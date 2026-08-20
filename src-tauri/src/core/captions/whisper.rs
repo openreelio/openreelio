@@ -426,9 +426,12 @@ impl Default for TranscriptionOptions {
 
 /// Word-level timing extracted from Whisper token timestamps.
 ///
-/// Sub-word BPE tokens are merged into whole words; each word carries the real
-/// `t0`/`t1` token timing converted to seconds (consistent with the segment
-/// `/100.0` centisecond convention).
+/// Sub-word BPE tokens are merged into whole words. Times are seconds
+/// (consistent with the segment `/100.0` centisecond convention) and come from
+/// whisper.cpp's DTW cross-attention alignment where the model has a known
+/// alignment-head preset, and from the heuristic `t0`/`t1` estimates otherwise.
+/// Either way they have been through [`repair_word_timings`], so they are
+/// ordered, non-overlapping and inside their segment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WordTiming {
     /// The word text.
@@ -454,7 +457,8 @@ pub struct TranscriptionSegment {
     pub end_time: f64,
     /// Transcribed text
     pub text: String,
-    /// Optional word-level timings derived from Whisper token timestamps.
+    /// Optional word-level timings derived from Whisper token timestamps —
+    /// DTW-aligned where the model supports it, heuristic otherwise.
     ///
     /// Empty when token timestamps are unavailable; serialization stays
     /// backward-compatible via `#[serde(default)]` so previously persisted
@@ -846,9 +850,16 @@ fn push_word_timed_cues(
     let duration = segment.end_time - segment.start_time;
     let should_split = segment_chars > char_budget || duration > MAX_CUE_DURATION_SEC;
     if !should_split {
+        // The segment fits in one cue, but its own window is not the cue window.
+        // Whisper's segment boundaries enclose whatever the decoder swept over,
+        // so a segment that opens on two seconds of room tone would put those two
+        // seconds inside cue 1. The words have already passed the usability
+        // filter and the coverage guard above, so their span is the better
+        // answer; the segment window stays as the fallback if it degenerates.
+        let (start_time, end_time) = word_span_within(&words, segment);
         output.push(TranscriptionSegment {
-            start_time: segment.start_time,
-            end_time: segment.end_time,
+            start_time,
+            end_time,
             text: text.to_string(),
             words: segment.words.clone(),
         });
@@ -907,6 +918,25 @@ fn push_word_timed_cues(
 
     merge_short_cues(&mut cues);
     output.extend(cues);
+}
+
+/// Returns the cue window spanned by `words`, clamped into the segment.
+///
+/// Falls back to the segment's own window when the words degenerate to a point
+/// or an inverted range, so a cue is never emitted with nothing on screen.
+fn word_span_within(words: &[&WordTiming], segment: &TranscriptionSegment) -> (f64, f64) {
+    let fallback = (segment.start_time, segment.end_time);
+    let (Some(first), Some(last)) = (words.first(), words.last()) else {
+        return fallback;
+    };
+
+    let start = first.start_time.clamp(segment.start_time, segment.end_time);
+    let end = last.end_time.clamp(segment.start_time, segment.end_time);
+    if end > start {
+        (start, end)
+    } else {
+        fallback
+    }
 }
 
 /// Expands words whose own text already exceeds `char_budget` into smaller units.
@@ -1210,8 +1240,17 @@ fn is_whisper_special_token(text: &str) -> bool {
 /// Special tokens are stripped. To reproduce the original transcript spacing
 /// downstream, each resulting word **preserves its leading whitespace verbatim**
 /// (only trailing whitespace is trimmed); callers concatenate word texts and
-/// trim the cue ends rather than re-inserting separators. Each word spans from
-/// its first character's token `start_time` to its last character's `end_time`.
+/// trim the cue ends rather than re-inserting separators.
+///
+/// Whisper stamps one interval per token, but a single CJK token routinely
+/// carries several syllables and therefore produces several words. That interval
+/// is divided equally across the token's non-whitespace characters, so those
+/// words come out contiguous instead of sharing one identical `[start, end]` —
+/// identical intervals would leave every cue built from them overlapping its
+/// neighbour. Whitespace is a separator rather than a sound and takes no share.
+/// The division is exact at the token edges: the first voiced character starts
+/// at the token's `start_time` and the last ends at its `end_time`, so a token
+/// that maps to a single word is unaffected.
 pub fn group_tokens_into_words(tokens: &[RawToken]) -> Vec<WordTiming> {
     let mut words: Vec<WordTiming> = Vec::new();
     let mut current_text = String::new();
@@ -1251,11 +1290,37 @@ pub fn group_tokens_into_words(tokens: &[RawToken]) -> Vec<WordTiming> {
         }
 
         // Walk the token character-by-character so CJK boundaries inside a single
-        // multi-character token are still detected. Token timing applies to the
-        // whole token; we attribute its start/end to the characters it carries.
+        // multi-character token are still detected. The token's interval is
+        // shared out equally across those characters (see the fn docs).
+        //
+        // Whitespace takes no share: it is a separator, not a sound. A leading
+        // space would otherwise consume a full character's worth of the token
+        // and push the first real syllable that much later — measured at ~93 ms
+        // on a Korean token, which is enough to move a cue off its onset.
+        let voiced = token
+            .text
+            .chars()
+            .filter(|value| !value.is_whitespace())
+            .count();
+        let span = (token.end_time - token.start_time).max(0.0);
+        let token_end = token.end_time.max(token.start_time);
+        // Boundary that falls after `voiced_before` voiced characters.
+        let char_bound = |voiced_before: usize| {
+            if voiced == 0 || voiced_before >= voiced {
+                token_end
+            } else {
+                token.start_time + span * voiced_before as f64 / voiced as f64
+            }
+        };
+
+        let mut voiced_before = 0usize;
         let mut first_in_token = true;
         for c in token.text.chars() {
             let is_space = c.is_whitespace();
+            let char_start = char_bound(voiced_before);
+            let voiced_after = voiced_before + usize::from(!is_space);
+            let char_end = char_bound(voiced_after);
+            voiced_before = voiced_after;
             let is_cjk_char = is_cjk(c);
 
             // Decide whether this character starts a new word.
@@ -1284,11 +1349,11 @@ pub fn group_tokens_into_words(tokens: &[RawToken]) -> Vec<WordTiming> {
             }
 
             if !has_current {
-                current_start = token.start_time;
+                current_start = char_start;
                 has_current = true;
             }
             current_text.push(c);
-            current_end = token.end_time;
+            current_end = char_end;
             if !is_space {
                 prev_char_cjk = is_cjk_char;
             }
@@ -1323,9 +1388,16 @@ const MONOTONIC_EPSILON_SEC: f64 = 1e-4;
 
 /// Minimum plausible on-screen duration for a single word (seconds).
 ///
-/// DTW writes a timestamp only where its alignment path transitions, so several
+/// Token timestamps land on whisper.cpp's ~20 ms encoder frame grid, so several
 /// consecutive tokens can resolve to the same instant and collapse a word to
-/// zero length. Such words are grown back to this floor.
+/// zero length. Such words are grown back toward this floor.
+///
+/// It is a target, not a guarantee. Growing a word takes room from the silence
+/// after it or from a neighbour that can spare it, and dense speech offers
+/// neither: eight syllables inside 200 ms cannot all be 40 ms long without
+/// inventing time the audio does not contain. A run that cannot reach the floor
+/// is spread evenly instead, so the shortfall is shared rather than dumped on
+/// whichever word happened to be repaired first.
 const MIN_WORD_DURATION_SEC: f64 = 0.04;
 
 /// Upper bound on plausible speech duration per syllable-ish unit (seconds).
@@ -1360,6 +1432,17 @@ const ONSET_RELATIVE_THRESHOLD: f64 = 0.15;
 /// Percentile of frame energies treated as the quiet floor of a window.
 const ONSET_FLOOR_PERCENTILE: f64 = 0.10;
 
+/// Peak RMS (≈ -80 dBFS) a window must reach before any of its energy rises
+/// count as speech onsets.
+///
+/// The onset threshold is relative to the window's own floor and peak, which
+/// makes it scale-free — and therefore just as happy to find "onsets" in dither
+/// and converter noise as in speech. Whisper hallucinates text over silence, and
+/// without this gate those hallucinated segments get their word starts jittered
+/// onto noise transients. Below this level there is nothing to align to, so
+/// nothing is snapped.
+const ONSET_MIN_PEAK_RMS: f64 = 1e-4;
+
 /// Resolves sparse DTW token timestamps into one monotonic boundary per token.
 ///
 /// Each resolved value is the token's **end** boundary. whisper.cpp writes
@@ -1368,11 +1451,24 @@ const ONSET_FLOOR_PERCENTILE: f64 = 0.10;
 /// and the next one starts, not where it begins. Callers therefore take a
 /// token's start from the previous token's resolved value.
 ///
-/// Transitions are sparse, so most tokens carry `-1` ("not computed"); callers
-/// pass `None` for those. The gaps are filled by linear interpolation between
-/// the surrounding anchors, ramping from `segment_start` before the first anchor
-/// and toward `segment_end` after the last one, then clamped into the segment
-/// and forced non-decreasing.
+/// In practice whisper.cpp stamps nearly every token, so the resolved sequence
+/// is mostly anchors. A token whose alignment path never transitions carries
+/// `-1` ("not computed") and callers pass `None` for it; those gaps are filled
+/// by linear interpolation between the surrounding anchors, ramping from
+/// `leading_start` before the first anchor and toward `segment_end` after the
+/// last one, then clamped into the segment and forced non-decreasing. The
+/// interpolation is a defensive path, not the common one — do not read a claim
+/// about accuracy into it either way.
+///
+/// `leading_start` is the first token's heuristic `t0`, used as the floor of the
+/// leading ramp. Ramping from the segment start instead discards whatever `t0`
+/// knew and drags every unanchored leading token back to wherever the decoder's
+/// 30 s window happened to open. `t0` is not reliable — for a segment's *opening*
+/// token it is measured to be exactly the segment start, i.e. no information at
+/// all — but it is never worse, because it is clamped into
+/// `[segment_start, first anchor]`. The leading edge is recovered properly from
+/// the audio later, in [`repair_word_timings`]. Pass `None` (or a non-finite
+/// value) to fall back to the segment start.
 ///
 /// Returns `None` when the segment carries no anchor at all — DTW produced
 /// nothing usable and the caller must keep the heuristic `t0`/`t1` timings.
@@ -1381,6 +1477,7 @@ pub fn resolve_dtw_token_times(
     dtw_times: &[Option<f64>],
     segment_start: f64,
     segment_end: f64,
+    leading_start: Option<f64>,
 ) -> Option<Vec<f64>> {
     if dtw_times.is_empty() {
         return None;
@@ -1412,10 +1509,16 @@ pub fn resolve_dtw_token_times(
 
     let mut resolved = vec![lower; dtw_times.len()];
 
-    // Ramp from the segment start up to the first anchor.
+    // Ramp from the first token's heuristic start — not the segment start — up
+    // to the first anchor, so leading unanchored tokens stay where whisper.cpp's
+    // energy-refined estimate put them instead of collapsing onto silence.
+    let ramp_base = leading_start
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(lower, first_time))
+        .unwrap_or(lower);
     for (index, slot) in resolved.iter_mut().enumerate().take(first_index) {
         let ratio = index as f64 / first_index as f64;
-        *slot = lower + (first_time - lower) * ratio;
+        *slot = ramp_base + (first_time - ramp_base) * ratio;
     }
     resolved[first_index] = first_time;
 
@@ -1462,12 +1565,13 @@ pub fn resolve_dtw_token_times(
 /// spans from the previous boundary to its own and the stream comes out
 /// contiguous and monotonic.
 ///
-/// The first token has no preceding boundary. Its heuristic `t0` is kept as the
-/// leading edge because whisper.cpp refines those estimates against audio
-/// energy, which places the start of speech better than the segment start would;
-/// the repair pass corrects it further. Callers must therefore pass **text
-/// tokens only** — a leading control token would donate its own interpolated
-/// boundary as the leading edge and pull the first word back to silence.
+/// The first token has no preceding boundary, so its heuristic `t0` stands in as
+/// the leading edge. Do not mistake that for an accurate start: the preceding
+/// `[_BEG_]` control token carries no DTW stamp of its own (measured: `t_dtw =
+/// -1`), and `t0` for a segment's opening token is just the segment start. This
+/// is a placeholder that [`repair_word_timings`] replaces with a measured speech
+/// onset. Callers must still pass **text tokens only** — a leading control token
+/// would donate its own interpolated boundary here, which is strictly worse.
 ///
 /// Does nothing when the lengths disagree, so a caller that lost a token to a
 /// decode error keeps its heuristic timings rather than getting misaligned ones.
@@ -1517,8 +1621,9 @@ fn syllable_units(text: &str) -> usize {
 /// floor and peak. Working per window (rather than over the whole take) keeps
 /// the threshold adaptive to local level.
 ///
-/// Returns an empty vector when the window is empty or carries no usable
-/// dynamic range, in which case no snapping happens.
+/// Returns an empty vector when the window is empty, carries no usable dynamic
+/// range, or never rises above [`ONSET_MIN_PEAK_RMS`] — in which case no
+/// snapping happens.
 fn energy_onsets(samples: &[f32], window_start: f64, window_end: f64) -> Vec<f64> {
     if samples.is_empty() || !window_start.is_finite() || !window_end.is_finite() {
         return Vec::new();
@@ -1571,7 +1676,7 @@ fn energy_onsets(samples: &[f32], window_start: f64, window_end: f64) -> Vec<f64
         ((sorted.len() as f64 * ONSET_FLOOR_PERCENTILE) as usize).min(sorted.len() - 1);
     let floor = sorted[floor_index];
     let peak = sorted[sorted.len() - 1];
-    if peak <= floor || peak <= f64::EPSILON {
+    if peak <= floor || peak < ONSET_MIN_PEAK_RMS {
         return Vec::new();
     }
 
@@ -1585,26 +1690,47 @@ fn energy_onsets(samples: &[f32], window_start: f64, window_end: f64) -> Vec<f64
     onsets
 }
 
-/// Repairs word timings produced from DTW token timestamps.
+/// Trims any word whose end overruns the next word's start.
 ///
-/// DTW alignment is far more accurate than Whisper's heuristic token timestamps,
-/// but it is sparse and quantized to the encoder frame grid, which leaves three
-/// classes of artifact: collapsed (zero-length) words, words that stretch across
-/// a pause because their end is taken from the next word's start, and starts
-/// that sit a frame or two away from the audible attack. This pass fixes all
-/// three deterministically, in order:
+/// Word ends and word starts are set by different rules — a duration ceiling
+/// here, an ε push-forward or an onset snap there — so they can disagree. When
+/// they do, the earlier word loses: cues are built from a word's start and its
+/// last word's end, so an overrun surfaces as one subtitle still on screen while
+/// the next has already appeared.
+fn enforce_no_overlap(words: &mut [WordTiming]) {
+    for index in 0..words.len().saturating_sub(1) {
+        let next_start = words[index + 1].start_time;
+        if words[index].end_time > next_start {
+            words[index].end_time = next_start.max(words[index].start_time);
+        }
+    }
+}
+
+/// Repairs word timings produced from Whisper token timestamps.
+///
+/// This runs on **every** transcription, not only the DTW ones. DTW alignment is
+/// far more accurate than the heuristic `t0`/`t1` estimates, but it improves the
+/// *input* to this pass rather than replacing it: both sources leave the same
+/// classes of artifact — collapsed (zero-length) words, words that stretch
+/// across a pause because their end is taken from the next word's start, words
+/// that overlap their successor, and starts that sit a frame or two away from
+/// the audible attack. This pass fixes them deterministically, in order:
 ///
 /// 1. Sanitize — drop non-finite timings, clamp into the segment.
 /// 2. Monotonicity — force non-decreasing starts and `end >= start` by minimal
-///    push-forward, never reordering or dropping text.
-/// 3. Duration plausibility — cap each word at [`MAX_WORD_SEC_PER_UNIT`] per
-///    syllable-ish unit, and grow collapsed words back to
-///    [`MIN_WORD_DURATION_SEC`] using the following gap, then any spare span of
-///    the next word.
+///    push-forward, never reordering or dropping text, then trim any overlap.
+/// 3. Duration plausibility — recover the first word's start, which is the one
+///    start DTW never supplies, from the audio; cap every other word at
+///    [`MAX_WORD_SEC_PER_UNIT`] per syllable-ish unit *except the segment's
+///    last*, whose end anchors the cue's screen exit and comes from
+///    whisper.cpp's own segment end; then grow short words back toward
+///    [`MIN_WORD_DURATION_SEC`], first into the gap ahead and then by
+///    re-spreading a whole run of short words across the span it can occupy.
 /// 4. Onset snap — move each start onto the nearest short-time-energy onset
-///    within [`ONSET_SNAP_RADIUS_SEC`], but only when that preserves ordering.
-/// 5. Invariant check — non-decreasing starts, `end >= start`, inside the
-///    segment.
+///    within [`ONSET_SNAP_RADIUS_SEC`], but only when that preserves ordering
+///    and does not starve the neighbour it takes room from.
+/// 5. Invariant check — non-decreasing, non-overlapping, `end >= start`, inside
+///    the segment.
 ///
 /// `samples` is the 16 kHz mono buffer the segment times refer to. Word text is
 /// never modified, so the downstream cue coverage guard keeps behaving the same.
@@ -1649,9 +1775,56 @@ pub fn repair_word_timings(
         previous_start = word.start_time;
     }
 
-    // 3a. Duration ceiling: release a word shortly after it is actually spoken
+    // 2b. Ordering the starts can leave an end past the next start — a single
+    // multi-syllable CJK token used to hand every syllable the same interval —
+    // so resolve the overlap before any duration rule reads those spans.
+    enforce_no_overlap(words);
+
+    let onsets = energy_onsets(samples, lower, upper);
+
+    // 3a. Leading edge. Every word start except the first is a DTW boundary:
+    // whisper.cpp stamps a token where the alignment path *leaves* it, so a
+    // token's start is the previous token's stamp — and the first token has no
+    // previous token. Its start falls back to Whisper's heuristic `t0`, which
+    // for a segment's opening token is simply the segment start and carries no
+    // information at all. (Measured on a clip with two seconds of room tone
+    // before speech: the first token reports `t0 = 0` while its DTW stamp lands
+    // correctly at 2.38 s.) Left alone, that silence is the leading edge of the
+    // first cue.
+    //
+    // So when the first word comes out implausibly long, take its start from
+    // the audio instead: the first energy onset inside the window the word could
+    // plausibly occupy. Without a usable onset, fall back to the same ceiling
+    // the other words get — applied to the start, because here it is the end
+    // that is trustworthy.
+    {
+        let first = &mut words[0];
+        let ceiling =
+            (syllable_units(&first.text) as f64 * MAX_WORD_SEC_PER_UNIT).max(MIN_WORD_DURATION_SEC);
+        if first.end_time - first.start_time > ceiling {
+            let earliest = first.start_time.max(first.end_time - ceiling);
+            let latest = (first.end_time - MIN_WORD_DURATION_SEC).max(earliest);
+            first.start_time = onsets
+                .iter()
+                .copied()
+                .find(|onset| *onset >= earliest && *onset <= latest)
+                .unwrap_or(earliest);
+        }
+    }
+
+    // 3b. Duration ceiling: release a word shortly after it is actually spoken
     // instead of letting it span the pause before the next word.
-    for word in words.iter_mut() {
+    //
+    // The segment's last word is exempt. Its end is not borrowed from a
+    // successor's start: it comes from whisper.cpp's own segment end, which is
+    // refined against audio energy, and it is what every cue built from this
+    // segment uses as its screen exit. Capping it truncates the tail cue by
+    // however long the speaker held the final word.
+    let last_index = words.len() - 1;
+    for (index, word) in words.iter_mut().enumerate() {
+        if index == last_index {
+            continue;
+        }
         let max_duration =
             (syllable_units(&word.text) as f64 * MAX_WORD_SEC_PER_UNIT).max(MIN_WORD_DURATION_SEC);
         if word.end_time - word.start_time > max_duration {
@@ -1659,7 +1832,7 @@ pub fn repair_word_timings(
         }
     }
 
-    // 3b. Duration floor: grow a collapsed word into the gap ahead of it.
+    // 3c. Duration floor: grow a collapsed word into the gap ahead of it.
     for index in 0..words.len() {
         let limit = words
             .get(index + 1)
@@ -1673,25 +1846,59 @@ pub fn repair_word_timings(
         }
     }
 
-    // 3c. Duration floor, continued: when there is no gap, borrow from the next
-    // word's span — but only the part it can spare above its own floor.
-    for index in 0..words.len().saturating_sub(1) {
-        let needed = MIN_WORD_DURATION_SEC - (words[index].end_time - words[index].start_time);
-        if needed <= 0.0 {
+    // 3d. Duration floor, continued: a word still short after 3c has no gap left
+    // ahead of it, so it must take room from what follows. Do that for a whole
+    // run of short words at once and share the room evenly, rather than letting
+    // the first borrower take its full 40 ms and leave the rest at zero.
+    //
+    // The run may grow until the following word would itself drop below the
+    // floor, or to the segment end when the run is the tail. When even that span
+    // divided evenly falls short of the floor — dense speech, several syllables
+    // inside a couple of hundred milliseconds — every word gets an equal share
+    // of what there is and none reaches 40 ms. That is the honest answer: the
+    // audio does not contain the time.
+    let mut index = 0usize;
+    while index < words.len() {
+        if words[index].end_time - words[index].start_time >= MIN_WORD_DURATION_SEC {
+            index += 1;
             continue;
         }
-        let next = &words[index + 1];
-        let spare = (next.end_time - next.start_time - MIN_WORD_DURATION_SEC).max(0.0);
-        let take = needed.min(spare);
-        if take <= 0.0 {
-            continue;
+
+        let mut last = index;
+        while last + 1 < words.len()
+            && words[last + 1].end_time - words[last + 1].start_time < MIN_WORD_DURATION_SEC
+        {
+            last += 1;
         }
-        words[index].end_time += take;
-        words[index + 1].start_time += take;
+
+        let limit = match words.get(last + 1) {
+            Some(next) => (next.end_time - MIN_WORD_DURATION_SEC).max(next.start_time),
+            None => upper,
+        }
+        .max(words[last].end_time);
+
+        let run_start = words[index].start_time;
+        let count = (last - index + 1) as f64;
+        let share = ((limit - run_start) / count).min(MIN_WORD_DURATION_SEC);
+        if share > 0.0 {
+            let mut cursor = run_start;
+            for word in words[index..=last].iter_mut() {
+                // Never shrink a word that already exceeds its share.
+                let target = share.max(word.end_time - word.start_time);
+                word.start_time = cursor;
+                word.end_time = (cursor + target).min(limit).max(cursor);
+                cursor = word.end_time;
+            }
+            if let Some(next) = words.get_mut(last + 1) {
+                next.start_time = next.start_time.max(cursor);
+                next.end_time = next.end_time.max(next.start_time);
+            }
+        }
+
+        index = last + 1;
     }
 
     // 4. Onset snap: nudge starts onto the audible attack when it is close by.
-    let onsets = energy_onsets(samples, lower, upper);
     if !onsets.is_empty() {
         for index in 0..words.len() {
             let start = words[index].start_time;
@@ -1720,28 +1927,54 @@ pub fn repair_word_timings(
                 if candidate <= previous.start_time {
                     continue;
                 }
+                // Snapping backwards trims the previous word onto the new start.
+                // Refuse the snap when that would cut the neighbour below the
+                // floor: a correctly placed start is not worth a flickering word
+                // before it.
+                if previous.end_time > candidate
+                    && candidate - previous.start_time < MIN_WORD_DURATION_SEC
+                {
+                    continue;
+                }
             }
             words[index].start_time = candidate;
-            if index > 0 && words[index - 1].end_time > candidate {
-                // Keep the previous word from overlapping the moved start.
-                words[index - 1].end_time = candidate.max(words[index - 1].start_time);
+            if index > 0 {
+                let previous = &mut words[index - 1];
+                if previous.end_time > candidate {
+                    // Keep the previous word from overlapping the moved start.
+                    previous.end_time = candidate.max(previous.start_time);
+                } else if previous.end_time - previous.start_time < MIN_WORD_DURATION_SEC {
+                    // The start moved away and left room behind it; a neighbour
+                    // that never reached the floor gets first claim on it.
+                    previous.end_time = (previous.start_time + MIN_WORD_DURATION_SEC)
+                        .min(candidate)
+                        .max(previous.end_time);
+                }
             }
         }
     }
 
-    // 5. Final invariants: ordered, non-degenerate, inside the segment.
+    // 5. Final invariants: ordered, non-overlapping, non-degenerate, inside the
+    // segment.
     let mut previous_start = f64::NEG_INFINITY;
     for word in words.iter_mut() {
         word.start_time = word.start_time.clamp(lower, upper).max(previous_start);
         word.end_time = word.end_time.clamp(lower, upper).max(word.start_time);
         previous_start = word.start_time;
     }
+    enforce_no_overlap(words);
 
     debug_assert!(
         words
             .windows(2)
             .all(|pair| pair[0].start_time <= pair[1].start_time),
         "repaired word starts must be non-decreasing"
+    );
+    debug_assert!(
+        words
+            .windows(2)
+            .all(|pair| pair[0].end_time <= pair[1].start_time),
+        "repaired words must not overlap"
     );
     debug_assert!(
         words.iter().all(|word| word.end_time >= word.start_time
@@ -2164,11 +2397,15 @@ mod engine_impl {
                         Ok(value) => value.into_owned(),
                         Err(_) => continue,
                     };
-                    // Drop control tokens here rather than during word grouping:
-                    // whisper.cpp assigns DTW timestamps to text tokens only, so
-                    // the boundary mapping below is only index-aligned with the
-                    // decoder once the non-text tokens are gone. Word grouping
-                    // discards them anyway, so nothing downstream changes.
+                    // Drop control tokens here rather than during word grouping.
+                    // Index alignment is not the reason: `dtw_times` is filled in
+                    // this same loop, so it lines up with `raw_tokens` whichever
+                    // tokens are kept. The reason is the leading edge —
+                    // `apply_dtw_token_boundaries` takes the first token's
+                    // heuristic `t0` as the start of the stream, and a leading
+                    // `[_BEG_]` would donate the segment's own start instead,
+                    // dragging the first word back into the silence before
+                    // speech. Word grouping discards them anyway.
                     if is_whisper_special_token(&token_text) {
                         continue;
                     }
@@ -2183,7 +2420,13 @@ mod engine_impl {
 
                 // Prefer DTW cross-attention timestamps when whisper.cpp produced
                 // any, falling back to the heuristic `t0`/`t1` when it did not.
-                if let Some(boundaries) = resolve_dtw_token_times(&dtw_times, start, end) {
+                // The first text token's heuristic `t0` seeds the leading ramp so
+                // unanchored leading tokens do not collapse onto the segment
+                // start (see `resolve_dtw_token_times`).
+                let leading_start = raw_tokens.first().map(|token| token.start_time);
+                if let Some(boundaries) =
+                    resolve_dtw_token_times(&dtw_times, start, end, leading_start)
+                {
                     apply_dtw_token_boundaries(&mut raw_tokens, &boundaries, start, end);
                 }
 
@@ -3210,6 +3453,53 @@ mod tests {
     }
 
     #[test]
+    fn test_subtitle_ready_segments_trims_an_unsplit_cue_to_its_words() {
+        // Whisper's segment boundaries enclose whatever its 30 s window swept
+        // over, so a segment can open seconds before anyone speaks. A cue that
+        // needs no splitting still must not inherit that silence: the word
+        // timings say where the speech is.
+        let segment = TranscriptionSegment {
+            start_time: 0.0,
+            end_time: 5.0,
+            text: "Hello there".to_string(),
+            words: vec![word("Hello", 2.08, 2.60), word(" there", 2.65, 3.20)],
+        };
+
+        let cues = subtitle_ready_segments(&[segment]);
+
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "Hello there");
+        assert!(
+            (cues[0].start_time - 2.08).abs() < 1e-9,
+            "cue must start on the first word, got {:?}",
+            cues[0]
+        );
+        assert!(
+            (cues[0].end_time - 3.20).abs() < 1e-9,
+            "cue must end on the last word, got {:?}",
+            cues[0]
+        );
+    }
+
+    #[test]
+    fn test_subtitle_ready_segments_unsplit_cue_falls_back_on_a_degenerate_span() {
+        // A single collapsed word carries no usable window, so the segment's own
+        // one is kept rather than emitting a cue with nothing on screen.
+        let segment = TranscriptionSegment {
+            start_time: 0.0,
+            end_time: 5.0,
+            text: "Hi".to_string(),
+            words: vec![word("Hi", 2.0, 2.0)],
+        };
+
+        let cues = subtitle_ready_segments(&[segment]);
+
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].start_time, 0.0);
+        assert_eq!(cues[0].end_time, 5.0);
+    }
+
+    #[test]
     fn test_word_timing_serde_backward_compatible() {
         // A segment serialized without `words` must still deserialize (defaulting
         // to an empty vec), preserving backward compatibility.
@@ -3294,6 +3584,99 @@ mod tests {
         // inter-syllable spaces.
         let rebuilt: String = words.iter().map(|word| word.text.as_str()).collect();
         assert_eq!(rebuilt, "안녕하세요");
+    }
+
+    #[test]
+    fn test_group_tokens_shares_a_token_interval_across_its_syllables() {
+        // Whisper stamps one interval per token, and a Korean token routinely
+        // carries several syllables. Handing all of them the same [start, end]
+        // makes every word overlap its neighbour, which surfaces downstream as
+        // one cue still on screen while the next has already appeared.
+        let tokens = vec![RawToken {
+            text: "안녕하세요".to_string(),
+            start_time: 1.00,
+            end_time: 1.50,
+        }];
+
+        let words = group_tokens_into_words(&tokens);
+
+        assert_eq!(words.len(), 5);
+        assert_eq!(words[0].start_time, 1.00);
+        assert_eq!(words[4].end_time, 1.50);
+        for pair in words.windows(2) {
+            assert!(
+                pair[0].end_time > pair[0].start_time,
+                "each syllable must get real time: {words:?}"
+            );
+            assert!(
+                (pair[0].end_time - pair[1].start_time).abs() < 1e-9,
+                "syllables of one token must be contiguous: {words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_group_tokens_gives_a_leading_space_no_share_of_the_token() {
+        // Live Korean tokens arrive space-prefixed. Charging that space a
+        // character's worth of the token's interval pushes the first syllable
+        // ~93 ms late, which is enough to move a cue off its speech onset.
+        let tokens = vec![RawToken {
+            text: " 안녕하세요".to_string(),
+            start_time: 0.62,
+            end_time: 1.18,
+        }];
+
+        let words = group_tokens_into_words(&tokens);
+
+        assert_eq!(words.len(), 5);
+        assert_eq!(
+            words[0].start_time, 0.62,
+            "the first syllable must start where the token does, got {:?}",
+            words[0]
+        );
+        assert_eq!(words[4].end_time, 1.18);
+    }
+
+    #[test]
+    fn test_subtitle_ready_segments_keeps_korean_cues_from_overlapping() {
+        // Full pure pipeline over Korean-shaped input: multi-syllable tokens,
+        // word grouping, repair, then cue splitting. Cue N+1 must never start
+        // before cue N has left the screen.
+        let chunks = [
+            "안녕하세요",
+            "만나서반갑",
+            "습니다오늘",
+            "은날씨가아",
+            "주좋네요정",
+            "말좋아요네",
+        ];
+        let tokens: Vec<RawToken> = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| raw_token(chunk, index as f64, index as f64 + 1.0))
+            .collect();
+
+        let mut words = group_tokens_into_words(&tokens);
+        let samples = vec![0.0_f32; (7.0 * WHISPER_SAMPLE_RATE) as usize];
+        repair_word_timings(&mut words, &samples, 0.0, 6.0);
+
+        let text: String = words.iter().map(|entry| entry.text.as_str()).collect();
+        let cues = subtitle_ready_segments(&[TranscriptionSegment {
+            start_time: 0.0,
+            end_time: 6.0,
+            text,
+            words,
+        }]);
+
+        assert!(cues.len() > 1, "a 30-syllable segment must split: {cues:?}");
+        for pair in cues.windows(2) {
+            assert!(
+                pair[0].end_time <= pair[1].start_time + 1e-9,
+                "cues must not overlap: {cues:?}"
+            );
+        }
+        let rebuilt: String = cues.iter().map(|cue| cue.text.as_str()).collect();
+        assert_eq!(rebuilt, chunks.concat());
     }
 
     #[test]
@@ -3753,8 +4136,8 @@ mod tests {
 
     #[test]
     fn resolve_dtw_token_times_returns_none_without_anchors() {
-        assert!(resolve_dtw_token_times(&[], 0.0, 1.0).is_none());
-        assert!(resolve_dtw_token_times(&[None, None, None], 0.0, 1.0).is_none());
+        assert!(resolve_dtw_token_times(&[], 0.0, 1.0, None).is_none());
+        assert!(resolve_dtw_token_times(&[None, None, None], 0.0, 1.0, None).is_none());
     }
 
     #[test]
@@ -3765,6 +4148,7 @@ mod tests {
             &[Some(1.0), None, None, Some(1.6), None, Some(2.0)],
             0.5,
             3.0,
+            None,
         )
         .expect("anchored input should resolve");
 
@@ -3781,7 +4165,7 @@ mod tests {
     fn resolve_dtw_token_times_never_produces_negative_or_unordered_times() {
         // Leading tokens without an anchor must ramp from the segment start, not
         // inherit the -1 sentinel as a negative time.
-        let times = resolve_dtw_token_times(&[None, None, Some(4.0), None, None], 2.0, 5.0)
+        let times = resolve_dtw_token_times(&[None, None, Some(4.0), None, None], 2.0, 5.0, None)
             .expect("anchored input should resolve");
 
         assert_eq!(times[0], 2.0);
@@ -3796,9 +4180,53 @@ mod tests {
 
     #[test]
     fn resolve_dtw_token_times_clamps_out_of_range_anchors() {
-        let times = resolve_dtw_token_times(&[Some(-3.0), Some(99.0)], 1.0, 2.0)
+        let times = resolve_dtw_token_times(&[Some(-3.0), Some(99.0)], 1.0, 2.0, None)
             .expect("anchored input should resolve");
         assert_eq!(times, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn resolve_dtw_token_times_ramps_from_the_first_heuristic_start() {
+        // The first token carries no DTW stamp, so its boundary is interpolated.
+        // Ramping from the segment start would drag it back to 0.0 and put the
+        // leading word in the silence before speech; whisper.cpp's own
+        // energy-refined `t0` (0.62 s) is the floor that belongs there.
+        let times = resolve_dtw_token_times(&[None, Some(1.20), Some(1.60)], 0.0, 3.0, Some(0.62))
+            .expect("anchored input should resolve");
+
+        assert!(
+            (times[0] - 0.62).abs() < 1e-9,
+            "leading ramp should start at the heuristic t0, got {}",
+            times[0]
+        );
+        assert_eq!(times[1], 1.20);
+        assert_eq!(times[2], 1.60);
+
+        // The hint is a floor, never a licence to move a token past its anchor
+        // or outside the segment.
+        let clamped = resolve_dtw_token_times(&[None, Some(1.20)], 0.5, 3.0, Some(9.0))
+            .expect("anchored input should resolve");
+        assert!((0.5..=1.20).contains(&clamped[0]));
+    }
+
+    #[test]
+    fn dtw_boundaries_keep_the_leading_word_out_of_the_silence() {
+        // End to end over the pure half: an unanchored leading token plus the
+        // heuristic start it should inherit.
+        let mut tokens = vec![
+            raw_token(" Hello", 0.62, 0.90),
+            raw_token(" there", 0.90, 1.30),
+        ];
+        let boundaries = resolve_dtw_token_times(&[None, Some(1.28)], 0.0, 3.0, Some(0.62))
+            .expect("anchored input should resolve");
+        apply_dtw_token_boundaries(&mut tokens, &boundaries, 0.0, 3.0);
+
+        let words = group_tokens_into_words(&tokens);
+        assert!(
+            (words[0].start_time - 0.62).abs() < 1e-9,
+            "the first word must not be dragged back to the segment start, got {}",
+            words[0].start_time
+        );
     }
 
     fn raw_token(text: &str, start_time: f64, end_time: f64) -> RawToken {
@@ -3861,7 +4289,7 @@ mod tests {
             raw_token("lo", 0.30, 0.50),
             raw_token(" there", 0.50, 0.90),
         ];
-        let boundaries = resolve_dtw_token_times(&[Some(0.32), None, Some(0.88)], 0.0, 1.5)
+        let boundaries = resolve_dtw_token_times(&[Some(0.32), None, Some(0.88)], 0.0, 1.5, None)
             .expect("anchored input should resolve");
         apply_dtw_token_boundaries(&mut tokens, &boundaries, 0.0, 1.5);
 
@@ -3900,6 +4328,10 @@ mod tests {
         }
     }
 
+    /// Slack allowed on every invariant comparison, to absorb the accumulated
+    /// rounding of a chain of clamps rather than the behaviour under test.
+    const INVARIANT_TOLERANCE_SEC: f64 = 1e-9;
+
     fn assert_repair_invariants(words: &[WordTiming], segment_start: f64, segment_end: f64) {
         for pair in words.windows(2) {
             assert!(
@@ -3907,8 +4339,13 @@ mod tests {
                 "word starts must be non-decreasing: {:?}",
                 words
             );
+            assert!(
+                pair[0].end_time <= pair[1].start_time + INVARIANT_TOLERANCE_SEC,
+                "words must not overlap: {:?}",
+                words
+            );
         }
-        for entry in words {
+        for (index, entry) in words.iter().enumerate() {
             assert!(
                 entry.end_time >= entry.start_time,
                 "word end must not precede its start: {:?}",
@@ -3918,6 +4355,52 @@ mod tests {
                 entry.start_time >= segment_start && entry.end_time <= segment_end,
                 "word must stay inside the segment: {:?}",
                 entry
+            );
+
+            let duration = entry.end_time - entry.start_time;
+
+            // Duration floor, with the documented exception: a word may fall
+            // short only when it already occupies every last millisecond
+            // available to it, i.e. dense speech that leaves no room to grow
+            // into. Anything else is a repair pass that gave up early.
+            let limit = words
+                .get(index + 1)
+                .map(|next| next.start_time)
+                .unwrap_or(segment_end);
+            assert!(
+                duration >= MIN_WORD_DURATION_SEC - INVARIANT_TOLERANCE_SEC
+                    || entry.end_time >= limit - INVARIANT_TOLERANCE_SEC,
+                "a word below the duration floor must fill the span available to it: \
+                 {entry:?} (available until {limit})"
+            );
+
+            // Duration ceiling. The segment's last word is exempt by design
+            // (its end anchors the cue's screen exit), and a backward onset snap
+            // may legitimately extend any word by up to the snap radius.
+            if index + 1 < words.len() {
+                let ceiling = (syllable_units(&entry.text) as f64 * MAX_WORD_SEC_PER_UNIT)
+                    .max(MIN_WORD_DURATION_SEC)
+                    + ONSET_SNAP_RADIUS_SEC;
+                assert!(
+                    duration <= ceiling + INVARIANT_TOLERANCE_SEC,
+                    "a non-final word must stay under its duration ceiling: {entry:?}"
+                );
+            }
+        }
+    }
+
+    /// Asserts the repair pass never invented, reordered, or rewrote a word.
+    ///
+    /// Words with unusable timings are dropped, so the surviving texts must be a
+    /// subsequence of the originals — not necessarily equal to them.
+    fn assert_text_subsequence(before: &[WordTiming], after: &[WordTiming]) {
+        let mut remaining = before.iter();
+        for entry in after {
+            assert!(
+                remaining.any(|original| original.text == entry.text),
+                "repair must preserve the word sequence: {:?} is not a subsequence of {:?}",
+                after.iter().map(|w| &w.text).collect::<Vec<_>>(),
+                before.iter().map(|w| &w.text).collect::<Vec<_>>()
             );
         }
     }
@@ -4023,19 +4506,254 @@ mod tests {
     #[test]
     fn repair_word_timings_caps_words_that_span_a_pause() {
         // Word ends are derived from the next word's start, so a word before a
-        // long pause arrives stretched across the whole silence.
+        // long pause arrives stretched across the whole silence. The subject is
+        // the middle word: the first word's *start* is repaired instead, because
+        // it is the one start DTW does not supply.
         let samples = vec![0.0_f32; (10.0 * WHISPER_SAMPLE_RATE) as usize];
-        let mut words = vec![word(" go", 1.00, 8.00), word(" on", 8.00, 8.40)];
+        let mut words = vec![
+            word(" well", 0.50, 1.00),
+            word(" go", 1.00, 8.00),
+            word(" on", 8.00, 8.40),
+        ];
 
         repair_word_timings(&mut words, &samples, 0.0, 10.0);
 
-        let capped = words[0].end_time - words[0].start_time;
+        let capped = words[1].end_time - words[1].start_time;
         assert!(
             capped <= syllable_units(" go") as f64 * MAX_WORD_SEC_PER_UNIT + 1e-9,
             "word spanning a pause should be capped, got {capped}"
         );
         assert!(capped >= MIN_WORD_DURATION_SEC);
         assert_repair_invariants(&words, 0.0, 10.0);
+    }
+
+    #[test]
+    fn repair_word_timings_leaves_the_segments_last_word_at_the_segment_end() {
+        // The duration ceiling exists to stop a word spanning the pause before
+        // the next one. The last word has no next one: its end comes from
+        // whisper.cpp's own energy-refined segment end and is what the tail cue
+        // uses to leave the screen. Capping it truncates the cue.
+        let samples = vec![0.0_f32; (10.0 * WHISPER_SAMPLE_RATE) as usize];
+        let mut words = vec![word(" hold", 1.00, 1.40), word(" oooon", 1.40, 3.20)];
+
+        repair_word_timings(&mut words, &samples, 0.0, 3.20);
+
+        assert!(
+            (words[1].end_time - 3.20).abs() < 1e-9,
+            "the last word must keep the segment end, got {:?}",
+            words[1]
+        );
+        // The word before it is still capped — the exemption is for the tail only.
+        let capped = words[0].end_time - words[0].start_time;
+        assert!(
+            capped <= syllable_units(" hold") as f64 * MAX_WORD_SEC_PER_UNIT + 1e-9,
+            "a non-final word must still be capped, got {capped}"
+        );
+        assert_repair_invariants(&words, 0.0, 3.20);
+    }
+
+    #[test]
+    fn repair_word_timings_recovers_the_first_words_start_from_the_audio() {
+        // DTW stamps a token where the alignment path leaves it, so a token's
+        // start is the previous token's stamp — and the first token has none.
+        // Whisper's heuristic `t0` fills in, and for a segment opening on
+        // silence that is just the segment start. Here the word claims to begin
+        // at 0.0 and end at 2.38 s; the speech actually starts at the burst.
+        let samples = synth_bursts(6.0, &[(2.16, 2.38), (2.50, 3.00)]);
+        let onset = energy_onsets(&samples, 0.0, 6.0)
+            .first()
+            .copied()
+            .expect("the burst must produce an onset");
+        let mut words = vec![word(" Hello", 0.00, 2.38), word(" there", 2.50, 3.00)];
+
+        repair_word_timings(&mut words, &samples, 0.0, 6.0);
+
+        assert!(
+            (words[0].start_time - onset).abs() < 1e-9,
+            "the first word must start on the measured onset, got {:?}",
+            words[0]
+        );
+        assert!(
+            (words[0].end_time - 2.38).abs() < 1e-9,
+            "the first word's DTW end must survive: {:?}",
+            words[0]
+        );
+        assert_repair_invariants(&words, 0.0, 6.0);
+    }
+
+    #[test]
+    fn repair_word_timings_bounds_the_first_word_without_an_onset_to_lean_on() {
+        // Silence gives the recovery nothing to snap to, so it falls back to the
+        // same duration ceiling every other word gets — applied to the start,
+        // because for the first word it is the end that is trustworthy.
+        let samples = vec![0.0_f32; (6.0 * WHISPER_SAMPLE_RATE) as usize];
+        let mut words = vec![word(" Hello", 0.00, 2.38), word(" there", 2.50, 3.00)];
+
+        repair_word_timings(&mut words, &samples, 0.0, 6.0);
+
+        let ceiling = syllable_units(" Hello") as f64 * MAX_WORD_SEC_PER_UNIT;
+        assert!(
+            (words[0].start_time - (2.38 - ceiling)).abs() < 1e-9,
+            "the first word should fall back to its ceiling, got {:?}",
+            words[0]
+        );
+        assert_repair_invariants(&words, 0.0, 6.0);
+    }
+
+    #[test]
+    fn repair_word_timings_leaves_a_plausible_first_word_alone() {
+        // The recovery only fires when the first word is implausibly long. A
+        // segment that opens straight into speech must not be touched.
+        let samples = synth_bursts(6.0, &[(0.05, 0.40)]);
+        let mut words = vec![word(" Hi", 0.05, 0.40), word(" there", 0.45, 0.90)];
+
+        repair_word_timings(&mut words, &samples, 0.0, 6.0);
+
+        assert!(
+            (words[0].start_time - 0.05).abs() < ONSET_SNAP_RADIUS_SEC,
+            "a plausible first word must stay put, got {:?}",
+            words[0]
+        );
+        assert_repair_invariants(&words, 0.0, 6.0);
+    }
+
+    #[test]
+    fn repair_word_timings_shares_borrowed_room_across_a_run() {
+        // Two collapsed words in a row. Borrowing one word at a time gives the
+        // whole 40 ms to whichever borrows first and leaves the other at zero;
+        // the run has to split what the next word can spare.
+        let samples = vec![0.0_f32; (3.0 * WHISPER_SAMPLE_RATE) as usize];
+        let mut words = vec![
+            word("가", 1.00, 1.00),
+            word("나", 1.00, 1.00),
+            word("다", 1.00, 1.10),
+        ];
+
+        repair_word_timings(&mut words, &samples, 0.0, 3.0);
+
+        let first = words[0].end_time - words[0].start_time;
+        let second = words[1].end_time - words[1].start_time;
+        assert!(
+            (first - second).abs() < 1e-9,
+            "a run must share the room evenly, got {first} and {second}"
+        );
+        assert!(
+            first > 0.01,
+            "neither word may be left collapsed, got {words:?}"
+        );
+        assert!(
+            words[2].end_time - words[2].start_time >= MIN_WORD_DURATION_SEC,
+            "the lending word must keep its own floor: {words:?}"
+        );
+        assert_repair_invariants(&words, 0.0, 3.0);
+    }
+
+    #[test]
+    fn repair_word_timings_spreads_a_dense_run_it_cannot_grow() {
+        // Eight syllables inside 200 ms. There is no room to give any of them
+        // 40 ms, so the pass must spread what there is evenly and stay ordered
+        // rather than starve the early words to pay the late ones.
+        let samples = vec![0.0_f32; (2.0 * WHISPER_SAMPLE_RATE) as usize];
+        let syllables = ["가", "나", "다", "라", "마", "바", "사", "아"];
+        let mut words = Vec::new();
+        for (index, text) in syllables.iter().enumerate() {
+            let start = index as f64 * 0.025;
+            words.push(word(text, start, start + 0.025));
+        }
+
+        repair_word_timings(&mut words, &samples, 0.0, 0.25);
+
+        assert_eq!(words.len(), syllables.len());
+        assert_repair_invariants(&words, 0.0, 0.25);
+        let shortest = words
+            .iter()
+            .map(|entry| entry.end_time - entry.start_time)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            shortest >= 0.025 - 1e-9,
+            "no word may end up shorter than it arrived, got {shortest}"
+        );
+    }
+
+    #[test]
+    fn repair_word_timings_refuses_a_snap_that_would_starve_the_previous_word() {
+        // Snapping a start backwards trims the previous word's end onto it. Here
+        // the onset sits ~12 ms after the previous word's start, so accepting the
+        // snap would leave that word far under the floor — a one-frame flicker
+        // bought to move a start by 40 ms.
+        let samples = synth_bursts(3.0, &[(1.32, 1.60)]);
+        let onset = energy_onsets(&samples, 0.0, 3.0)
+            .first()
+            .copied()
+            .expect("the burst must produce an onset");
+        let mut words = vec![
+            word(" a", onset - 0.012, onset + 0.028),
+            word(" b", onset + 0.048, onset + 0.400),
+        ];
+        let untouched_start = words[1].start_time;
+
+        repair_word_timings(&mut words, &samples, 0.0, 3.0);
+
+        assert!(
+            (words[1].start_time - untouched_start).abs() < 1e-9,
+            "the snap must be refused, got {words:?}"
+        );
+        assert!(
+            words[0].end_time - words[0].start_time >= MIN_WORD_DURATION_SEC - 1e-9,
+            "the previous word must keep its floor: {words:?}"
+        );
+        assert_repair_invariants(&words, 0.0, 3.0);
+    }
+
+    #[test]
+    fn repair_word_timings_applies_the_duration_floor_before_snapping() {
+        // Golden for the step order. The onset sits 30 ms before the collapsed
+        // word's start, and the snap guard refuses any candidate closer than the
+        // 40 ms floor to the word's *end*. Growing the word to the floor first
+        // (step 3) makes the snap legal; snapping first would see a zero-length
+        // word and refuse.
+        //
+        // The equivalent golden for the duration *ceiling* is unconstructible:
+        // the smallest ceiling is one syllable-ish unit (350 ms), which already
+        // exceeds the snap radius plus the floor (80 + 40 ms), so a capped end
+        // can never be the thing that forbids a snap.
+        let samples = synth_bursts(3.0, &[(1.00, 1.40)]);
+        let onset = energy_onsets(&samples, 0.0, 3.0)
+            .first()
+            .copied()
+            .expect("the burst must produce an onset");
+        let mut words = vec![word(" now", onset + 0.030, onset + 0.030)];
+
+        repair_word_timings(&mut words, &samples, 0.0, 3.0);
+
+        assert!(
+            (words[0].start_time - onset).abs() < 1e-9,
+            "the grown word should snap onto the onset, got {words:?}"
+        );
+        assert_repair_invariants(&words, 0.0, 3.0);
+    }
+
+    #[test]
+    fn energy_onsets_ignores_near_silence() {
+        // Dither and converter noise have the same *shape* as speech once the
+        // threshold is placed relative to a window's own floor and peak. Whisper
+        // hallucinates text over silence, so without an absolute gate those cues
+        // get their starts jittered onto noise.
+        let mut samples = vec![0.0_f32; (2.0 * WHISPER_SAMPLE_RATE) as usize];
+        let from = WHISPER_SAMPLE_RATE as usize;
+        for (offset, sample) in samples[from..].iter_mut().enumerate() {
+            *sample = if offset % 2 == 0 { 3.0e-5 } else { -3.0e-5 };
+        }
+
+        assert!(
+            energy_onsets(&samples, 0.0, 2.0).is_empty(),
+            "near-silence must not produce onsets"
+        );
+
+        // The same shape at speech level still does, so the gate is a level
+        // check and not a way of switching onset detection off.
+        let audible = synth_bursts(2.0, &[(1.0, 2.0)]);
+        assert!(!energy_onsets(&audible, 0.0, 2.0).is_empty());
     }
 
     #[test]
@@ -4050,13 +4768,20 @@ mod tests {
     #[test]
     fn repair_word_timings_caps_cjk_words_by_syllable_count() {
         let samples = vec![0.0_f32; (12.0 * WHISPER_SAMPLE_RATE) as usize];
-        // One Hangul syllable and a five-syllable greeting, both over-long.
-        let mut words = vec![word("가", 0.50, 6.00), word("안녕하세요", 6.00, 11.50)];
+        // One Hangul syllable and a five-syllable greeting, both over-long. They
+        // are bracketed by other words so neither is the segment's first (whose
+        // start is repaired instead) nor its last (which is exempt).
+        let mut words = vec![
+            word("네", 0.20, 0.40),
+            word("가", 0.50, 6.00),
+            word("안녕하세요", 6.00, 11.50),
+            word("요", 11.50, 11.90),
+        ];
 
         repair_word_timings(&mut words, &samples, 0.0, 12.0);
 
-        let single = words[0].end_time - words[0].start_time;
-        let five = words[1].end_time - words[1].start_time;
+        let single = words[1].end_time - words[1].start_time;
+        let five = words[2].end_time - words[2].start_time;
         assert!(single <= MAX_WORD_SEC_PER_UNIT + 1e-9, "got {single}");
         assert!(five <= 5.0 * MAX_WORD_SEC_PER_UNIT + 1e-9, "got {five}");
         assert!(
@@ -4107,55 +4832,119 @@ mod tests {
         }
     }
 
-    #[test]
-    fn repair_word_timings_always_satisfies_its_invariants() {
-        // Property-style sweep over deliberately hostile inputs: unordered,
-        // out-of-range, zero-length and non-finite timings.
-        let samples = synth_bursts(6.0, &[(0.5, 0.9), (1.7, 2.1), (3.4, 4.0), (5.0, 5.4)]);
-        let mut rng = Lcg(0x5EED_1234_ABCD_0001);
+    /// Property-style sweep over deliberately hostile inputs: unordered,
+    /// out-of-range, zero-length and non-finite timings, anchored anywhere in
+    /// `[segment_start, segment_end]`.
+    fn sweep_repair_invariants(segment_start: f64, segment_end: f64, seed: u64) {
+        let span = segment_end - segment_start;
+        let samples = synth_bursts(
+            segment_end + 1.0,
+            &[
+                (segment_start + 0.5, segment_start + 0.9),
+                (segment_start + span * 0.3, segment_start + span * 0.4),
+                (segment_start + span * 0.6, segment_start + span * 0.7),
+                (segment_end - 0.6, segment_end - 0.2),
+            ],
+        );
+        let mut rng = Lcg(seed);
 
         for case in 0..200 {
             let count = 1 + (rng.next_unit() * 12.0) as usize;
             let mut words = Vec::with_capacity(count);
             for index in 0..count {
-                let start = rng.next_unit() * 7.0 - 0.5;
-                let span = rng.next_unit() * 2.0 - 0.5;
+                let start = segment_start + rng.next_unit() * (span + 1.0) - 0.5;
+                let jitter = rng.next_unit() * 2.0 - 0.5;
                 let (start, end) = match (case + index) % 7 {
-                    0 => (start, start),              // collapsed
-                    1 => (start, start - 0.3),        // inverted
-                    2 => (f64::NAN, start),           // non-finite start
-                    3 => (start, f64::INFINITY),      // non-finite end
-                    4 => (start, start + 9.0),        // far past the segment
-                    _ => (start, start + span.abs()), // ordinary
+                    0 => (start, start),                // collapsed
+                    1 => (start, start - 0.3),          // inverted
+                    2 => (f64::NAN, start),             // non-finite start
+                    3 => (start, f64::INFINITY),        // non-finite end
+                    4 => (start, start + span + 3.0),   // far past the segment
+                    _ => (start, start + jitter.abs()), // ordinary
                 };
                 let text = if index % 3 == 0 { "안녕" } else { " word" };
                 words.push(word(text, start, end));
             }
 
-            repair_word_timings(&mut words, &samples, 0.0, 6.0);
-            assert_repair_invariants(&words, 0.0, 6.0);
+            let before = words.clone();
+            repair_word_timings(&mut words, &samples, segment_start, segment_end);
+            assert_repair_invariants(&words, segment_start, segment_end);
+            assert_text_subsequence(&before, &words);
         }
+    }
+
+    #[test]
+    fn repair_word_timings_always_satisfies_its_invariants() {
+        sweep_repair_invariants(0.0, 6.0, 0x5EED_1234_ABCD_0001);
+    }
+
+    #[test]
+    fn repair_word_timings_satisfies_its_invariants_on_a_late_segment() {
+        // Every other repair test starts its segment at 0.0, where a
+        // segment-relative offset and an absolute one are indistinguishable.
+        // Whisper segments are absolute positions in the take, so sweep one that
+        // starts well after the origin too.
+        sweep_repair_invariants(3.5, 9.25, 0x5EED_1234_ABCD_0002);
     }
 
     #[test]
     fn repair_word_timings_keeps_cues_on_the_word_timed_path() {
         // The cue builder falls back to character proportions when word text
         // covers less than half the segment text; repair must never trigger it.
-        let samples = synth_bursts(3.0, &[(0.30, 0.70), (0.90, 1.30)]);
-        let mut words = vec![word("Hello", 0.28, 0.28), word(" world", 0.92, 1.30)];
+        // The segment is deliberately over the per-cue character budget, so the
+        // splitting path — the one the coverage guard actually protects — runs.
+        let texts = [
+            "Hello",
+            " world",
+            " this",
+            " sentence",
+            " is",
+            " deliberately",
+            " long",
+            " enough",
+            " to",
+            " cross",
+            " the",
+            " character",
+            " budget",
+            " for",
+            " one",
+            " cue",
+        ];
+        let samples = synth_bursts(9.0, &[(0.30, 0.70), (0.90, 1.30), (4.00, 4.60)]);
+        let mut words = Vec::new();
+        for (index, text) in texts.iter().enumerate() {
+            let start = 0.28 + index as f64 * 0.55;
+            // Collapse every fourth word so the repair pass has real work to do.
+            let span = if index % 4 == 0 { 0.0 } else { 0.45 };
+            words.push(word(text, start, start + span));
+        }
 
-        repair_word_timings(&mut words, &samples, 0.0, 3.0);
+        repair_word_timings(&mut words, &samples, 0.0, 9.0);
 
+        let expected = texts.concat();
         let segment = TranscriptionSegment {
             start_time: 0.0,
-            end_time: 3.0,
-            text: "Hello world".to_string(),
+            end_time: 9.0,
+            text: expected.trim().to_string(),
             words: words.clone(),
         };
         let cues = subtitle_ready_segments(&[segment]);
-        assert_eq!(cues.len(), 1);
-        assert_eq!(cues[0].text, "Hello world");
-        assert!(cues[0].end_time > cues[0].start_time);
+
+        assert!(
+            cues.len() > 1,
+            "the segment must cross the split threshold: {cues:?}"
+        );
+        assert!(
+            cues.iter().all(|cue| !cue.words.is_empty()),
+            "every cue must come from the word-timed path, not the fallback: {cues:?}"
+        );
+        let rebuilt = cues
+            .iter()
+            .map(|cue| cue.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(rebuilt, expected.trim());
     }
 
     #[cfg(not(feature = "whisper"))]
