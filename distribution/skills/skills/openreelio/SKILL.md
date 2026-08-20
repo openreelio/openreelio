@@ -65,9 +65,10 @@ you can look at. Load [Perception](./perception/REFERENCE.md).
 ## Editing
 
 Place, trim, split, move, and speed-change clips; add transitions from curated
-recipes (fades render; dissolves/wipes/slides render as cuts with a warning for
-now); cut a whole asset to a curated pacing profile; reach every backend command;
-run atomic batches. Load [Editing](./editing/REFERENCE.md).
+recipes (fades, dissolves, wipes and slides all render — a two-input transition
+needs unused source media on both sides of the cut, and the render says so when
+a boundary has none); cut a whole asset to a curated pacing profile; reach every
+backend command; run atomic batches. Load [Editing](./editing/REFERENCE.md).
 
 ## Captions and text
 

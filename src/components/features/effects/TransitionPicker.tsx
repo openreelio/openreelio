@@ -242,6 +242,14 @@ export const TransitionPicker = memo(function TransitionPicker({
         <h2 className="text-sm font-medium text-editor-text">Transitions</h2>
       </div>
 
+      {/* The preview player draws every boundary as a hard cut. Two-input
+          transitions are stitched by the export's filtergraph, which the
+          WebView preview does not run, so saying nothing here would let a user
+          conclude their dissolve was never applied. */}
+      <p className="px-3 pt-2 text-xs text-editor-text-muted">
+        Transitions appear in the exported file; the preview shows a cut for now.
+      </p>
+
       {/* Transition Cards */}
       <div className="flex-1 overflow-auto p-3">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">

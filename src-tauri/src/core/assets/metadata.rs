@@ -21,6 +21,19 @@ use crate::core::{CoreError, CoreResult, Ratio};
 pub struct MediaMetadata {
     /// Duration in seconds
     pub duration_sec: f64,
+    /// How far the *pictures* go, when the file reports a video stream.
+    ///
+    /// [`Self::duration_sec`] is the container duration, which is the maximum
+    /// across every stream. A file whose audio outlasts its video therefore
+    /// looks seconds longer than the last frame it can decode, and anything
+    /// asking "is there unused picture past this point" — the transition
+    /// handle check above all — has to ask the video stream itself.
+    ///
+    /// `None` when the file carries no video stream, or when the stream
+    /// advertises neither a duration nor a frame count one can be derived
+    /// from; callers fall back to [`Self::duration_sec`].
+    #[serde(default)]
+    pub video_duration_sec: Option<f64>,
     /// File size in bytes
     pub file_size: u64,
     /// Video stream info (if present)
@@ -42,6 +55,7 @@ impl Default for MediaMetadata {
     fn default() -> Self {
         Self {
             duration_sec: 0.0,
+            video_duration_sec: None,
             file_size: 0,
             video: None,
             audio: None,
@@ -68,6 +82,11 @@ struct FFprobeStream {
     width: Option<u32>,
     height: Option<u32>,
     r_frame_rate: Option<String>,
+    /// Per-stream duration. Absent in containers like Matroska.
+    duration: Option<String>,
+    /// Frame count, which with `r_frame_rate` gives a duration when the stream
+    /// does not advertise one.
+    nb_frames: Option<String>,
     sample_rate: Option<String>,
     channels: Option<u8>,
     bit_rate: Option<String>,
@@ -163,6 +182,7 @@ impl MetadataExtractor {
                 match stream.codec_type.as_str() {
                     "video" if metadata.video.is_none() => {
                         metadata.rotation_deg = Self::parse_display_rotation(&stream);
+                        metadata.video_duration_sec = Self::parse_video_stream_duration(&stream);
                         metadata.video = Some(Self::parse_video_stream(&stream));
                     }
                     "audio" if metadata.audio.is_none() => {
@@ -205,6 +225,55 @@ impl MetadataExtractor {
             has_alpha: false, // FFprobe doesn't easily expose this
             is_hdr,
             color_transfer: stream.color_transfer.clone(),
+        }
+    }
+
+    /// How far a video stream's pictures run, in seconds.
+    ///
+    /// Prefers the stream's own `duration`. When the container carries no
+    /// per-stream duration, derives one from the frame count and the frame rate,
+    /// which is the next best answer to "where does the last picture land".
+    /// Returns `None` when neither is available so the caller can fall back to
+    /// the container duration rather than reading a missing value as zero.
+    fn parse_video_stream_duration(stream: &FFprobeStream) -> Option<f64> {
+        let declared = stream
+            .duration
+            .as_ref()
+            .and_then(|raw| raw.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0);
+        if declared.is_some() {
+            return declared;
+        }
+
+        let frames = stream
+            .nb_frames
+            .as_ref()
+            .and_then(|raw| raw.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)?;
+        // Parsed strictly rather than through `parse_frame_rate`, which falls
+        // back to 30fps: a fabricated frame rate here would fabricate a picture
+        // length, which is exactly the guess this function exists to avoid.
+        let fps = stream
+            .r_frame_rate
+            .as_deref()
+            .and_then(Self::parse_exact_rational)
+            .filter(|value| value.is_finite() && *value > 0.0)?;
+
+        Some(frames / fps)
+    }
+
+    /// Parses an FFmpeg rational such as `30/1` or `30000/1001`, or nothing.
+    fn parse_exact_rational(raw: &str) -> Option<f64> {
+        match raw.split_once('/') {
+            Some((numerator, denominator)) => {
+                let numerator: f64 = numerator.trim().parse().ok()?;
+                let denominator: f64 = denominator.trim().parse().ok()?;
+                if denominator == 0.0 {
+                    return None;
+                }
+                Some(numerator / denominator)
+            }
+            None => raw.trim().parse().ok(),
         }
     }
 

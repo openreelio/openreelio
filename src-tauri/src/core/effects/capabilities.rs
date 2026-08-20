@@ -133,7 +133,12 @@ pub fn effect_capability(effect_type: &EffectType) -> EffectCapability {
         EffectType::Pixelate => EffectCapability::export_supported("pixelize"),
         EffectType::Posterize => EffectCapability::export_supported("posterize"),
 
-        // Transitions
+        // Transitions. The three `xfade` entries say `export_supported` because
+        // the export does render them: the timeline stitch blends the boundary
+        // out of the clips' unused source media. A boundary with no media to
+        // spare degrades to a cut with a warning naming the reason, which is a
+        // property of that edit rather than of the effect, so it belongs in the
+        // render's warnings and not in this table.
         EffectType::CrossDissolve => EffectCapability::export_supported("xfade"),
         EffectType::Fade => EffectCapability::export_supported("fade"),
         EffectType::Wipe => EffectCapability::export_supported("xfade"),

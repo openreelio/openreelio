@@ -187,24 +187,79 @@ and a recipe paired with a contradictory `effectType` is rejected. `fade-out`
 is anchored on the clip's tail when the command executes; pass
 `params.start_time` only to put the fade somewhere else in the clip.
 
-### Transitions render as cuts
+### Transitions and when they render
 
-Recipes are stored, validated, and preserved on the clip. What they are not,
-yet, is *rendered*:
+A transition is rendered when it can be, and reported as a cut when it cannot:
 
 | Recipe family | Rendered by `render start` |
 |---------------|----------------------------|
 | `fade-in`, `fade-out` | **Yes** — single-input filters in the clip's own chain |
-| `dissolve-*`, `wipe-*`, `slide-*` | **Not yet** — the boundary renders as a hard cut and the render reports a warning naming the clip and the effect |
+| `dissolve-*`, `wipe-*`, `slide-*` | **Yes, given handles** — the boundary blends, the picture and the sound crossfade together, and the file stays exactly as long as the timeline. Without handles the boundary renders as a hard cut and the render reports a warning naming the clip, the effect and the reason |
 
 A two-input transition needs the outgoing and incoming pictures at once, and
-overlapping them shortens the video stream while every clip's audio stays at its
-absolute timeline position: the file would drift out of sync and end before
-`Sequence::output_duration()`, which is the length `verify` measures against.
-Doing it properly needs a transition engine that crossfades and retimes audio
-alongside the picture. Until that exists the render degrades loudly rather than
-shipping a file that disagrees with its own timeline. For a soft-looking cut
-today, put `fade-out` on the outgoing clip and `fade-in` on the incoming one.
+overlapping them the naive way shortens the video stream while every clip's
+audio stays at its absolute timeline position: the file would drift out of sync
+and end before `Sequence::output_duration()`, which is the length `verify`
+measures against. So the blend is not paid for out of the timeline. Both clips
+reach into source media the edit is not using instead — **handles**: the
+outgoing clip plays half the transition past its out point, the incoming clip
+starts half of it early, and the overlap consumes exactly what they added. Not a
+frame of the timeline moves.
+
+That means a transition needs **half its length of unused source media on each
+side**. A one-second dissolve needs half a second past the outgoing clip's out
+point and half a second before the incoming clip's in point. Clips trimmed from
+longer sources have this; a clip using every frame of its source does not.
+
+The render degrades to a cut, with a warning naming the clip, the effect and the
+reason, when:
+
+1. the effect is not on a video track — there is no picture to blend;
+2. its track is hidden;
+3. the clip carrying it is disabled;
+4. it is on an adjustment layer, which grades the clips beneath it rather than
+   contributing a picture of its own;
+5. it is on a text clip, which is drawn over the finished picture rather than
+   contributing one to blend;
+6. no clip starts where the carrier ends on the same track (a gap, or the last
+   clip on the track) — there is nothing to blend into;
+7. the clip that does start there contributes no picture either, for any of
+   reasons 1-5;
+8. the clip carries **another two-input transition already** — a clip has one
+   out point, so the first one wins and every later one is refused by name;
+9. its `duration` is not a positive number, or is longer than the **10 s**
+   maximum the engine will place (a guard against a millisecond value arriving
+   where seconds were meant);
+10. its duration is **not shorter than both** shots it joins — shorten the
+    transition or lengthen the clips;
+11. either clip is frozen, reversed or time-remapped, so its render window has
+    no well-defined reach into source;
+12. the outgoing asset's length was never measured, so its handle cannot be
+    *proven* to exist — import or re-probe the asset (`analysis run`);
+13. either side is short of handle — the warning says which side, how much media
+    it has, and how much the blend needed.
+
+A transition that renders can still draw a warning of its own: a blend across a
+**razor split** — where the outgoing clip's out point is the incoming clip's in
+point in the same source — mixes every frame with itself and is invisible in the
+finished file. It renders, correctly, and the render says it will not be seen.
+Trim material at the boundary first.
+
+**Audio on a separate track is not crossfaded.** The engine fades the audio that
+travels with the two clips it is blending. Sound placed on its own audio track —
+detached audio, a music bed, a separate narration take — keeps whatever fades it
+was authored with, so a hard edit there will still be heard as a hard edit
+underneath a picture that dissolves. Author `fade_in_sec`/`fade_out_sec` on those
+clips to match.
+
+An eligible transition produces **no warning at all** — the render matches what
+the timeline shows. For a soft-looking cut where handles are impossible, put
+`fade-out` on the outgoing clip and `fade-in` on the incoming one.
+
+`verify` reports the same refusals as the structural check
+`transition.no_handles`, without needing a rendered file: it reads the project,
+asks the same planner the render asks, and carries a `RemoveEffect` fix for each
+transition that will not survive the render.
 
 ### Framing a clip: transform and opacity
 
@@ -270,11 +325,15 @@ detected shot changes — so `dynamic-social` replaces guesses with one checked 
 | `calm-longform` | 7.0 s | 2.0 s | slow | yes |
 
 Every shipped profile cuts hard. `transitionRecipe` (`null`) and
-`transitionEveryN` (`0`) stay in the schema, reserved for the transition engine,
-but no profile sets them while the renderer turns a dissolve into a cut — see
-[Transitions render as cuts](#transitions-render-as-cuts). Ids resolve case- and
-separator-insensitively and accept aliases (`shorts`, `montage`, `social`, `doc`,
-`calm`, …).
+`transitionEveryN` (`0`) stay in the schema, still reserved — and handles are
+not the reason. A profile cuts one asset, so every boundary it makes is a razor
+split: both sides keep all the unused media a blend could want, and the renderer
+would blend each one. Both sides are also the same footage at the same frame, so
+the blend mixes every frame with itself and renders identically to the cut it
+replaced — see
+[Transitions and when they render](#transitions-and-when-they-render). Producing
+boundaries with material to blend between is a separate piece of work. Ids resolve case- and separator-insensitively and accept
+aliases (`shorts`, `montage`, `social`, `doc`, `calm`, …).
 
 Analysis is a precondition, not a nicety: the plan needs the source duration, and
 shot boundaries are what let cuts land on real shot changes. Without a cached
@@ -321,8 +380,9 @@ field (`clipId`); only the referenced value itself waits for execute.
 
 A profile decides pace. Nothing else.
 
-- **No transitions.** Every shipped profile cuts hard, and a dissolve added by
-  hand renders as a cut with a warning until the transition engine lands.
+- **No transitions.** Every shipped profile cuts hard. A dissolve added by hand
+  does render, given handles on both sides of the boundary — the planner just
+  does not place one for you.
 - **No beat sync.** The analysis bundle carries BPM as a single average scalar,
   not a beat grid. `music-montage` is metronomic, not beat-locked; cutting on the
   beat needs analysis that does not exist yet.
@@ -498,11 +558,12 @@ openreelio-cli verify --path ./demo --file ./proxy.mp4 \
 Without `--file`, only structural checks run and FFmpeg is never invoked.
 `--structural-only` makes that explicit and conflicts with `--file`.
 
-Twenty-two checks in two categories. **structural**: `sequence.empty`,
+Twenty-three checks in two categories. **structural**: `sequence.empty`,
 `timeline.gap`, `clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`,
 `audio.silent_clip`, `caption.overlap`, `caption.reading_rate`,
 `caption.out_of_bounds`, `caption.safe_area`, `shot.length_stats`,
-`shot.cut_rhythm`, plus the opt-in `asset.license` and `sequence.duration`.
+`shot.cut_rhythm`, `transition.no_handles`, plus the opt-in `asset.license` and
+`sequence.duration`.
 **rendered**: `render.duration_mismatch`, `render.missing_video`,
 `render.resolution_mismatch`, `render.black_frames`, `render.frozen`,
 `audio.peak`, `audio.clipping`, `audio.loudness`. The two opt-ins run only when

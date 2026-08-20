@@ -231,7 +231,7 @@ pub trait IntoFFmpegFilter {
     ///
     /// # Returns
     ///
-    /// FFmpeg filter string like "xfade=transition=dissolve:duration=1.0:offset=0.0"
+    /// FFmpeg filter string like "xfade=transition=fade:duration=1.0:offset=0.0"
     fn to_filter_body(&self) -> String;
 }
 
@@ -835,21 +835,43 @@ impl Effect {
     // Transition Effect Builders
     // -------------------------------------------------------------------------
 
+    /// Builds the one-input `fade` filter.
+    ///
+    /// `start_time` anchors both directions. It defaults to 0 for a fade-in,
+    /// which is where a fade-in belongs on a stream that begins at the clip's in
+    /// point - but a clip taking part in a transition is rendered from a stream
+    /// that begins earlier, inside the handle, and the export re-anchors the
+    /// param so the fade still lands on the picture the editor pointed at. For a
+    /// fade-out the caller sets `start_time = clip_duration - fade_duration`.
     fn build_fade_filter(&self) -> String {
         let duration = self.get_float("duration").unwrap_or(1.0);
         let fade_in = self.get_bool("fade_in").unwrap_or(true);
+        let start_time = self.get_float("start_time").unwrap_or(0.0).max(0.0);
 
         if fade_in {
-            format!("fade=t=in:st=0:d={:.4}", duration)
+            // A fade-in on an un-shifted stream keeps the bare `st=0` the graph
+            // has always emitted, so nothing about an ordinary clip changes.
+            let start = if start_time <= 0.0 {
+                "0".to_string()
+            } else {
+                format!("{:.4}", start_time)
+            };
+            format!("fade=t=in:st={}:d={:.4}", start, duration)
         } else {
-            // For fade out, start_time specifies when the fade begins.
-            // Caller should set start_time = clip_duration - fade_duration.
-            let start_time = self.get_float("start_time").unwrap_or(0.0);
             format!("fade=t=out:st={:.4}:d={:.4}", start_time, duration)
         }
     }
 
     /// Builds FFmpeg xfade filter for cross dissolve transition.
+    ///
+    /// Uses `transition=fade`, which is the linear A-to-B blend an NLE calls a
+    /// cross dissolve: at the midpoint every output pixel is the average of the
+    /// two inputs. FFmpeg's `transition=dissolve` is a different effect
+    /// altogether - a per-pixel random threshold that picks *one* of the two
+    /// sources for each pixel - so a half-way "dissolve" between two flat greys
+    /// comes out as full-range noise instead of the flat mid-grey a dissolve
+    /// owes the viewer. Their averages are identical, which is how it went
+    /// unnoticed.
     ///
     /// Parameters:
     /// - `duration`: Transition duration in seconds (default: 1.0)
@@ -859,7 +881,7 @@ impl Effect {
         let offset = self.get_float("offset").unwrap_or(0.0);
 
         format!(
-            "xfade=transition=dissolve:duration={:.4}:offset={:.4}",
+            "xfade=transition=fade:duration={:.4}:offset={:.4}",
             duration, offset
         )
     }
@@ -2782,8 +2804,8 @@ mod tests {
 
         let filter = effect.to_filter_string("in", "out");
         assert!(
-            filter.contains("xfade=transition=dissolve"),
-            "Expected dissolve transition, got: {}",
+            filter.contains("xfade=transition=fade"),
+            "Expected a blending fade transition, got: {}",
             filter
         );
         assert!(
@@ -2804,7 +2826,7 @@ mod tests {
 
         let filter = effect.to_filter_string("in", "out");
         // Default duration should be 1.0, offset should be 0.0
-        assert!(filter.contains("xfade=transition=dissolve"));
+        assert!(filter.contains("xfade=transition=fade"));
         assert!(filter.contains("duration=1.0"));
         assert!(filter.contains("offset=0.0"));
     }
@@ -3073,7 +3095,7 @@ mod tests {
 
         let filter = effect.to_filter_string("in", "out");
         // Should still generate valid filter with zero duration
-        assert!(filter.contains("xfade=transition=dissolve"));
+        assert!(filter.contains("xfade=transition=fade"));
         assert!(filter.contains("duration=0.0"));
     }
 

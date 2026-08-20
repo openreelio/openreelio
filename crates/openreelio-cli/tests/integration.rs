@@ -494,6 +494,294 @@ fn create_sample_video_with_scene_change_and_audio(path: &std::path::Path) -> bo
     status.success()
 }
 
+/// Generates a solid-colour clip with a constant tone, long enough to have
+/// handles either side of the range an edit uses.
+///
+/// A real transition needs unused source media on both sides of the cut, so a
+/// transition fixture cannot be trimmed to its own length the way the other
+/// render fixtures are. The colour is flat so a blended frame is unmistakably
+/// neither source, and the tone is a single frequency at a quarter of full
+/// scale so two of them can sum through a crossfade without clipping.
+fn create_solid_tone_source(
+    path: &std::path::Path,
+    colour: &str,
+    frequency: u32,
+    duration_secs: u32,
+) -> bool {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        skip_without_ffmpeg("no FFmpeg could be resolved to build the transition fixture");
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        skip_without_ffmpeg("ffmpeg lacks a supported video encoder for the transition fixture");
+        return false;
+    };
+    if !ffmpeg_supports_encoder(&ffmpeg_path, "aac") {
+        skip_without_ffmpeg("ffmpeg lacks the aac encoder needed by the transition fixture");
+        return false;
+    }
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("color=c={colour}:s=320x240:r=25:d={duration_secs}"),
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("sine=frequency={frequency}:sample_rate=44100:duration={duration_secs}"),
+        "-filter_complex",
+        "[1:a]volume=0.25[a]",
+        "-map",
+        "0:v",
+        "-map",
+        "[a]",
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+    command.args(["-c:a", "aac", "-shortest"]);
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate transition fixture with ffmpeg");
+    if !status.success() {
+        skip_without_ffmpeg("ffmpeg could not generate the transition fixture");
+    }
+    status.success()
+}
+
+/// Averages the middle of one rendered frame down to a single brightness value.
+///
+/// A single pixel cannot see an `xfade`: FFmpeg's `dissolve` switches pixels
+/// over at random rather than mixing them, so any one pixel is fully one shot or
+/// fully the other all the way through. The *average* is what moves smoothly,
+/// and it moves the same way for every `xfade` shape. Only the middle of the
+/// frame is measured, so the letterbox bars a source of a different aspect ratio
+/// leaves on the canvas cannot drag the reading toward black.
+fn sample_rendered_mean_brightness(path: &std::path::Path, at_sec: f64) -> Option<u8> {
+    let ffmpeg_path = available_ffmpeg_path()?;
+    let output = Command::new(ffmpeg_path)
+        .args(["-v", "error", "-ss", &at_sec.to_string(), "-i"])
+        .arg(path)
+        .args([
+            "-vf",
+            "crop=w=iw/2:h=ih/2,scale=1:1:flags=area,format=rgb24",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() < 3 {
+        return None;
+    }
+    let sum: u32 = output.stdout[..3]
+        .iter()
+        .map(|channel| *channel as u32)
+        .sum();
+    Some((sum / 3) as u8)
+}
+
+/// Measures the mean volume, in dBFS, of one window of a rendered file's audio.
+///
+/// This is what proves a crossfade is constant power: `qsin` squares sum to one,
+/// so summing the two branches through the master mix has to leave the level
+/// where it was rather than dipping or doubling at the boundary.
+fn measure_audio_mean_volume_db(
+    path: &std::path::Path,
+    start_sec: f64,
+    duration_sec: f64,
+) -> Option<f64> {
+    let ffmpeg_path = available_ffmpeg_path()?;
+    let output = Command::new(ffmpeg_path)
+        .args([
+            "-hide_banner",
+            "-ss",
+            &start_sec.to_string(),
+            "-t",
+            &duration_sec.to_string(),
+            "-i",
+        ])
+        .arg(path)
+        .args(["-map", "0:a", "-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .ok()?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // A failed measurement is not a quiet one. Without this, an ffmpeg that
+    // could not open the file returns `None`, every caller `expect`s it, and the
+    // panic blames a missing reading rather than the run that never happened.
+    assert!(
+        output.status.success(),
+        "measuring {} at {start_sec}s failed: {stderr}",
+        path.display()
+    );
+
+    // `volumedetect` reports on stderr, and prints once per instance - including
+    // an empty one when the filter is torn down without frames. The last
+    // reading with samples behind it is the measurement.
+    stderr
+        .lines()
+        .filter_map(|line| line.split("mean_volume:").nth(1))
+        .map(|value| value.trim().trim_end_matches(" dB").trim().to_string())
+        .filter_map(|value| parse_volume_db(&value))
+        .next_back()
+}
+
+/// Reads one `volumedetect` level, including the silence it reports as `-inf`.
+///
+/// `-inf dB` is a real measurement - it means the window held nothing at all -
+/// and parsing it as "no reading" hides exactly the failure an audio assertion
+/// is looking for. It is mapped onto a floor far below anything a fixture
+/// produces so a caller can compare it numerically like any other level.
+fn parse_volume_db(raw: &str) -> Option<f64> {
+    const SILENCE_FLOOR_DB: f64 = -120.0;
+
+    if raw.contains("inf") {
+        return Some(if raw.starts_with('-') {
+            SILENCE_FLOOR_DB
+        } else {
+            0.0
+        });
+    }
+    raw.parse().ok()
+}
+
+/// One end of the spectrum, isolated far enough to measure a single tone.
+///
+/// The transition fixtures carry a 440Hz tone on one shot and 880Hz on the
+/// other. A single octave is not much separation, so each filter is a cascade:
+/// four two-pole stages put the far tone around 30dB down, which is deep enough
+/// that it cannot move a reading taken to within a decibel. Whatever the cascade
+/// costs *inside* the passband is a constant, and every assertion using this
+/// compares a level against the same band's own steady state, so it cancels.
+enum ToneBand {
+    /// Keeps the 440Hz tone, rejects the 880Hz one.
+    Low,
+    /// Keeps the 880Hz tone, rejects the 440Hz one.
+    High,
+}
+
+impl ToneBand {
+    fn filter(&self) -> &'static str {
+        match self {
+            Self::Low => {
+                "lowpass=f=550:poles=2,lowpass=f=550:poles=2,lowpass=f=550:poles=2,lowpass=f=550:poles=2"
+            }
+            Self::High => {
+                "highpass=f=700:poles=2,highpass=f=700:poles=2,highpass=f=700:poles=2,highpass=f=700:poles=2"
+            }
+        }
+    }
+}
+
+/// Measures one tone's own level over one window of a rendered file.
+///
+/// Measuring the *mix* cannot see a crossfade at all: two tones fading through
+/// each other at constant power sum to the level they started at, which is the
+/// same reading a hard cut produces and the same reading a fade with the wrong
+/// curve produces. Only each tone's own envelope tells them apart.
+///
+/// The window is cut inside the filtergraph rather than by seeking the input, so
+/// it is sample-exact - the windows this is used with are a tenth of a second
+/// wide, and a keyframe-accurate input seek would miss them.
+fn measure_tone_band_db(
+    path: &std::path::Path,
+    start_sec: f64,
+    end_sec: f64,
+    band: ToneBand,
+) -> Option<f64> {
+    let ffmpeg_path = available_ffmpeg_path()?;
+    let output = Command::new(ffmpeg_path)
+        .args(["-hide_banner", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:a",
+            "-af",
+            &format!(
+                "atrim=start={start_sec}:end={end_sec},{},volumedetect",
+                band.filter()
+            ),
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .ok()?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "measuring {} over {start_sec}..{end_sec}s failed: {stderr}",
+        path.display()
+    );
+
+    stderr
+        .lines()
+        .filter_map(|line| line.split("mean_volume:").nth(1))
+        .map(|value| value.trim().trim_end_matches(" dB").trim().to_string())
+        .filter_map(|value| parse_volume_db(&value))
+        .next_back()
+}
+
+/// The spread between the darkest and brightest luma in the middle of a frame.
+///
+/// A blend between two *flat* sources must itself be flat: every output pixel is
+/// the same mix of the same two colours. This is what separates a real blend
+/// from FFmpeg's `transition=dissolve`, which is not a blend at all - it picks
+/// one source or the other per pixel by a random threshold, so a half-way
+/// "dissolve" between flat black and flat white is full-range noise whose
+/// *average* is mid-grey. An average-brightness assertion passes on both; only
+/// the spread tells them apart.
+fn sample_rendered_luma_spread(path: &std::path::Path, at_sec: f64) -> Option<u16> {
+    let ffmpeg_path = available_ffmpeg_path()?;
+    let output = Command::new(ffmpeg_path)
+        .args(["-hide_banner", "-i"])
+        .arg(path)
+        .args([
+            "-vf",
+            &format!(
+                "trim=start={at_sec}:end={},crop=w=iw/2:h=ih/2,signalstats,metadata=print",
+                at_sec + 0.02
+            ),
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .ok()?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "measuring the luma spread of {} at {at_sec}s failed: {stderr}",
+        path.display()
+    );
+
+    let read = |key: &str| -> Option<u16> {
+        stderr
+            .lines()
+            .filter_map(|line| line.split(key).nth(1))
+            .filter_map(|value| value.trim().parse::<f64>().ok())
+            .next()
+            .map(|value| value.round() as u16)
+    };
+
+    Some(read("lavfi.signalstats.YMAX=")?.saturating_sub(read("lavfi.signalstats.YMIN=")?))
+}
+
 /// The FFprobe that ships with the FFmpeg the CLI under test would use.
 ///
 /// Resolved the same way as [`available_ffmpeg_path`] so the measurement tools
@@ -4089,12 +4377,12 @@ fn test_plan_from_profile_builds_a_plan_that_validates_executes_and_verifies() {
 /// Scenario: an AddEffect step lands the named recipe on the clip it names,
 /// at a boundary past the first
 ///
-/// No shipped profile plans a transition while the renderer turns one into a
-/// cut, so the plan gets the `AddEffect` step appended by hand — which is what
-/// an agent editing a generated plan would do, and what a profile will emit
-/// again once the transition engine exists. What is under test is the handoff:
-/// a `$fromStep` reference resolving to the *right* clip, carrying the *right*
-/// effect type, at a boundary that is not the trivial first one.
+/// No shipped profile plans a transition — every boundary a profile makes is a
+/// razor split, and a blend across one is invisible — so the plan gets the
+/// `AddEffect` step appended by hand, which is what an agent editing a generated
+/// plan would do. What is under test is the handoff: a `$fromStep` reference
+/// resolving to the *right* clip, carrying the *right* effect type, at a
+/// boundary that is not the trivial first one.
 #[test]
 fn test_a_plan_places_a_transition_recipe_on_the_clip_it_names() {
     let (dir, path, asset_id) = create_project_with_analysis("pacing_transition");
@@ -4375,42 +4663,27 @@ fn test_plan_from_profile_rejects_an_asset_that_is_not_in_the_project() {
 // Transition Rendering
 // =============================================================================
 
-/// Feature: rendering a clip that carries a transition effect
-/// Scenario: the boundary renders as a cut, the file is still exactly as long
-/// as the timeline, and the render says what it did not do
+/// Length of each shot in the transition fixtures, in seconds.
+const TRANSITION_SHOT_SEC: f64 = 4.0;
+/// Length of the `dissolve-standard` recipe, in seconds.
+const TRANSITION_DISSOLVE_SEC: f64 = 1.0;
+
+/// Builds a two-shot timeline from two sources and returns the ids needed to
+/// hang a transition on the cut.
 ///
-/// The A/V case specifically. A transition that overlapped the picture would
-/// shorten the video stream while the audio stitch kept every clip at its
-/// absolute timeline position, so the file would both drift out of sync and end
-/// before `Sequence::output_duration()` — which is the length `verify` measures
-/// against. Silent fixtures cannot see either failure, so this one has sound.
-#[test]
-fn test_render_with_a_transition_effect_matches_the_timeline_length_and_warns() {
-    if available_ffmpeg_path().is_none() {
-        return;
-    }
-
-    let dir = create_temp_project("render_transition_av");
-    let path = project_path(&dir, "render_transition_av");
-
-    let source_path = dir.path().join("av_source.mp4");
-    if !create_sample_video_with_scene_change_and_audio(&source_path) {
-        return;
-    }
-
-    let import = run_cli_ok(&[
-        "asset",
-        "import",
-        "--path",
-        &path,
-        "--file",
-        source_path.to_str().unwrap(),
-    ]);
-    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
-
-    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+/// `source_in` decides whether the clips have handles: a clip that starts at
+/// source time 0 and runs to the end of its media has no unused frames to blend
+/// with, which is the difference between a rendered dissolve and a warned cut.
+///
+/// Returns `(sequence_id, track_id, outgoing_clip_id)`.
+fn place_two_shot_timeline(
+    path: &str,
+    sources: [&std::path::Path; 2],
+    source_in_sec: f64,
+) -> (String, String, String) {
+    let info = run_cli_ok(&["timeline", "info", "--path", path]);
     let sequence_id = info["sequenceId"].as_str().unwrap().to_string();
-    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", path]);
     let track_id = tracks["tracks"]
         .as_array()
         .unwrap()
@@ -4420,40 +4693,339 @@ fn test_render_with_a_transition_effect_matches_the_timeline_length_and_warns() 
         .unwrap()
         .to_string();
 
-    // `asset import` records no probed duration, so the timeline gives the clip
-    // its 10s default. Trimming both clips to the fixture's real 4s keeps the
-    // rendered length a statement about the stitch rather than about a clip
-    // that outruns its source.
-    const FIXTURE_SEC: f64 = 4.0;
-    for index in 0..2 {
+    let mut outgoing_clip = String::new();
+    for (index, source) in sources.into_iter().enumerate() {
+        let import = run_cli_ok(&[
+            "asset",
+            "import",
+            "--path",
+            path,
+            "--file",
+            source.to_str().unwrap(),
+        ]);
+        let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
         let inserted = run_cli_ok(&[
             "timeline",
             "insert",
             "--path",
-            &path,
+            path,
             "--asset",
             &asset_id,
             "--track",
             &track_id,
             "--at",
-            &(index as f64 * FIXTURE_SEC).to_string(),
+            &(index as f64 * TRANSITION_SHOT_SEC).to_string(),
         ]);
         let clip_id = inserted["createdIds"][0].as_str().unwrap().to_string();
+
+        // `asset import` records no probed duration, so the timeline hands every
+        // clip its 10s default; trimming is what states the edit.
         run_cli_ok(&[
             "timeline",
             "trim",
             "--path",
-            &path,
+            path,
             "--track",
             &track_id,
             "--clip",
             &clip_id,
             "--source-in",
-            "0",
+            &source_in_sec.to_string(),
             "--source-out",
-            &FIXTURE_SEC.to_string(),
+            &(source_in_sec + TRANSITION_SHOT_SEC).to_string(),
         ]);
+
+        if index == 0 {
+            outgoing_clip = clip_id;
+        }
     }
+
+    (sequence_id, track_id, outgoing_clip)
+}
+
+/// Hangs `dissolve-standard` on the clip that ends at the cut.
+fn add_dissolve(path: &str, sequence_id: &str, track_id: &str, clip_id: &str) {
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        path,
+        "--type",
+        "AddEffect",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "recipe": "dissolve-standard",
+        })
+        .to_string(),
+    ]);
+}
+
+/// The warnings a `render start` result reported.
+fn render_warnings(rendered: &serde_json::Value) -> Vec<String> {
+    rendered["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|warning| warning.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Feature: rendering a two-input transition between adjacent clips
+/// Scenario: the boundary really blends, and costs the timeline nothing
+///
+/// The A/V case specifically, and with real handles. Both halves of the
+/// invariant are checked here because a transition engine can break either one:
+/// the picture must blend *and* the file must stay exactly as long as
+/// `Sequence::output_duration()`, with the sound crossfading over the same
+/// stretch at a steady level rather than dipping or doubling at the cut. A
+/// silent fixture, or one whose clips are already using every frame of their
+/// source, cannot see any of that.
+#[test]
+fn test_render_blends_an_adjacent_transition_without_spending_timeline_time() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transition_blend");
+    let path = project_path(&dir, "render_transition_blend");
+
+    // Eight seconds of source for a four-second shot: two seconds of unused
+    // media either side of the range, which is what the blend is paid for with.
+    let dark = dir.path().join("dark.mp4");
+    let light = dir.path().join("light.mp4");
+    if !create_solid_tone_source(&dark, "black", 440, 8) {
+        return;
+    }
+    if !create_solid_tone_source(&light, "white", 880, 8) {
+        return;
+    }
+
+    let (sequence_id, track_id, outgoing_clip) =
+        place_two_shot_timeline(&path, [&dark, &light], 2.0);
+    add_dissolve(&path, &sequence_id, &track_id, &outgoing_clip);
+
+    let timeline_end_sec = TRANSITION_SHOT_SEC * 2.0;
+    let cut_sec = TRANSITION_SHOT_SEC;
+
+    let output_path = dir.path().join("blended-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a blended transition must render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let rendered: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    // Nothing degraded, so nothing to apologise for.
+    let warnings = render_warnings(&rendered);
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.contains("renders as a cut")),
+        "a transition the engine blended must not be reported as a cut: {warnings:?}"
+    );
+
+    // The invariant the handles exist to protect: the picture is exactly as
+    // long as the timeline, counted in decoded frames rather than trusted from
+    // the container.
+    let fps = ffprobe_video_fps(&output_path).expect("rendered fps");
+    let frames = ffprobe_video_frame_count(&output_path).expect("rendered frame count");
+    assert_eq!(
+        frames,
+        (timeline_end_sec * fps).round() as u64,
+        "an {timeline_end_sec}s timeline at {fps}fps must render exactly that many frames"
+    );
+
+    // The blend itself. The shots are black and white, so the frame average
+    // reads the blend directly: half way at the cut, and each shot untouched a
+    // whole transition either side of it. Half a transition either side is what
+    // the handles bought, so a full one is comfortably clear of the blend.
+    let at_cut = sample_rendered_mean_brightness(&output_path, cut_sec).expect("frame at the cut");
+    assert!(
+        (90..=170).contains(&at_cut),
+        "the cut must be half way between the two shots, measured {at_cut}"
+    );
+
+    // ...and it has to be a *blend*, not merely something whose average lands in
+    // the middle. Both shots are flat, so a real blend is flat too: every pixel
+    // is the same mix of the same two colours. FFmpeg's `transition=dissolve`
+    // instead picks one source or the other per pixel at random, which averages
+    // to exactly the same mid-grey while looking like static - the engine
+    // shipped that for a while precisely because the average could not see it.
+    //
+    // Measured: `transition=fade` gives YMIN=YMAX=121 (spread 0) on this
+    // fixture; `transition=dissolve` gives YMIN=0, YMAX=255 (spread 255) with
+    // the same YAVG of 121. The bound is generous enough for codec ringing
+    // around the flat field and nowhere near a noise mode.
+    let spread = sample_rendered_luma_spread(&output_path, cut_sec).expect("spread at the cut");
+    assert!(
+        spread < 40,
+        "the blend must mix the two shots rather than choosing between them per pixel; \
+         luma spread across the middle of the frame measured {spread}"
+    );
+
+    let before = sample_rendered_mean_brightness(&output_path, cut_sec - TRANSITION_DISSOLVE_SEC)
+        .expect("frame before the blend");
+    assert!(
+        before < 25,
+        "a full transition before the cut must still be the outgoing shot, measured {before}"
+    );
+    let after = sample_rendered_mean_brightness(&output_path, cut_sec + TRANSITION_DISSOLVE_SEC)
+        .expect("frame after the blend");
+    assert!(
+        after > 230,
+        "a full transition after the cut must already be the incoming shot, measured {after}"
+    );
+
+    // The sound crossfades over the same stretch. Constant-power fades sum to a
+    // flat level, so the blend window must measure like the steady state either
+    // side of it. The tolerance is generous because these are separate lossy
+    // windows, not because the shape is approximate.
+    let steady_before =
+        measure_audio_mean_volume_db(&output_path, 1.0, 1.0).expect("level before the blend");
+    let steady_after =
+        measure_audio_mean_volume_db(&output_path, 6.0, 1.0).expect("level after the blend");
+    let across_blend = measure_audio_mean_volume_db(
+        &output_path,
+        cut_sec - TRANSITION_DISSOLVE_SEC / 2.0,
+        TRANSITION_DISSOLVE_SEC,
+    )
+    .expect("level across the blend");
+    assert!(
+        (across_blend - steady_before).abs() < 3.0 && (across_blend - steady_after).abs() < 3.0,
+        "a constant-power crossfade must not dip or spike: \
+         {steady_before} dB before, {across_blend} dB across, {steady_after} dB after"
+    );
+
+    // The flat-level check above is necessary and nowhere near sufficient: two
+    // tones fading through each other at constant power sum to the level they
+    // started at, and so does a hard cut, and so does a fade on the wrong curve.
+    // Every one of those passes it. Each tone's *own* envelope is what
+    // distinguishes them, so the two shots carry different frequencies and are
+    // measured apart.
+    //
+    // `qsin` gain is sin(x * pi/2) over the blend, so at a quarter of the way
+    // through, relative to that tone's own steady state:
+    //
+    //   outgoing  20*log10(cos(pi/8)) = -0.69 dB
+    //   incoming  20*log10(sin(pi/8)) = -8.34 dB
+    //
+    // and the two swap at three quarters. The quarter points are deliberate:
+    // measured symmetrically about the midpoint every candidate reads -3 dB,
+    // which is why the earlier version of this test was blind.
+    //
+    // Measured on this fixture, deviation of the *incoming* tone at the quarter
+    // point: qsin -8.3 dB (correct), linear/tri -12.0 dB, hard cut -27.9 dB,
+    // and -28.6 dB when the incoming branch is not pulled back by its head
+    // handle. A one-decibel tolerance admits only the first.
+    const QUARTER_WINDOW_SEC: f64 = 0.1;
+    const FADED_IN_DB: f64 = -0.69;
+    const FADED_DOWN_DB: f64 = -8.34;
+    const TONE_TOLERANCE_DB: f64 = 1.0;
+
+    let blend_start_sec = cut_sec - TRANSITION_DISSOLVE_SEC / 2.0;
+    let quarter_sec = blend_start_sec + TRANSITION_DISSOLVE_SEC / 4.0;
+    let three_quarter_sec = blend_start_sec + TRANSITION_DISSOLVE_SEC * 3.0 / 4.0;
+
+    let tone_at = |start: f64, band: ToneBand, what: &str| -> f64 {
+        measure_tone_band_db(
+            &output_path,
+            start - QUARTER_WINDOW_SEC / 2.0,
+            start + QUARTER_WINDOW_SEC / 2.0,
+            band,
+        )
+        .unwrap_or_else(|| panic!("{what} must be measurable"))
+    };
+
+    let outgoing_steady = tone_at(1.5, ToneBand::Low, "the outgoing tone's steady state");
+    let incoming_steady = tone_at(6.5, ToneBand::High, "the incoming tone's steady state");
+
+    let checks = [
+        (
+            "the outgoing tone a quarter into the blend",
+            tone_at(quarter_sec, ToneBand::Low, "the outgoing tone") - outgoing_steady,
+            FADED_IN_DB,
+        ),
+        (
+            "the incoming tone a quarter into the blend",
+            tone_at(quarter_sec, ToneBand::High, "the incoming tone") - incoming_steady,
+            FADED_DOWN_DB,
+        ),
+        (
+            "the outgoing tone three quarters into the blend",
+            tone_at(three_quarter_sec, ToneBand::Low, "the outgoing tone") - outgoing_steady,
+            FADED_DOWN_DB,
+        ),
+        (
+            "the incoming tone three quarters into the blend",
+            tone_at(three_quarter_sec, ToneBand::High, "the incoming tone") - incoming_steady,
+            FADED_IN_DB,
+        ),
+    ];
+
+    for (what, measured, expected) in checks {
+        assert!(
+            (measured - expected).abs() < TONE_TOLERANCE_DB,
+            "{what} must follow the constant-power curve: expected {expected:.2} dB \
+             below its own steady state, measured {measured:.2} dB"
+        );
+    }
+
+    let (verify_stdout, verify_stderr, verify_code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        output_path.to_str().unwrap(),
+    ]);
+    assert_ne!(
+        verify_code, 2,
+        "verify itself must run.\nstdout: {verify_stdout}\nstderr: {verify_stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&verify_stdout).unwrap();
+    let duration_check = find_check(&report, "render.duration_mismatch");
+    assert_eq!(
+        duration_check["status"], "passed",
+        "the render must not disagree with the timeline it came from: {duration_check}"
+    );
+}
+
+/// Feature: rendering a transition whose clips have no source media to spare
+/// Scenario: the boundary renders as a cut, the file is still exactly as long
+/// as the timeline, and the render says why it could not blend
+///
+/// A blend is paid for out of unused source media. Clips that already run to
+/// the end of their source have none, and the honest answer is a cut plus a
+/// warning naming the side that ran out — not a file that is shorter than the
+/// timeline it came from.
+#[test]
+fn test_render_without_handles_degrades_a_transition_to_a_cut_and_says_so() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transition_av");
+    let path = project_path(&dir, "render_transition_av");
+
+    // Four seconds of source for a four-second shot: nothing left over.
+    let source_path = dir.path().join("av_source.mp4");
+    if !create_sample_video_with_scene_change_and_audio(&source_path) {
+        return;
+    }
+
+    let (sequence_id, track_id, outgoing_clip) =
+        place_two_shot_timeline(&path, [&source_path, &source_path], 0.0);
+    add_dissolve(&path, &sequence_id, &track_id, &outgoing_clip);
 
     let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
     let clips = clips["clips"].as_array().unwrap();
@@ -4462,31 +5034,6 @@ fn test_render_with_a_transition_effect_matches_the_timeline_length_and_warns() 
         .iter()
         .map(|clip| clip["timelineInSec"].as_f64().unwrap() + clip["durationSec"].as_f64().unwrap())
         .fold(0.0, f64::max);
-    let outgoing_clip = clips
-        .iter()
-        .find(|clip| clip["timelineInSec"].as_f64() == Some(0.0))
-        .and_then(|clip| clip["id"].as_str())
-        .unwrap()
-        .to_string();
-
-    // A dissolve on the clip that ends at the cut: the exact shape that used to
-    // be stitched with `xfade`.
-    run_cli_ok(&[
-        "command",
-        "execute",
-        "--path",
-        &path,
-        "--type",
-        "AddEffect",
-        "--payload",
-        &serde_json::json!({
-            "sequenceId": sequence_id,
-            "trackId": track_id,
-            "clipId": outgoing_clip,
-            "recipe": "dissolve-standard",
-        })
-        .to_string(),
-    ]);
 
     let output_path = dir.path().join("transition-render.mp4");
     let (stdout, stderr, success) = run_cli(&[
@@ -4503,26 +5050,33 @@ fn test_render_with_a_transition_effect_matches_the_timeline_length_and_warns() 
     );
     let rendered: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
-    // Truthful degradation: the export says what it did instead.
-    let warnings: Vec<&str> = rendered["warnings"]
-        .as_array()
-        .expect("warnings")
-        .iter()
-        .filter_map(|warning| warning.as_str())
-        .collect();
+    // Truthful degradation: the export says what it did instead, and why.
+    let warnings = render_warnings(&rendered);
     assert!(
         warnings
             .iter()
-            .any(|warning| warning.contains("not yet rendered") && warning.contains("cut")),
-        "an unrendered transition must be reported: {warnings:?}"
+            .any(|warning| warning.contains("renders as a cut") && warning.contains("handle")),
+        "a transition with no handle to blend with must be reported: {warnings:?}"
     );
 
-    // The invariant the overlap broke: the file is exactly as long as the
-    // timeline says it is.
+    // The invariant an unpaid-for overlap would break: the file is exactly as
+    // long as the timeline says it is.
     let rendered_duration = rendered["durationSec"].as_f64().unwrap();
     assert!(
         (rendered_duration - timeline_end_sec).abs() < 0.2,
         "rendered {rendered_duration}s must match the {timeline_end_sec}s timeline: {rendered}"
+    );
+
+    // The warning has to describe the file, not merely accompany it. Both shots
+    // are the same source here, so the frame on the cut must be that source
+    // untouched rather than any mixture: a cut is what was promised, so a cut is
+    // what has to be there.
+    let spread = sample_rendered_luma_spread(&output_path, TRANSITION_SHOT_SEC)
+        .expect("spread at the refused boundary");
+    assert!(
+        spread < 40,
+        "a boundary reported as a cut must not be blended or dithered; luma spread \
+         across the middle of the frame measured {spread}"
     );
 
     let (verify_stdout, verify_stderr, verify_code) = run_cli_exit(&[
@@ -4541,6 +5095,83 @@ fn test_render_with_a_transition_effect_matches_the_timeline_length_and_warns() 
     assert_eq!(
         duration_check["status"], "passed",
         "the render must not disagree with the timeline it came from: {duration_check}"
+    );
+}
+
+/// Feature: rendering part of a sequence that crosses a blended boundary
+/// Scenario: the range is exactly as long as asked for and still shows the blend
+///
+/// A range render trims the finished stream, so a transition whose offset was
+/// measured against the whole timeline rather than against its own group would
+/// show up here as a range that is the wrong length or misses the blend.
+///
+/// A smoke test, deliberately: `--start`/`--end` become output-side `-ss`/`-t`,
+/// so the whole graph - transitions and all - is built and run exactly as it is
+/// for a full render and only the tail of the encode is discarded. What this
+/// covers is that the range plumbing does not disturb the blend, not that the
+/// blend is computed differently inside a range.
+#[test]
+fn test_render_range_across_a_transition_keeps_its_length_and_shows_the_blend() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transition_range");
+    let path = project_path(&dir, "render_transition_range");
+
+    let dark = dir.path().join("dark.mp4");
+    let light = dir.path().join("light.mp4");
+    if !create_solid_tone_source(&dark, "black", 440, 8) {
+        return;
+    }
+    if !create_solid_tone_source(&light, "white", 880, 8) {
+        return;
+    }
+
+    let (sequence_id, track_id, outgoing_clip) =
+        place_two_shot_timeline(&path, [&dark, &light], 2.0);
+    add_dissolve(&path, &sequence_id, &track_id, &outgoing_clip);
+
+    // Two seconds straddling the cut at 4s.
+    const RANGE_START_SEC: f64 = 3.0;
+    const RANGE_END_SEC: f64 = 5.0;
+
+    let output_path = dir.path().join("range-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+        "--start",
+        &RANGE_START_SEC.to_string(),
+        "--end",
+        &RANGE_END_SEC.to_string(),
+    ]);
+    assert!(
+        success,
+        "a range across a transition must render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Counted in decoded frames, not trusted from the container: a container
+    // duration is written by the muxer from timestamps and can round its way
+    // past a missing frame, which is exactly the error a range render makes.
+    let fps = ffprobe_video_fps(&output_path).expect("range fps");
+    let frames = ffprobe_video_frame_count(&output_path).expect("range frame count");
+    assert_eq!(
+        frames,
+        ((RANGE_END_SEC - RANGE_START_SEC) * fps).round() as u64,
+        "a {}s range at {fps}fps must render exactly that many frames",
+        RANGE_END_SEC - RANGE_START_SEC
+    );
+
+    // The cut sits one second into the range.
+    let at_cut = sample_rendered_mean_brightness(&output_path, 1.0)
+        .expect("frame at the cut inside the range");
+    assert!(
+        (90..=170).contains(&at_cut),
+        "the blend must survive a range render, measured {at_cut}"
     );
 }
 
@@ -7294,13 +7925,15 @@ fn test_packs_list_filters_by_kind() {
     assert_eq!(social["tempo"], "moderate");
     assert_eq!(social["targetShotSec"], 2.5);
 
-    // Every shipped profile cuts hard while the renderer turns a two-input
-    // transition into a cut. Listing a recipe here would advertise an edit the
-    // export cannot deliver.
+    // Every shipped profile cuts hard. The renderer does place transitions, but
+    // a profile cuts one asset, so every boundary it makes is a razor split and
+    // a blend across one mixes the same footage into itself — invisible, and
+    // paid for in encode time. Listing a recipe here would advertise an effect
+    // the file cannot show.
     for pack in pacing_packs {
         assert!(
             pack["transitionRecipe"].is_null(),
-            "profile '{}' must not advertise a transition the render cannot place: {pack}",
+            "profile '{}' must not advertise a transition that would render invisibly: {pack}",
             pack["id"]
         );
         assert_eq!(pack["transitionEveryN"], 0, "{pack}");

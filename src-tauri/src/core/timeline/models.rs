@@ -1168,12 +1168,43 @@ impl AudioKeyframe {
     /// `if(lt(t,T),expr,fallback)` expressions. dB values are converted to
     /// linear amplitude (10^(dB/20)) since FFmpeg `volume` defaults to linear.
     ///
-    /// Commas inside `if()` expressions are function argument separators and
-    /// must NOT be escaped — matches the pattern in `build_time_remap_setpts`.
-    pub fn to_ffmpeg_volume_expr(keyframes: &[AudioKeyframe]) -> Option<String> {
+    /// `head_offset_sec` is how far into the audio branch the clip's own in
+    /// point sits. It is zero unless a transition widened the branch backwards
+    /// into unused source media; when it is not, every keyframe time is pushed
+    /// later by exactly that much, because `t` in the emitted expression counts
+    /// from the first sample of the branch and the keyframes are authored
+    /// against the clip.
+    ///
+    /// # Filter-argument quoting
+    ///
+    /// The whole expression is emitted inside single quotes. A filtergraph
+    /// treats `,` as the separator between filters in a chain, so the commas
+    /// that separate `if()`'s arguments end the `volume` filter early: an
+    /// unquoted two-keyframe expression makes FFmpeg reject the entire graph
+    /// with `No such filter: '<threshold>)'` and the render fails outright.
+    /// Inside single quotes every character is literal, and the expression
+    /// itself can never contain a quote — it is built here out of digits,
+    /// operators and function names only.
+    ///
+    /// # `eval=frame`
+    ///
+    /// `volume` defaults to `eval=once`, which evaluates the expression when the
+    /// filter is configured and reuses that one gain for the whole stream. A
+    /// time-varying expression therefore has to ask for per-frame evaluation, or
+    /// the automation silently flattens to a constant.
+    pub fn to_ffmpeg_volume_expr(
+        keyframes: &[AudioKeyframe],
+        head_offset_sec: f64,
+    ) -> Option<String> {
         if keyframes.len() < 2 {
             return None;
         }
+
+        let head_offset_sec = if head_offset_sec.is_finite() {
+            head_offset_sec.max(0.0)
+        } else {
+            0.0
+        };
 
         // Interpolate in dB space (matching AudioKeyframe::interpolate()),
         // then convert the final dB expression to linear amplitude for FFmpeg.
@@ -1203,7 +1234,12 @@ impl AudioKeyframe {
                         format!("{:.6}", db0)
                     } else {
                         let slope_db = (db1 - db0) / dt;
-                        format!("({:.6}+{:.6}*(t-{:.6}))", db0, slope_db, t0)
+                        format!(
+                            "({:.6}+{:.6}*(t-{:.6}))",
+                            db0,
+                            slope_db,
+                            t0 + head_offset_sec
+                        )
                     }
                 }
                 KeyframeInterpolation::Hold => {
@@ -1213,7 +1249,7 @@ impl AudioKeyframe {
 
             // Convert dB expression to linear: pow(10, dB/20)
             let linear_segment = format!("pow(10,{}/20)", db_segment_expr);
-            parts.push((t1, linear_segment));
+            parts.push((t1 + head_offset_sec, linear_segment));
         }
 
         if parts.is_empty() {
@@ -1228,14 +1264,16 @@ impl AudioKeyframe {
             expr = format!("if(lt(t,{:.6}),{},{})", threshold, segment_expr, expr);
         }
 
-        // Before first keyframe: hold first value
+        // Before first keyframe: hold first value. The head handle counts as
+        // "before the first keyframe" too — a transition reaching backwards into
+        // unused media must not start the automation early.
         let first_linear = db_to_linear(keyframes[0].value_db);
-        let first_t = keyframes[0].time_offset;
+        let first_t = keyframes[0].time_offset + head_offset_sec;
         if first_t > 0.0 {
             expr = format!("if(lt(t,{:.6}),{:.6},{})", first_t, first_linear, expr);
         }
 
-        Some(format!("volume={}", expr))
+        Some(format!("volume='{}':eval=frame", expr))
     }
 }
 
@@ -2556,14 +2594,12 @@ mod tests {
         ];
 
         // When generating FFmpeg expression
-        let expr = AudioKeyframe::to_ffmpeg_volume_expr(&keyframes);
+        let expr = AudioKeyframe::to_ffmpeg_volume_expr(&keyframes, 0.0);
 
-        // Then it should produce a valid volume filter (no quotes, no escaped commas)
+        // Then it should produce a valid volume filter
         assert!(expr.is_some());
         let expr = expr.unwrap();
-        assert!(expr.starts_with("volume="));
-        assert!(!expr.contains('\''), "Should not contain single quotes");
-        assert!(!expr.contains("\\,"), "Commas should not be escaped");
+        assert!(expr.starts_with("volume='"));
         assert!(expr.contains("if(lt(t,"));
         // Expression must interpolate in dB space then convert to linear via pow(10, dB/20)
         assert!(
@@ -2573,12 +2609,76 @@ mod tests {
     }
 
     #[test]
+    fn should_quote_the_volume_expression_so_the_filtergraph_still_parses() {
+        // A filtergraph splits filters on `,`, and `if()` separates its
+        // arguments with the same character. Emitting the expression bare made
+        // FFmpeg read the text after the first comma as a filter name and
+        // reject the whole graph — every clip with two or more volume
+        // keyframes failed to render at all.
+        let keyframes = vec![
+            AudioKeyframe::new(0.0, 0.0, KeyframeInterpolation::Linear),
+            AudioKeyframe::new(2.0, -12.0, KeyframeInterpolation::Linear),
+        ];
+
+        let expr = AudioKeyframe::to_ffmpeg_volume_expr(&keyframes, 0.0).expect("expression built");
+
+        let body = expr
+            .strip_prefix("volume=")
+            .expect("the filter names itself first");
+        let quoted = body
+            .strip_suffix(":eval=frame")
+            .expect("per-frame evaluation is what makes the expression vary at all");
+        assert!(
+            quoted.starts_with('\'') && quoted.ends_with('\''),
+            "the expression must be quoted or its commas end the filter: {expr}"
+        );
+        assert!(
+            !quoted[1..quoted.len() - 1].contains('\''),
+            "a quote inside the expression would reopen the filtergraph: {expr}"
+        );
+    }
+
+    #[test]
+    fn should_shift_every_breakpoint_by_the_head_handle() {
+        // A transition starts the incoming clip's sound half a blend before its
+        // in point, so `t` in the emitted expression no longer counts from the
+        // clip. Keyframes authored at 0s and 2s belong at 0.5s and 2.5s of
+        // branch time when the branch opens 0.5s early.
+        let keyframes = vec![
+            AudioKeyframe::new(0.0, 0.0, KeyframeInterpolation::Linear),
+            AudioKeyframe::new(2.0, -12.0, KeyframeInterpolation::Linear),
+        ];
+
+        let anchored =
+            AudioKeyframe::to_ffmpeg_volume_expr(&keyframes, 0.0).expect("expression built");
+        let shifted =
+            AudioKeyframe::to_ffmpeg_volume_expr(&keyframes, 0.5).expect("expression built");
+
+        assert!(
+            anchored.contains("lt(t,2.000000)") && anchored.contains("*(t-0.000000)"),
+            "without a handle the breakpoints stay where they were authored: {anchored}"
+        );
+        assert!(
+            shifted.contains("lt(t,2.500000)"),
+            "the segment's end must move with the branch: {shifted}"
+        );
+        assert!(
+            shifted.contains("*(t-0.500000)"),
+            "the ramp must start at the clip's in point, not the branch's: {shifted}"
+        );
+        assert!(
+            shifted.contains("lt(t,0.500000)"),
+            "the handle plays at the first keyframe's level, not partway down the ramp: {shifted}"
+        );
+    }
+
+    #[test]
     fn audio_keyframe_should_return_none_for_insufficient_keyframes() {
         // Given only one keyframe (need >= 2)
         let keyframes = vec![AudioKeyframe::new(0.0, 0.0, KeyframeInterpolation::Linear)];
 
         // When generating FFmpeg expression
-        let expr = AudioKeyframe::to_ffmpeg_volume_expr(&keyframes);
+        let expr = AudioKeyframe::to_ffmpeg_volume_expr(&keyframes, 0.0);
 
         // Then it should return None
         assert!(expr.is_none());

@@ -18,6 +18,7 @@ use super::violation::{merged_span_duration_sec, QCViolation, Severity, Violatio
 use crate::core::captions::{CaptionPosition, CaptionStyle, VerticalPosition};
 use crate::core::commands::find_gaps;
 use crate::core::project::ProjectState;
+use crate::core::render::transition_stitch::plan_sequence_transitions;
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::CoreResult;
 
@@ -1376,6 +1377,211 @@ impl QCRule for ShotLengthStatsRule {
 }
 
 // =============================================================================
+// TransitionNoHandlesRule
+// =============================================================================
+
+/// Rule that reports two-input transitions the render will not blend
+///
+/// A stored `CrossDissolve`, `Wipe` or `Slide` is only a request. The render
+/// blends it as a real `xfade` when the edit gives it somewhere to blend from —
+/// unused source media on both sides of the cut, a real adjacency, a picture on
+/// each side, a duration shorter than both shots and no longer than the cap the
+/// engine will place. When any of that is missing the boundary silently comes
+/// out as a hard cut.
+///
+/// "Silently" is the problem this rule exists for. The export reports the
+/// refusal as a warning, but only if someone runs an export and reads its
+/// warnings: an agent that places transitions and then verifies the project has
+/// no other way to learn that its edit did not survive contact with the media.
+/// The check runs off the project alone — no render, no `--file` — because the
+/// answer is knowable from the timeline and the source lengths.
+///
+/// Graded as a warning: the program still renders, still lasts exactly as long
+/// as the timeline says, and a hard cut is a legitimate edit. What is not
+/// legitimate is believing a dissolve is there when it is not.
+#[derive(Debug, Default)]
+pub struct TransitionNoHandlesRule;
+
+impl TransitionNoHandlesRule {
+    /// Creates a new TransitionNoHandlesRule
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl QCRule for TransitionNoHandlesRule {
+    fn name(&self) -> &str {
+        "TransitionNoHandlesRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "transition.no_handles"
+    }
+
+    fn description(&self) -> &str {
+        "Reports two-input transitions the render will degrade to a hard cut, and why"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        state: &ProjectState,
+        config: &RuleConfig,
+        context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let severity = config.severity_override.unwrap_or(self.default_severity());
+
+        // Measured before the planner runs, because the planner wants a
+        // synchronous answer and probing a file is not one. Only assets a clip
+        // carrying a two-input transition actually touches are measured, so a
+        // project without transitions costs nothing at all.
+        let durations = measure_transition_source_durations(sequence, state).await;
+
+        let plan = plan_sequence_transitions(
+            sequence,
+            &state.assets,
+            &state.effects,
+            context.fps,
+            |asset| durations.get(&asset.id).copied(),
+        );
+
+        Ok(plan
+            .refusals()
+            .iter()
+            .map(|refusal| {
+                let location = sequence
+                    .tracks
+                    .iter()
+                    .flat_map(|track| track.clips.iter())
+                    .find(|clip| clip.id == refusal.clip_id)
+                    .map(|clip| (clip.place.timeline_in_sec, clip.timeline_end()));
+
+                let mut violation = QCViolation::new(
+                    self.name(),
+                    severity,
+                    format!(
+                        "Transition '{}' on clip '{}' renders as a hard cut",
+                        refusal.effect_label, refusal.clip_id
+                    ),
+                )
+                .with_entities(vec![refusal.clip_id.clone(), refusal.effect_id.clone()])
+                .with_details(format!(
+                    "The render will not blend this boundary: {}.",
+                    refusal.reason
+                ))
+                .with_metric("clipId", refusal.clip_id.clone())
+                .with_metric("effectId", refusal.effect_id.clone())
+                .with_metric("trackId", refusal.track_id.clone())
+                .with_metric("effect", refusal.effect_label.clone());
+
+                if let Some((start, end)) = location {
+                    violation = violation.with_location(start, end);
+                }
+
+                // Removing the effect is the one repair that is always correct
+                // and always computable: it makes the project say what the file
+                // will show. Everything else — trimming the clips back to free a
+                // handle, shortening the transition — depends on material this
+                // rule would have to guess at, and a fix that guesses wrong is
+                // worse than no fix.
+                violation.with_fix(
+                    ViolationFix::new(
+                        format!(
+                            "Remove the '{}' transition that will not render",
+                            refusal.effect_label
+                        ),
+                        vec![serde_json::json!({
+                            "type": "RemoveEffect",
+                            "sequenceId": sequence.id,
+                            "trackId": refusal.track_id,
+                            "clipId": refusal.clip_id,
+                            "effectId": refusal.effect_id
+                        })],
+                    )
+                    .with_confidence(0.6),
+                )
+            })
+            .collect())
+    }
+}
+
+/// Measures the media behind every clip that carries a two-input transition.
+///
+/// Only those clips and the ones they cut into: an asset nobody blends across
+/// never needs measuring, and the probe is the expensive part of this rule.
+/// `Asset::duration_sec` is used when the project already carries one, which is
+/// the normal case for anything imported through the GUI.
+async fn measure_transition_source_durations(
+    sequence: &Sequence,
+    state: &ProjectState,
+) -> std::collections::HashMap<String, f64> {
+    let mut wanted: Vec<String> = Vec::new();
+
+    for track in &sequence.tracks {
+        let mut clips: Vec<&Clip> = track.clips.iter().filter(|clip| clip.enabled).collect();
+        clips.sort_by(|a, b| a.place.timeline_in_sec.total_cmp(&b.place.timeline_in_sec));
+
+        for (index, clip) in clips.iter().enumerate() {
+            let carries_transition = clip.effects.iter().any(|effect_id| {
+                state.effects.get(effect_id).is_some_and(|effect| {
+                    effect.enabled && effect.effect_type.is_two_input_transition()
+                })
+            });
+            if !carries_transition {
+                continue;
+            }
+
+            wanted.push(clip.asset_id.clone());
+            if let Some(next) = clips.get(index + 1) {
+                wanted.push(next.asset_id.clone());
+            }
+        }
+    }
+
+    wanted.sort();
+    wanted.dedup();
+
+    let mut measured = std::collections::HashMap::new();
+    for asset_id in wanted {
+        let Some(asset) = state.assets.get(&asset_id) else {
+            continue;
+        };
+
+        if let Some(duration) = asset
+            .duration_sec
+            .filter(|duration| duration.is_finite() && *duration > 0.0)
+        {
+            measured.insert(asset_id, duration);
+            continue;
+        }
+
+        // Off the async executor: FFprobe is a blocking child process, and QC
+        // runs on the same runtime as everything else.
+        let uri = asset.uri.clone();
+        let probed = tokio::task::spawn_blocking(move || {
+            crate::core::assets::MetadataExtractor::extract(&uri)
+                .ok()
+                .and_then(|metadata| metadata.video_duration_sec.or(Some(metadata.duration_sec)))
+        })
+        .await
+        .ok()
+        .flatten()
+        .filter(|duration: &f64| duration.is_finite() && *duration > 0.0);
+
+        if let Some(duration) = probed {
+            measured.insert(asset_id, duration);
+        }
+    }
+
+    measured
+}
+
+// =============================================================================
 // Cross-reference: rendered black ranges vs. structural gaps
 // =============================================================================
 
@@ -2549,5 +2755,131 @@ mod tests {
 
         assert_eq!(report.violations[0].severity, Severity::Info);
         assert!(report.passed);
+    }
+
+    // ========================================================================
+    // TransitionNoHandlesRule
+    // ========================================================================
+
+    /// A two-clip sequence where the outgoing clip carries a dissolve.
+    ///
+    /// `outgoing_source_length` is how long the outgoing clip's media runs. The
+    /// clip always uses 0..5s of it, so a length of 5.0 leaves no handle and a
+    /// length of 9.0 leaves four seconds of one.
+    fn sequence_with_dissolve(outgoing_source_length: f64) -> (Sequence, ProjectState) {
+        use crate::core::effects::{Effect, EffectType, ParamValue};
+
+        let mut state = ProjectState::new("QC Transitions");
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        track.id = "track-1".to_string();
+
+        let mut dissolve = Effect::new(EffectType::CrossDissolve);
+        dissolve.id = "dissolve-1".to_string();
+        dissolve.set_param("duration", ParamValue::Float(1.0));
+        dissolve.enabled = true;
+        state.effects.insert(dissolve.id.clone(), dissolve.clone());
+
+        // The outgoing clip runs to the end of whatever media it has.
+        let mut outgoing = Clip::with_range("asset_out", 0.0, 5.0);
+        outgoing.id = "clip-out".to_string();
+        outgoing.place.timeline_in_sec = 0.0;
+        outgoing.place.duration_sec = 5.0;
+        outgoing.effects.push(dissolve.id.clone());
+        track.add_clip(outgoing);
+
+        // The incoming clip starts two seconds into a nine-second source, so it
+        // always has a handle of its own.
+        let mut incoming = Clip::with_range("asset_in", 2.0, 7.0);
+        incoming.id = "clip-in".to_string();
+        incoming.place.timeline_in_sec = 5.0;
+        incoming.place.duration_sec = 5.0;
+        track.add_clip(incoming);
+
+        sequence.add_track(track);
+
+        let mut outgoing_asset = video_asset("asset_out", false);
+        outgoing_asset.duration_sec = Some(outgoing_source_length);
+        let mut incoming_asset = video_asset("asset_in", false);
+        incoming_asset.duration_sec = Some(9.0);
+        state.assets.insert("asset_out".to_string(), outgoing_asset);
+        state.assets.insert("asset_in".to_string(), incoming_asset);
+
+        (sequence, state)
+    }
+
+    #[tokio::test]
+    async fn should_report_a_transition_the_render_will_not_blend() {
+        // The outgoing clip uses its source to the last frame, so there is no
+        // unused media to reach into and the boundary comes out as a hard cut.
+        let (sequence, state) = sequence_with_dissolve(5.0);
+        let context = context_for(&sequence);
+
+        let violations = TransitionNoHandlesRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs without a render");
+
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert!(
+            violations[0].message.contains("hard cut"),
+            "the finding must say what the file will show: {}",
+            violations[0].message
+        );
+        assert!(
+            violations[0]
+                .details
+                .as_deref()
+                .is_some_and(|details| details.contains("handle")),
+            "the finding must carry the reason from the planner: {:?}",
+            violations[0].details
+        );
+
+        let fix = violations[0].suggested_fix.as_ref().expect("a fix");
+        assert_eq!(fix.commands[0]["type"], "RemoveEffect");
+        assert_eq!(fix.commands[0]["effectId"], "dissolve-1");
+        assert_eq!(fix.commands[0]["clipId"], "clip-out");
+        assert_eq!(fix.commands[0]["trackId"], "track-1");
+    }
+
+    #[tokio::test]
+    async fn should_stay_silent_about_a_transition_the_render_will_blend() {
+        // Four seconds of unused media past the out point is far more than the
+        // half-second handle a one-second dissolve needs.
+        let (sequence, state) = sequence_with_dissolve(9.0);
+        let context = context_for(&sequence);
+
+        let violations = TransitionNoHandlesRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs without a render");
+
+        assert!(
+            violations.is_empty(),
+            "a transition that renders is not a finding: {violations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_stay_silent_when_the_sequence_holds_no_transitions() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        track.add_clip(video_clip("asset_1", 0.0, 5.0));
+        track.add_clip(video_clip("asset_1", 5.0, 5.0));
+        sequence.add_track(track);
+        let context = context_for(&sequence);
+
+        let violations = TransitionNoHandlesRule::new()
+            .check(
+                &sequence,
+                &state_with(vec![video_asset("asset_1", false)]),
+                &RuleConfig::default(),
+                &context,
+            )
+            .await
+            .expect("rule runs without a render");
+
+        assert!(violations.is_empty(), "{violations:?}");
     }
 }

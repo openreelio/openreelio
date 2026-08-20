@@ -193,6 +193,18 @@ pub struct FFmpegProgress {
 pub struct MediaInfo {
     /// Duration in seconds
     pub duration_sec: f64,
+    /// How far the *pictures* go, when the file reports a video stream.
+    ///
+    /// `duration_sec` is the container duration, which is the maximum across
+    /// every stream, so a file whose audio outlasts its video looks seconds
+    /// longer than the last frame it can decode. Anything asking "is there
+    /// unused picture past this point" has to ask the video stream itself.
+    ///
+    /// `None` when there is no video stream, or when the stream advertises
+    /// neither a duration nor a frame count one can be derived from; callers
+    /// fall back to `duration_sec`.
+    #[serde(default)]
+    pub video_duration_sec: Option<f64>,
     /// Video stream info (if present)
     pub video: Option<VideoStreamInfo>,
     /// Audio stream info (if present)
@@ -1979,6 +1991,7 @@ fn parse_probe_output(json_str: &str) -> FFmpegResult<MediaInfo> {
         .unwrap_or_default();
 
     let mut video_info: Option<VideoStreamInfo> = None;
+    let mut video_duration_sec: Option<f64> = None;
     let mut audio_info: Option<AudioStreamInfo> = None;
 
     for stream in streams {
@@ -1986,6 +1999,7 @@ fn parse_probe_output(json_str: &str) -> FFmpegResult<MediaInfo> {
 
         match codec_type {
             Some("video") if video_info.is_none() => {
+                video_duration_sec = video_stream_duration(&stream);
                 video_info = Some(parse_video_stream(&stream)?);
             }
             Some("audio") if audio_info.is_none() => {
@@ -1997,6 +2011,7 @@ fn parse_probe_output(json_str: &str) -> FFmpegResult<MediaInfo> {
 
     Ok(MediaInfo {
         duration_sec,
+        video_duration_sec,
         video: video_info,
         audio: audio_info,
         format: format_name,
@@ -2014,7 +2029,14 @@ fn parse_probe_output(json_str: &str) -> FFmpegResult<MediaInfo> {
 fn parse_video_stream_duration(json_str: &str) -> Option<f64> {
     let json: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let stream = json.get("streams")?.as_array()?.first()?;
+    video_stream_duration(stream)
+}
 
+/// Reads one video stream object's picture length, in seconds.
+///
+/// Split out of [`parse_video_stream_duration`] so the full `-show_streams`
+/// probe and the narrow `v:0` probe answer the question the same way.
+fn video_stream_duration(stream: &serde_json::Value) -> Option<f64> {
     let declared = stream
         .get("duration")
         .and_then(|value| value.as_str())

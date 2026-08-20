@@ -96,7 +96,7 @@ existing editable, event-sourced engine — CLI/MCP (the flagship agent surface)
 |------|-------------|
 | Q6.1 | `PacingProfile` pack `{tempo, targetShotSec, variance, transitionRecipe, transitionEveryN}` + registry. |
 | Q6.2 | `StylePlanner::plan_from_profile` reusing `compute_scaled_cut_times`/`generate_steps` (profile as alternative input to an ESD). |
-| Q6.3 | `generate_steps` emits transition `AddEffect` steps honoring recipes — makes good the "transitions not yet supported" warning at style_planner.rs:188. |
+| Q6.3 | `generate_steps` emits transition `AddEffect` steps honoring recipes — the cadence is implemented and tested; no shipped profile uses it, because a profile's boundaries are razor splits and a blend across one is invisible (see the module docs on `style_planner`). |
 | Q6.4 | CLI exposure (exact verb decided at implementation: extend `analysis build-selects` vs new `plan from-profile`). |
 
 ### PR 7 — `feature/mcp-frame-tool` (RQ-2, MCP image path)

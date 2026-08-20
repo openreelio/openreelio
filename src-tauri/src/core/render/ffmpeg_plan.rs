@@ -26,11 +26,15 @@ use super::{
         collect_overlay_text_drawtext_filters, effective_source_dimensions,
         generated_text_visual_end_sec, hdr_metadata_for_asset, is_text_clip,
         output_video_dimensions, output_video_fps, output_video_pixel_format,
-        resolve_asset_source_dimensions, seed_source_dimension_cache, unmeasurable_effect_message,
+        resolve_asset_source_dimensions, resolve_asset_source_duration,
+        seed_source_dimension_cache, seed_source_duration_cache, unmeasurable_effect_message,
         AssetAudioInfo, ExportEngine, ExportError, ExportSettings, VideoCodec,
         VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
     transform_layout::compute_clip_transform_layout,
+    transition_stitch::{
+        clip_stream_frames, plan_sequence_transitions, stitch_transition_groups, ClipHandles,
+    },
     RenderPlan,
 };
 
@@ -103,14 +107,27 @@ pub(super) fn build_sequence_ffmpeg_args(
     // not measure are simply absent and fall through to the resolver.
     let mut source_dimensions = seed_source_dimension_cache(ctx.audio_info);
 
+    // Which boundaries blend, and by how much. Planning once up front means the
+    // trim builders, the audio mix and the stitch all read the same answer, so
+    // the picture, the sound and the reported warnings cannot disagree about
+    // what the render did.
+    let mut source_durations = seed_source_duration_cache(ctx.audio_info);
+    let transition_plan =
+        plan_sequence_transitions(ctx.sequence, ctx.assets, ctx.effects, output_fps, |asset| {
+            resolve_asset_source_duration(asset, &mut source_durations)
+        });
+
     let mut adjustment_layer_effects = Vec::new();
     for (clip, _track) in &all_clips {
         if clip.is_adjustment_layer() && !clip.effects.is_empty() {
+            // An adjustment layer never takes part in a transition — the
+            // planner refuses one outright — so it has no handles to anchor to.
             let graph = ctx.engine.build_clip_filter_graph(
                 clip,
                 ctx.effects,
                 Some(output_width),
                 Some(output_height),
+                ClipHandles::default(),
             );
             if graph.has_video_effects() {
                 let start = clip.place.timeline_in_sec;
@@ -155,17 +172,43 @@ pub(super) fn build_sequence_ffmpeg_args(
         args.push("-i".to_string());
         args.push(validated_path.to_string_lossy().to_string());
 
+        // A clip in a transition renders a little more than its slot: the extra
+        // comes out of unused source media, never out of the timeline. The
+        // effect chain needs to know too — its stream now starts before the
+        // clip's in point, so anything anchored in seconds has to move with it.
+        let handles = transition_plan.handles(&clip.id);
+
         let clip_filter_graph = ctx.engine.build_clip_filter_graph(
             clip,
             ctx.effects,
             Some(output_width),
             Some(output_height),
+            handles,
         );
 
         let source_hdr_metadata = hdr_metadata_for_asset(asset);
         let tonemap_filter = ctx
             .settings
             .build_tonemap_video_filter(&source_hdr_metadata);
+
+        let engine_audio_fades = transition_plan.audio_fades(&clip.id);
+        // The pin has to be the frame count the stitch will assume, and the
+        // stitch derives it from the clip's cumulative timeline boundaries so
+        // that consecutive clips telescope. Rounding this clip's own duration
+        // instead would disagree by a frame on any timeline whose cut points are
+        // not on frame boundaries, and `xfade` would blend at the wrong frame.
+        let pinned_frames = transition_plan.touches(&clip.id).then(|| {
+            clip_stream_frames(
+                clip.place.timeline_in_sec,
+                clip.place.timeline_out_sec(),
+                handles,
+                output_fps,
+            )
+        });
+        let segment_duration_sec = match pinned_frames {
+            Some(frames) => f64::from(frames) / output_fps,
+            None => clip.place.duration_sec + handles.head_sec + handles.tail_sec,
+        };
 
         match track.kind {
             TrackKind::Video => {
@@ -180,7 +223,13 @@ pub(super) fn build_sequence_ffmpeg_args(
                         video_out_label.clone()
                     };
 
-                    build_video_trim_filter(clip, input_index, &trim_label, &mut filter_complex);
+                    build_video_trim_filter(
+                        clip,
+                        input_index,
+                        &trim_label,
+                        &mut filter_complex,
+                        handles,
+                    );
 
                     if clip_filter_graph.has_video_effects() {
                         let effects_filter = clip_filter_graph
@@ -239,7 +288,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                             &video_out_label,
                             &normalized_video_label,
                             &layout,
-                            clip.place.duration_sec,
+                            segment_duration_sec,
                             output_width,
                             output_height,
                             output_fps,
@@ -254,14 +303,18 @@ pub(super) fn build_sequence_ffmpeg_args(
                             output_height,
                             output_fps,
                             output_pixel_format,
+                            pinned_frames,
                         );
                     }
 
-                    video_segments.push(VideoTimelineSegment::new(
-                        format!("[{}]", normalized_video_label),
-                        clip.place.timeline_in_sec,
-                        clip.place.timeline_out_sec(),
-                    ));
+                    video_segments.push(
+                        VideoTimelineSegment::new(
+                            format!("[{}]", normalized_video_label),
+                            clip.place.timeline_in_sec,
+                            clip.place.timeline_out_sec(),
+                        )
+                        .with_clip(clip.id.clone()),
+                    );
                 }
 
                 if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
@@ -273,6 +326,8 @@ pub(super) fn build_sequence_ffmpeg_args(
                         input_index,
                         &audio_trim_label,
                         &mut filter_complex,
+                        handles,
+                        engine_audio_fades,
                     );
 
                     if clip_filter_graph.has_audio_effects() {
@@ -293,6 +348,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                         input_index,
                         &audio_out_label,
                         &mut filter_complex,
+                        handles,
                     );
 
                     audio_streams.push(format!("[{}]", mixed_audio_label));
@@ -308,6 +364,8 @@ pub(super) fn build_sequence_ffmpeg_args(
                         input_index,
                         &audio_trim_label,
                         &mut filter_complex,
+                        handles,
+                        engine_audio_fades,
                     );
 
                     if clip_filter_graph.has_audio_effects() {
@@ -328,6 +386,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                         input_index,
                         &audio_out_label,
                         &mut filter_complex,
+                        handles,
                     );
 
                     audio_streams.push(format!("[{}]", mixed_audio_label));
@@ -372,6 +431,17 @@ pub(super) fn build_sequence_ffmpeg_args(
             "Sequence has no visual clips to export".to_string(),
         ));
     }
+
+    // Each planned boundary is folded into its neighbours here, before the
+    // timeline stitch sees the list. The fold hands back one segment covering
+    // exactly the same timeline span, so gaps, the black tail and the output
+    // length are all decided by code that never learns a transition happened.
+    let video_segments = stitch_transition_groups(
+        &mut filter_complex,
+        video_segments,
+        &transition_plan,
+        output_fps,
+    )?;
 
     if filter_complex.ends_with(';') {
         filter_complex.pop();
@@ -495,6 +565,22 @@ pub(super) fn build_audio_only_ffmpeg_args(
         return Err(ExportError::NoClips);
     }
 
+    // An audio-only render of a sequence with transitions has to hear the same
+    // crossfades the full render does, or extracting the audio would produce a
+    // different edit from the one on screen.
+    let mut source_durations = seed_source_duration_cache(ctx.audio_info);
+    // The *output* frame rate, exactly as the video path uses: every transition
+    // length is quantised to whole output frames, so planning the audio against
+    // the sequence rate would give an export with an fps override a different
+    // set of crossfades from the picture it is supposed to accompany.
+    let transition_plan = plan_sequence_transitions(
+        ctx.sequence,
+        ctx.assets,
+        ctx.effects,
+        output_video_fps(ctx.sequence, ctx.settings),
+        |asset| resolve_asset_source_duration(asset, &mut source_durations),
+    );
+
     for (clip, track) in &all_clips {
         if !matches!(track.kind, TrackKind::Video | TrackKind::Audio) {
             continue;
@@ -528,14 +614,20 @@ pub(super) fn build_audio_only_ffmpeg_args(
         args.push("-i".to_string());
         args.push(validated_path.to_string_lossy().to_string());
 
-        let clip_filter_graph = ctx
-            .engine
-            .build_clip_filter_graph(clip, ctx.effects, None, None);
+        let handles = transition_plan.handles(&clip.id);
+        let clip_filter_graph =
+            ctx.engine
+                .build_clip_filter_graph(clip, ctx.effects, None, None, handles);
         let audio_trim_label = format!("atrim{}", input_index);
         let audio_out_label = format!("a{}", input_index);
-
-        let audio_effects_input =
-            build_audio_trim_filter(clip, input_index, &audio_trim_label, &mut filter_complex);
+        let audio_effects_input = build_audio_trim_filter(
+            clip,
+            input_index,
+            &audio_trim_label,
+            &mut filter_complex,
+            handles,
+            transition_plan.audio_fades(&clip.id),
+        );
 
         if clip_filter_graph.has_audio_effects() {
             let effects_filter =
@@ -555,6 +647,7 @@ pub(super) fn build_audio_only_ffmpeg_args(
             input_index,
             &audio_out_label,
             &mut filter_complex,
+            handles,
         );
 
         audio_streams.push(format!("[{}]", mixed_audio_label));

@@ -6258,6 +6258,19 @@ export type MediaInfo = {
  */
 durationSec: number; 
 /**
+ * How far the *pictures* go, when the file reports a video stream.
+ * 
+ * `duration_sec` is the container duration, which is the maximum across
+ * every stream, so a file whose audio outlasts its video looks seconds
+ * longer than the last frame it can decode. Anything asking "is there
+ * unused picture past this point" has to ask the video stream itself.
+ * 
+ * `None` when there is no video stream, or when the stream advertises
+ * neither a duration nor a frame count one can be derived from; callers
+ * fall back to `duration_sec`.
+ */
+videoDurationSec?: number | null; 
+/**
  * Video stream info (if present)
  */
 video: VideoStreamInfo | null; 
