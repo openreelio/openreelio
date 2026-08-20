@@ -200,6 +200,33 @@ pub fn validate_local_input_path(path: &str, label: &str) -> Result<PathBuf, Str
     }
 }
 
+/// Validates a caller-supplied input path and confines the read to `allowed_roots`.
+///
+/// [`validate_local_input_path`] only proves that a path is local, non-traversing and an
+/// existing regular file — it accepts *any* absolute location on disk. An IPC command
+/// that reads a file named by the renderer must additionally confine the read, otherwise
+/// a compromised webview can use the command's success/failure and result counts as an
+/// oracle for files anywhere on the machine.
+///
+/// Callers are expected to map the error to a generic message so the rejected path is not
+/// reflected back to the caller.
+pub fn validate_scoped_input_path(
+    path: &str,
+    label: &str,
+    allowed_roots: &[&Path],
+) -> Result<PathBuf, String> {
+    // `validate_local_input_path` canonicalizes (best-effort), so compare against
+    // canonicalized roots to avoid symlink and case-normalization surprises.
+    let validated = validate_local_input_path(path, label)?;
+    let allowed_root_canon = canonical_allowed_roots(allowed_roots, label)?;
+
+    if !is_within_any_scope(&validated, &allowed_root_canon) {
+        return Err(format!("{label} must be within an allowed directory"));
+    }
+
+    Ok(validated)
+}
+
 /// Validates and canonicalizes a project directory path.
 ///
 /// This is used by IPC entry points that open projects to ensure:
@@ -1192,6 +1219,52 @@ mod tests {
         let path_str = file_path.to_string_lossy().to_string();
         let result = validate_output_path(&path_str, "outputPath");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_scoped_input_path_allows_within_root() {
+        let root = TempDir::new().unwrap();
+        let nested_dir = root.path().join("exports");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let input = nested_dir.join("diarization.json");
+        std::fs::write(&input, "{}").unwrap();
+
+        let result = validate_scoped_input_path(
+            &input.to_string_lossy(),
+            "diarization inputPath",
+            &[root.path()],
+        );
+
+        assert!(
+            result.is_ok(),
+            "in-scope input must be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_scoped_input_path_rejects_outside_root() {
+        // An absolute path to an existing regular file passes
+        // `validate_local_input_path` on its own; only the scope check stops the
+        // command from being used as a read oracle for the rest of the disk.
+        let allowed_root = TempDir::new().unwrap();
+        let outside_root = TempDir::new().unwrap();
+        let input = outside_root.path().join("secret.json");
+        std::fs::write(&input, "{}").unwrap();
+
+        assert!(
+            validate_local_input_path(&input.to_string_lossy(), "diarization inputPath").is_ok()
+        );
+
+        let result = validate_scoped_input_path(
+            &input.to_string_lossy(),
+            "diarization inputPath",
+            &[allowed_root.path()],
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("must be within an allowed directory"));
     }
 
     #[test]

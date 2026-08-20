@@ -47,6 +47,14 @@ pub fn quality_to_wire_value(quality: VideoQuality) -> &'static str {
 /// - Requires http/https
 /// - Trims whitespace
 /// - Removes trailing slash
+///
+/// Unlike the AI gateway's `validate_base_url`, this deliberately does *not* deny
+/// internal/loopback hosts. The gateway URL is dialed with user credentials attached,
+/// so pointing it at an internal address is an SSRF and key-exfiltration risk; this
+/// value only feeds a local `is_available()` check and is never persisted or used to
+/// issue a request, and a locally hosted provider on `localhost` is a supported setup.
+/// If this URL ever becomes the target of an actual request, adopt the gateway's
+/// internal-host denial here as well.
 #[cfg(feature = "ai-providers")]
 pub fn validate_base_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim();

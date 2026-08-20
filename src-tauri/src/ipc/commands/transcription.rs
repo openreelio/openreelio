@@ -470,10 +470,11 @@ pub async fn transcribe_asset(
             .get(&asset_id)
             .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
 
-        // Security: the asset URI can be set via UpdateAsset without validation, and
-        // this synchronous path feeds it straight to ffmpeg. Re-validate to reject
-        // `..`/URL/protocol strings and non-existent files, preventing path traversal
-        // and ffmpeg-protocol handling of a caller-controlled input.
+        // Security: asset URIs from a loaded project file have not passed the
+        // command-layer validation, and this synchronous path feeds them straight to
+        // ffmpeg. Re-validate to reject `..`/URL/protocol strings and non-existent
+        // files, preventing path traversal and ffmpeg-protocol handling of a
+        // caller-controlled input.
         let validated =
             crate::core::fs::validate_local_input_path(&asset.uri, "transcription source")
                 .map_err(|e| format!("Invalid source media path: {}", e))?;

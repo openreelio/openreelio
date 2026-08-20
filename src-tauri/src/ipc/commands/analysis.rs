@@ -57,6 +57,7 @@ use crate::core::commands::AddEffectCommand;
 use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::effects::{curve_points_to_json, CurvePoint, EffectType, ParamValue};
 use crate::core::ffmpeg::{FFmpegRunner, MediaInfo, SharedFFmpegState};
+use crate::core::fs::export_allowed_roots;
 use crate::core::jobs::{Job, JobStatus, JobType, Priority};
 use crate::core::project::ProjectState;
 #[cfg(feature = "ai-providers")]
@@ -903,12 +904,19 @@ pub async fn import_diarization_json(
 
     // Security: `input_path` is caller-supplied and reaches the filesystem directly.
     // Validate it (rejects `..` traversal, URL/protocol strings, and non-regular
-    // files) so a compromised renderer cannot coerce reads of arbitrary locations,
-    // and map IO/parse failures to generic messages so the target file's contents
+    // files) *and* confine it to the project directory plus the session-approved
+    // export directories, so a compromised renderer cannot point the import at an
+    // arbitrary file and read back its speaker/segment counts as an oracle. IO and
+    // parse failures are mapped to generic messages so the target file's contents
     // are never reflected back to the caller via error strings.
-    let validated_input_path = crate::core::fs::validate_local_input_path(
+    let approved_dirs = state.approved_export_dirs_snapshot().await;
+    let allowed_roots = export_allowed_roots(&project_path, &approved_dirs);
+    let allowed_root_refs: Vec<&std::path::Path> =
+        allowed_roots.iter().map(|p| p.as_path()).collect();
+    let validated_input_path = crate::core::fs::validate_scoped_input_path(
         &resolved_input_path.to_string_lossy(),
         "diarization inputPath",
+        &allowed_root_refs,
     )
     .map_err(|_| "Invalid diarization input path".to_string())?;
 
