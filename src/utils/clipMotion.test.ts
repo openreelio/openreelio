@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Clip } from '@/types';
-import { getClipMotionTransformAtTime } from './clipMotion';
+import { getClipMotionTransformAtTime, hasActiveMotionKeyframes } from './clipMotion';
 
 function createClip(): Clip {
   return {
@@ -57,6 +57,34 @@ describe('clipMotion', () => {
     expect(transform.position.y).toBeCloseTo(0.5);
     expect(transform.scale.x).toBeCloseTo(1.2);
     expect(transform.scale.y).toBeCloseTo(1.2);
+  });
+
+  describe('hasActiveMotionKeyframes', () => {
+    it('should report false when the clip has no keyframes', () => {
+      expect(hasActiveMotionKeyframes(createClip())).toBe(false);
+    });
+
+    it('should report true when at least one keyframe drives the sampler', () => {
+      const clip = createClip();
+      clip.motionKeyframes = [
+        { timeOffset: 0, interpolation: 'linear', transform: clip.transform },
+      ];
+
+      expect(hasActiveMotionKeyframes(clip)).toBe(true);
+    });
+
+    it('should report false when every keyframe is discarded by the sampler', () => {
+      const clip = createClip();
+      clip.motionKeyframes = [
+        { timeOffset: Number.NaN, interpolation: 'linear', transform: clip.transform },
+        { timeOffset: -1, interpolation: 'linear', transform: clip.transform },
+      ];
+
+      // The sampler falls back to the static transform for these, so nothing is
+      // actually keyframed and the transform stays directly editable.
+      expect(hasActiveMotionKeyframes(clip)).toBe(false);
+      expect(getClipMotionTransformAtTime(clip, 7)).toEqual(clip.transform);
+    });
   });
 });
 

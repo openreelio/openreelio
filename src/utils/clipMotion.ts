@@ -67,6 +67,20 @@ function sortedValidKeyframes(keyframes: TransformKeyframe[] | undefined): Trans
     .sort((a, b) => a.timeOffset - b.timeOffset);
 }
 
+/**
+ * Whether a clip's transform is actually driven by motion keyframes.
+ *
+ * Uses the same validity filter as {@link getClipMotionTransformAtTime}, so a
+ * clip whose keyframes are all invalid (non-finite or negative `timeOffset`)
+ * correctly reports `false` — its transform still comes from `clip.transform`
+ * and stays directly editable.
+ *
+ * @param clip - The clip to inspect.
+ */
+export function hasActiveMotionKeyframes(clip: Clip): boolean {
+  return sortedValidKeyframes(clip.motionKeyframes).length > 0;
+}
+
 export function getClipMotionTransformAtTime(clip: Clip, timelineTimeSec: number): Transform {
   const keyframes = sortedValidKeyframes(clip.motionKeyframes);
   if (keyframes.length === 0) {
