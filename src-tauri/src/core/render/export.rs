@@ -12853,6 +12853,71 @@ mod tests {
     }
 
     #[test]
+    fn an_auto_reframe_track_follows_the_clip_rather_than_the_branch() {
+        use crate::core::effects::{EffectType, ParamValue};
+
+        // Auto-reframe builds a piecewise-linear crop expression in `t` out of
+        // the keyframe times stored in its analysis payload, so it drifts by
+        // exactly the head handle for the same reason a fade does — the shot
+        // stays framed for where the subject was half a blend earlier.
+        let mut effect = Effect::new(EffectType::AutoReframe);
+        effect.id = "reframe".to_string();
+        effect.enabled = true;
+        effect.set_param(
+            "analysis_data",
+            ParamValue::String(
+                serde_json::json!({
+                    "crop_w": 608,
+                    "crop_h": 1080,
+                    "keyframes": [
+                        { "t": 0.0, "x": 100, "y": 0 },
+                        { "t": 2.0, "x": 300, "y": 0 },
+                    ],
+                })
+                .to_string(),
+            ),
+        );
+
+        let anchored = anchor_effect_to_branch(effect.clone(), 0.5);
+        let payload: serde_json::Value = serde_json::from_str(
+            anchored
+                .get_param("analysis_data")
+                .and_then(ParamValue::as_str)
+                .expect("the payload survives anchoring"),
+        )
+        .expect("the payload is still valid JSON");
+
+        let times: Vec<f64> = payload["keyframes"]
+            .as_array()
+            .expect("keyframes")
+            .iter()
+            .map(|keyframe| keyframe["t"].as_f64().expect("a time"))
+            .collect();
+        assert_eq!(
+            times,
+            vec![0.5, 2.5],
+            "every keyframe must move later by the head handle"
+        );
+        assert_eq!(
+            payload["crop_w"], 608,
+            "nothing but the times may be touched"
+        );
+
+        let untouched = anchor_effect_to_branch(effect, 0.0);
+        let untouched_payload: serde_json::Value = serde_json::from_str(
+            untouched
+                .get_param("analysis_data")
+                .and_then(ParamValue::as_str)
+                .expect("payload"),
+        )
+        .expect("valid JSON");
+        assert_eq!(
+            untouched_payload["keyframes"][0]["t"], 0.0,
+            "a clip with no handle keeps the track it was given"
+        );
+    }
+
+    #[test]
     fn a_video_fade_on_a_clip_without_handles_is_emitted_exactly_as_before() {
         use crate::core::effects::{EffectType, ParamValue};
 
