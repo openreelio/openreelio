@@ -107,30 +107,29 @@ These packages are compiled into the OpenReelio application bundle.
 Used for the preview transform overlay (drag / resize / rotate of the
 selected clip).
 
-react-moveable pulls in the following transitive dependencies, all MIT
-licensed and all copyright (c) Daybrush / NAVER Corp.:
+react-moveable pulls the following transitive dependencies into the bundle. All
+are MIT licensed:
 
-| Package | Version |
-|---------|---------|
-| @cfcs/core | 0.0.6 |
-| @daybrush/utils | 1.13.0 |
-| @egjs/agent | 2.4.4 |
-| @egjs/children-differ | 1.0.1 |
-| @egjs/component | 3.0.5 |
-| @egjs/list-differ | 1.0.1 |
-| @scena/dragscroll | 1.4.0 |
-| @scena/event-emitter | 1.0.5 |
-| @scena/matrix | 1.1.1 |
-| css-styled | 1.0.8 |
-| css-to-mat | 1.1.1 |
-| framework-utils | 1.1.0 |
-| gesto | 1.19.4 |
-| keycode | 2.2.1 |
-| keycon | 1.4.0 |
-| overlap-area | 1.1.0 |
-| react-css-styled | 1.1.9 |
-| react-selecto | 1.26.3 |
-| selecto | 1.26.3 |
+| Package | Version | Copyright |
+|---------|---------|-----------|
+| @daybrush/utils | 1.13.0 | (c) Daybrush |
+| @egjs/agent | 2.4.4 | (c) NAVER Corp. |
+| @egjs/children-differ | 1.0.1 | (c) NAVER Corp. |
+| @egjs/list-differ | 1.0.1 | (c) NAVER Corp. |
+| @scena/dragscroll | 1.4.0 | (c) Daybrush |
+| @scena/event-emitter | 1.0.5 | (c) Daybrush |
+| @scena/matrix | 1.1.1 | (c) Daybrush |
+| css-styled | 1.0.8 | (c) Daybrush |
+| css-to-mat | 1.1.1 | (c) Daybrush |
+| framework-utils | 1.1.0 | (c) Daybrush |
+| gesto | 1.19.4 | (c) Daybrush |
+| overlap-area | 1.1.0 | (c) Daybrush |
+| react-css-styled | 1.1.9 | (c) Daybrush |
+
+`react-selecto`, `selecto`, `keycon`, `keycode`, `@cfcs/core` and
+`@egjs/component` are installed as transitive dependencies of react-moveable but
+no module OpenReelio imports ever reaches them, so they are absent from the
+shipped bundle and are deliberately not listed above.
 
 ## SIL Open Font License 1.1
 
@@ -441,7 +440,10 @@ Apache License
 
 ## MIT License
 
-Applies to react-moveable and its transitive dependencies listed above.
+Applies to react-moveable and its transitive dependencies listed above. The
+copyright line below is react-moveable's own; each transitive dependency keeps
+the copyright holder named in the table above, reproduced here as required by
+the MIT terms.
 
 ```
 MIT License
