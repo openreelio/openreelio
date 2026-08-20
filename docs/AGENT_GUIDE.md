@@ -814,10 +814,66 @@ caption track.
 
 ```bash
 openreelio-cli transcription status
-openreelio-cli transcription install --model large-v3-turbo
+openreelio-cli transcription install --model large-v3-turbo-q5_0
 openreelio-cli transcription generate --path ./demo --asset <ASSET_ID> --import
 openreelio-cli transcription generate-sequence --path ./demo --import
 ```
+
+**Caption cue boundaries come from DTW-aligned word timings.** Instead of
+Whisper's cheap heuristic token timestamps, whisper.cpp aligns tokens by dynamic
+time warping over the decoder's cross-attention. Those word timings decide where
+each caption cue starts and ends, including the leading and trailing edge of a
+cue that needed no splitting.
+
+The scope is exactly that — caption cues. The transcript editor and the
+analysis/annotation word surfaces (`analysis run`, transcript word lists) still
+derive word times by dividing a segment's duration equally among its words. Do
+not read a word offset from those surfaces and expect DTW accuracy.
+
+Which models get it:
+
+- `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` and their
+  quantized variants (`-q5_0`, `-q8_0`) map to an alignment-head preset.
+- Any file OpenReelio does not recognize by name — a third-party or hand-renamed
+  `.bin` — is run without DTW. This is the common skip, not `large`.
+- `large` (`ggml-large.bin`) is deliberately excluded: the plain filename has
+  pointed at v1 and v2 upstream, so the version cannot be inferred and a wrong
+  alignment-head preset would misalign silently.
+- The filename is an identity claim, not a checksum. `large-v2` weights renamed
+  to `ggml-large-v3.bin` have the same head counts, pass the bounds check, and
+  align against the wrong heads without any error.
+- Note that "best installed model" ranks `large` above `medium` on transcription
+  accuracy, even though `medium` gets DTW timings and `large` does not.
+
+Failure is never fatal. The alignment heads are validated when whisper.cpp
+creates its first state, not when the weights load, so the engine probes for that
+at startup and rebuilds the context without DTW if the probe fails — you get a
+warning in the log and heuristic timings, never a failed transcription. Flash
+attention stays off globally because enabling it disables DTW in whisper.cpp.
+
+A deterministic repair pass then runs — **on every transcription, DTW or not.**
+DTW improves the input it repairs; it does not replace it. The pass:
+
+- recovers the first word's start from the audio. DTW stamps a token where the
+  alignment path *leaves* it, so a token's start is the previous token's stamp
+  and the first token has none; Whisper's fallback estimate for it is just the
+  segment start, which is silence whenever the segment opens before anyone
+  speaks. That start is taken from the first short-time-energy onset instead;
+- keeps word starts ordered, non-overlapping and inside their segment;
+- grows collapsed words back toward at least 40 ms where the surrounding audio
+  allows — a dense run with no room to give is spread evenly and stays under
+  40 ms;
+- releases a word that would otherwise stretch across a pause after at most
+  350 ms per syllable-ish unit, except the segment's last word, whose end
+  anchors the tail cue;
+- snaps each start to the nearest energy onset within 80 ms when that neither
+  reorders words nor starves a neighbour.
+
+Accuracy is indicative, not contractual. On English and Korean test clips
+(`small` and `large-v3-turbo`, speech preceded by silence) the leading cue edge
+landed on the hand-measured speech onset to within the 10 ms analysis hop.
+That is clean speech with a clear attack; noisy or overlapping dialogue will do
+worse. Verify anything you are going to cut against.
 
 ## 8. MCP server
 
