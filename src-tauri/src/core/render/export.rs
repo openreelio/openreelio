@@ -14,7 +14,10 @@ use tokio::sync::mpsc::Sender;
 
 use crate::core::{
     assets::{Asset, AssetKind},
-    captions::CAPTION_SIDE_MARGIN_PERCENT,
+    captions::{
+        CAPTION_CUSTOM_DEFAULT_Y_PERCENT, CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
+        CAPTION_SIDE_MARGIN_PERCENT,
+    },
     commands::TEXT_ASSET_PREFIX,
     effects::{
         effect_capability, effect_type_label, Effect, EffectType, FilterGraph, IntoFFmpegFilter,
@@ -3778,12 +3781,23 @@ fn get_json_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&
     keys.iter().find_map(|key| object.get(*key))
 }
 
+/// Reads a caption's numeric field, refusing anything that is not a real number.
+///
+/// `f64::from_str` accepts `"NaN"`, `"inf"` and `"-Infinity"`, and every consumer
+/// of this value goes on to `clamp` it — which returns NaN unchanged rather than
+/// pulling it into range. A style blob carrying `{"fontSize": "NaN"}` therefore
+/// used to reach `format!("{:.2}")` and put the literal text `NaN` in an ASS
+/// style column, which libass reads as a parse failure for the whole line. A
+/// non-finite field is treated as absent, so the caller's `unwrap_or` default
+/// applies exactly as it would for a missing key.
 fn parse_json_number(value: &Value) -> Option<f64> {
-    match value {
+    let parsed = match value {
         Value::Number(number) => number.as_f64(),
         Value::String(raw) => raw.trim().parse::<f64>().ok(),
         _ => None,
-    }
+    };
+
+    parsed.filter(|number| number.is_finite())
 }
 
 fn parse_json_bool(value: &Value) -> Option<bool> {
@@ -3888,7 +3902,7 @@ fn normalized_caption_margin_percent(margin_percent: f64) -> f64 {
     (if margin_percent.is_finite() {
         margin_percent
     } else {
-        5.0
+        CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT
     })
     .clamp(0.0, 50.0)
 }
@@ -3919,12 +3933,6 @@ enum CaptionAnchor {
     Custom { x: f64, y: f64 },
 }
 
-/// Vertical margin a caption with no stored position is held off the bottom by.
-///
-/// Numerically the same as the side margin today, but the two answer different
-/// questions and are free to diverge.
-const CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT: f64 = 10.0;
-
 /// Horizontal anchor a preset caption uses for the given alignment.
 ///
 /// Left-aligned text grows right from the left margin, right-aligned text grows
@@ -3942,7 +3950,10 @@ pub(crate) fn caption_preset_anchor_x(alignment: &str) -> f64 {
 
 fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> CaptionAnchor {
     // No stored position renders where a caption always has: along the bottom,
-    // a tenth of the canvas clear of the edge.
+    // `CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT` of the canvas clear of the edge.
+    // The preview draws a positionless caption from the same number, so the two
+    // have to read it from one definition or a caption created without a
+    // position sits at one height on screen and another in the file.
     let mut anchor = CaptionAnchor::Preset {
         vertical: CaptionVertical::Bottom,
         margin_percent: CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
@@ -3952,7 +3963,7 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
         if let Some(preset) = position_value.as_str() {
             return CaptionAnchor::Preset {
                 vertical: CaptionVertical::parse(preset),
-                margin_percent: 5.0,
+                margin_percent: CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
             };
         }
 
@@ -3968,7 +3979,7 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
                 let margin_percent =
                     get_json_field(position_object, &["marginPercent", "margin_percent"])
                         .and_then(parse_json_number)
-                        .unwrap_or(5.0);
+                        .unwrap_or(CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT);
                 return CaptionAnchor::Preset {
                     vertical: CaptionVertical::parse(vertical),
                     margin_percent,
@@ -3990,7 +4001,9 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
             if custom_x.is_some() || custom_y.is_some() {
                 anchor = CaptionAnchor::Custom {
                     x: custom_x.map(normalize_caption_axis).unwrap_or(0.5),
-                    y: custom_y.map(normalize_caption_axis).unwrap_or(0.9),
+                    y: custom_y
+                        .map(normalize_caption_axis)
+                        .unwrap_or(CAPTION_CUSTOM_DEFAULT_Y_PERCENT / 100.0),
                 };
             }
         }
@@ -4780,8 +4793,24 @@ fn effect_int_param(effect: &Effect, name: &str, fallback: i64) -> i64 {
         .unwrap_or(fallback)
 }
 
+/// Reads a float parameter, treating a non-finite one as unset.
+///
+/// The last line of defence for the numeric columns of an ASS script. Every
+/// caller clamps what it gets here, and `f64::clamp` returns NaN unchanged, so
+/// without this a NaN or infinity that reached an effect param from *any*
+/// source - a hand-written plan, a plugin, a future parser - would be formatted
+/// straight into a style or an override tag as `NaN` or `inf` and cost libass
+/// the whole line. `parse_json_number` already rejects them at the caption
+/// parser; this makes the property hold no matter which path set the param.
 fn effect_float_param(effect: &Effect, name: &str, fallback: f64) -> f64 {
-    effect.get_float(name).unwrap_or(fallback)
+    debug_assert!(
+        fallback.is_finite(),
+        "the fallback for '{name}' must itself be a real number"
+    );
+    effect
+        .get_float(name)
+        .filter(|value| value.is_finite())
+        .unwrap_or(fallback)
 }
 
 fn effect_bool_param(effect: &Effect, name: &str, fallback: bool) -> bool {
@@ -7539,10 +7568,206 @@ mod tests {
                 "{position} must not pin the caption. Got: {script}"
             );
             assert!(
-                script.contains(",2,192,192,108,"),
+                script.contains(",2,192,192,54,"),
                 "{position} must keep the default bottom margins. Got: {script}"
             );
         }
+    }
+
+    #[test]
+    fn test_a_non_finite_caption_number_never_reaches_the_ass_script() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // `"NaN"`, `"inf"` and friends parse as perfectly good `f64`s, and every
+        // consumer of a caption number goes on to `clamp` it - which returns NaN
+        // unchanged rather than pulling it into range. A style blob carrying one
+        // used to be formatted straight into an ASS style column as the literal
+        // text `NaN`, and libass drops a line it cannot parse, so the caption
+        // silently vanished from the render.
+        for hostile in [
+            "NaN",
+            "nan",
+            "inf",
+            "-inf",
+            "Infinity",
+            "-Infinity",
+            "infinity",
+        ] {
+            let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+            let mut track = Track::new_caption("Captions");
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(0.0);
+            clip.label = Some("Hostile numbers".to_string());
+            clip.caption_style = Some(serde_json::json!({
+                "fontSize": hostile,
+                "lineHeight": hostile,
+                "letterSpacing": hostile,
+                "opacity": hostile,
+                "outlineWidth": hostile,
+                "backgroundPadding": hostile,
+            }));
+            clip.caption_position = Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": hostile,
+            }));
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+                .expect("script result")
+                .expect("script exists");
+
+            // Rust formats the two as `NaN` and `inf`/`-inf`. `Inf` with a
+            // capital I is not checked because the script's own
+            // `[Script Info]` header contains it.
+            for poison in ["NaN", "nan", "inf"] {
+                assert!(
+                    !script.contains(poison),
+                    "'{hostile}' must not survive into the script as '{poison}'. Got: {script}"
+                );
+            }
+            // And the field falls back to the default rather than to something
+            // arbitrary: 48pt type, held off the bottom by the shared margin.
+            assert!(
+                script.contains(",48.00,"),
+                "a refused font size must fall back to the default. Got: {script}"
+            );
+            assert!(
+                script.contains(",2,192,192,54,1\n"),
+                "a refused margin must fall back to the shared default. Got: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_non_finite_effect_param_cannot_be_formatted_into_an_ass_field() {
+        use crate::core::effects::ParamValue;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Defence in depth for the formatters themselves: whatever put a
+        // non-finite number on an effect param - a hand-written plan, a plugin,
+        // a parser that has not been written yet - the ASS emitter must still
+        // produce a script libass can read. `rotation` is the sharp case,
+        // because it is the one float the emitter never clamped at all.
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some("Poisoned params".to_string());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let mut effect = build_caption_text_effect(&sequence.tracks[0].clips[0])
+            .expect("a caption clip builds a text effect");
+        for param in ["font_size", "rotation", "opacity", "x", "y"] {
+            effect.set_param(param, ParamValue::Float(f64::NAN));
+        }
+        effect.set_param("scale_x_percent", ParamValue::Float(f64::INFINITY));
+        effect.set_param("scale_y_percent", ParamValue::Float(f64::NEG_INFINITY));
+
+        let mut styles = String::new();
+        let mut events = String::new();
+        append_ass_text_style_and_event(
+            &mut styles,
+            &mut events,
+            &AssEventContext {
+                style_name: "OpenReelioText0",
+                layer: 0,
+                font_family: "Arial",
+                anchor: ass_text_anchor(
+                    &sequence.tracks[0].clips[0],
+                    &TrackKind::Caption,
+                    &effect,
+                    1920,
+                    1080,
+                ),
+            },
+            &sequence.tracks[0].clips[0],
+            &effect,
+        );
+
+        let emitted = format!("{styles}{events}");
+        for poison in ["NaN", "nan", "inf"] {
+            assert!(
+                !emitted.contains(poison),
+                "a non-finite param must not be formatted as '{poison}'. Got: {emitted}"
+            );
+        }
+        assert!(
+            emitted.contains("\\frz0.00"),
+            "an unusable rotation falls back to no rotation. Got: {emitted}"
+        );
+        assert!(
+            emitted.contains(",100.00,100.00,"),
+            "unusable scales fall back to unscaled type. Got: {emitted}"
+        );
+    }
+
+    #[test]
+    fn test_a_positionless_caption_burns_in_at_the_preview_default_margin() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // A caption can be created with no stored position at all, and the
+        // preview draws that caption `DEFAULT_CAPTION_POSITION.marginPercent`
+        // (`src/types/index.ts`) of the canvas off the bottom. The burn-in used
+        // to carry its own default of twice that, so the very same caption sat
+        // at one height on screen and another in the exported file.
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut caption_track = Track::new_caption("Captions");
+        let mut caption_clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        caption_clip.label = Some("Positionless".to_string());
+        assert!(
+            caption_clip.caption_position.is_none(),
+            "the fixture has to exercise the no-stored-position path"
+        );
+        caption_track.add_clip(caption_clip);
+        sequence.add_track(caption_track);
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists");
+
+        let expected_margin_v =
+            (CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT / 100.0 * 1080.0).round() as i32;
+        assert_eq!(
+            expected_margin_v, 54,
+            "the shared default is 5% of a 1080-line canvas"
+        );
+        assert!(
+            !script.contains("\\pos("),
+            "a positionless caption keeps its margins rather than being pinned. Got: {script}"
+        );
+        assert!(
+            script.contains(&format!(",,192,192,{expected_margin_v},,")),
+            "the event's MarginV must be the preview's default, not the burn-in's own. \
+             Got: {script}"
+        );
+        assert!(
+            script.contains(&format!(",2,192,192,{expected_margin_v},1\n")),
+            "the style must carry the same MarginV as the event. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn test_the_burn_in_and_the_render_graph_agree_on_the_default_caption_height() {
+        // The ASS path expresses the default as a margin off the bottom edge
+        // and the render graph as a distance down from the top, so the one
+        // number they share only stays shared if both are read from the same
+        // constant. `resolve_caption_position_percent` in `graph.rs` is the
+        // other half of this pairing.
+        let anchor = resolve_caption_anchor(None, None);
+        let (_, y) = caption_anchor_position(anchor, "center");
+
+        assert_eq!(
+            y * 100.0,
+            100.0 - CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
+            "a positionless caption sits one default margin above the bottom edge"
+        );
     }
 
     #[test]
@@ -12615,6 +12840,49 @@ mod tests {
         assert!(
             joined.contains("trim=end_frame=165"),
             "a segment feeding an xfade must be exactly as long as planned: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_transition_on_a_muted_video_track_is_left_out_instead_of_failing_the_export() {
+        use crate::core::timeline::{Clip, Track};
+
+        // Muting a video track drops it from the render, so its clips never
+        // become segments. The planner used to plan the transition anyway, and
+        // the stitch then found a plan entry it could not fold and refused the
+        // entire export - a muted track took the whole file down with it.
+        let (mut sequence, assets, effects, audio_info) = build_transition_fixture(
+            &[
+                TransitionClipSpec::new(5.0, Some(one_second_dissolve("muted-dissolve"))),
+                TransitionClipSpec::new(5.0, None),
+            ],
+            false,
+        );
+        sequence.tracks[0].muted = true;
+
+        // Something has to survive the mute, or the export would have nothing
+        // to render for reasons that have nothing to do with the transition.
+        let mut audible = Track::new_video("Video 2");
+        let mut clip = Clip::new("asset0")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        clip.id = "kept-clip".to_string();
+        audible.add_clip(clip);
+        sequence.add_track(audible);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info,
+            &ExportSettings::default(),
+        )
+        .expect("a transition on a muted track must not fail the export");
+        let joined = args.join(" ");
+
+        assert!(
+            !joined.contains("xfade"),
+            "a muted track's transition must be absent from the graph: {joined}"
         );
     }
 

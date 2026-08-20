@@ -871,6 +871,16 @@ fn build_source_analysis_report(
     project_dir: &Path,
     asset_id: &str,
 ) -> anyhow::Result<Value> {
+    // The report reads two files named after this id, so the id decides which
+    // file the process opens. The caller supplies it directly on the command
+    // line, and a project snapshot is restored without validating the ids inside
+    // it, so neither the argument nor the state lookup can be relied on to have
+    // rejected `..\..\somewhere-else` already. Gate it before the lookup, ahead
+    // of any filesystem access - the MCP sibling confines the same path for the
+    // same reason. `search-library` records a rejected asset as skipped rather
+    // than failing the whole search.
+    crate::validate::path_safe_id(asset_id, "assetId")?;
+
     let asset = project
         .state
         .assets
@@ -1421,6 +1431,10 @@ fn load_cached_bundle(
     project_dir: &Path,
     asset_id: &str,
 ) -> anyhow::Result<Option<CachedAnalysisBundle>> {
+    // Defence in depth: the caller has already gated the id, but this is the
+    // line that turns it into a path, so it carries its own guard.
+    crate::validate::path_safe_id(asset_id, "assetId")?;
+
     let path = project_dir
         .join(".openreelio")
         .join("analysis")
@@ -1446,6 +1460,10 @@ fn load_cached_bundle(
 }
 
 fn load_annotation(project_dir: &Path, asset_id: &str) -> anyhow::Result<Option<Value>> {
+    // Defence in depth: the caller has already gated the id, but this is the
+    // line that turns it into a path, so it carries its own guard.
+    crate::validate::path_safe_id(asset_id, "assetId")?;
+
     let path = project_dir
         .join(".openreelio")
         .join("annotations")

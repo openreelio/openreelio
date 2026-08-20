@@ -48,6 +48,22 @@ pub fn non_empty(value: &str, param_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validates that an identifier is safe to use as a single path component.
+///
+/// An id that reaches a `Path::join` decides which file the process opens, and
+/// nothing upstream guarantees the id is well formed: a project snapshot is
+/// restored without validating the ids inside it, so a project file can carry an
+/// asset whose id is `..\..\somewhere-else`. Any CLI path built from an id must
+/// therefore be gated here first.
+///
+/// Delegates to the core's single definition rather than re-deriving the rule,
+/// so the CLI cannot drift from what the rest of the engine enforces.
+pub fn path_safe_id(id: &str, label: &str) -> anyhow::Result<()> {
+    openreelio_core::fs::validate_path_id_component(id, label).map_err(|error| {
+        anyhow::anyhow!("{error}. Identifiers are used as file names and cannot name a path.")
+    })
+}
+
 /// Validates that start < end for a time range.
 pub fn time_range_ordered(
     start: f64,
@@ -174,5 +190,36 @@ mod tests {
     #[test]
     fn test_trim_points_ordered_rejects_inverted() {
         assert!(trim_points_ordered(Some(8.0), Some(5.0)).is_err());
+    }
+
+    #[test]
+    fn test_path_safe_id_rejects_anything_that_names_a_path() {
+        for hostile in [
+            "..",
+            "../secret",
+            r"..\secret",
+            "nested/secret",
+            r"nested\secret",
+            "C:",
+            "trailing..",
+            "",
+            "   ",
+            " padded ",
+            "with\0null",
+            "with\nnewline",
+        ] {
+            assert!(
+                path_safe_id(hostile, "assetId").is_err(),
+                "'{}' must never be used as a file name",
+                hostile.escape_debug()
+            );
+        }
+    }
+
+    #[test]
+    fn test_path_safe_id_accepts_the_ids_the_engine_really_mints() {
+        for id in ["01HXYZ123ABC", "asset_001", "my-asset-name", "자산_001"] {
+            assert!(path_safe_id(id, "assetId").is_ok(), "'{id}' is well formed");
+        }
     }
 }
