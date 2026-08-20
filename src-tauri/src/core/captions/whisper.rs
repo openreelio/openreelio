@@ -234,6 +234,13 @@ impl WhisperModel {
     }
 
     /// Returns a quality-first rank used when choosing among already installed models.
+    ///
+    /// The rank is about transcription accuracy only. [`WhisperModel::Large`]
+    /// therefore outranks [`WhisperModel::Medium`] even though `medium` gets
+    /// DTW-aligned word timings and `large` does not (see
+    /// [`WhisperModel::dtw_preset`]): a user with both installed gets the better
+    /// transcript and the cheaper timings. Left as is deliberately — changing
+    /// the ordering is a product decision, not a timing fix.
     pub fn quality_rank(&self) -> u8 {
         // Ranks encode accuracy priority for "best installed" selection:
         // LargeV3 > LargeV3Q5 > LargeV3Turbo > LargeV3TurboQ8 > LargeV3TurboQ5
@@ -302,15 +309,23 @@ impl WhisperModel {
     /// preset can be selected safely.
     ///
     /// whisper.cpp's DTW token timestamps need the alignment heads of the exact
-    /// architecture the weights were trained with; a mismatched preset makes
-    /// context initialization fail outright. Quantized variants share the
-    /// architecture of the model they were quantized from, so they map to the
-    /// same preset.
+    /// architecture the weights were trained with. A preset whose head indices
+    /// fall outside the loaded architecture is rejected — but only when the
+    /// *state* is created (`whisper_init_state` → `aheads_masks_init`), not when
+    /// the model is loaded, so the engine probes for it explicitly and degrades.
+    /// Quantized variants share the architecture of the model they were
+    /// quantized from, so they map to the same preset.
     ///
     /// [`WhisperModel::Large`] (`ggml-large.bin`) deliberately returns `None`:
     /// the plain `large` filename is version-ambiguous upstream (it has pointed
-    /// at v1 and v2 over time) and guessing wrong would break the context. Those
-    /// users keep the heuristic token timestamps.
+    /// at v1 and v2 over time) and guessing wrong would break the alignment.
+    /// Those users keep the heuristic token timestamps as the *input* to the
+    /// repair pass, which runs on every path regardless of DTW.
+    ///
+    /// The bounds check only catches an architecture mismatch. Weights renamed
+    /// to another file of the *same* shape — `large-v2` saved as
+    /// `ggml-large-v3.bin`, say — pass it and align silently against the wrong
+    /// heads, so the filename is trusted as an identity claim, not verified.
     pub fn dtw_preset(&self) -> Option<DtwPreset> {
         match self {
             WhisperModel::Tiny => Some(DtwPreset::Tiny),
@@ -327,19 +342,27 @@ impl WhisperModel {
     }
 }
 
+/// Filename prefix every converted whisper.cpp ggml model carries.
+const MODEL_FILE_PREFIX: &str = "ggml-";
+
 /// Infers the [`WhisperModel`] from a ggml model file path.
 ///
 /// Model files are named `ggml-<name>.bin`, and `<name>` is exactly the string
 /// [`WhisperModel`]'s `FromStr` accepts, so the file stem round-trips back to
-/// the enum. Returns `None` for any path that is not a recognized OpenReelio
-/// model file (a user-supplied or third-party model), in which case callers must
-/// degrade gracefully rather than fail.
+/// the enum. The prefix is matched case-insensitively — Windows and macOS
+/// filesystems preserve case but compare without it, so a `GGML-small.bin`
+/// copied in by hand still resolves — and `FromStr` already lowercases the rest.
+///
+/// Returns `None` for any path that is not a recognized OpenReelio model file (a
+/// user-supplied or third-party model), in which case callers must degrade
+/// gracefully rather than fail.
 pub fn model_from_path(model_path: &Path) -> Option<WhisperModel> {
-    model_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .and_then(|stem| stem.strip_prefix("ggml-"))
-        .and_then(|name| name.parse::<WhisperModel>().ok())
+    let stem = model_path.file_stem().and_then(|stem| stem.to_str())?;
+    let prefix = stem.get(..MODEL_FILE_PREFIX.len())?;
+    if !prefix.eq_ignore_ascii_case(MODEL_FILE_PREFIX) {
+        return None;
+    }
+    stem[MODEL_FILE_PREFIX.len()..].parse::<WhisperModel>().ok()
 }
 
 impl std::str::FromStr for WhisperModel {
@@ -536,28 +559,6 @@ const DROP_NON_SPEECH_CUES: bool = true;
 /// non-speech guard, which makes decoder-level suppression redundant and
 /// harmful. Kept as a tunable const so SDH-style pipelines can re-enable it.
 const SUPPRESS_NON_SPEECH_TOKENS: bool = false;
-
-/// When true, whisper.cpp computes token timestamps by dynamic time warping
-/// (DTW) of the decoder's cross-attention weights against the encoder frames,
-/// in addition to the cheap heuristic `t0`/`t1` estimates.
-///
-/// DTW timestamps are markedly more accurate than the heuristic ones (which are
-/// derived from segment-level interpolation), at the cost of a modest amount of
-/// scratch memory and compute. They require a model-specific alignment-head
-/// preset ([`WhisperModel::dtw_preset`]); models without a known preset keep the
-/// heuristic timings. Kept as a tunable const so the DTW path can be disabled
-/// wholesale if a future whisper.cpp regression makes it unreliable.
-const DTW_TOKEN_TIMESTAMPS: bool = true;
-
-/// Scratch memory (bytes) whisper.cpp reserves for the DTW alignment pass.
-///
-/// This mirrors whisper-rs's own default (128 MiB). It is spelled out here so
-/// the allocation is explicit and reviewable rather than an invisible upstream
-/// default.
-///
-/// TODO: remove this const and rely on `DtwParameters::default()` once
-/// whisper-rs exposes a way to override only the DTW mode.
-const DTW_MEM_SIZE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Returns a short Korean seed prompt used to bias the decoder toward Hangul
 /// orthography when transcribing Korean audio, or `None` for any other language.
@@ -1781,6 +1782,38 @@ mod engine_impl {
     /// probes when the caller did not request a specific thread count.
     const DETECTION_DEFAULT_THREADS: usize = 1;
 
+    /// When true, whisper.cpp computes token timestamps by dynamic time warping
+    /// (DTW) of the decoder's cross-attention weights against the encoder
+    /// frames, in addition to the cheap heuristic `t0`/`t1` estimates.
+    ///
+    /// DTW timestamps are markedly more accurate than the heuristic ones (which
+    /// are derived from segment-level interpolation), at the cost of a modest
+    /// amount of scratch memory and compute. They require a model-specific
+    /// alignment-head preset ([`WhisperModel::dtw_preset`]); models without a
+    /// known preset keep the heuristic timings. Kept as a tunable const so the
+    /// DTW path can be disabled wholesale if a future whisper.cpp regression
+    /// makes it unreliable.
+    ///
+    /// A/B smoke methodology (how the const was exercised, for anyone repeating
+    /// it): transcribe the same clip twice with only this const flipped, keeping
+    /// the model, language and thread count fixed, then diff the emitted cue
+    /// boundaries against a hand-measured speech onset (an RMS envelope of the
+    /// same WAV is enough). Both runs must produce identical cue *text* — only
+    /// the boundaries may move — and the DTW run's leading edge must land no
+    /// further from the measured onset than the heuristic run's. The repair pass
+    /// runs in both, so a difference is attributable to the alignment alone.
+    const DTW_TOKEN_TIMESTAMPS: bool = true;
+
+    /// Scratch memory (bytes) whisper.cpp reserves for the DTW alignment pass.
+    ///
+    /// This mirrors whisper-rs's own default (128 MiB). It is spelled out here
+    /// so the allocation is explicit and reviewable rather than an invisible
+    /// upstream default.
+    ///
+    /// TODO: remove this const and rely on `DtwParameters::default()` once
+    /// whisper-rs exposes a way to override only the DTW mode.
+    const DTW_MEM_SIZE_BYTES: usize = 128 * 1024 * 1024;
+
     /// Whisper transcription engine
     pub struct WhisperEngine {
         context: WhisperContext,
@@ -1816,13 +1849,27 @@ mod engine_impl {
             // DTW alignment heads are architecture-specific, so the model is
             // identified from its filename. Unrecognized files (user-supplied or
             // third-party weights) simply run without DTW.
-            let dtw_preset = model_from_path(model_path).and_then(|model| model.dtw_preset());
-            if dtw_preset.is_none() {
-                tracing::debug!(
-                    model = %model_str,
-                    "no DTW alignment-head preset for this model; using heuristic token timestamps"
-                );
-            }
+            let dtw_preset = match model_from_path(model_path) {
+                Some(model) => {
+                    let preset = model.dtw_preset();
+                    if preset.is_none() {
+                        // Not "unrecognized": this model is known and knowingly
+                        // excluded because its filename does not pin a version.
+                        tracing::info!(
+                            model = model.name(),
+                            "model is excluded from DTW alignment (version-ambiguous filename); using heuristic token timestamps"
+                        );
+                    }
+                    preset
+                }
+                None => {
+                    tracing::info!(
+                        model = %model_str,
+                        "unrecognized whisper model file; using heuristic token timestamps without DTW"
+                    );
+                    None
+                }
+            };
             let (context, used_gpu) =
                 Self::create_context_with_fallback(model_str.as_ref(), dtw_preset)?;
 
@@ -1843,12 +1890,17 @@ mod engine_impl {
         /// axes: DTW token timestamps and GPU acceleration.
         ///
         /// DTW is requested when [`DTW_TOKEN_TIMESTAMPS`] is on and the model has
-        /// a known alignment-head preset (see [`WhisperModel::dtw_preset`]). A
-        /// preset that the loaded weights do not match makes whisper.cpp reject
-        /// the context outright, and so can an unusually tight memory budget, so
-        /// a failed DTW initialization is retried once with DTW disabled rather
-        /// than propagated: accurate timestamps are an enhancement, never a
-        /// precondition for transcribing.
+        /// a known alignment-head preset (see [`WhisperModel::dtw_preset`]).
+        ///
+        /// Loading the weights does **not** validate that preset. whisper.cpp
+        /// builds the alignment-head masks in `whisper_init_state`, so a preset
+        /// that does not match the architecture is only rejected when the first
+        /// state is created — which is inside [`Self::transcribe`], long after
+        /// there is anything left to fall back to. This function therefore
+        /// probes a state here (see [`Self::probe_dtw_state`]) and, on failure,
+        /// rebuilds the context with DTW disabled. Accurate timestamps are an
+        /// enhancement, never a precondition for transcribing: a mismatched
+        /// preset must cost timing accuracy, not the transcript.
         ///
         /// Within each attempt, `use_gpu` defaults to true only on builds that
         /// compiled a GPU backend (whisper-rs `_gpu`), so CPU-only builds start
@@ -1863,22 +1915,57 @@ mod engine_impl {
             model_str: &str,
             dtw_preset: Option<DtwPreset>,
         ) -> WhisperResult<(WhisperContext, bool)> {
-            let requested_dtw = dtw_preset.filter(|_| DTW_TOKEN_TIMESTAMPS);
-
-            match Self::try_create_context(model_str, requested_dtw) {
-                Ok(result) => Ok(result),
-                Err(dtw_error) if requested_dtw.is_some() => {
-                    tracing::warn!(
-                        error = %dtw_error,
-                        "whisper DTW context initialization failed; retrying without DTW token timestamps"
-                    );
-                    Self::try_create_context(model_str, None)
+            if let Some(preset) = dtw_preset.filter(|_| DTW_TOKEN_TIMESTAMPS) {
+                match Self::try_create_context(model_str, Some(preset)) {
+                    Ok((context, used_gpu)) => match Self::probe_dtw_state(&context) {
+                        Ok(()) => {
+                            tracing::info!(gpu = used_gpu, dtw = true, "whisper context ready");
+                            return Ok((context, used_gpu));
+                        }
+                        Err(probe_error) => tracing::warn!(
+                            error = %probe_error,
+                            "whisper rejected the DTW alignment heads for these weights; retrying without DTW token timestamps"
+                        ),
+                    },
+                    Err(load_error) => tracing::warn!(
+                        error = %load_error,
+                        "whisper model load failed with DTW requested; retrying without DTW token timestamps"
+                    ),
                 }
-                Err(error) => Err(error),
             }
+
+            let (context, used_gpu) = Self::try_create_context(model_str, None)?;
+            tracing::info!(gpu = used_gpu, dtw = false, "whisper context ready");
+            Ok((context, used_gpu))
+        }
+
+        /// Forces whisper.cpp to validate the DTW alignment heads by creating
+        /// and immediately discarding one state.
+        ///
+        /// `whisper_init_state` is where `aheads_masks_init` runs, so this is the
+        /// earliest point a mismatched preset can be detected. The state is
+        /// discarded rather than kept because [`Self::transcribe`] takes `&self`
+        /// and needs its own; the cost is one KV-cache allocation per engine,
+        /// logged below so it stays visible.
+        fn probe_dtw_state(context: &WhisperContext) -> WhisperResult<()> {
+            let started = std::time::Instant::now();
+            let state = context
+                .create_state()
+                .map_err(|error| WhisperError::ModelLoadError(error.to_string()))?;
+            drop(state);
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "whisper DTW alignment-head probe passed"
+            );
+            Ok(())
         }
 
         /// Runs the GPU-to-CPU degradation ladder for one DTW setting.
+        ///
+        /// Success here means only that the weights loaded; it says nothing
+        /// about DTW, which the caller validates separately. The rungs are
+        /// therefore logged by their own axis and the single "context ready"
+        /// line is left to the caller, so neither log claims more than it knows.
         fn try_create_context(
             model_str: &str,
             dtw_preset: Option<DtwPreset>,
@@ -1886,20 +1973,9 @@ mod engine_impl {
             let params = Self::context_params(true, dtw_preset);
             // `use_gpu` defaults to true only when a GPU backend was compiled.
             let attempted_gpu = params.use_gpu;
-            let dtw_enabled = dtw_preset.is_some();
 
             match WhisperContext::new_with_params(model_str, params) {
-                Ok(context) => {
-                    if attempted_gpu {
-                        tracing::info!(
-                            dtw = dtw_enabled,
-                            "whisper context initialized with GPU acceleration"
-                        );
-                    } else {
-                        tracing::info!(dtw = dtw_enabled, "whisper context initialized on CPU");
-                    }
-                    Ok((context, attempted_gpu))
-                }
+                Ok(context) => Ok((context, attempted_gpu)),
                 Err(gpu_error) if attempted_gpu => {
                     // GPU build but GPU init failed: retry once on CPU so a missing
                     // or unhealthy GPU degrades gracefully instead of failing.
@@ -1910,10 +1986,6 @@ mod engine_impl {
                     let cpu_params = Self::context_params(false, dtw_preset);
                     let context = WhisperContext::new_with_params(model_str, cpu_params)
                         .map_err(|cpu_error| WhisperError::ModelLoadError(cpu_error.to_string()))?;
-                    tracing::info!(
-                        dtw = dtw_enabled,
-                        "whisper context initialized on CPU after GPU fallback"
-                    );
                     Ok((context, false))
                 }
                 Err(cpu_error) => {
@@ -3662,6 +3734,21 @@ mod tests {
         assert_eq!(model_from_path(Path::new("/models/custom.bin")), None);
         assert_eq!(model_from_path(Path::new("/models/ggml-unknown.bin")), None);
         assert_eq!(model_from_path(Path::new("/models")), None);
+        assert_eq!(model_from_path(Path::new("/models/gg.bin")), None);
+    }
+
+    #[test]
+    fn model_from_path_ignores_prefix_case() {
+        // Windows and macOS preserve filename case but compare without it, so a
+        // model copied in by hand can arrive spelled any way.
+        assert_eq!(
+            model_from_path(Path::new("/models/GGML-small.bin")),
+            Some(WhisperModel::Small)
+        );
+        assert_eq!(
+            model_from_path(Path::new("/models/Ggml-Large-V3-Turbo.bin")),
+            Some(WhisperModel::LargeV3Turbo)
+        );
     }
 
     #[test]
