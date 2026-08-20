@@ -4589,13 +4589,6 @@ fn ass_escape_text(raw: &str) -> String {
     escaped
 }
 
-fn escape_filtergraph_value(raw: &str) -> String {
-    raw.replace('\\', r"\\")
-        .replace(':', r"\:")
-        .replace(',', r"\,")
-        .replace('\'', r"\'")
-}
-
 /// Reads the horizontal alignment an effect stores, normalized.
 fn caption_effect_alignment(effect: &Effect) -> String {
     effect
@@ -5134,9 +5127,16 @@ pub(super) fn append_ass_text_overlay(
     base_video_label: &str,
     ass_path: &Path,
 ) -> String {
+    use crate::core::effects::escape_ffmpeg_filter_value;
+
     let output_label = "[txtass0]";
     let path_text = ass_path.to_string_lossy();
-    let escaped_path = escape_filtergraph_value(path_text.as_ref());
+    // Both values land inside a single-quoted filter argument, so they must go
+    // through the canonical filtergraph escaper: a literal `'` has to be emitted
+    // as `'\''`, otherwise it terminates the quoted region and the rest of the
+    // value is parsed as filtergraph syntax (`;`/`[`/`]` + `movie=` would give
+    // arbitrary file read/write).
+    let escaped_path = escape_ffmpeg_filter_value(path_text.as_ref());
     // The filter takes a single directory, and libass reads it in addition to
     // the host's own font provider. Taking whichever path happened to sort
     // first meant a per-user font folder could shadow the system one; naming
@@ -5146,7 +5146,7 @@ pub(super) fn append_ass_text_overlay(
             let directory_text = directory.to_string_lossy();
             format!(
                 ":fontsdir='{}'",
-                escape_filtergraph_value(directory_text.as_ref())
+                escape_ffmpeg_filter_value(directory_text.as_ref())
             )
         })
         .unwrap_or_default();
@@ -7724,6 +7724,34 @@ mod tests {
             "got: {filter_complex}"
         );
         assert!(filter_complex.contains("subtitles=filename='/tmp/vertical.ass'"));
+    }
+
+    #[test]
+    fn test_ass_subtitles_path_single_quote_cannot_break_out_of_filter() {
+        // The ASS file lives under a project-derived directory, so a crafted
+        // project path can carry a single quote. An unescaped `'` would close the
+        // quoted filename and turn the rest of the value into filtergraph syntax
+        // (`;[in]movie=...` = arbitrary file read/write). The canonical escaper
+        // rewrites every literal quote to `'\''`, keeping the payload inside the
+        // quoted region.
+        let mut filter_complex = String::from("[0:v]null[outv]");
+        let label = append_ass_text_overlay(
+            &mut filter_complex,
+            "[outv]",
+            &PathBuf::from("/tmp/x';[in]movie=filename=/etc/passwd[out];[out].ass"),
+        );
+
+        assert_eq!(label, "[txtass0]");
+        assert!(
+            !filter_complex.contains("x';"),
+            "Single quote must not terminate the quoted region: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains(
+                "subtitles=filename='/tmp/x'\\'';[in]movie=filename=/etc/passwd[out];[out].ass'"
+            ),
+            "Expected close-escape-reopen quoting of the injected value, got: {filter_complex}"
+        );
     }
 
     // -------------------------------------------------------------------------

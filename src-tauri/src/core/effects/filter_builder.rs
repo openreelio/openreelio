@@ -128,7 +128,12 @@ fn luma_sat_factor_expr(points: &[CurvePoint], luma_expr: &str) -> String {
 // FFmpeg Utility Functions
 // =============================================================================
 
-fn escape_ffmpeg_filter_value(raw: &str) -> String {
+/// Escapes a value for embedding inside a single-quoted FFmpeg filtergraph argument.
+///
+/// This is the single canonical filtergraph quoting rule for the whole crate; any
+/// other escaping of a value that ends up inside `option='<value>'` must delegate
+/// here rather than re-deriving the rules (see the rationale in the body).
+pub(crate) fn escape_ffmpeg_filter_value(raw: &str) -> String {
     // FFmpeg filtergraphs treat `:` and `,` as separators and `\` as an escape character.
     // Windows paths also contain `\` and `:` (drive letter), so we must escape them to
     // keep filter strings replayable and safe against filtergraph injection.
