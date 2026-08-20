@@ -318,6 +318,16 @@ fn picture_refusal_reason(clip: &Clip, track: &Track) -> Option<&'static str> {
     if !matches!(track.kind, TrackKind::Video) {
         return Some("it is not on a video track, so there is no picture to blend");
     }
+    // The export collects its clips from the tracks that contribute to the
+    // output, so a muted track has no segment for the stitch to fold. Planning a
+    // transition across a boundary the stitch will never see leaves the plan
+    // entry orphaned, which the fold refuses outright - the whole render fails
+    // over a transition on a track the caller had already taken out of the file.
+    // Refuse the transition here instead, and keep this predicate the same one
+    // `collect_enabled_clips_sorted` uses so the two cannot disagree.
+    if !track.contributes_to_output() {
+        return Some("its track is muted, so the export leaves it out of the render entirely");
+    }
     if !track.visible {
         return Some("its track is hidden, so there is no picture to blend");
     }
@@ -1401,6 +1411,71 @@ mod tests {
         assert!(
             reason.contains("text clip"),
             "the refusal must name what the clip really is: {reason}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_transition_on_a_muted_video_track_rather_than_orphan_it() {
+        // The export collects its clips from the tracks that contribute to the
+        // output, and muting a video track takes it out of that list entirely.
+        // A transition planned across a boundary on such a track therefore has
+        // no segments for the stitch to fold, and the fold refuses an unfolded
+        // plan entry by failing the whole render - so muting one track used to
+        // stop the export dead rather than simply leaving that track out.
+        let (mut sequence, assets, effects, lengths) = build(vec![
+            with_handles(0.0, 5.0, Some(dissolve(1.0))),
+            with_handles(5.0, 5.0, None),
+        ]);
+        sequence.tracks[0].muted = true;
+        assert!(
+            sequence.tracks[0].visible,
+            "the track has to stay visible so the muting is what refuses it"
+        );
+        assert!(
+            !sequence.tracks[0].contributes_to_output(),
+            "the fixture must match the predicate the export collects clips with"
+        );
+
+        let plan = plan_sequence_transitions(&sequence, &assets, &effects, FPS, |asset| {
+            lengths.get(&asset.id).copied()
+        });
+
+        assert!(
+            plan.is_empty(),
+            "a muted track's transition must never reach the fold"
+        );
+        assert!(
+            !plan.touches("clip0") && !plan.touches("clip1"),
+            "neither side may be given handles the render would bake in"
+        );
+        let refusal = &plan.refusals()[0];
+        assert_eq!(refusal.clip_id, "clip0");
+        assert!(
+            refusal.reason.contains("muted"),
+            "the refusal must name muting as the cause: {}",
+            refusal.reason
+        );
+    }
+
+    #[test]
+    fn should_still_refuse_a_hidden_track_for_having_no_picture() {
+        // A hidden video track still contributes its audio, so it stays in the
+        // export's clip list and its transition is refused for the reason it
+        // always was. Only muting removes the track outright.
+        let (mut sequence, assets, effects, lengths) = build(vec![
+            with_handles(0.0, 5.0, Some(dissolve(1.0))),
+            with_handles(5.0, 5.0, None),
+        ]);
+        sequence.tracks[0].visible = false;
+
+        let plan = plan_sequence_transitions(&sequence, &assets, &effects, FPS, |asset| {
+            lengths.get(&asset.id).copied()
+        });
+
+        let reason = &plan.refusals()[0].reason;
+        assert!(
+            reason.contains("hidden"),
+            "a hidden track keeps its own reason: {reason}"
         );
     }
 

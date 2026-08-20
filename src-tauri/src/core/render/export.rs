@@ -12685,6 +12685,49 @@ mod tests {
     }
 
     #[test]
+    fn a_transition_on_a_muted_video_track_is_left_out_instead_of_failing_the_export() {
+        use crate::core::timeline::{Clip, Track};
+
+        // Muting a video track drops it from the render, so its clips never
+        // become segments. The planner used to plan the transition anyway, and
+        // the stitch then found a plan entry it could not fold and refused the
+        // entire export - a muted track took the whole file down with it.
+        let (mut sequence, assets, effects, audio_info) = build_transition_fixture(
+            &[
+                TransitionClipSpec::new(5.0, Some(one_second_dissolve("muted-dissolve"))),
+                TransitionClipSpec::new(5.0, None),
+            ],
+            false,
+        );
+        sequence.tracks[0].muted = true;
+
+        // Something has to survive the mute, or the export would have nothing
+        // to render for reasons that have nothing to do with the transition.
+        let mut audible = Track::new_video("Video 2");
+        let mut clip = Clip::new("asset0")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        clip.id = "kept-clip".to_string();
+        audible.add_clip(clip);
+        sequence.add_track(audible);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info,
+            &ExportSettings::default(),
+        )
+        .expect("a transition on a muted track must not fail the export");
+        let joined = args.join(" ");
+
+        assert!(
+            !joined.contains("xfade"),
+            "a muted track's transition must be absent from the graph: {joined}"
+        );
+    }
+
+    #[test]
     fn an_audio_only_export_hears_the_same_crossfades_the_video_export_shows() {
         use crate::core::effects::{EffectType, ParamValue};
         use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
