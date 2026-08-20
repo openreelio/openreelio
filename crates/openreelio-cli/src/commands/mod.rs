@@ -15,6 +15,7 @@ mod ffmpeg;
 mod frame;
 mod help_json;
 mod mcp;
+mod otio;
 mod packs;
 mod perception;
 mod plan;
@@ -75,6 +76,12 @@ pub enum Commands {
     Caption {
         #[command(subcommand)]
         action: caption::CaptionAction,
+    },
+
+    /// OpenTimelineIO interchange (export, import)
+    Otio {
+        #[command(subcommand)]
+        action: otio::OtioAction,
     },
 
     /// Curated caption style packs, transition recipes, and text presets
@@ -149,6 +156,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Analysis { action } => analysis::execute(action),
         Commands::Timeline { action } => timeline::execute(action),
         Commands::Caption { action } => caption::execute(action),
+        Commands::Otio { action } => otio::execute(action),
         Commands::Packs { action } => packs::execute(action),
         Commands::Transcription { action } => transcription::execute(action),
         Commands::Text { action } => text::execute(action),

@@ -353,6 +353,25 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli caption add --path ./project --text \"Hello\" --start 0.0 --end 3.0"
             },
+            "otio.export": {
+                "description": "Export a sequence to an OpenTimelineIO (.otio) file. OTIO is the Academy Software Foundation's editorial interchange format and DaVinci Resolve imports it natively on the free tier, so this is the 'assemble headless, finish in Resolve' path. It is a CUT interchange: tracks, clips, gaps, two-input transitions (cross dissolve, wipe, slide) and markers survive. Effects, transforms, captions, text clips, speed/reverse/time-remap, opacity, blend modes and clip audio settings do NOT — every one of them is named in the returned 'unsupported' array rather than dropped quietly, and structural changes (skipped tracks, missing media, trimmed overlaps) are named in 'warnings'. Gaps are synthesised because an OTIO track is a contiguous child list; no gap is written after the last clip. OpenReelio's own detail (track kind, clip ids, the real transition type behind a 'Custom') is stashed under metadata.openreelio so a re-import restores it while foreign tools see standard OTIO.",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "out": { "type": "string", "required": true, "desc": "Output .otio file path (absolute)" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" }
+                },
+                "example": "openreelio-cli otio export --path ./project --out cut.otio"
+            },
+            "otio.import": {
+                "description": "Import an OpenTimelineIO (.otio) file into a sequence. The file is turned into an edit plan and run through the same machinery as 'plan execute', so the whole import is one atomic, undoable unit that rolls back on failure; exit codes follow the same contract (0 applied and saved, 1 rejected or rolled back cleanly, 2 tool failure or incomplete rollback). Media is matched to existing assets by metadata.openreelio.assetId, then by path, then by file name; anything still unmatched is imported first and reported in 'assetImports'. Gaps advance the timeline cursor and emit no step, transitions become an AddEffect on the outgoing clip, and stack markers become sequence markers. Every RationalTime is converted through its own rate, so a file that mixes rates imports correctly. Refused outright: image-sequence references, and a file needing more than the plan step cap (chunking it would give up atomicity). Reported but not fatal: nested stacks, non-editorial track kinds, offline clips, asymmetric transitions, and transitions whose handles cannot be verified.",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "file": { "type": "string", "required": true, "desc": "OpenTimelineIO file to read" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID to import into (defaults to active)" },
+                    "dry-run": { "type": "boolean", "required": false, "desc": "Print the plan the file proposes, with its warnings and asset imports, and stop without touching the project" }
+                },
+                "example": "openreelio-cli otio import --path ./project --file cut.otio --dry-run"
+            },
             "packs.list": {
                 "description": "List curated caption style packs, transition recipes, text presets, and pacing profiles. Packs are the quality floor: name one instead of assembling typography, a transition duration, or a cutting rhythm by hand. Every listed id is accepted by caption --style-pack, by stylePack on CreateCaption/UpdateCaption/ImportGeneratedCaptions, by recipe on AddEffect, by text add --preset / preset on AddTextClip, and by plan from-profile --profile",
                 "params": {
