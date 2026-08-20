@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::fmt;
+use std::fmt::Write;
 
 use crate::core::Ratio;
 
@@ -313,6 +314,89 @@ pub fn is_drop_frame_rate(fps: &Ratio) -> bool {
     fps.den == 1001 && (fps.num == 30000 || fps.num == 60000)
 }
 
+/// Percent-encodes a path for use inside a `file://` URL.
+///
+/// Path separators and the Windows drive colon are left intact; everything
+/// outside the unreserved set is escaped.
+fn encode_file_url_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
+                encoded.push(byte as char)
+            }
+            _ => {
+                let _ = write!(encoded, "%{:02X}", byte);
+            }
+        }
+    }
+
+    encoded
+}
+
+/// Converts an asset URI into the `file://` URL every interchange format wants.
+///
+/// Shared by FCPXML's `src` attribute and OTIO's `ExternalReference.target_url`
+/// so the two formats name the same media the same way. A URI that is already a
+/// `file://` URL is passed through untouched.
+pub fn asset_src_url(uri: &str) -> String {
+    if uri.starts_with("file://") {
+        return uri.to_string();
+    }
+
+    let normalized = uri.replace('\\', "/");
+    let encoded = encode_file_url_path(&normalized);
+
+    if normalized.starts_with('/') {
+        format!("file://{}", encoded)
+    } else if normalized.as_bytes().get(1) == Some(&b':') {
+        format!("file:///{}", encoded)
+    } else {
+        format!("file://{}", encoded)
+    }
+}
+
+/// Recovers the filesystem path from a `file://` URL produced by
+/// [`asset_src_url`].
+///
+/// Import needs this to match a foreign `target_url` against the assets already
+/// in the project. Returns `None` for anything that is not a `file://` URL,
+/// including the remote URLs OTIO also permits.
+pub fn file_url_to_path(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("file://")?;
+    // `file:///C:/x` and `file:///media/x` both leave a leading slash here; a
+    // Windows drive letter follows it, a POSIX absolute path is the slash.
+    let trimmed = match rest.strip_prefix('/') {
+        Some(after) if after.as_bytes().get(1) == Some(&b':') => after,
+        _ => rest,
+    };
+
+    Some(percent_decode(trimmed))
+}
+
+/// Reverses [`encode_file_url_path`]. Invalid escapes are kept verbatim.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = &input[index + 1..index + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Truncates a string to fit within a maximum byte length,
 /// ensuring no partial UTF-8 characters.
 pub fn truncate_reel_name(name: &str, max_len: usize) -> String {
@@ -423,6 +507,48 @@ mod tests {
     fn should_return_ax_for_empty_reel_name() {
         let result = truncate_reel_name("", 8);
         assert_eq!(result, "AX");
+    }
+
+    // =========================================================================
+    // Media URL Tests
+    // =========================================================================
+
+    #[test]
+    fn should_encode_asset_paths_as_file_urls() {
+        assert_eq!(
+            asset_src_url("/media/My Clip #1.mp4"),
+            "file:///media/My%20Clip%20%231.mp4"
+        );
+        assert_eq!(
+            asset_src_url(r#"C:\Projects\My Clip.mp4"#),
+            "file:///C:/Projects/My%20Clip.mp4"
+        );
+    }
+
+    #[test]
+    fn should_pass_through_a_uri_that_is_already_a_file_url() {
+        assert_eq!(
+            asset_src_url("file:///media/clip.mp4"),
+            "file:///media/clip.mp4"
+        );
+    }
+
+    #[test]
+    fn should_recover_the_original_path_from_a_file_url() {
+        for path in [
+            "/media/My Clip #1.mp4",
+            r#"C:\Projects\My Clip.mp4"#,
+            "/media/한글.mp4",
+        ] {
+            let url = asset_src_url(path);
+            let recovered = file_url_to_path(&url).expect("a file URL should decode");
+            assert_eq!(recovered, path.replace('\\', "/"));
+        }
+    }
+
+    #[test]
+    fn should_not_decode_a_non_file_url() {
+        assert_eq!(file_url_to_path("https://example.com/clip.mp4"), None);
     }
 
     #[test]

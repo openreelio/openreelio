@@ -25,7 +25,7 @@ use crate::core::assets::Asset;
 use crate::core::timeline::{Sequence, Track, TrackKind};
 use crate::core::Ratio;
 
-use super::models::{InterchangeExportResult, InterchangeFormat};
+use super::models::{asset_src_url, InterchangeExportResult, InterchangeFormat};
 
 // =============================================================================
 // Public API
@@ -151,40 +151,6 @@ fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('\'', "&apos;")
-}
-
-fn encode_file_url_path(path: &str) -> String {
-    let mut encoded = String::with_capacity(path.len());
-
-    for byte in path.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
-                encoded.push(byte as char)
-            }
-            _ => {
-                let _ = write!(encoded, "%{:02X}", byte);
-            }
-        }
-    }
-
-    encoded
-}
-
-fn asset_src_url(uri: &str) -> String {
-    if uri.starts_with("file://") {
-        return uri.to_string();
-    }
-
-    let normalized = uri.replace('\\', "/");
-    let encoded = encode_file_url_path(&normalized);
-
-    if normalized.starts_with('/') {
-        format!("file://{}", encoded)
-    } else if normalized.as_bytes().get(1) == Some(&b':') {
-        format!("file:///{}", encoded)
-    } else {
-        format!("file://{}", encoded)
-    }
 }
 
 // =============================================================================
@@ -686,18 +652,6 @@ mod tests {
         assert!(xml.contains(r#"<asset id="r2""#));
         assert!(xml.contains(r#"name="interview.mp4""#));
         assert!(xml.contains(r#"src="file:///media/interview.mp4""#));
-    }
-
-    #[test]
-    fn should_encode_asset_paths_as_file_urls() {
-        assert_eq!(
-            asset_src_url("/media/My Clip #1.mp4"),
-            "file:///media/My%20Clip%20%231.mp4"
-        );
-        assert_eq!(
-            asset_src_url(r#"C:\Projects\My Clip.mp4"#),
-            "file:///C:/Projects/My%20Clip.mp4"
-        );
     }
 
     #[test]
