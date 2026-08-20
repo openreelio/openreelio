@@ -43,6 +43,7 @@ import {
 } from '@/utils/captionStyle';
 import { SeekBar } from './SeekBar';
 import { TextPlacementOverlay, type TextPlacementCommitPayload } from './TextPlacementOverlay';
+import { TransformOverlay } from './TransformOverlay';
 import { isTextClip } from '@/types';
 import type {
   Clip,
@@ -190,6 +191,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = useState({ width, height });
   const [isMultiFrameLoading, setIsMultiFrameLoading] = useState(false);
 
   // Ref to track latest render request time (for race condition prevention)
@@ -745,6 +747,40 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     }
   }, [currentTime, requestRenderFrame]);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const updateSize = (): void => {
+      const rect = container.getBoundingClientRect();
+      setContainerSize((prev) => {
+        const nextWidth = rect.width > 0 ? rect.width : prev.width;
+        const nextHeight = rect.height > 0 ? rect.height : prev.height;
+
+        if (Math.abs(prev.width - nextWidth) < 0.5 && Math.abs(prev.height - nextHeight) < 0.5) {
+          return prev;
+        }
+
+        return { width: nextWidth, height: nextHeight };
+      });
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [width, height]);
+
   // ===========================================================================
   // Playback Controls
   // ===========================================================================
@@ -811,6 +847,14 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     };
   }, [pause]);
 
+  const overlayDisplayScale = useMemo(() => {
+    if (width <= 0 || height <= 0 || containerSize.width <= 0 || containerSize.height <= 0) {
+      return 1;
+    }
+
+    return Math.min(containerSize.width / width, containerSize.height / height);
+  }, [containerSize.width, containerSize.height, width, height]);
+
   // ===========================================================================
   // Render Empty State
   // ===========================================================================
@@ -864,6 +908,19 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         width={width}
         height={height}
         className="absolute inset-0 w-full h-full object-contain"
+      />
+
+      <TransformOverlay
+        sequence={activeSequence ?? null}
+        assets={assets}
+        canvasWidth={width}
+        canvasHeight={height}
+        containerWidth={containerSize.width}
+        containerHeight={containerSize.height}
+        displayScale={overlayDisplayScale}
+        panX={0}
+        panY={0}
+        zIndex={30}
       />
 
       <TextPlacementOverlay

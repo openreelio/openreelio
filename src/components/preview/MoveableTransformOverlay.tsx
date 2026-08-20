@@ -101,6 +101,10 @@ function formatScaleLabel(transform: Transform): string {
   return `${Math.round(transform.scale.x * 100)}% x ${Math.round(transform.scale.y * 100)}%`;
 }
 
+function boxTransform(bounds: ClipScreenBounds): string {
+  return `translate(${bounds.left}px, ${bounds.top}px) rotate(${bounds.rotationDeg}deg)`;
+}
+
 function boundsToRect(bounds: ClipScreenBounds): ClipScreenRect {
   return {
     left: bounds.left,
@@ -133,6 +137,7 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
   const moveableRef = useRef<Moveable>(null);
   const gestureRef = useRef<GestureState | null>(null);
   const contextRef = useRef<OverlayContext | null>(null);
+  const keepRatioRef = useRef(false);
   const [shiftHeld, setShiftHeld] = useState(false);
 
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
@@ -216,7 +221,7 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
       target.style.width = `${bounds.width}px`;
       target.style.height = `${bounds.height}px`;
       target.style.transformOrigin = `${bounds.anchor.x * 100}% ${bounds.anchor.y * 100}%`;
-      target.style.transform = `translate(${bounds.left}px, ${bounds.top}px) rotate(${bounds.rotationDeg}deg)`;
+      target.style.transform = boxTransform(bounds);
     }
 
     const info = infoRef.current;
@@ -226,17 +231,15 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
     }
   }, []);
 
-  // The committed transform owns the DOM whenever a gesture is not running.
+  // The committed bounds are rendered as style props so the target already has
+  // its final size when moveable first measures it. Once a gesture starts the
+  // writes go through `applyBounds` instead, which never re-renders.
   useLayoutEffect(() => {
     contextRef.current = context;
     if (!context || gestureRef.current) return;
 
-    applyBounds(
-      context.bounds,
-      context.isKeyframed ? KEYFRAMED_HINT : formatScaleLabel(context.transform),
-    );
     moveableRef.current?.updateRect();
-  }, [context, applyBounds]);
+  }, [context]);
 
   // Re-attach the overlay's stable handle testids to moveable's controls.
   useEffect(() => {
@@ -340,12 +343,23 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
 
   const handleResize = useCallback(
     (event: OnResize) => {
-      updateGesture({
-        width: event.width,
-        height: event.height,
+      const patch: Partial<ClipScreenRect> = {
         left: event.drag.beforeTranslate[0],
         top: event.drag.beforeTranslate[1],
-      });
+      };
+
+      // moveable reports both axes on every resize, rounded to CSS pixels. For
+      // an edge handle without keepRatio only the dragged axis may change, so
+      // the other one is left alone rather than absorbing the rounding error.
+      const keepRatio = keepRatioRef.current;
+      if (keepRatio || event.direction[0] !== 0) {
+        patch.width = event.width;
+      }
+      if (keepRatio || event.direction[1] !== 0) {
+        patch.height = event.height;
+      }
+
+      updateGesture(patch);
     },
     [updateGesture],
   );
@@ -365,6 +379,7 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
   // Text scale is stored as a transform but rendered as a font-size change, so
   // text may only resize uniformly. Shift forces uniform resizing otherwise.
   const keepRatio = context.isText || shiftHeld;
+  keepRatioRef.current = keepRatio;
 
   return (
     <div
@@ -374,17 +389,28 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
     >
       <div
         ref={targetRef}
-        className={`absolute left-0 top-0 border-2 border-blue-500 ${
+        className={`absolute border-2 border-blue-500 ${
           isInteractive ? 'pointer-events-auto cursor-grab' : 'pointer-events-none border-dashed'
         }`}
         data-testid="transform-bounds"
         data-keyframed={context.isKeyframed ? 'true' : undefined}
+        style={{
+          left: 0,
+          top: 0,
+          width: context.bounds.width,
+          height: context.bounds.height,
+          transformOrigin: `${context.bounds.anchor.x * 100}% ${context.bounds.anchor.y * 100}%`,
+          transform: boxTransform(context.bounds),
+        }}
       />
 
       <div
         ref={infoRef}
         className="absolute left-0 top-0 bg-black/70 text-white text-xs px-2 py-1 rounded pointer-events-none whitespace-nowrap"
         data-testid="transform-info"
+        style={{
+          transform: `translate(${context.bounds.left}px, ${context.bounds.top - INFO_OFFSET_PX}px)`,
+        }}
       >
         {context.isKeyframed ? KEYFRAMED_HINT : formatScaleLabel(context.transform)}
       </div>
@@ -397,6 +423,8 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
         resizable={isInteractive}
         rotatable={isInteractive}
         origin={false}
+        useResizeObserver
+        useMutationObserver
         keepRatio={keepRatio}
         renderDirections={MOVEABLE_DIRECTIONS}
         rotationPosition="top"

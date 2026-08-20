@@ -36,6 +36,7 @@ interface MoveableCallbacks {
   onDragEnd: () => void;
   onResizeStart: () => boolean;
   onResize: (event: {
+    direction: number[];
     width: number;
     height: number;
     drag: { beforeTranslate: number[] };
@@ -456,6 +457,7 @@ describe('MoveableTransformOverlay', () => {
       props.onResizeStart();
       // moveable pins the west edge for an east drag: the box grows, left stays.
       props.onResize({
+        direction: [1, 0],
         width: bounds.width + 96,
         height: bounds.height,
         drag: { beforeTranslate: [bounds.left, bounds.top] },
@@ -474,6 +476,7 @@ describe('MoveableTransformOverlay', () => {
 
       props.onResizeStart();
       props.onResize({
+        direction: [1, 0],
         width: bounds.width + 96,
         height: bounds.height,
         drag: { beforeTranslate: [bounds.left, bounds.top] },
@@ -485,12 +488,30 @@ describe('MoveableTransformOverlay', () => {
       expect(transform.position.y).toBeCloseTo(0.5);
     });
 
+    it('should ignore the untouched axis moveable reports for an edge resize', () => {
+      const bounds = startBounds();
+      const props = moveable();
+
+      props.onResizeStart();
+      // moveable rounds both axes to CSS pixels even when only one is dragged.
+      props.onResize({
+        direction: [1, 0],
+        width: bounds.width + 96,
+        height: bounds.height + 0.5,
+        drag: { beforeTranslate: [bounds.left, bounds.top] },
+      });
+      props.onResizeEnd();
+
+      expect(committedTransform().scale.y).toBe(1);
+    });
+
     it('should scale both axes for a corner resize', () => {
       const bounds = startBounds();
       const props = moveable();
 
       props.onResizeStart();
       props.onResize({
+        direction: [1, 1],
         width: bounds.width + 96,
         height: bounds.height + 54,
         drag: { beforeTranslate: [bounds.left, bounds.top] },
@@ -508,6 +529,7 @@ describe('MoveableTransformOverlay', () => {
 
       props.onResizeStart();
       props.onResize({
+        direction: [1, 1],
         width: 0,
         height: 0,
         drag: { beforeTranslate: [bounds.left, bounds.top] },
@@ -537,12 +559,21 @@ describe('MoveableTransformOverlay', () => {
         .slice(1)
         .map(Number);
 
+      const startHeight = Number.parseFloat(boxElement.style.height);
+      const ratio = (startWidth + 60) / startWidth;
+
       const props = moveable();
+      expect(props.keepRatio).toBe(true);
       props.onResizeStart();
+      // keepRatio is on for text, so moveable scales both axes together and
+      // keeps the west edge midpoint fixed for an east handle.
       props.onResize({
+        direction: [1, 0],
         width: startWidth + 60,
-        height: Number.parseFloat(boxElement.style.height),
-        drag: { beforeTranslate: [startLeft, startTop] },
+        height: startHeight * ratio,
+        drag: {
+          beforeTranslate: [startLeft, startTop - (startHeight * ratio - startHeight) / 2],
+        },
       });
       props.onResizeEnd();
 
@@ -551,6 +582,7 @@ describe('MoveableTransformOverlay', () => {
       expect(transform.position.x).toBeCloseTo(0.25);
       expect(transform.position.y).toBeCloseTo(0.5);
       expect(transform.scale.x).toBeGreaterThan(1);
+      expect(transform.scale.y).toBeCloseTo(transform.scale.x, 6);
     });
   });
 

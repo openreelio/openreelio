@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import { TimelinePreviewPlayer } from './TimelinePreviewPlayer';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
+import { useTimelineStore } from '@/stores/timelineStore';
 import type { Asset, Clip, Sequence, Track } from '@/types';
 
 const frameBufferMock = vi.hoisted(() => ({
@@ -203,6 +204,7 @@ describe('TimelinePreviewPlayer', () => {
 
   afterEach(() => {
     HTMLCanvasElement.prototype.getContext = originalGetContext;
+    useTimelineStore.setState({ selectedClipIds: [] });
   });
 
   it('keeps the visible canvas intact while the next frame is still extracting', async () => {
@@ -294,5 +296,21 @@ describe('TimelinePreviewPlayer', () => {
 
     expect(frameBufferMock.getFrame).toHaveBeenLastCalledWith('asset-1', '/tmp/asset-1.mp4', 4);
     expect(frameBufferMock.getFrame).not.toHaveBeenCalledWith('asset-1', '/tmp/asset-1.mp4', 3);
+  });
+  it('renders the transform overlay for a single selected clip', () => {
+    useTimelineStore.setState({ selectedClipIds: ['clip-1'] });
+
+    render(<TimelinePreviewPlayer showControls={false} />);
+
+    expect(screen.getByTestId('transform-overlay')).toBeInTheDocument();
+    expect(screen.getByTestId('transform-bounds')).toBeInTheDocument();
+  });
+
+  it('does not render the transform overlay when nothing is selected', () => {
+    useTimelineStore.setState({ selectedClipIds: [] });
+
+    render(<TimelinePreviewPlayer showControls={false} />);
+
+    expect(screen.queryByTestId('transform-bounds')).not.toBeInTheDocument();
   });
 });
