@@ -436,13 +436,14 @@ fn esd_path(project_dir: &Path, id: &str) -> std::path::PathBuf {
 }
 
 /// Validates an ESD ID to prevent path traversal
+///
+/// Delegates to the canonical validator rather than re-deriving the rules. The previous
+/// hand-rolled check missed `:` and control characters, and on Windows `Path::join` with
+/// a disk-prefixed component discards the base path entirely — an `esdId` of `C:secret`
+/// escaped `.openreelio/esds/` without containing a separator or `..`, and `delete_esd`
+/// takes the id straight from IPC and calls `remove_file` on the result.
 fn validate_esd_id(id: &str) -> CoreResult<()> {
-    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
-        return Err(CoreError::ValidationError(
-            "Invalid ESD ID: must not be empty or contain path separators".to_string(),
-        ));
-    }
-    Ok(())
+    crate::core::fs::validate_path_id_component(id, "esdId").map_err(CoreError::ValidationError)
 }
 
 /// Saves an ESD to disk at `{project}/.openreelio/esds/{id}.json`.
