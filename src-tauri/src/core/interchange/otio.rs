@@ -54,9 +54,9 @@ use crate::core::{Color, Frame};
 
 use super::models::{asset_src_url, InterchangeExportResult, InterchangeFormat};
 use super::otio_schema::{
-    ExternalReference, MissingReference, OtioClip, OtioComposable, OtioGap, OtioMarker,
-    OtioMediaRef, OtioStack, OtioTimeline, OtioTrack, OtioTrackOrItem, OtioTransition,
-    RationalTime, TimeRange, OPENREELIO_METADATA_KEY,
+    schema_clip, schema_track, schema_transition, ExternalReference, MissingReference, OtioClip,
+    OtioComposable, OtioGap, OtioMarker, OtioMediaRef, OtioStack, OtioTimeline, OtioTrack,
+    OtioTrackOrItem, OtioTransition, RationalTime, TimeRange, OPENREELIO_METADATA_KEY,
 };
 
 /// Default transition length, in seconds, when an effect carries no `duration`.
@@ -397,7 +397,7 @@ fn build_track(
 
     BuiltTrack {
         track: OtioTrack {
-            otio_schema: "Track.1".to_string(),
+            otio_schema: schema_track(),
             name: track.name.clone(),
             kind: otio_track_kind(&track.kind).to_string(),
             children,
@@ -581,7 +581,7 @@ fn build_clip(
         .unwrap_or_else(|| clip.id.clone());
 
     OtioClip {
-        otio_schema: "Clip.2".to_string(),
+        otio_schema: schema_clip(),
         name,
         source_range: TimeRange::from_frames(source_start, duration_frames, rate),
         media_reference,
@@ -670,7 +670,7 @@ fn build_transition(
     }
 
     Some(OtioTransition {
-        otio_schema: "Transition.1".to_string(),
+        otio_schema: schema_transition(),
         name: effect_type.clone(),
         transition_type: transition_type.to_string(),
         in_offset: RationalTime::new(in_offset as f64, rate),

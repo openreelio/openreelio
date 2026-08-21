@@ -39,15 +39,26 @@ pub fn empty_metadata() -> JsonValue {
     JsonValue::Object(Map::new())
 }
 
-/// Declares the `OTIO_SCHEMA` default and validating deserializer for one node
-/// type. The first literal is what we write; the rest are additionally accepted
-/// on read.
+/// Declares the validating `OTIO_SCHEMA` deserializer for one node type, and —
+/// in the `write` form — the canonical string its constructor stamps. The first
+/// literal is what we write; the rest are additionally accepted on read.
+///
+/// No form declares a serde `default`. `OTIO_SCHEMA` is the discriminator that
+/// says what a node *is*, so a node that omits it is a node this build cannot
+/// identify; defaulting it would let a `{"value": …, "rate": …}` blob through as
+/// a `RationalTime` and read a foreign file by guessing.
 macro_rules! otio_schema {
-    ($default_fn:ident, $de_fn:ident, $canonical:literal $(, $also:literal)*) => {
-        fn $default_fn() -> String {
+    // A node this build both reads and writes.
+    (write $default_fn:ident, $de_fn:ident, $canonical:literal $(, $also:literal)*) => {
+        /// The `OTIO_SCHEMA` string this build stamps on the node it writes.
+        pub(super) fn $default_fn() -> String {
             $canonical.to_string()
         }
 
+        otio_schema!(read $de_fn, $canonical $(, $also)*);
+    };
+    // A node this build only reads, so it needs no canonical string.
+    (read $de_fn:ident, $canonical:literal $(, $also:literal)*) => {
         fn $de_fn<'de, D>(deserializer: D) -> Result<String, D::Error>
         where
             D: Deserializer<'de>,
@@ -67,34 +78,30 @@ macro_rules! otio_schema {
     };
 }
 
-otio_schema!(schema_timeline, de_schema_timeline, "Timeline.1");
-otio_schema!(schema_stack, de_schema_stack, "Stack.1");
-otio_schema!(schema_track, de_schema_track, "Track.1");
-otio_schema!(schema_clip, de_schema_clip, "Clip.2", "Clip.1");
-otio_schema!(schema_gap, de_schema_gap, "Gap.1");
-otio_schema!(schema_transition, de_schema_transition, "Transition.1");
-otio_schema!(schema_marker, de_schema_marker, "Marker.1", "Marker.2");
+otio_schema!(write schema_timeline, de_schema_timeline, "Timeline.1");
+otio_schema!(write schema_stack, de_schema_stack, "Stack.1");
+otio_schema!(write schema_track, de_schema_track, "Track.1");
+otio_schema!(write schema_clip, de_schema_clip, "Clip.2", "Clip.1");
+otio_schema!(write schema_gap, de_schema_gap, "Gap.1");
+otio_schema!(write schema_transition, de_schema_transition, "Transition.1");
+otio_schema!(write schema_marker, de_schema_marker, "Marker.1", "Marker.2");
 otio_schema!(
-    schema_external_reference,
+    write schema_external_reference,
     de_schema_external_reference,
     "ExternalReference.1"
 );
 otio_schema!(
-    schema_missing_reference,
+    write schema_missing_reference,
     de_schema_missing_reference,
     "MissingReference.1"
 );
+otio_schema!(read de_schema_image_sequence_reference, "ImageSequenceReference.1");
 otio_schema!(
-    schema_image_sequence_reference,
-    de_schema_image_sequence_reference,
-    "ImageSequenceReference.1"
-);
-otio_schema!(
-    schema_rational_time,
+    write schema_rational_time,
     de_schema_rational_time,
     "RationalTime.1"
 );
-otio_schema!(schema_time_range, de_schema_time_range, "TimeRange.1");
+otio_schema!(write schema_time_range, de_schema_time_range, "TimeRange.1");
 
 // =============================================================================
 // Time
@@ -107,11 +114,7 @@ otio_schema!(schema_time_range, de_schema_time_range, "TimeRange.1");
 /// assuming the sequence frame rate.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RationalTime {
-    #[serde(
-        rename = "OTIO_SCHEMA",
-        default = "schema_rational_time",
-        deserialize_with = "de_schema_rational_time"
-    )]
+    #[serde(rename = "OTIO_SCHEMA", deserialize_with = "de_schema_rational_time")]
     pub otio_schema: String,
     pub value: f64,
     pub rate: f64,
@@ -142,11 +145,7 @@ impl RationalTime {
 /// A half-open span `[start_time, start_time + duration)`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TimeRange {
-    #[serde(
-        rename = "OTIO_SCHEMA",
-        default = "schema_time_range",
-        deserialize_with = "de_schema_time_range"
-    )]
+    #[serde(rename = "OTIO_SCHEMA", deserialize_with = "de_schema_time_range")]
     pub otio_schema: String,
     pub start_time: RationalTime,
     pub duration: RationalTime,
@@ -180,7 +179,6 @@ impl TimeRange {
 pub struct ExternalReference {
     #[serde(
         rename = "OTIO_SCHEMA",
-        default = "schema_external_reference",
         deserialize_with = "de_schema_external_reference"
     )]
     pub otio_schema: String,
@@ -210,7 +208,6 @@ impl ExternalReference {
 pub struct MissingReference {
     #[serde(
         rename = "OTIO_SCHEMA",
-        default = "schema_missing_reference",
         deserialize_with = "de_schema_missing_reference"
     )]
     pub otio_schema: String,
@@ -242,7 +239,6 @@ impl Default for MissingReference {
 pub struct ImageSequenceReference {
     #[serde(
         rename = "OTIO_SCHEMA",
-        default = "schema_image_sequence_reference",
         deserialize_with = "de_schema_image_sequence_reference"
     )]
     pub otio_schema: String,
@@ -303,11 +299,7 @@ impl<'de> Deserialize<'de> for OtioMediaRef {
 /// A marker attached to a stack or track.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OtioMarker {
-    #[serde(
-        rename = "OTIO_SCHEMA",
-        default = "schema_marker",
-        deserialize_with = "de_schema_marker"
-    )]
+    #[serde(rename = "OTIO_SCHEMA", deserialize_with = "de_schema_marker")]
     pub otio_schema: String,
     #[serde(default)]
     pub name: String,
@@ -343,11 +335,7 @@ impl OtioMarker {
 /// A clip: a span of one media reference placed on a track.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OtioClip {
-    #[serde(
-        rename = "OTIO_SCHEMA",
-        default = "schema_clip",
-        deserialize_with = "de_schema_clip"
-    )]
+    #[serde(rename = "OTIO_SCHEMA", deserialize_with = "de_schema_clip")]
     pub otio_schema: String,
     #[serde(default)]
     pub name: String,
@@ -365,11 +353,7 @@ pub struct OtioClip {
 /// A hole in a track. OTIO tracks are contiguous, so every hole is explicit.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OtioGap {
-    #[serde(
-        rename = "OTIO_SCHEMA",
-        default = "schema_gap",
-        deserialize_with = "de_schema_gap"
-    )]
+    #[serde(rename = "OTIO_SCHEMA", deserialize_with = "de_schema_gap")]
     pub otio_schema: String,
     #[serde(default)]
     pub name: String,
@@ -397,11 +381,7 @@ impl OtioGap {
 /// timeline cursor does not advance across it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OtioTransition {
-    #[serde(
-        rename = "OTIO_SCHEMA",
-        default = "schema_transition",
-        deserialize_with = "de_schema_transition"
-    )]
+    #[serde(rename = "OTIO_SCHEMA", deserialize_with = "de_schema_transition")]
     pub otio_schema: String,
     #[serde(default)]
     pub name: String,
@@ -456,11 +436,7 @@ impl<'de> Deserialize<'de> for OtioComposable {
 /// A track: an ordered, contiguous list of clips, gaps and transitions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OtioTrack {
-    #[serde(
-        rename = "OTIO_SCHEMA",
-        default = "schema_track",
-        deserialize_with = "de_schema_track"
-    )]
+    #[serde(rename = "OTIO_SCHEMA", deserialize_with = "de_schema_track")]
     pub otio_schema: String,
     #[serde(default)]
     pub name: String,
@@ -510,11 +486,7 @@ impl<'de> Deserialize<'de> for OtioTrackOrItem {
 /// A stack: tracks layered over one another, all starting at the same instant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OtioStack {
-    #[serde(
-        rename = "OTIO_SCHEMA",
-        default = "schema_stack",
-        deserialize_with = "de_schema_stack"
-    )]
+    #[serde(rename = "OTIO_SCHEMA", deserialize_with = "de_schema_stack")]
     pub otio_schema: String,
     #[serde(default)]
     pub name: String,
@@ -542,11 +514,7 @@ impl OtioStack {
 /// The root node of an OTIO file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OtioTimeline {
-    #[serde(
-        rename = "OTIO_SCHEMA",
-        default = "schema_timeline",
-        deserialize_with = "de_schema_timeline"
-    )]
+    #[serde(rename = "OTIO_SCHEMA", deserialize_with = "de_schema_timeline")]
     pub otio_schema: String,
     #[serde(default)]
     pub name: String,
@@ -680,6 +648,31 @@ mod tests {
         let error = serde_json::from_value::<OtioComposable>(serde_json::json!({ "name": "x" }))
             .expect_err("a node without OTIO_SCHEMA should be rejected");
 
+        assert!(error.to_string().contains("OTIO_SCHEMA"));
+    }
+
+    #[test]
+    fn should_reject_a_node_whose_schema_field_is_absent_rather_than_assuming_one() {
+        // Given: a time blob with no OTIO_SCHEMA. Defaulting the discriminator
+        // reads a foreign file by guessing what its nodes are.
+        let error = serde_json::from_value::<RationalTime>(serde_json::json!({
+            "value": 24.0,
+            "rate": 24.0,
+        }))
+        .expect_err("a RationalTime without OTIO_SCHEMA should be rejected");
+        assert!(error.to_string().contains("OTIO_SCHEMA"));
+
+        let error = serde_json::from_value::<TimeRange>(serde_json::json!({
+            "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0.0, "rate": 24.0 },
+            "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": 24.0, "rate": 24.0 },
+        }))
+        .expect_err("a TimeRange without OTIO_SCHEMA should be rejected");
+        assert!(error.to_string().contains("OTIO_SCHEMA"));
+
+        let error = serde_json::from_str::<OtioTimeline>(
+            r#"{"name":"x","tracks":{"OTIO_SCHEMA":"Stack.1"}}"#,
+        )
+        .expect_err("a timeline without OTIO_SCHEMA should be rejected");
         assert!(error.to_string().contains("OTIO_SCHEMA"));
     }
 
