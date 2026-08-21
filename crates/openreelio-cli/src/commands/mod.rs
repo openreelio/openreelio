@@ -195,6 +195,27 @@ pub(crate) fn load_project(path: &PathBuf) -> anyhow::Result<ActiveProject> {
     ActiveProject::open(canonical).map_err(|e| anyhow::anyhow!("Failed to open project: {}", e))
 }
 
+/// Read a project's state for a command that must not change anything.
+///
+/// [`load_project`] opens an editing *session*, and opening one writes: it
+/// creates the hidden state directory, migrates legacy state files into it and
+/// takes the ops-log lock. A verb that promised to change nothing — `otio
+/// import --dry-run` — cannot do any of that just to read the assets it needs,
+/// so it reads the state where it lies instead. There is no session and no
+/// [`ActiveProject`], so nothing downstream can save through it by accident.
+///
+/// The project root is returned alongside the state because a read-only caller
+/// still needs to know where the project is.
+pub(crate) fn load_project_state_read_only(
+    path: &PathBuf,
+) -> anyhow::Result<(PathBuf, openreelio_core::project::ProjectState)> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("Project path '{}' not found: {}", path.display(), e))?;
+    let state = ActiveProject::read_state_without_session(&canonical)
+        .map_err(|e| anyhow::anyhow!("Failed to read project: {}", e))?;
+    Ok((canonical, state))
+}
+
 /// Save the project state (snapshot + metadata).
 pub(crate) fn save_project(project: &mut ActiveProject) -> anyhow::Result<()> {
     project
@@ -207,7 +228,15 @@ pub(crate) fn resolve_sequence_id(
     project: &ActiveProject,
     explicit: Option<String>,
 ) -> anyhow::Result<String> {
+    resolve_sequence_id_in_state(&project.state, explicit)
+}
+
+/// Same, for a caller that holds state without a session.
+pub(crate) fn resolve_sequence_id_in_state(
+    state: &openreelio_core::project::ProjectState,
+    explicit: Option<String>,
+) -> anyhow::Result<String> {
     explicit
-        .or_else(|| project.state.active_sequence_id.clone())
+        .or_else(|| state.active_sequence_id.clone())
         .ok_or_else(|| anyhow::anyhow!("No sequence specified and no active sequence set"))
 }

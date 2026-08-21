@@ -1453,17 +1453,40 @@ mod tests {
         (sequence, assets, effects)
     }
 
+    /// Builds the import plan for a document the round-trip tests just exported.
+    ///
+    /// The fixtures keep their media under `/media`, so the project root is that
+    /// directory: the importer only reads media from inside the project, and a
+    /// round trip is exactly the case where it should not have to be told twice.
+    fn import_plan(
+        timeline: &OtioTimeline,
+        sequence_id: &str,
+        assets: &HashMap<String, Asset>,
+    ) -> crate::core::interchange::otio_import::OtioImportPlan {
+        use crate::core::interchange::otio_import::{otio_to_plan_steps, OtioImportContext};
+
+        otio_to_plan_steps(
+            timeline,
+            &OtioImportContext {
+                sequence_id,
+                assets,
+                project_root: std::path::Path::new("/media"),
+                sequence_fps: crate::core::Ratio::new(24, 1),
+                allow_external_media: false,
+            },
+        )
+        .expect("plan should build")
+    }
+
     #[test]
     fn should_round_trip_a_two_track_sequence_into_plan_steps_that_rebuild_it() {
-        use crate::core::interchange::otio_import::otio_to_plan_steps;
-
         // Given: a two-track sequence with a gap and a dissolve
         let (sequence, assets, effects) = round_trip_fixture();
 
         // When: exported, parsed back, and turned into an import plan
         let export = export_otio(&sequence, &assets, &effects).expect("export should work");
         let parsed = parse_otio(&export.json).expect("our own output must parse");
-        let plan = otio_to_plan_steps(&parsed, "target-seq", &assets).expect("plan should build");
+        let plan = import_plan(&parsed, "target-seq", &assets);
 
         // Then: the plan rebuilds the same structure — ids regenerate, so this
         // compares shape and timing rather than identity
@@ -1524,8 +1547,6 @@ mod tests {
 
     #[test]
     fn should_be_structurally_stable_across_a_second_export() {
-        use crate::core::interchange::otio_import::otio_to_plan_steps;
-
         // Given: a sequence exported once
         let (sequence, assets, effects) = round_trip_fixture();
         let first = export_otio(&sequence, &assets, &effects).expect("export should work");
@@ -1539,9 +1560,9 @@ mod tests {
         assert_eq!(first.json, second);
 
         // And the plan built from either is the same
-        let plan_a = otio_to_plan_steps(&parsed, "seq", &assets).expect("plan should build");
+        let plan_a = import_plan(&parsed, "seq", &assets);
         let reparsed = parse_otio(&second).expect("second pass must parse");
-        let plan_b = otio_to_plan_steps(&reparsed, "seq", &assets).expect("plan should build");
+        let plan_b = import_plan(&reparsed, "seq", &assets);
         assert_eq!(plan_a.steps, plan_b.steps);
     }
 

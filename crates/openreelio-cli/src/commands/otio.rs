@@ -20,7 +20,9 @@ use std::path::PathBuf;
 
 use openreelio_core::fs::{validate_output_path, write_bytes_atomic_no_symlink};
 use openreelio_core::interchange::otio;
-use openreelio_core::interchange::otio_import::otio_to_plan_steps;
+use openreelio_core::interchange::otio_import::{
+    otio_to_plan_steps, OtioImportContext, OtioImportPlan,
+};
 
 use super::plan::{EditPlan, PlanStep, EXIT_TOOL_FAILURE};
 use crate::output;
@@ -59,6 +61,14 @@ pub enum OtioAction {
         /// Print the plan the file proposes and stop without applying it
         #[arg(long)]
         dry_run: bool,
+
+        /// Import media the file references from outside the project directory
+        ///
+        /// Off by default: an `.otio` chooses its own media paths, and importing
+        /// one hands its author a filesystem probe. Pass this only for a file
+        /// you trust whose media genuinely lives elsewhere.
+        #[arg(long)]
+        allow_external_media: bool,
     },
 }
 
@@ -77,7 +87,8 @@ pub fn execute(action: OtioAction) -> anyhow::Result<()> {
             file,
             sequence,
             dry_run,
-        } => match run_import(&path, &file, sequence, dry_run) {
+            allow_external_media,
+        } => match run_import(&path, &file, sequence, dry_run, allow_external_media) {
             Ok(0) => Ok(()),
             Ok(exit_code) => {
                 super::plan::flush_stdout();
@@ -139,54 +150,28 @@ fn run_import(
     file: &std::path::Path,
     sequence: Option<String>,
     dry_run: bool,
+    allow_external_media: bool,
 ) -> anyhow::Result<i32> {
-    // An OTIO document is a cut list, not media; a sane one is well under this.
-    // Cap the read so a hostile or accidental multi-gigabyte file can't exhaust
-    // memory before `parse_otio` (a plain serde parse) even sees it.
-    const MAX_OTIO_BYTES: u64 = 64 * 1024 * 1024;
-    if let Ok(meta) = std::fs::metadata(file) {
-        if meta.len() > MAX_OTIO_BYTES {
-            anyhow::bail!(
-                "OTIO file '{}' is {} bytes, larger than the {} MiB limit",
-                file.display(),
-                meta.len(),
-                MAX_OTIO_BYTES / (1024 * 1024)
-            );
-        }
-    }
-    let document = std::fs::read_to_string(file).map_err(|error| {
-        anyhow::anyhow!("Failed to read OTIO file '{}': {}", file.display(), error)
-    })?;
+    let document = read_otio_document(file)?;
     let timeline = otio::parse_otio(&document).map_err(|error| anyhow::anyhow!(error))?;
 
-    let mut project = super::load_project(path)?;
-    let sequence_id = super::resolve_sequence_id(&project, sequence)?;
-
-    let import = otio_to_plan_steps(&timeline, &sequence_id, &project.state.assets)
-        .map_err(|error| anyhow::anyhow!(error))?;
-
-    let steps: Vec<PlanStep> = import
-        .steps
-        .iter()
-        .map(|step| serde_json::from_value(step.clone()))
-        .collect::<Result<_, _>>()
-        .map_err(|error| anyhow::anyhow!("OTIO import produced an unreadable step: {}", error))?;
-
-    let plan = EditPlan {
-        id: plan_id(file),
-        steps,
-    };
-
-    let asset_imports: Vec<serde_json::Value> = import
-        .asset_imports
-        .iter()
-        .map(|asset| serde_json::json!({ "name": asset.name, "uri": asset.uri }))
-        .collect();
-
     if dry_run {
-        // Nothing above this point mutates, and nothing below it runs: the whole
-        // point of a dry run is that the caller can read the plan before any of
-        // it is real.
+        // A dry run reads the project and stops, so it must not *open* one:
+        // opening an editing session creates the hidden state directory,
+        // migrates legacy state files into it and takes the ops-log lock, all
+        // of which are writes. Nothing here holds an ActiveProject, so nothing
+        // here can save.
+        let (project_root, state) = super::load_project_state_read_only(path)?;
+        let sequence_id = super::resolve_sequence_id_in_state(&state, sequence)?;
+        let import = build_import(
+            &timeline,
+            &sequence_id,
+            &state,
+            &project_root,
+            allow_external_media,
+        )?;
+        let (plan, asset_imports) = plan_from_import(file, &import)?;
+
         output::print_json(&serde_json::json!({
             "status": "ok",
             "message": "Dry run: no changes were applied",
@@ -200,6 +185,17 @@ fn run_import(
         }))?;
         return Ok(0);
     }
+
+    let mut project = super::load_project(path)?;
+    let sequence_id = super::resolve_sequence_id(&project, sequence)?;
+    let import = build_import(
+        &timeline,
+        &sequence_id,
+        &project.state,
+        &project.path,
+        allow_external_media,
+    )?;
+    let (plan, asset_imports) = plan_from_import(file, &import)?;
 
     let (mut result, exit_code) = super::plan::execute_plan_on_project(&mut project, &plan)?;
 
@@ -218,6 +214,106 @@ fn run_import(
 
     output::print_json(&result)?;
     Ok(exit_code)
+}
+
+/// Builds the plan an OTIO file proposes for `sequence_id`.
+fn build_import(
+    timeline: &openreelio_core::interchange::otio_schema::OtioTimeline,
+    sequence_id: &str,
+    state: &openreelio_core::project::ProjectState,
+    project_root: &std::path::Path,
+    allow_external_media: bool,
+) -> anyhow::Result<OtioImportPlan> {
+    let sequence_fps = state
+        .sequences
+        .get(sequence_id)
+        .map(|sequence| sequence.format.fps.clone())
+        .ok_or_else(|| anyhow::anyhow!("Sequence not found: {}", sequence_id))?;
+
+    otio_to_plan_steps(
+        timeline,
+        &OtioImportContext {
+            sequence_id,
+            assets: &state.assets,
+            project_root,
+            sequence_fps,
+            allow_external_media,
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(error))
+}
+
+/// Turns the importer's JSON steps into an [`EditPlan`] plus its asset report.
+fn plan_from_import(
+    file: &std::path::Path,
+    import: &OtioImportPlan,
+) -> anyhow::Result<(EditPlan, Vec<serde_json::Value>)> {
+    let steps: Vec<PlanStep> = import
+        .steps
+        .iter()
+        .map(|step| serde_json::from_value(step.clone()))
+        .collect::<Result<_, _>>()
+        .map_err(|error| anyhow::anyhow!("OTIO import produced an unreadable step: {}", error))?;
+
+    let asset_imports = import
+        .asset_imports
+        .iter()
+        .map(|asset| serde_json::json!({ "name": asset.name, "uri": asset.uri }))
+        .collect();
+
+    Ok((
+        EditPlan {
+            id: plan_id(file),
+            steps,
+        },
+        asset_imports,
+    ))
+}
+
+/// An OTIO document is a cut list, not media; a sane one is well under this.
+const MAX_OTIO_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Reads an OTIO document, refusing one larger than [`MAX_OTIO_BYTES`].
+fn read_otio_document(file: &std::path::Path) -> anyhow::Result<String> {
+    read_capped(file, MAX_OTIO_BYTES)
+}
+
+/// Reads a whole file, refusing one larger than `max_bytes`.
+///
+/// The cap is enforced by the read itself rather than by a `metadata` check
+/// beforehand. A stat can be raced, and it silently reports nothing useful for a
+/// pipe or a device node, so a `metadata` guard in front of `read_to_string`
+/// leaves the unbounded read reachable — which is the only part that matters,
+/// because it is the one that allocates.
+fn read_capped(file: &std::path::Path, max_bytes: u64) -> anyhow::Result<String> {
+    use std::io::Read;
+
+    let handle = std::fs::File::open(file).map_err(|error| {
+        anyhow::anyhow!("Failed to read OTIO file '{}': {}", file.display(), error)
+    })?;
+
+    let mut buffer = Vec::new();
+    handle
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut buffer)
+        .map_err(|error| {
+            anyhow::anyhow!("Failed to read OTIO file '{}': {}", file.display(), error)
+        })?;
+
+    if buffer.len() as u64 > max_bytes {
+        anyhow::bail!(
+            "OTIO file '{}' is larger than the {} MiB limit",
+            file.display(),
+            max_bytes / (1024 * 1024)
+        );
+    }
+
+    String::from_utf8(buffer).map_err(|_| {
+        anyhow::anyhow!(
+            "OTIO file '{}' is not valid UTF-8; OTIO documents are JSON text",
+            file.display()
+        )
+    })
 }
 
 /// Derives a stable plan id from the file being imported.
@@ -245,5 +341,46 @@ mod tests {
     #[test]
     fn plan_id_falls_back_when_the_file_has_no_stem() {
         assert_eq!(plan_id(std::path::Path::new("/")), "otio_import_timeline");
+    }
+
+    fn write_temp(name: &str, bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(name);
+        std::fs::write(&file, bytes).expect("write fixture");
+        (dir, file)
+    }
+
+    #[test]
+    fn should_refuse_a_document_larger_than_the_cap_through_the_read_itself() {
+        // The cap has to be enforced by the read, not by a metadata check in
+        // front of it: a stat can be raced, and it reports nothing useful for a
+        // pipe, so a guard that only consults metadata leaves the unbounded read
+        // — the part that allocates — reachable.
+        let (_dir, file) = write_temp("big.otio", &[b'x'; 64]);
+
+        let error = read_capped(&file, 16).expect_err("an oversized file must be refused");
+
+        assert!(
+            error.to_string().contains("larger than"),
+            "the refusal must name the cap, got: {error}"
+        );
+    }
+
+    #[test]
+    fn should_read_a_document_that_exactly_fills_the_cap() {
+        let (_dir, file) = write_temp("exact.otio", b"0123456789abcdef");
+
+        let document = read_capped(&file, 16).expect("a file at the cap should read");
+
+        assert_eq!(document, "0123456789abcdef");
+    }
+
+    #[test]
+    fn should_refuse_a_document_that_is_not_utf8() {
+        let (_dir, file) = write_temp("binary.otio", &[0xff, 0xfe, 0x00]);
+
+        let error = read_capped(&file, 16).expect_err("binary is not an OTIO document");
+
+        assert!(error.to_string().contains("UTF-8"), "got: {error}");
     }
 }

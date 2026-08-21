@@ -24,19 +24,36 @@
 //! Every `RationalTime` in an OTIO file carries its own rate, and a foreign file
 //! may mix rates within one timeline. Times are therefore converted through the
 //! node's own rate before anything else happens; the sequence frame rate is
-//! never assumed.
+//! never assumed for *reading*. It is imposed for *writing*: every timeline
+//! position is snapped to the target sequence's frame grid, because a 24fps cut
+//! dropped into a 29.97fps sequence otherwise opens sub-frame holes and overlaps
+//! that no later edit can see.
+//!
+//! ## Trust
+//!
+//! An `.otio` file is untrusted input: it names media paths chosen by whoever
+//! wrote it, and `ImportAsset` stats — and for some kinds ffprobes — whatever it
+//! is handed. Import therefore only reads media from **inside the project
+//! directory** unless the caller explicitly allows otherwise
+//! ([`OtioImportContext::allow_external_media`]), which closes both the UNC /
+//! SMB reflection vector and the "does this file exist" oracle a foreign file
+//! would otherwise get over the whole filesystem.
 
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value as JsonValue};
 
 use crate::core::ai::MAX_PLAN_STEPS;
 use crate::core::assets::Asset;
+use crate::core::timeline::TimelineClock;
+use crate::core::Ratio;
 
 use super::models::{file_url_to_path, strip_verbatim_prefix};
 use super::otio_schema::{
-    openreelio_meta_str, OtioClip, OtioComposable, OtioMarker, OtioMediaRef, OtioTimeline,
-    OtioTrack, OtioTrackOrItem, OtioTransition,
+    openreelio_meta_bool, openreelio_meta_f64, openreelio_meta_str, OtioClip, OtioComposable,
+    OtioMarker, OtioMediaRef, OtioTimeline, OtioTrack, OtioTrackOrItem, OtioTransition,
+    RationalTime,
 };
 
 /// Extra handle, in frames, a transition is required to have beyond its own
@@ -46,6 +63,17 @@ const HANDLE_SLACK_FRAMES: f64 = 1.0;
 
 /// Effect type used when a `SMPTE_Dissolve` arrives with no OpenReelio metadata.
 const DEFAULT_TRANSITION_EFFECT: &str = "cross_dissolve";
+
+/// The effect types an OTIO transition may become.
+///
+/// An OTIO transition is a two-input blend and nothing else. Without this list
+/// `metadata.openreelio.transitionType` is an arbitrary-effect injection: a file
+/// naming `"brightness"` would have a colour filter added to a clip by a verb
+/// documented to carry cuts.
+const IMPORTABLE_TRANSITIONS: &[&str] = &["cross_dissolve", "wipe", "slide"];
+
+/// The wipe / slide directions the render engine understands.
+const IMPORTABLE_TRANSITION_DIRECTIONS: &[&str] = &["left", "right", "up", "down"];
 
 // =============================================================================
 // Public API
@@ -74,7 +102,35 @@ pub struct OtioImportPlan {
     pub asset_imports: Vec<OtioAssetImport>,
 }
 
-/// Converts an OTIO timeline into plan steps that rebuild it in `sequence_id`.
+/// The project an OTIO file is being imported into.
+///
+/// Everything the importer is allowed to know about the target lives here, so
+/// the rules that depend on it — which media may be read, which frame grid
+/// positions land on — are decided from the project rather than from the file.
+pub struct OtioImportContext<'a> {
+    /// Sequence the plan builds into.
+    pub sequence_id: &'a str,
+    /// Assets already in the project, keyed by id.
+    pub assets: &'a HashMap<String, Asset>,
+    /// The project directory. Media outside it is refused unless
+    /// [`Self::allow_external_media`] is set.
+    pub project_root: &'a Path,
+    /// Frame rate of the target sequence; every timeline position is snapped to
+    /// its grid.
+    pub sequence_fps: Ratio,
+    /// Lets the file name media outside the project directory.
+    ///
+    /// Off by default. A `.otio` chooses its own media paths, and `ImportAsset`
+    /// stats — and for some kinds ffprobes — whatever it is given, so an
+    /// unscoped import hands the file's author a filesystem existence oracle and,
+    /// on Windows, an outbound SMB connection. Relinking a foreign edit to media
+    /// that genuinely lives elsewhere is a real workflow, so it is available; it
+    /// is just not the default.
+    pub allow_external_media: bool,
+}
+
+/// Converts an OTIO timeline into plan steps that rebuild it in the context's
+/// sequence.
 ///
 /// # Errors
 ///
@@ -85,10 +141,9 @@ pub struct OtioImportPlan {
 ///   is worse than one the caller was told to split deliberately.
 pub fn otio_to_plan_steps(
     timeline: &OtioTimeline,
-    sequence_id: &str,
-    assets: &HashMap<String, Asset>,
+    context: &OtioImportContext<'_>,
 ) -> Result<OtioImportPlan, String> {
-    let mut builder = PlanBuilder::new(sequence_id, assets);
+    let mut builder = PlanBuilder::new(context);
 
     for (index, child) in timeline.tracks.children.iter().enumerate() {
         match child {
@@ -102,7 +157,7 @@ pub fn otio_to_plan_steps(
     }
 
     for (index, marker) in timeline.tracks.markers.iter().enumerate() {
-        builder.add_marker(index, marker);
+        builder.add_marker(&format!("marker_{index}"), marker, None);
     }
 
     let plan = builder.finish();
@@ -127,6 +182,13 @@ pub fn otio_to_plan_steps(
 /// A clip step already emitted, remembered so a later transition can attach to
 /// it and so its handles can be checked.
 struct PlacedClip {
+    /// Index of the clip's node among its track's children.
+    ///
+    /// Not its position among the *placed* clips: a skipped child (offline
+    /// media, a refused path, an unreadable time) makes those two disagree, and
+    /// a transition resolved against the placed count then silently attaches to
+    /// the wrong cut.
+    child_index: usize,
     step_id: String,
     asset_id: Option<String>,
     source_in_sec: f64,
@@ -134,26 +196,73 @@ struct PlacedClip {
 }
 
 struct PlanBuilder<'a> {
-    sequence_id: &'a str,
-    assets: &'a HashMap<String, Asset>,
+    context: &'a OtioImportContext<'a>,
+    /// Frame grid of the target sequence.
+    clock: TimelineClock,
     plan: OtioImportPlan,
     /// Import steps already emitted, keyed by the media path, so two clips off
     /// the same file import it once.
     imported: HashMap<String, String>,
+    /// Distinct node rates the file used, so a rate that is not the sequence's
+    /// is reported once rather than once per clip.
+    foreign_rates: Vec<f64>,
 }
 
 impl<'a> PlanBuilder<'a> {
-    fn new(sequence_id: &'a str, assets: &'a HashMap<String, Asset>) -> Self {
+    fn new(context: &'a OtioImportContext<'a>) -> Self {
         Self {
-            sequence_id,
-            assets,
+            context,
+            clock: TimelineClock::new(context.sequence_fps.clone()),
             plan: OtioImportPlan::default(),
             imported: HashMap::new(),
+            foreign_rates: Vec::new(),
         }
     }
 
-    fn finish(self) -> OtioImportPlan {
+    fn finish(mut self) -> OtioImportPlan {
+        self.report_rate_mismatch();
         self.plan
+    }
+
+    fn sequence_id(&self) -> &str {
+        self.context.sequence_id
+    }
+
+    fn assets(&self) -> &HashMap<String, Asset> {
+        self.context.assets
+    }
+
+    /// Notes a rate the file expressed a time at.
+    fn note_rate(&mut self, time: &RationalTime) {
+        let rate = time.rate;
+        if !rate.is_finite() || rate <= 0.0 {
+            return;
+        }
+        if !self.foreign_rates.contains(&rate) {
+            self.foreign_rates.push(rate);
+        }
+    }
+
+    /// Reports, once, that the file's timing does not live on the sequence's
+    /// frame grid.
+    fn report_rate_mismatch(&mut self) {
+        let sequence_rate = self.clock.frames_per_second();
+        let mut foreign: Vec<String> = self
+            .foreign_rates
+            .iter()
+            .filter(|rate| (**rate - sequence_rate).abs() > 1e-9)
+            .map(|rate| format!("{rate}"))
+            .collect();
+        if foreign.is_empty() {
+            return;
+        }
+        foreign.dedup();
+        self.plan.unsupported.push(format!(
+            "the file expresses its timing at {} fps and the sequence runs at {sequence_rate} fps; \
+             every position was snapped to the sequence's frame grid, so a cut may move by up to \
+             half a frame",
+            foreign.join(" and ")
+        ));
     }
 
     fn push_step(&mut self, id: &str, command_type: &str, payload: JsonValue, depends_on: &[&str]) {
@@ -180,11 +289,12 @@ impl<'a> PlanBuilder<'a> {
         };
 
         let track_step = format!("track_{index}");
+        let sequence_id = self.sequence_id().to_string();
         self.push_step(
             &track_step,
             "CreateTrack",
             json!({
-                "sequenceId": self.sequence_id,
+                "sequenceId": sequence_id,
                 "kind": kind,
                 "name": track_name(track, index),
             }),
@@ -201,43 +311,81 @@ impl<'a> PlanBuilder<'a> {
                     // A hole is implicit in our model: nothing is placed, the
                     // cursor simply advances. This is the exact inverse of the
                     // gap synthesis the exporter does.
-                    cursor_sec += gap.source_range.duration.to_seconds();
+                    self.note_rate(&gap.source_range.duration);
+                    match gap.source_range.duration.to_seconds() {
+                        Some(duration_sec) if duration_sec >= 0.0 => cursor_sec += duration_sec,
+                        _ => self.plan.warnings.push(format!(
+                            "a gap on track '{}' has a length this build cannot read and was \
+                             ignored, so everything after it moved earlier",
+                            track.name
+                        )),
+                    }
                 }
                 OtioComposable::Clip(clip) => {
-                    let duration_sec = clip.source_range.duration.to_seconds();
-                    if let Some(place) =
-                        self.add_clip(index, child_index, &track_step, clip, cursor_sec)?
-                    {
+                    self.note_rate(&clip.source_range.duration);
+                    let Some(duration_sec) = clip.source_range.duration.to_seconds() else {
+                        self.plan.warnings.push(format!(
+                            "clip '{}' has a duration this build cannot read ({} at rate {}) and \
+                             was not imported",
+                            clip.name,
+                            clip.source_range.duration.value,
+                            clip.source_range.duration.rate
+                        ));
+                        continue;
+                    };
+                    if duration_sec <= 0.0 {
+                        self.plan.warnings.push(format!(
+                            "clip '{}' has a duration of {duration_sec}s and was not imported",
+                            clip.name
+                        ));
+                        continue;
+                    }
+
+                    if let Some(place) = self.add_clip(
+                        index,
+                        child_index,
+                        &track_step,
+                        clip,
+                        cursor_sec,
+                        duration_sec,
+                    )? {
                         placed.push(place);
                     }
+                    // The cursor advances whether or not the clip was placed: an
+                    // OTIO track's children are contiguous, so a skipped clip
+                    // still owns its slot and everything after it keeps its time.
                     cursor_sec += duration_sec;
                 }
                 OtioComposable::Transition(transition) => {
                     // A transition consumes no time of its own, so it does not
                     // move the cursor. It is resolved after the pass, once the
                     // clip on each side is known.
-                    pending_transitions.push((placed.len(), transition));
+                    pending_transitions.push((child_index, transition));
                 }
             }
         }
 
-        for (position, transition) in pending_transitions {
+        for (child_index, transition) in pending_transitions {
             self.add_transition(
                 index,
                 &track_step,
                 &placed,
-                position,
+                child_index,
                 transition,
                 &track.name,
             );
         }
 
-        for marker in &track.markers {
-            self.plan.warnings.push(format!(
-                "the marker '{}' on track '{}' was imported onto the sequence: OpenReelio holds \
-                 markers on the sequence, not per track",
-                marker.name, track.name
-            ));
+        for (marker_index, marker) in track.markers.iter().enumerate() {
+            // OpenReelio holds markers on the sequence, so a track marker
+            // becomes a sequence marker at the same instant. The step is emitted
+            // here rather than merely announced: the previous code claimed the
+            // import in a warning and produced no step at all.
+            self.add_marker(
+                &format!("marker_{index}_{marker_index}"),
+                marker,
+                Some(track.name.as_str()),
+            );
         }
 
         Ok(())
@@ -254,13 +402,39 @@ impl<'a> PlanBuilder<'a> {
         track_step: &str,
         clip: &OtioClip,
         timeline_start_sec: f64,
+        duration_sec: f64,
     ) -> Result<Option<PlacedClip>, String> {
-        let source_in_sec = clip.source_range.start_time.to_seconds();
-        let duration_sec = clip.source_range.duration.to_seconds();
-
-        if duration_sec <= 0.0 {
+        self.note_rate(&clip.source_range.start_time);
+        let Some(source_in_sec) = clip.source_range.start_time.to_seconds() else {
             self.plan.warnings.push(format!(
-                "clip '{}' has a duration of {duration_sec}s and was not imported",
+                "clip '{}' has a source in-point this build cannot read ({} at rate {}) and was \
+                 not imported",
+                clip.name, clip.source_range.start_time.value, clip.source_range.start_time.rate
+            ));
+            return Ok(None);
+        };
+        if source_in_sec < 0.0 {
+            self.plan.warnings.push(format!(
+                "clip '{}' reads from {source_in_sec}s of its source, which is before the media \
+                 starts, and was not imported",
+                clip.name
+            ));
+            return Ok(None);
+        }
+
+        // The file's own grid is not the sequence's. Positions are snapped here,
+        // at the edge, rather than during the walk: accumulating snapped values
+        // would compound each rounding, while snapping an exactly accumulated
+        // cursor rounds once.
+        let start_frame = self.clock.seconds_to_nearest_frame(timeline_start_sec);
+        let end_frame = self
+            .clock
+            .seconds_to_nearest_frame(timeline_start_sec + duration_sec);
+        let timeline_start = self.clock.frame_to_seconds(start_frame);
+        let snapped_duration = self.clock.frame_to_seconds(end_frame) - timeline_start;
+        if snapped_duration <= 0.0 {
+            self.plan.warnings.push(format!(
+                "clip '{}' is shorter than one frame at the sequence's rate and was not imported",
                 clip.name
             ));
             return Ok(None);
@@ -270,6 +444,8 @@ impl<'a> PlanBuilder<'a> {
         let Some(resolved) = resolved else {
             return Ok(None);
         };
+
+        self.record_clip_losses(clip);
 
         let step_id = format!("clip_{track_index}_{child_index}");
         let mut depends_on = vec![track_step.to_string()];
@@ -281,30 +457,75 @@ impl<'a> PlanBuilder<'a> {
             }
         };
         let depends_refs: Vec<&str> = depends_on.iter().map(String::as_str).collect();
+        let source_out_sec = source_in_sec + snapped_duration;
+        let sequence_id = self.sequence_id().to_string();
 
         self.push_step(
             &step_id,
             "InsertClip",
             json!({
-                "sequenceId": self.sequence_id,
+                "sequenceId": sequence_id,
                 "trackId": step_reference(track_step),
                 "assetId": asset_value,
-                "timelineStart": timeline_start_sec,
+                "timelineStart": timeline_start,
                 "sourceIn": source_in_sec,
-                "sourceOut": source_in_sec + duration_sec,
+                "sourceOut": source_out_sec,
             }),
             &depends_refs,
         );
 
         Ok(Some(PlacedClip {
+            child_index,
             step_id,
             asset_id: match resolved {
                 ResolvedMedia::Existing(asset_id) => Some(asset_id),
                 ResolvedMedia::Imported(_) => None,
             },
             source_in_sec,
-            source_out_sec: source_in_sec + duration_sec,
+            source_out_sec,
         }))
+    }
+
+    /// Reports the editorial detail the clip's node carries that the import does
+    /// not restore.
+    ///
+    /// The exporter writes a clip's speed, reverse, freeze and time-remap flags
+    /// into `metadata.openreelio` so nothing is lost silently, and the importer
+    /// then places the clip at unmodified speed. Naming that here is what makes
+    /// the round trip honest: the clip *looks* right on the timeline and plays
+    /// at a different speed than it did.
+    fn record_clip_losses(&mut self, clip: &OtioClip) {
+        let mut lost: Vec<String> = Vec::new();
+        if let Some(speed) = openreelio_meta_f64(&clip.metadata, "speed") {
+            lost.push(format!("a {speed}x speed change"));
+        }
+        if openreelio_meta_bool(&clip.metadata, "reverse") == Some(true) {
+            lost.push("reverse playback".to_string());
+        }
+        if openreelio_meta_bool(&clip.metadata, "freezeFrame") == Some(true) {
+            lost.push("a freeze frame".to_string());
+        }
+        if openreelio_meta_bool(&clip.metadata, "timeRemap") == Some(true) {
+            lost.push("a time remap curve".to_string());
+        }
+
+        if !lost.is_empty() {
+            self.plan.unsupported.push(format!(
+                "clip '{}' carried {} that OTIO import does not restore; it was placed at \
+                 unmodified speed and plays its slot straight through",
+                clip.name,
+                lost.join(" and ")
+            ));
+        }
+
+        if !clip.markers.is_empty() {
+            self.plan.unsupported.push(format!(
+                "clip '{}' carries {} marker(s) that were not imported: OpenReelio holds markers \
+                 on the sequence, not on a clip",
+                clip.name,
+                clip.markers.len()
+            ));
+        }
     }
 
     /// Finds the asset a clip's media reference names, importing it if needed.
@@ -335,7 +556,7 @@ impl<'a> PlanBuilder<'a> {
         // Our own file names the asset outright, which survives a rename the
         // path-based match would miss.
         if let Some(asset_id) = openreelio_meta_str(&clip.metadata, "assetId") {
-            if self.assets.contains_key(asset_id) {
+            if self.assets().contains_key(asset_id) {
                 return Ok(Some(ResolvedMedia::Existing(asset_id.to_string())));
             }
         }
@@ -348,24 +569,12 @@ impl<'a> PlanBuilder<'a> {
             return Ok(None);
         };
 
+        // Matching an asset the project already holds reads nothing off the
+        // foreign path, so both matches run before the scoping guard: the guard
+        // exists to keep `ImportAsset` away from a path the file chose, not to
+        // stop a clip from finding media the user imported themselves.
         if let Some(asset_id) = self.find_asset_by_path(&path) {
             return Ok(Some(ResolvedMedia::Existing(asset_id)));
-        }
-
-        // A UNC / network target from an untrusted `.otio` must never reach the
-        // import path: `ImportAsset` stats (and, for some kinds, ffprobes) the
-        // path, and on Windows a `\\host\share` reference initiates an outbound
-        // SMB connection that leaks an NTLM handshake to a host the file's author
-        // chose. Only a path that already matched a locally-imported asset above
-        // is trusted; a novel network path is refused, not imported. Full
-        // project-root scoping of local target URLs is tracked separately.
-        if is_network_path(&path) {
-            self.plan.warnings.push(format!(
-                "clip '{}' references the network path '{}', which OpenReelio will not import from an \
-                 OTIO file; relink it to local media instead",
-                clip.name, path
-            ));
-            return Ok(None);
         }
 
         let base_name = base_name(&path);
@@ -378,7 +587,11 @@ impl<'a> PlanBuilder<'a> {
             return Ok(Some(ResolvedMedia::Existing(asset_id)));
         }
 
-        if let Some(existing_step) = self.imported.get(&path) {
+        let Some(uri) = self.scoped_import_path(&clip.name, &path) else {
+            return Ok(None);
+        };
+
+        if let Some(existing_step) = self.imported.get(&uri) {
             return Ok(Some(ResolvedMedia::Imported(existing_step.clone())));
         }
 
@@ -386,21 +599,87 @@ impl<'a> PlanBuilder<'a> {
         self.push_step(
             &step_id,
             "ImportAsset",
-            json!({ "name": base_name, "uri": path }),
+            json!({ "name": base_name, "uri": uri }),
             &[],
         );
-        self.imported.insert(path.clone(), step_id.clone());
+        self.imported.insert(uri.clone(), step_id.clone());
         self.plan.asset_imports.push(OtioAssetImport {
             name: base_name,
-            uri: path,
+            uri,
         });
 
         Ok(Some(ResolvedMedia::Imported(step_id)))
     }
 
+    /// Turns a media path the file chose into one this import may actually read,
+    /// or `None` — with the reason recorded — when it may not.
+    ///
+    /// This is the whole of the import's trust boundary, and it is deliberately
+    /// one decision rather than a list of banned spellings. A path that does not
+    /// match an asset the project already has is about to be handed to
+    /// `ImportAsset`, which stats it and may ffprobe it, so the question is not
+    /// "is this a UNC path" — `\\host\share`, `/\host\share`, `//host/share` and
+    /// `%5C%5Chost` are all the same request — but "is this inside the project".
+    /// Answering that refuses the SMB reflection and the filesystem existence
+    /// oracle together, and keeps refusing spellings nobody has thought of yet.
+    fn scoped_import_path(&mut self, clip_name: &str, path: &str) -> Option<String> {
+        // Kept as its own check so a network path is named as one in the report
+        // even when external media is allowed: an outbound SMB connection is a
+        // different hazard from reading a local file the operator asked for.
+        if is_network_path(path) {
+            self.plan.warnings.push(format!(
+                "clip '{clip_name}' references the network path '{path}', which OpenReelio will \
+                 not import from an OTIO file; relink it to local media instead"
+            ));
+            return None;
+        }
+
+        if path.contains("://") {
+            self.plan.warnings.push(format!(
+                "clip '{clip_name}' references '{path}', which is not a local file, and was not \
+                 imported"
+            ));
+            return None;
+        }
+
+        let candidate = if is_absolute_media_path(path) {
+            PathBuf::from(path)
+        } else {
+            // A relative reference is ours: an asset stored inside the project
+            // keeps a project-relative URI. It resolves against the project root,
+            // which also makes it in-scope by construction — once `..` is out.
+            self.context.project_root.join(path)
+        };
+
+        if candidate
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            self.plan.warnings.push(format!(
+                "clip '{clip_name}' references '{path}', which walks out of the directory it \
+                 starts in, and was not imported"
+            ));
+            return None;
+        }
+
+        if !self.context.allow_external_media
+            && !is_inside_project(self.context.project_root, &candidate)
+        {
+            self.plan.warnings.push(format!(
+                "clip '{clip_name}' references '{path}', which is outside the project directory, \
+                 and was not imported; an OTIO file chooses its own media paths, so import only \
+                 reads media from inside the project unless external media is explicitly allowed \
+                 (`--allow-external-media`)"
+            ));
+            return None;
+        }
+
+        Some(candidate.to_string_lossy().replace('\\', "/"))
+    }
+
     fn find_asset_by_path(&self, path: &str) -> Option<String> {
         let wanted = normalize_path(path);
-        self.assets
+        self.assets()
             .values()
             .find(|asset| normalize_path(&asset.uri) == wanted)
             .map(|asset| asset.id.clone())
@@ -408,7 +687,7 @@ impl<'a> PlanBuilder<'a> {
 
     fn find_asset_by_name(&self, name: &str) -> Option<String> {
         let wanted = name.to_lowercase();
-        self.assets
+        self.assets()
             .values()
             .find(|asset| asset.name.to_lowercase() == wanted)
             .map(|asset| asset.id.clone())
@@ -420,31 +699,48 @@ impl<'a> PlanBuilder<'a> {
 
     /// Attaches a transition to the outgoing clip of the boundary it sits on.
     ///
-    /// `position` is the number of clips already placed when the transition was
-    /// read, so the outgoing clip is `placed[position - 1]` and the incoming one
-    /// is `placed[position]`.
+    /// `child_index` is the transition's own index among the track's children,
+    /// so the boundary it sits on is between the children at `child_index - 1`
+    /// and `child_index + 1`. Both of those must have been *placed*: if either
+    /// was skipped there is no cut here any more, and attaching the blend to the
+    /// nearest surviving clip would move it to a boundary the file never named.
     fn add_transition(
         &mut self,
         track_index: usize,
         track_step: &str,
         placed: &[PlacedClip],
-        position: usize,
+        child_index: usize,
         transition: &OtioTransition,
         track_name: &str,
     ) {
         let (Some(outgoing), Some(incoming)) = (
-            position.checked_sub(1).and_then(|index| placed.get(index)),
-            placed.get(position),
+            child_index
+                .checked_sub(1)
+                .and_then(|index| placed.iter().find(|clip| clip.child_index == index)),
+            placed
+                .iter()
+                .find(|clip| clip.child_index == child_index + 1),
         ) else {
             self.plan.warnings.push(format!(
                 "a transition on track '{track_name}' was not imported: it does not sit between \
-                 two imported clips"
+                 two imported clips, because it is at the end of the track or because an adjacent \
+                 clip was skipped"
             ));
             return;
         };
 
-        let in_sec = transition.in_offset.to_seconds();
-        let out_sec = transition.out_offset.to_seconds();
+        self.note_rate(&transition.in_offset);
+        self.note_rate(&transition.out_offset);
+        let (Some(in_sec), Some(out_sec)) = (
+            transition.in_offset.to_seconds(),
+            transition.out_offset.to_seconds(),
+        ) else {
+            self.plan.warnings.push(format!(
+                "a transition on track '{track_name}' has offsets this build cannot read and was \
+                 not imported"
+            ));
+            return;
+        };
         let duration_sec = in_sec + out_sec;
 
         if duration_sec <= 0.0 {
@@ -462,27 +758,61 @@ impl<'a> PlanBuilder<'a> {
             ));
         }
 
-        let effect_type = self.transition_effect_type(transition, track_name);
-        self.check_handles(transition, outgoing, incoming, track_name);
+        let Some(effect_type) = self.transition_effect_type(transition, track_name) else {
+            return;
+        };
+        self.check_handles(in_sec, out_sec, outgoing, incoming, track_name);
 
-        let step_id = format!("transition_{track_index}_{}", position);
+        let mut params = json!({ "duration": duration_sec });
+        if let (Some(map), Some(direction)) = (
+            params.as_object_mut(),
+            transition_direction(transition, &effect_type),
+        ) {
+            map.insert("direction".to_string(), json!(direction));
+        }
+
+        // Keyed by the transition's own child index, so two transitions on one
+        // track cannot collide however many clips between them were skipped.
+        let step_id = format!("transition_{track_index}_{child_index}");
+        let sequence_id = self.sequence_id().to_string();
         self.push_step(
             &step_id,
             "AddEffect",
             json!({
-                "sequenceId": self.sequence_id,
+                "sequenceId": sequence_id,
                 "trackId": step_reference(track_step),
                 "clipId": step_reference(&outgoing.step_id),
                 "effectType": effect_type,
-                "params": { "duration": duration_sec },
+                "params": params,
             }),
             &[&outgoing.step_id, &incoming.step_id],
         );
     }
 
-    fn transition_effect_type(&mut self, transition: &OtioTransition, track_name: &str) -> String {
+    /// The OpenReelio effect an OTIO transition becomes, or `None` when it
+    /// becomes nothing.
+    ///
+    /// `metadata.openreelio.transitionType` is read from an untrusted file, so
+    /// it is checked against [`IMPORTABLE_TRANSITIONS`] rather than passed
+    /// through: unchecked, it lets an `.otio` add any effect in the catalogue —
+    /// a colour grade, a blur — through a verb whose contract is that it carries
+    /// cuts.
+    fn transition_effect_type(
+        &mut self,
+        transition: &OtioTransition,
+        track_name: &str,
+    ) -> Option<String> {
         if let Some(effect_type) = openreelio_meta_str(&transition.metadata, "transitionType") {
-            return effect_type.to_string();
+            if IMPORTABLE_TRANSITIONS.contains(&effect_type) {
+                return Some(effect_type.to_string());
+            }
+            self.plan.warnings.push(format!(
+                "a transition on track '{track_name}' names the type \"{effect_type}\", which is \
+                 not one of the two-input transitions an OTIO import may place ({}); it was not \
+                 imported",
+                IMPORTABLE_TRANSITIONS.join(", ")
+            ));
+            return None;
         }
 
         if transition.transition_type != "SMPTE_Dissolve" {
@@ -493,7 +823,7 @@ impl<'a> PlanBuilder<'a> {
             ));
         }
 
-        DEFAULT_TRANSITION_EFFECT.to_string()
+        Some(DEFAULT_TRANSITION_EFFECT.to_string())
     }
 
     /// Warns when a boundary does not have the unused source media a blend
@@ -505,12 +835,13 @@ impl<'a> PlanBuilder<'a> {
     /// render path soft-refuses the blend instead of failing the export.
     fn check_handles(
         &mut self,
-        transition: &OtioTransition,
+        in_sec: f64,
+        out_sec: f64,
         outgoing: &PlacedClip,
         incoming: &PlacedClip,
         track_name: &str,
     ) {
-        let rate = transition.in_offset.rate.max(transition.out_offset.rate);
+        let rate = self.clock.frames_per_second();
         let slack_sec = if rate.is_finite() && rate > 0.0 {
             HANDLE_SLACK_FRAMES / rate
         } else {
@@ -519,13 +850,13 @@ impl<'a> PlanBuilder<'a> {
 
         // OTIO's in_offset reaches back into the outgoing item and out_offset
         // reaches forward into the incoming one.
-        let outgoing_needed = transition.in_offset.to_seconds() + slack_sec;
-        let incoming_needed = transition.out_offset.to_seconds() + slack_sec;
+        let outgoing_needed = in_sec + slack_sec;
+        let incoming_needed = out_sec + slack_sec;
 
         match outgoing
             .asset_id
             .as_ref()
-            .and_then(|asset_id| self.assets.get(asset_id))
+            .and_then(|asset_id| self.assets().get(asset_id))
             .and_then(|asset| asset.duration_sec)
             .filter(|duration| duration.is_finite() && *duration > 0.0)
         {
@@ -559,11 +890,40 @@ impl<'a> PlanBuilder<'a> {
     // Markers
     // -------------------------------------------------------------------------
 
-    fn add_marker(&mut self, index: usize, marker: &OtioMarker) {
-        let time_sec = marker.marked_range.start_time.to_seconds();
+    /// Emits an `AddMarker` step for a marker the file carried.
+    ///
+    /// `track` names the track the marker sat on, or `None` for one that already
+    /// sat on the stack. OpenReelio holds markers on the sequence, so a track's
+    /// markers land there too — which is a change worth reporting, and a step
+    /// worth emitting: the previous code announced the import in a warning and
+    /// emitted nothing, so the marker was reported as carried and was lost.
+    fn add_marker(&mut self, step_id: &str, marker: &OtioMarker, track: Option<&str>) {
+        let origin = match track {
+            Some(name) => format!("track '{name}'"),
+            None => "the sequence".to_string(),
+        };
+        self.note_rate(&marker.marked_range.start_time);
+        let Some(time_sec) = marker.marked_range.start_time.to_seconds() else {
+            self.plan.warnings.push(format!(
+                "the marker '{}' on {origin} has a position this build cannot read and was not \
+                 imported",
+                marker.name
+            ));
+            return;
+        };
+        if time_sec < 0.0 {
+            self.plan.warnings.push(format!(
+                "the marker '{}' on {origin} is at {time_sec}s, before the start of the sequence, \
+                 and was not imported",
+                marker.name
+            ));
+            return;
+        }
+
+        let sequence_id = self.sequence_id().to_string();
         let mut payload = json!({
-            "sequenceId": self.sequence_id,
-            "timeSec": time_sec,
+            "sequenceId": sequence_id,
+            "timeSec": self.clock.snap_seconds_to_frame(time_sec),
             "label": marker.name,
         });
 
@@ -580,7 +940,7 @@ impl<'a> PlanBuilder<'a> {
             }
         }
 
-        if marker.marked_range.duration.to_seconds() > 0.0 {
+        if marker.marked_range.duration.to_seconds().unwrap_or(0.0) > 0.0 {
             self.plan.unsupported.push(format!(
                 "the marker '{}' spans a range; OpenReelio markers are points, so only its start \
                  was imported",
@@ -588,7 +948,15 @@ impl<'a> PlanBuilder<'a> {
             ));
         }
 
-        self.push_step(&format!("marker_{index}"), "AddMarker", payload, &[]);
+        if track.is_some() {
+            self.plan.warnings.push(format!(
+                "the marker '{}' on {origin} was imported onto the sequence: OpenReelio holds \
+                 markers on the sequence, not per track",
+                marker.name
+            ));
+        }
+
+        self.push_step(step_id, "AddMarker", payload, &[]);
     }
 }
 
@@ -654,14 +1022,64 @@ fn base_name(path: &str) -> String {
         .to_string()
 }
 
+/// The wipe / slide direction a transition asks for, if it asks for a valid one.
+///
+/// Only wipes and slides have a direction, and the value comes out of a foreign
+/// file, so it is checked against the set the render engine understands: an
+/// unrecognised direction would silently render as the default and turn a
+/// wipe-right into a wipe-left on the round trip.
+fn transition_direction(transition: &OtioTransition, effect_type: &str) -> Option<String> {
+    if !matches!(effect_type, "wipe" | "slide") {
+        return None;
+    }
+    let direction = openreelio_meta_str(&transition.metadata, "direction")?;
+    IMPORTABLE_TRANSITION_DIRECTIONS
+        .contains(&direction)
+        .then(|| direction.to_string())
+}
+
 /// Whether a resolved media path points at a UNC / network location.
 ///
 /// `file_url_to_path` turns `file://host/share/x` into `//host/share/x`, and a
-/// hand-written `.otio` may carry `\\host\share\x`. Both denote a remote SMB
-/// path; importing from one lets the file's author trigger an outbound
-/// connection (and an NTLM leak on Windows), so they are refused.
+/// hand-written `.otio` may carry `\\host\share\x`, `/\host\share\x` or the
+/// percent-encoded `%5C%5Chost`. Windows resolves every one of them as the same
+/// share, so the test cannot be a list of literal prefixes — it normalises the
+/// separators first and then asks whether the path starts with two of them.
+///
+/// Importing from a share lets the file's author trigger an outbound connection
+/// (and an NTLM handshake leak on Windows), so they are refused.
 fn is_network_path(path: &str) -> bool {
-    path.starts_with("//") || path.starts_with("\\\\")
+    strip_verbatim_prefix(path)
+        .replace('\\', "/")
+        .starts_with("//")
+}
+
+/// Whether a decoded media path names an absolute location.
+///
+/// Deliberately answered from the string rather than `Path::is_absolute`: an
+/// `.otio` written on Windows is routinely read on Linux and the reverse, and
+/// `Path::is_absolute` answers for the *host*, so `C:/Windows/win.ini` reads as a
+/// relative path on Linux and would be joined onto the project root — landing
+/// inside the scope it was supposed to be measured against.
+fn is_absolute_media_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    matches!(bytes.first(), Some(b'/') | Some(b'\\'))
+        || matches!(bytes, [drive, b':', ..] if drive.is_ascii_alphabetic())
+}
+
+/// Whether a media path resolves inside the project directory.
+///
+/// A `..` component is refused outright rather than resolved: the containment
+/// test below falls back to a textual comparison for a path that does not exist,
+/// and `<project>/../../etc/passwd` passes a textual comparison.
+fn is_inside_project(project_root: &Path, candidate: &Path) -> bool {
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return false;
+    }
+    crate::core::workspace::path_resolver::is_inside_project(project_root, candidate)
 }
 
 // =============================================================================
@@ -752,6 +1170,52 @@ mod tests {
             .collect()
     }
 
+    /// Where every fixture keeps its media, and the project root the fixtures
+    /// import into: the importer only reads media from inside the project, so a
+    /// test that is not about scoping should satisfy scoping by construction.
+    const PROJECT_ROOT: &str = "/media";
+
+    fn plan_for(
+        timeline: &OtioTimeline,
+        assets: &HashMap<String, Asset>,
+    ) -> Result<OtioImportPlan, String> {
+        plan_in(timeline, assets, PROJECT_ROOT, false)
+    }
+
+    fn plan_in(
+        timeline: &OtioTimeline,
+        assets: &HashMap<String, Asset>,
+        project_root: &str,
+        allow_external_media: bool,
+    ) -> Result<OtioImportPlan, String> {
+        plan_at(
+            timeline,
+            assets,
+            project_root,
+            allow_external_media,
+            Ratio::new(24, 1),
+        )
+    }
+
+    fn plan_at(
+        timeline: &OtioTimeline,
+        assets: &HashMap<String, Asset>,
+        project_root: &str,
+        allow_external_media: bool,
+        sequence_fps: Ratio,
+    ) -> Result<OtioImportPlan, String> {
+        otio_to_plan_steps(
+            timeline,
+            &OtioImportContext {
+                sequence_id: "seq1",
+                assets,
+                project_root: Path::new(project_root),
+                sequence_fps,
+                allow_external_media,
+            },
+        )
+    }
+
     fn step_types(plan: &OtioImportPlan) -> Vec<String> {
         plan.steps
             .iter()
@@ -775,8 +1239,7 @@ mod tests {
         );
 
         // When: converting to plan steps
-        let plan =
-            otio_to_plan_steps(&timeline, "seq1", &HashMap::new()).expect("plan should build");
+        let plan = plan_for(&timeline, &HashMap::new()).expect("plan should build");
 
         // Then: two CreateTrack steps carrying our own kind names
         assert_eq!(step_types(&plan), vec!["CreateTrack", "CreateTrack"]);
@@ -792,8 +1255,7 @@ mod tests {
             json!([]),
         );
 
-        let plan =
-            otio_to_plan_steps(&timeline, "seq1", &HashMap::new()).expect("plan should build");
+        let plan = plan_for(&timeline, &HashMap::new()).expect("plan should build");
 
         assert!(plan.steps.is_empty());
         assert!(plan.warnings.iter().any(|w| w.contains("Effect")));
@@ -813,7 +1275,7 @@ mod tests {
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
 
         // When: converting
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         // Then: the gap emits no step and the second clip starts at 5s
         assert_eq!(
@@ -839,7 +1301,7 @@ mod tests {
         );
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
 
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         assert_eq!(plan.steps[1]["payload"]["trackId"]["$fromStep"], "track_0");
         assert_eq!(plan.steps[1]["payload"]["trackId"]["$path"], "createdIds.0");
@@ -867,7 +1329,7 @@ mod tests {
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
 
         // When: converting
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         // Then: 96 ticks at 48fps is 2s of source, not 4s
         assert_eq!(plan.steps[2]["payload"]["timelineStart"], 2.0);
@@ -892,7 +1354,7 @@ mod tests {
         );
         let assets = assets_with(&[("a1", "My Clip.mp4", "/media/My Clip.mp4", Some(60.0))]);
 
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         assert_eq!(plan.steps[1]["payload"]["assetId"], "a1");
         assert!(plan.asset_imports.is_empty());
@@ -905,7 +1367,7 @@ mod tests {
         let timeline = timeline_of(json!([video_track(json!([clip]))]), json!([]));
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
 
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         assert_eq!(plan.steps[1]["payload"]["assetId"], "a1");
     }
@@ -920,8 +1382,7 @@ mod tests {
             json!([]),
         );
 
-        let plan =
-            otio_to_plan_steps(&timeline, "seq1", &HashMap::new()).expect("plan should build");
+        let plan = plan_for(&timeline, &HashMap::new()).expect("plan should build");
 
         assert_eq!(
             step_types(&plan),
@@ -951,8 +1412,7 @@ mod tests {
             json!([]),
         );
 
-        let plan =
-            otio_to_plan_steps(&timeline, "seq1", &HashMap::new()).expect("plan should build");
+        let plan = plan_for(&timeline, &HashMap::new()).expect("plan should build");
 
         // No ImportAsset step and no InsertClip for the offending clip.
         assert_eq!(step_types(&plan), vec!["CreateTrack"]);
@@ -985,8 +1445,7 @@ mod tests {
             json!([]),
         );
 
-        let plan =
-            otio_to_plan_steps(&timeline, "seq1", &HashMap::new()).expect("plan should build");
+        let plan = plan_for(&timeline, &HashMap::new()).expect("plan should build");
 
         assert_eq!(step_types(&plan), vec!["CreateTrack"]);
         assert!(plan.warnings.iter().any(|w| w.contains("offline")));
@@ -1007,8 +1466,8 @@ mod tests {
             json!([]),
         );
 
-        let error = otio_to_plan_steps(&timeline, "seq1", &HashMap::new())
-            .expect_err("an image sequence should be refused");
+        let error =
+            plan_for(&timeline, &HashMap::new()).expect_err("an image sequence should be refused");
 
         assert!(error.contains("image sequence"));
         assert!(error.contains("frames"));
@@ -1046,7 +1505,7 @@ mod tests {
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
 
         // When: converting
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         // Then: an AddEffect on the first clip, 1s long, ordered behind both
         let effect = plan
@@ -1078,7 +1537,7 @@ mod tests {
         );
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
 
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
         let effect = plan
             .steps
             .iter()
@@ -1100,7 +1559,7 @@ mod tests {
         );
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
 
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         assert!(plan
             .unsupported
@@ -1122,7 +1581,7 @@ mod tests {
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
 
         // When: converting
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         // Then: the plan still carries the step, with a warning about the handle
         assert!(plan
@@ -1148,7 +1607,7 @@ mod tests {
         // The outgoing clip ends at 5s in a source that is only 5s long.
         let assets = assets_with(&[("a1", "short.mp4", "/media/short.mp4", Some(5.0))]);
 
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         assert!(plan
             .warnings
@@ -1168,7 +1627,7 @@ mod tests {
         );
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", None)]);
 
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         assert!(plan
             .warnings
@@ -1187,7 +1646,7 @@ mod tests {
         );
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
 
-        let plan = otio_to_plan_steps(&timeline, "seq1", &assets).expect("plan should build");
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
 
         assert!(plan
             .steps
@@ -1216,8 +1675,7 @@ mod tests {
             }]),
         );
 
-        let plan =
-            otio_to_plan_steps(&timeline, "seq1", &HashMap::new()).expect("plan should build");
+        let plan = plan_for(&timeline, &HashMap::new()).expect("plan should build");
 
         assert_eq!(step_types(&plan), vec!["AddMarker"]);
         assert_eq!(plan.steps[0]["payload"]["timeSec"], 2.0);
@@ -1232,8 +1690,7 @@ mod tests {
             json!([]),
         );
 
-        let plan =
-            otio_to_plan_steps(&timeline, "seq1", &HashMap::new()).expect("plan should build");
+        let plan = plan_for(&timeline, &HashMap::new()).expect("plan should build");
 
         assert!(plan.steps.is_empty());
         assert!(plan
@@ -1253,8 +1710,7 @@ mod tests {
         let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60000.0))]);
 
         // When: converting
-        let error = otio_to_plan_steps(&timeline, "seq1", &assets)
-            .expect_err("an oversized file should be refused");
+        let error = plan_for(&timeline, &assets).expect_err("an oversized file should be refused");
 
         // Then: the refusal names the cap rather than chunking the plan
         assert!(error.contains(&MAX_PLAN_STEPS.to_string()));
@@ -1274,9 +1730,601 @@ mod tests {
         );
 
         let plan =
-            otio_to_plan_steps(&timeline, "seq1", &HashMap::new()).expect("plan should build");
+            plan_in(&timeline, &HashMap::new(), "C:/Media", false).expect("plan should build");
 
         assert_eq!(plan.asset_imports[0].uri, "C:/Media/My Clip.mp4");
         assert_eq!(plan.asset_imports[0].name, "My Clip.mp4");
+    }
+
+    // =========================================================================
+    // Media scoping
+    // =========================================================================
+
+    /// Builds a one-clip timeline pointing at `url`.
+    fn timeline_referencing(url: &str) -> OtioTimeline {
+        timeline_of(
+            json!([video_track(json!([clip_node("a", 0.0, 48.0, url)]))]),
+            json!([]),
+        )
+    }
+
+    #[test]
+    fn should_refuse_every_spelling_of_a_network_path() {
+        // Windows resolves all of these as the same SMB share. A literal
+        // `//`-or-`\\` prefix test only catches the last two, so a file that
+        // spells the share `/\host\share` — or percent-encodes the separators —
+        // walks straight past it into ImportAsset and an outbound NTLM handshake.
+        for url in [
+            "file:///\\\\host/share/clip.mp4",
+            "file:////host/share/clip.mp4",
+            "file:///%5Chost/share/clip.mp4",
+            "file:///%5C%5Chost/share/clip.mp4",
+            "file:///%5C/host/share/clip.mp4",
+            "file://host/share/clip.mp4",
+        ] {
+            let plan =
+                plan_for(&timeline_referencing(url), &HashMap::new()).expect("plan should build");
+
+            assert_eq!(
+                step_types(&plan),
+                vec!["CreateTrack"],
+                "'{url}' must not reach ImportAsset"
+            );
+            assert!(plan.asset_imports.is_empty(), "'{url}' imported media");
+            assert!(
+                plan.warnings
+                    .iter()
+                    .any(|warning| warning.contains("network path")
+                        || warning.contains("outside the project directory")),
+                "'{url}' must be refused by name: {:?}",
+                plan.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn should_refuse_a_local_path_outside_the_project_even_when_it_is_not_a_share() {
+        // An absolute local path is a filesystem existence oracle: ImportAsset
+        // stats it, and for some kinds ffprobes it, so a hostile file learns
+        // what is on the machine one clip at a time.
+        for url in [
+            "file:///C:/Windows/win.ini",
+            "file:///etc/passwd",
+            "file:///C%3A/Windows/win.ini",
+        ] {
+            let plan = plan_in(
+                &timeline_referencing(url),
+                &HashMap::new(),
+                "/project",
+                false,
+            )
+            .expect("plan should build");
+
+            assert_eq!(
+                step_types(&plan),
+                vec!["CreateTrack"],
+                "'{url}' must not reach ImportAsset"
+            );
+            assert!(
+                plan.warnings
+                    .iter()
+                    .any(|warning| warning.contains("outside the project directory")),
+                "'{url}' must be refused by name: {:?}",
+                plan.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn should_refuse_a_relative_path_that_climbs_out_of_the_project() {
+        let plan = plan_in(
+            &timeline_referencing("../../secrets/passwords.mp4"),
+            &HashMap::new(),
+            "/project",
+            false,
+        )
+        .expect("plan should build");
+
+        assert_eq!(step_types(&plan), vec!["CreateTrack"]);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("walks out of the directory")));
+    }
+
+    #[test]
+    fn should_import_media_that_lives_inside_the_project() {
+        let plan = plan_in(
+            &timeline_referencing("file:///project/footage/a.mp4"),
+            &HashMap::new(),
+            "/project",
+            false,
+        )
+        .expect("plan should build");
+
+        assert_eq!(
+            step_types(&plan),
+            vec!["CreateTrack", "ImportAsset", "InsertClip"]
+        );
+        assert_eq!(plan.asset_imports[0].uri, "/project/footage/a.mp4");
+    }
+
+    #[test]
+    fn should_resolve_a_project_relative_reference_against_the_project_root() {
+        // Our own export writes a relative reference for media stored inside the
+        // project, so this is the round trip, not an exotic input.
+        let plan = plan_in(
+            &timeline_referencing("footage/a.mp4"),
+            &HashMap::new(),
+            "/project",
+            false,
+        )
+        .expect("plan should build");
+
+        assert_eq!(plan.asset_imports[0].uri, "/project/footage/a.mp4");
+    }
+
+    #[test]
+    fn should_import_media_outside_the_project_only_when_it_is_allowed() {
+        let timeline = timeline_referencing("file:///elsewhere/a.mp4");
+
+        let refused =
+            plan_in(&timeline, &HashMap::new(), "/project", false).expect("plan should build");
+        assert!(refused.asset_imports.is_empty());
+
+        let allowed =
+            plan_in(&timeline, &HashMap::new(), "/project", true).expect("plan should build");
+        assert_eq!(allowed.asset_imports[0].uri, "/elsewhere/a.mp4");
+    }
+
+    #[test]
+    fn should_still_match_an_existing_asset_that_lives_outside_the_project() {
+        // Scoping guards ImportAsset, not the timeline: media the user already
+        // imported themselves is media the project already trusts.
+        let assets = assets_with(&[("a1", "a.mp4", "/elsewhere/a.mp4", Some(60.0))]);
+        let plan = plan_in(
+            &timeline_referencing("file:///elsewhere/a.mp4"),
+            &assets,
+            "/project",
+            false,
+        )
+        .expect("plan should build");
+
+        assert_eq!(plan.steps[1]["payload"]["assetId"], "a1");
+        assert!(plan.asset_imports.is_empty());
+    }
+
+    #[test]
+    fn should_classify_every_separator_spelling_of_a_network_path() {
+        for path in [
+            "//host/share/x.mp4",
+            "\\\\host\\share\\x.mp4",
+            "/\\host\\share\\x.mp4",
+            "\\/host/share/x.mp4",
+            r"\\?\UNC\host\share\x.mp4",
+        ] {
+            assert!(is_network_path(path), "'{path}' is a share");
+        }
+        for path in [
+            "/media/x.mp4",
+            "C:/media/x.mp4",
+            "C:\\media\\x.mp4",
+            r"\\?\C:\media\x.mp4",
+            "media/x.mp4",
+        ] {
+            assert!(!is_network_path(path), "'{path}' is local");
+        }
+    }
+
+    // =========================================================================
+    // Invalid times
+    // =========================================================================
+
+    #[test]
+    fn should_skip_a_clip_whose_duration_overflows_to_infinity() {
+        // 1e308 / 1e-308 is finite over finite and still overflows. Coerced, it
+        // serialises into the step as JSON null and the `<= 0` guard waves it
+        // through, so the plan carries a clip with no in or out point at all.
+        let timeline = timeline_of(
+            json!([video_track(json!([{
+                "OTIO_SCHEMA": "Clip.2",
+                "name": "overflow",
+                "source_range": {
+                    "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": rational(0.0, 24.0),
+                    "duration": rational(1e308, 1e-308),
+                },
+                "media_reference": {
+                    "OTIO_SCHEMA": "ExternalReference.1",
+                    "target_url": "file:///media/a.mp4",
+                },
+            }]))]),
+            json!([]),
+        );
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+
+        assert_eq!(step_types(&plan), vec!["CreateTrack"]);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("cannot read")));
+        assert_no_null_or_infinite_times(&plan);
+    }
+
+    #[test]
+    fn should_skip_a_clip_whose_source_in_point_is_before_the_media_starts() {
+        let timeline = timeline_of(
+            json!([video_track(json!([clip_node(
+                "backwards",
+                -48.0,
+                48.0,
+                "file:///media/a.mp4"
+            )]))]),
+            json!([]),
+        );
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+
+        assert_eq!(step_types(&plan), vec!["CreateTrack"]);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("before the media starts")));
+    }
+
+    #[test]
+    fn should_skip_a_clip_whose_duration_is_negative() {
+        let timeline = timeline_of(
+            json!([video_track(json!([clip_node(
+                "negative",
+                0.0,
+                -48.0,
+                "file:///media/a.mp4"
+            )]))]),
+            json!([]),
+        );
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+
+        assert_eq!(step_types(&plan), vec!["CreateTrack"]);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("was not imported")));
+    }
+
+    #[test]
+    fn should_skip_a_marker_before_the_start_of_the_sequence() {
+        let timeline = timeline_of(
+            json!([]),
+            json!([
+                {
+                    "OTIO_SCHEMA": "Marker.1",
+                    "name": "Backwards",
+                    "marked_range": range(-48.0, 0.0, 24.0),
+                },
+                {
+                    "OTIO_SCHEMA": "Marker.1",
+                    "name": "Unreadable",
+                    "marked_range": {
+                        "OTIO_SCHEMA": "TimeRange.1",
+                        "start_time": rational(1.0, 0.0),
+                        "duration": rational(0.0, 24.0),
+                    },
+                },
+            ]),
+        );
+
+        let plan = plan_for(&timeline, &HashMap::new()).expect("plan should build");
+
+        assert!(plan.steps.is_empty(), "no marker should be placed");
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("before the start of the sequence")));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("cannot read")));
+        assert_no_null_or_infinite_times(&plan);
+    }
+
+    /// Fails if any step carries a time that is not a real number.
+    fn assert_no_null_or_infinite_times(plan: &OtioImportPlan) {
+        for step in &plan.steps {
+            for key in ["timelineStart", "sourceIn", "sourceOut", "timeSec"] {
+                if let Some(value) = step["payload"].get(key) {
+                    let number = value
+                        .as_f64()
+                        .unwrap_or_else(|| panic!("{key} must be a number, got {value}"));
+                    assert!(number.is_finite(), "{key} must be finite, got {number}");
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Transition placement
+    // =========================================================================
+
+    #[test]
+    fn should_not_attach_a_transition_to_a_cut_that_lost_its_neighbour() {
+        // [A, T1, B(offline), T2, C]: B is skipped, so neither transition sits on
+        // a surviving cut any more. Resolving by the count of placed clips walks
+        // T1 onto the A|C boundary the file never named, and gives both
+        // transitions the same step id.
+        let timeline = timeline_of(
+            json!([video_track(json!([
+                clip_node("a", 48.0, 72.0, "file:///media/a.mp4"),
+                dissolve_node(12.0, 12.0, None),
+                {
+                    "OTIO_SCHEMA": "Clip.2",
+                    "name": "b_offline",
+                    "source_range": range(0.0, 72.0, 24.0),
+                    "media_reference": { "OTIO_SCHEMA": "MissingReference.1" },
+                },
+                dissolve_node(12.0, 12.0, None),
+                clip_node("c", 240.0, 72.0, "file:///media/a.mp4"),
+            ]))]),
+            json!([]),
+        );
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+
+        assert!(
+            plan.steps
+                .iter()
+                .all(|step| step["commandType"] != "AddEffect"),
+            "neither transition sits between two imported clips: {:?}",
+            step_types(&plan)
+        );
+        assert_unique_step_ids(&plan);
+        assert_eq!(
+            plan.warnings
+                .iter()
+                .filter(|warning| warning.contains("does not sit between two imported clips"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn should_keep_two_transitions_on_one_track_apart() {
+        let timeline = timeline_of(
+            json!([video_track(json!([
+                clip_node("a", 48.0, 72.0, "file:///media/a.mp4"),
+                dissolve_node(12.0, 12.0, None),
+                clip_node("b", 240.0, 72.0, "file:///media/a.mp4"),
+                dissolve_node(12.0, 12.0, None),
+                clip_node("c", 480.0, 72.0, "file:///media/a.mp4"),
+            ]))]),
+            json!([]),
+        );
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+
+        let attached: Vec<&str> = plan
+            .steps
+            .iter()
+            .filter(|step| step["commandType"] == "AddEffect")
+            .filter_map(|step| step["payload"]["clipId"]["$fromStep"].as_str())
+            .collect();
+        assert_eq!(attached, vec!["clip_0_0", "clip_0_2"]);
+        assert_unique_step_ids(&plan);
+    }
+
+    #[test]
+    fn should_not_place_a_transition_on_the_clip_before_a_skipped_one() {
+        // [A, B(offline), T, C]: the transition's outgoing side is the clip that
+        // was skipped, so there is nothing to attach it to — attaching it to A
+        // would silently move the blend to a different cut.
+        let timeline = timeline_of(
+            json!([video_track(json!([
+                clip_node("a", 48.0, 72.0, "file:///media/a.mp4"),
+                {
+                    "OTIO_SCHEMA": "Clip.2",
+                    "name": "b_offline",
+                    "source_range": range(0.0, 72.0, 24.0),
+                    "media_reference": { "OTIO_SCHEMA": "MissingReference.1" },
+                },
+                dissolve_node(12.0, 12.0, None),
+                clip_node("c", 240.0, 72.0, "file:///media/a.mp4"),
+            ]))]),
+            json!([]),
+        );
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+
+        assert!(plan
+            .steps
+            .iter()
+            .all(|step| step["commandType"] != "AddEffect"));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("an adjacent \nclip was skipped")
+                || warning.contains("adjacent clip was skipped")));
+    }
+
+    fn assert_unique_step_ids(plan: &OtioImportPlan) {
+        let mut seen = std::collections::HashSet::new();
+        for step in &plan.steps {
+            let id = step["id"].as_str().expect("every step has an id");
+            assert!(seen.insert(id.to_string()), "duplicate step id '{id}'");
+        }
+    }
+
+    #[test]
+    fn should_refuse_a_transition_type_that_is_not_a_two_input_transition() {
+        // metadata.openreelio.transitionType is read from an untrusted file: with
+        // no allowlist it adds any effect in the catalogue through a cut verb.
+        let timeline = timeline_of(
+            json!([video_track(json!([
+                clip_node("a", 48.0, 72.0, "file:///media/a.mp4"),
+                dissolve_node(12.0, 12.0, Some("brightness")),
+                clip_node("b", 240.0, 72.0, "file:///media/a.mp4"),
+            ]))]),
+            json!([]),
+        );
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+
+        assert!(
+            plan.steps
+                .iter()
+                .all(|step| step["commandType"] != "AddEffect"),
+            "'brightness' is not a transition and must not be added as an effect"
+        );
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("brightness")));
+    }
+
+    #[test]
+    fn should_restore_the_direction_a_wipe_was_exported_with() {
+        // Without the direction the renderer defaults to left, so a wipe-right
+        // silently becomes a wipe-left on the round trip.
+        let mut node = dissolve_node(12.0, 12.0, Some("wipe"));
+        node["metadata"]["openreelio"]["direction"] = json!("right");
+        let timeline = timeline_of(
+            json!([video_track(json!([
+                clip_node("a", 48.0, 72.0, "file:///media/a.mp4"),
+                node,
+                clip_node("b", 240.0, 72.0, "file:///media/a.mp4"),
+            ]))]),
+            json!([]),
+        );
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+        let effect = plan
+            .steps
+            .iter()
+            .find(|step| step["commandType"] == "AddEffect")
+            .expect("the wipe should import");
+
+        assert_eq!(effect["payload"]["effectType"], "wipe");
+        assert_eq!(effect["payload"]["params"]["direction"], "right");
+    }
+
+    // =========================================================================
+    // Reported losses
+    // =========================================================================
+
+    #[test]
+    fn should_report_the_speed_detail_the_import_does_not_restore() {
+        let mut clip = clip_node("fast", 0.0, 48.0, "file:///media/a.mp4");
+        clip["metadata"] = json!({
+            "openreelio": { "speed": 2.0, "reverse": true, "freezeFrame": true, "timeRemap": true }
+        });
+        let timeline = timeline_of(json!([video_track(json!([clip]))]), json!([]));
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+
+        let entry = plan
+            .unsupported
+            .iter()
+            .find(|entry| entry.contains("fast"))
+            .unwrap_or_else(|| panic!("the loss must be reported: {:?}", plan.unsupported));
+        assert!(entry.contains("2x speed change"), "{entry}");
+        assert!(entry.contains("reverse playback"), "{entry}");
+        assert!(entry.contains("freeze frame"), "{entry}");
+        assert!(entry.contains("time remap"), "{entry}");
+    }
+
+    #[test]
+    fn should_import_a_track_marker_onto_the_sequence_rather_than_claiming_to() {
+        let mut track = video_track(json!([]));
+        track["markers"] = json!([{
+            "OTIO_SCHEMA": "Marker.1",
+            "name": "Beat",
+            "marked_range": range(48.0, 0.0, 24.0),
+        }]);
+        let timeline = timeline_of(json!([track]), json!([]));
+
+        let plan = plan_for(&timeline, &HashMap::new()).expect("plan should build");
+
+        assert_eq!(step_types(&plan), vec!["CreateTrack", "AddMarker"]);
+        assert_eq!(plan.steps[1]["payload"]["timeSec"], 2.0);
+        assert_eq!(plan.steps[1]["payload"]["label"], "Beat");
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("was imported onto the sequence")));
+    }
+
+    #[test]
+    fn should_report_clip_markers_as_lost_rather_than_dropping_them_silently() {
+        let mut clip = clip_node("a", 0.0, 48.0, "file:///media/a.mp4");
+        clip["markers"] = json!([{
+            "OTIO_SCHEMA": "Marker.1",
+            "name": "Note",
+            "marked_range": range(12.0, 0.0, 24.0),
+        }]);
+        let timeline = timeline_of(json!([video_track(json!([clip]))]), json!([]));
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        let plan = plan_for(&timeline, &assets).expect("plan should build");
+
+        assert!(plan
+            .unsupported
+            .iter()
+            .any(|entry| entry.contains("marker(s) that were not imported")));
+    }
+
+    // =========================================================================
+    // Frame grid
+    // =========================================================================
+
+    #[test]
+    fn should_land_a_foreign_rate_on_the_target_sequences_frame_grid() {
+        // Given: a 24fps cut imported into a 30fps sequence. 25 frames at 24fps
+        // is 1.041666…s, which is not a position a 30fps sequence has.
+        let timeline = timeline_of(
+            json!([video_track(json!([
+                clip_node("a", 0.0, 25.0, "file:///media/a.mp4"),
+                clip_node("b", 0.0, 25.0, "file:///media/a.mp4"),
+            ]))]),
+            json!([]),
+        );
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        // When: converting against a 30fps sequence
+        let plan = plan_at(&timeline, &assets, PROJECT_ROOT, false, Ratio::new(30, 1))
+            .expect("plan should build");
+
+        // Then: every position is a whole 30fps frame, and the rate difference
+        // is reported rather than silently absorbed
+        for step in plan
+            .steps
+            .iter()
+            .filter(|step| step["commandType"] == "InsertClip")
+        {
+            let start = step["payload"]["timelineStart"]
+                .as_f64()
+                .expect("a timeline start");
+            let frame = start * 30.0;
+            assert!(
+                (frame - frame.round()).abs() < 1e-9,
+                "{start}s is not on the 30fps grid"
+            );
+        }
+        assert!(
+            plan.unsupported
+                .iter()
+                .any(|entry| entry.contains("frame grid")),
+            "the rate mismatch must be reported: {:?}",
+            plan.unsupported
+        );
     }
 }

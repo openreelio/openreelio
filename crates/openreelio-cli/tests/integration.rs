@@ -9289,6 +9289,11 @@ fn test_otio_round_trip_preserves_the_cut_structure() {
         &target_path,
         "--file",
         interchange.to_str().unwrap(),
+        // The fixture's media sits beside the projects rather than inside
+        // either of them, which is exactly the case import refuses by default.
+        // Relinking a foreign edit to media held elsewhere is the workflow the
+        // flag exists for; the refusal itself is covered below.
+        "--allow-external-media",
     ]);
     assert_eq!(import["status"], "ok", "import report: {import}");
     // The fresh project has none of the media, so the plan imports it first.
@@ -9359,6 +9364,164 @@ fn test_otio_import_dry_run_leaves_the_project_untouched() {
     let after_tracks = run_cli_ok(&["timeline", "tracks", "--path", &target_path]);
     assert_eq!(after["count"], before["count"]);
     assert_eq!(after_tracks["count"], before_tracks["count"]);
+}
+
+/// Every file under `root`, as (relative path, bytes).
+///
+/// Content rather than mtime: a copy-then-delete migration can preserve a
+/// timestamp, and what a caller cares about is that its bytes are where it left
+/// them.
+fn snapshot_tree(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                let key = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(key, bytes);
+            }
+        }
+    }
+
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn test_otio_import_dry_run_writes_nothing_to_a_legacy_project_layout() {
+    // Given: an OTIO file, and a project whose state still sits in the legacy
+    // root files. Opening an editing session migrates those into the hidden
+    // state directory — renaming, copying and deleting — before anything the
+    // caller asked for happens, so a dry run that opens a session rewrites the
+    // project it promised not to touch.
+    let source_dir = create_temp_project("otio_legacy_source");
+    let (source_path, _) = seed_otio_fixture(&source_dir, "otio_legacy_source");
+    let interchange = source_dir.path().join("legacy.otio");
+    run_cli_ok(&[
+        "otio",
+        "export",
+        "--path",
+        &source_path,
+        "--out",
+        interchange.to_str().unwrap(),
+    ]);
+
+    let target_dir = create_temp_project("otio_legacy_target");
+    let target_root = target_dir.path().join("otio_legacy_target");
+    let target_path = target_root.to_string_lossy().to_string();
+
+    // Move the state back to the legacy layout this project once used.
+    let state_dir = target_root.join(".openreelio").join("state");
+    for name in ["ops.jsonl", "snapshot.json", "project.json"] {
+        let hidden = state_dir.join(name);
+        if hidden.exists() {
+            std::fs::rename(&hidden, target_root.join(name)).expect("move state file");
+        }
+    }
+    std::fs::remove_dir_all(target_root.join(".openreelio")).expect("drop the hidden state dir");
+
+    let before = snapshot_tree(&target_root);
+
+    // When: importing with --dry-run
+    let result = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &target_path,
+        "--file",
+        interchange.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    // Then: the plan is printed, and every byte under the project is where it
+    // was — no migrated state files, no created directory, no lock file.
+    assert_eq!(result["dryRun"], true);
+    assert!(result["stepCount"].as_u64().unwrap() > 0);
+
+    let after = snapshot_tree(&target_root);
+    let before_names: Vec<&String> = before.keys().collect();
+    let after_names: Vec<&String> = after.keys().collect();
+    assert_eq!(
+        after_names, before_names,
+        "a dry run must not add, move or remove a file"
+    );
+    assert!(
+        before == after,
+        "a dry run must not rewrite any file under the project"
+    );
+}
+
+#[test]
+fn test_otio_import_refuses_media_outside_the_project_by_default() {
+    // Given: an OTIO file whose media sits outside the project it is imported
+    // into. ImportAsset stats — and for some kinds ffprobes — whatever path it
+    // is handed, so an unscoped import is a filesystem probe the file's author
+    // gets to aim.
+    let source_dir = create_temp_project("otio_scope_source");
+    let (source_path, _) = seed_otio_fixture(&source_dir, "otio_scope_source");
+    let interchange = source_dir.path().join("scope.otio");
+    run_cli_ok(&[
+        "otio",
+        "export",
+        "--path",
+        &source_path,
+        "--out",
+        interchange.to_str().unwrap(),
+    ]);
+
+    let target_dir = create_temp_project("otio_scope_target");
+    let target_path = project_path(&target_dir, "otio_scope_target");
+
+    // When: importing without the flag
+    let result = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &target_path,
+        "--file",
+        interchange.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    // Then: no media is imported, and the refusal says why
+    assert!(
+        result["assetImports"].as_array().unwrap().is_empty(),
+        "media outside the project must not be imported: {result}"
+    );
+    let warnings = result["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the project directory")),
+        "the refusal must be reported: {warnings:?}"
+    );
+
+    // And with the flag, the same file imports its media.
+    let allowed = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &target_path,
+        "--file",
+        interchange.to_str().unwrap(),
+        "--dry-run",
+        "--allow-external-media",
+    ]);
+    assert_eq!(allowed["assetImports"].as_array().unwrap().len(), 2);
 }
 
 #[test]

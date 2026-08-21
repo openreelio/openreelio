@@ -130,15 +130,21 @@ impl RationalTime {
         }
     }
 
-    /// Converts to seconds using this node's own rate.
+    /// Converts to seconds using this node's own rate, or `None` when the node
+    /// does not describe a real instant.
     ///
-    /// Returns `0.0` for a non-positive or non-finite rate rather than an
-    /// infinity that would poison every downstream calculation.
-    pub fn to_seconds(&self) -> f64 {
+    /// Fallible on purpose. Coercing an unreadable time to `0.0` puts a clip at
+    /// the head of the timeline as if the file had asked for that, and the
+    /// quotient has to be checked as well as the inputs: `1e308 / 1e-308` is
+    /// finite over finite and overflows to infinity, which serialises into a
+    /// plan step as JSON `null`. A caller that cannot convert a time must report
+    /// the node and skip it.
+    pub fn to_seconds(&self) -> Option<f64> {
         if !self.rate.is_finite() || self.rate <= 0.0 || !self.value.is_finite() {
-            return 0.0;
+            return None;
         }
-        self.value / self.rate
+        let seconds = self.value / self.rate;
+        seconds.is_finite().then_some(seconds)
     }
 }
 
@@ -577,6 +583,15 @@ pub fn openreelio_meta_bool(metadata: &JsonValue, key: &str) -> Option<bool> {
     metadata.get(OPENREELIO_METADATA_KEY)?.get(key)?.as_bool()
 }
 
+/// Reads `metadata.openreelio.<key>` as a finite number.
+pub fn openreelio_meta_f64(metadata: &JsonValue, key: &str) -> Option<f64> {
+    metadata
+        .get(OPENREELIO_METADATA_KEY)?
+        .get(key)?
+        .as_f64()
+        .filter(|value| value.is_finite())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,13 +707,18 @@ mod tests {
         let time = RationalTime::new(48.0, 48.0);
 
         // Then: it is one second, not two
-        assert!((time.to_seconds() - 1.0).abs() < 1e-9);
+        assert!((time.to_seconds().expect("a real time converts") - 1.0).abs() < 1e-9);
     }
 
     #[test]
-    fn should_treat_a_non_positive_rate_as_zero_seconds() {
-        assert_eq!(RationalTime::new(10.0, 0.0).to_seconds(), 0.0);
-        assert_eq!(RationalTime::new(10.0, f64::NAN).to_seconds(), 0.0);
+    fn should_refuse_to_convert_a_time_that_names_no_real_instant() {
+        assert_eq!(RationalTime::new(10.0, 0.0).to_seconds(), None);
+        assert_eq!(RationalTime::new(10.0, -24.0).to_seconds(), None);
+        assert_eq!(RationalTime::new(10.0, f64::NAN).to_seconds(), None);
+        assert_eq!(RationalTime::new(f64::INFINITY, 24.0).to_seconds(), None);
+        // Finite over finite, and still an overflow to infinity: the quotient
+        // has to be checked, not only the inputs.
+        assert_eq!(RationalTime::new(1e308, 1e-308).to_seconds(), None);
     }
 
     #[test]
