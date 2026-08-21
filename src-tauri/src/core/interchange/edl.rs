@@ -137,6 +137,10 @@ pub fn build_export_result(
         event_count,
         track_count,
         duration_sec,
+        // EDL's losses are structural and documented at the module level rather
+        // than discovered per sequence, so there is nothing per-export to say.
+        warnings: Vec::new(),
+        unsupported: Vec::new(),
     }
 }
 

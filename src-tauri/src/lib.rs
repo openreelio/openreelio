@@ -618,6 +618,105 @@ impl ActiveProject {
         })
     }
 
+    /// Reads a project's state without opening an editing session.
+    ///
+    /// [`Self::open`] is a *session* open, and a session is a thing you have to
+    /// build: it creates the hidden state directory, migrates legacy state files
+    /// into it — renaming, copying and deleting — and takes the ops-log lock so
+    /// the external-change guard has a baseline to compare against. Every one of
+    /// those writes to disk. That is right for a command that is about to edit,
+    /// and wrong for one that promised not to touch anything, which is why
+    /// `otio import --dry-run` needs this: it has to read the project's assets
+    /// and sequences to build the plan it prints, and printing a plan is not a
+    /// reason to migrate somebody's files.
+    ///
+    /// So this creates nothing, moves nothing and locks nothing. It reads the
+    /// state files where they already are — hidden directory first, legacy root
+    /// second — and replays them.
+    ///
+    /// The cost of skipping the lock is that a line another process is midway
+    /// through appending can be read as corrupt and skipped, so the state may be
+    /// one operation behind a concurrent writer. That is acceptable for a
+    /// preview and unacceptable for anything that writes, which is why this
+    /// returns a bare [`ProjectState`]: there is no session to save through.
+    pub fn read_state_without_session(path: &Path) -> crate::core::CoreResult<ProjectState> {
+        let state_dir = Self::default_state_dir(path);
+
+        // No migration: whichever copy exists is read where it lies.
+        let pick = |current: PathBuf, legacy: PathBuf| {
+            if current.exists() || !legacy.exists() {
+                current
+            } else {
+                legacy
+            }
+        };
+        let ops_path = pick(
+            Self::state_ops_path(&state_dir),
+            Self::legacy_ops_path(path),
+        );
+        let snapshot_path = pick(
+            Self::state_snapshot_path(&state_dir),
+            Self::legacy_snapshot_path(path),
+        );
+        let meta_path = pick(
+            Self::state_meta_path(&state_dir),
+            Self::legacy_meta_path(path),
+        );
+        let history_path = Self::state_history_path(&state_dir);
+
+        let meta: ProjectMeta = if meta_path.exists() {
+            let file = std::fs::File::open(&meta_path)?;
+            serde_json::from_reader(file)?
+        } else {
+            ProjectMeta::new("Untitled")
+        };
+
+        let ops_log = OpsLog::new(&ops_path);
+        let read_result = ops_log.read_all_with_archive_unlocked()?;
+        let history_manifest = match std::fs::read(&history_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut history = match history_manifest.as_deref() {
+            Some(bytes) => ProjectHistory::from_json_slice(bytes).unwrap_or_else(|_| {
+                ProjectHistory::from_operations(&read_result.operations, meta.clone())
+            }),
+            None => ProjectHistory::from_operations(&read_result.operations, meta.clone()),
+        };
+        if history.base_meta.is_none() {
+            history.base_meta = Some(meta.clone());
+        }
+        Self::sync_history_with_operations(&mut history, &read_result.operations);
+        let history_meta = history.base_meta.clone().unwrap_or_else(|| meta.clone());
+
+        if !history.applied_op_ids.is_empty() || history_manifest.is_some() {
+            let by_id: std::collections::HashMap<&str, &crate::core::project::Operation> =
+                read_result
+                    .operations
+                    .iter()
+                    .map(|op| (op.id.as_str(), op))
+                    .collect();
+            let active_ops = history
+                .applied_op_ids
+                .iter()
+                .filter_map(|op_id| by_id.get(op_id.as_str()).map(|op| (*op).clone()))
+                .collect::<Vec<_>>();
+            return ProjectState::from_operations(active_ops, history_meta);
+        }
+
+        if read_result.operations.is_empty() && Snapshot::exists(&snapshot_path) {
+            // Only when there is nothing to replay: with operations in hand the
+            // replay is authoritative, and reading the snapshot as well would
+            // need the log's revision, which is exactly what the lock protects.
+            let (state, _) = Snapshot::load(&snapshot_path)?;
+            return Ok(state);
+        }
+
+        ProjectState::from_operations(read_result.operations, meta)
+    }
+
     /// Number of operations this session expects the on-disk ops log to contain.
     ///
     /// This is the count observed when the session was opened plus every append
@@ -1527,9 +1626,10 @@ mod tauri_app {
                 $crate::ipc::smart_reframe,
                 // Point tracking command
                 $crate::ipc::track_point,
-                // Interchange export commands (EDL, FCPXML)
+                // Interchange export commands (EDL, FCPXML, OTIO)
                 $crate::ipc::export_edl,
                 $crate::ipc::export_fcpxml,
+                $crate::ipc::export_otio,
                 // Export destination picker (native save dialog + allow-list)
                 $crate::ipc::pick_export_destination,
                 // AI commands
@@ -2057,9 +2157,10 @@ mod tauri_app {
             ipc::smart_reframe,
             // Point tracking command
             ipc::track_point,
-            // Interchange export commands (EDL, FCPXML)
+            // Interchange export commands (EDL, FCPXML, OTIO)
             ipc::export_edl,
             ipc::export_fcpxml,
+            ipc::export_otio,
             // Export destination picker (native save dialog + allow-list)
             ipc::pick_export_destination,
             // AI commands
@@ -2853,6 +2954,53 @@ mod tests {
         assert!(!project_path.join("ops.jsonl").exists());
         assert!(!project_path.join("project.json").exists());
         assert!(!project_path.join("snapshot.json").exists());
+    }
+
+    #[test]
+    fn should_read_a_legacy_layout_project_without_migrating_or_locking_it() {
+        // Given: a project whose state still sits in the legacy root files
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("read_only_legacy");
+        let project = ActiveProject::create("Read Only Legacy", project_path.clone()).unwrap();
+        let sequence_id = project.state.active_sequence_id.clone();
+        drop(project);
+
+        let state_dir = project_path.join(".openreelio/state");
+        for name in ["ops.jsonl", "snapshot.json", "project.json"] {
+            std::fs::rename(state_dir.join(name), project_path.join(name)).unwrap();
+        }
+        std::fs::remove_dir_all(project_path.join(".openreelio")).unwrap();
+
+        // When: reading it without a session
+        let state = ActiveProject::read_state_without_session(&project_path).unwrap();
+
+        // Then: the state is the project's, and nothing on disk moved. Opening a
+        // session would have migrated all three files and left a lock behind,
+        // which is not something a read may do.
+        assert_eq!(state.meta.name, "Read Only Legacy");
+        assert_eq!(state.active_sequence_id, sequence_id);
+        assert!(project_path.join("ops.jsonl").exists());
+        assert!(project_path.join("snapshot.json").exists());
+        assert!(project_path.join("project.json").exists());
+        assert!(!project_path.join(".openreelio").exists());
+    }
+
+    #[test]
+    fn should_read_a_current_layout_project_without_taking_the_ops_lock() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("read_only_current");
+        let project = ActiveProject::create("Read Only Current", project_path.clone()).unwrap();
+        drop(project);
+
+        let state_dir = project_path.join(".openreelio/state");
+        let lock = state_dir.join("ops.jsonl.lock");
+        let _ = std::fs::remove_file(&lock);
+
+        let state = ActiveProject::read_state_without_session(&project_path).unwrap();
+
+        assert_eq!(state.meta.name, "Read Only Current");
+        assert!(!state.sequences.is_empty());
+        assert!(!lock.exists(), "a read must not create the ops-log lock");
     }
 
     #[test]

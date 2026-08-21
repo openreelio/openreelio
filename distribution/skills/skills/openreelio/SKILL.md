@@ -81,6 +81,12 @@ presets, import/export SRT and VTT, and generate transcripts locally. Load
 List presets, render a fast proxy or a delivery file, stream progress, and limit
 the render to a range. Load [Render](./render/REFERENCE.md).
 
+## Interchange
+
+Hand a cut to DaVinci Resolve or another NLE, or take one back, with
+OpenTimelineIO — a cut-only exchange that reports everything it cannot carry.
+Load [Interchange](./interchange/REFERENCE.md).
+
 ## Verify
 
 Run deterministic quality control over the sequence and the rendered file, then

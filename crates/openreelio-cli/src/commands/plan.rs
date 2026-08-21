@@ -29,11 +29,11 @@ use std::path::{Path, PathBuf};
 pub use openreelio_core::ai::MAX_PLAN_STEPS;
 
 /// Exit code for a plan that was rejected, or failed and rolled back cleanly.
-const EXIT_PLAN_FAILED: i32 = 1;
+pub(crate) const EXIT_PLAN_FAILED: i32 = 1;
 
 /// Exit code for a failure of the tool itself, an incomplete rollback, or a
 /// plan that applied but could not be saved.
-const EXIT_TOOL_FAILURE: i32 = 2;
+pub(crate) const EXIT_TOOL_FAILURE: i32 = 2;
 
 #[derive(Subcommand)]
 pub enum PlanAction {
@@ -398,31 +398,48 @@ fn run_execute(path: &PathBuf, file: &Path) -> anyhow::Result<i32> {
     let plan = read_plan(file)?;
     let mut project = super::load_project(path)?;
 
-    // Nothing is mutated until the whole plan is known to be sound. A payload
-    // that only fails when its step is reached takes the project through a
-    // rollback it never needed to risk.
-    let validation = validate_edit_plan(&plan);
+    let (result, exit_code) = execute_plan_on_project(&mut project, &plan)?;
+    output::print_json(&result)?;
+    Ok(exit_code)
+}
+
+/// Validates, applies and saves a plan, returning its report and exit code.
+///
+/// Shared by `plan execute` and by every other verb that produces a plan rather
+/// than reading one from disk — `otio import`, today. Keeping one function means
+/// those verbs cannot drift from the exit-code contract or skip the
+/// validate-before-mutate rule.
+///
+/// Nothing is mutated until the whole plan is known to be sound: a payload that
+/// only fails when its step is reached takes the project through a rollback it
+/// never needed to risk.
+pub(crate) fn execute_plan_on_project(
+    project: &mut openreelio_core::ActiveProject,
+    plan: &EditPlan,
+) -> anyhow::Result<(serde_json::Value, i32)> {
+    let validation = validate_edit_plan(plan);
     if !validation.errors.is_empty() {
-        output::print_json(&serde_json::json!({
-            "status": "error",
-            "message": "Plan validation failed",
-            "planId": plan.id,
-            "errors": validation.errors,
-            "stepsWithReferences": validation.steps_with_references,
-        }))?;
-        return Ok(EXIT_PLAN_FAILED);
+        return Ok((
+            serde_json::json!({
+                "status": "error",
+                "message": "Plan validation failed",
+                "planId": plan.id,
+                "errors": validation.errors,
+                "stepsWithReferences": validation.steps_with_references,
+            }),
+            EXIT_PLAN_FAILED,
+        ));
     }
 
-    let mut result = apply_edit_plan(&mut project, &plan)?;
+    let mut result = apply_edit_plan(project, plan)?;
     if result["status"] == "ok" {
-        if let Err(save_error) = super::save_project(&mut project) {
-            result = applied_not_saved_report(&plan, &result, &save_error);
+        if let Err(save_error) = super::save_project(project) {
+            result = applied_not_saved_report(plan, &result, &save_error);
         }
     }
 
     let exit_code = plan_exit_code(&result);
-    output::print_json(&result)?;
-    Ok(exit_code)
+    Ok((result, exit_code))
 }
 
 /// Report for a plan whose steps all applied but whose save failed.
@@ -470,7 +487,7 @@ fn plan_exit_code(result: &serde_json::Value) -> i32 {
     }
 }
 
-fn flush_stdout() {
+pub(crate) fn flush_stdout() {
     let _ = std::io::stdout().flush();
 }
 
@@ -637,9 +654,11 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> PlanValidation {
         }
     }
 
+    let mut has_duplicate_ids = false;
     for step in &plan.steps {
         if !step_ids.insert(step.id.as_str()) {
             errors.push(format!("Duplicate step id '{}'", step.id));
+            has_duplicate_ids = true;
         }
     }
 
@@ -686,8 +705,13 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> PlanValidation {
         }
     }
 
-    if let Err(cycle_err) = topological_sort(&plan.steps) {
-        errors.push(cycle_err.to_string());
+    // Only worth asking once the ids are unique: the sort refuses a duplicated
+    // id too, so running it anyway would report the same fault twice and never
+    // reach the cycle the caller also wants to know about.
+    if !has_duplicate_ids {
+        if let Err(cycle_err) = topological_sort(&plan.steps) {
+            errors.push(cycle_err.to_string());
+        }
     }
 
     PlanValidation {
@@ -833,9 +857,21 @@ fn execute_step(
 }
 
 /// Sort plan steps in dependency order (Kahn's algorithm).
-/// Returns an error if the dependency graph contains a cycle.
+///
+/// Returns an error if the dependency graph contains a cycle, or if two steps
+/// share an id. The duplicate check is a backstop — [`validate_edit_plan`] runs
+/// first and rejects duplicates there — but it is not redundant: every id-keyed
+/// map below collapses the duplicates into one entry while the seed queue is
+/// built from the step *list*, so a duplicated id makes the sort emit the same
+/// step twice and the length check that guards against a cycle still passes.
+/// Executing a step twice is worse than refusing the plan.
 fn topological_sort(steps: &[PlanStep]) -> anyhow::Result<Vec<&PlanStep>> {
-    let step_map: HashMap<&str, &PlanStep> = steps.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut step_map: HashMap<&str, &PlanStep> = HashMap::with_capacity(steps.len());
+    for step in steps {
+        if step_map.insert(step.id.as_str(), step).is_some() {
+            return Err(anyhow::anyhow!("Duplicate step id '{}'", step.id));
+        }
+    }
     let mut in_degree: HashMap<&str, usize> = steps.iter().map(|s| (s.id.as_str(), 0)).collect();
     let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
 
@@ -851,10 +887,17 @@ fn topological_sort(steps: &[PlanStep]) -> anyhow::Result<Vec<&PlanStep>> {
         }
     }
 
-    let mut queue: VecDeque<&str> = in_degree
+    // Seeded in declaration order, not by iterating `in_degree`: a HashMap's
+    // iteration order varies per process, so seeding from it would run a plan's
+    // independent steps in a different order on every invocation. That is not a
+    // free choice — a plan that creates two tracks decides their stacking order
+    // by the order it creates them in, and the ops log it writes should be
+    // reproducible. Dependencies still constrain everything they name; this only
+    // fixes which of several equally valid orders is taken.
+    let mut queue: VecDeque<&str> = steps
         .iter()
-        .filter(|(_, &d)| d == 0)
-        .map(|(&id, _)| id)
+        .map(|step| step.id.as_str())
+        .filter(|id| in_degree.get(id).is_some_and(|&degree| degree == 0))
         .collect();
     let mut sorted = Vec::new();
 
@@ -902,6 +945,69 @@ mod tests {
             id: "plan-1".to_string(),
             steps,
         }
+    }
+
+    #[test]
+    fn should_run_independent_steps_in_the_order_the_plan_declares_them() {
+        // Given: a plan whose steps have no dependencies between them, so any
+        // order satisfies the graph
+        let steps = vec![
+            step("first", &[]),
+            step("second", &[]),
+            step("third", &[]),
+            step("fourth", &[]),
+            step("fifth", &[]),
+        ];
+
+        // When: the plan is sorted
+        let sorted = topological_sort(&steps).expect("an acyclic plan should sort");
+
+        // Then: it runs in declaration order. A plan that creates several tracks
+        // decides their stacking order by the order it creates them in, so
+        // "any valid order" is not good enough — it has to be this one, on
+        // every invocation.
+        let order: Vec<&str> = sorted.iter().map(|step| step.id.as_str()).collect();
+        assert_eq!(order, vec!["first", "second", "third", "fourth", "fifth"]);
+    }
+
+    #[test]
+    fn should_still_order_a_dependent_step_behind_the_step_it_names() {
+        // Given: a plan declared with the dependent step first
+        let steps = vec![
+            step("consumer", &["producer"]),
+            step("unrelated", &[]),
+            step("producer", &[]),
+        ];
+
+        // When: the plan is sorted
+        let sorted = topological_sort(&steps).expect("an acyclic plan should sort");
+        let order: Vec<&str> = sorted.iter().map(|step| step.id.as_str()).collect();
+
+        // Then: the dependency wins over declaration order
+        let producer = order.iter().position(|id| *id == "producer").unwrap();
+        let consumer = order.iter().position(|id| *id == "consumer").unwrap();
+        assert!(
+            producer < consumer,
+            "the producer must run first, got {order:?}"
+        );
+        assert_eq!(order.len(), 3);
+    }
+
+    #[test]
+    fn should_refuse_to_sort_a_plan_that_repeats_a_step_id() {
+        // Given: two steps sharing an id. Every id-keyed map collapses them into
+        // one entry, but the seed queue is built from the step list, so the sort
+        // emitted the same step twice and the cycle check — which only compares
+        // lengths — still passed. A plan generator with an id collision would
+        // therefore run one step twice instead of being refused.
+        let steps = vec![step("a", &[]), step("a", &[]), step("b", &["a"])];
+
+        let error = topological_sort(&steps).expect_err("a repeated step id must be refused");
+
+        assert!(
+            error.to_string().contains("Duplicate step id 'a'"),
+            "the refusal must name the id, got: {error}"
+        );
     }
 
     /// Validation errors alone, for the tests that only care about those.
@@ -1110,21 +1216,32 @@ mod tests {
     }
 
     #[test]
-    fn should_report_cycles_duplicates_and_missing_dependencies() {
+    fn should_report_cycles_and_missing_dependencies() {
         let errors = validate_edit_plan_errors(&plan(vec![
             step("a", &["b"]),
             step("b", &["a"]),
-            step("b", &[]),
             step("c", &["ghost"]),
         ]));
 
         assert!(errors.iter().any(|error| error.contains("Cycle detected")));
         assert!(errors
             .iter()
-            .any(|error| error.contains("Duplicate step id 'b'")));
-        assert!(errors
-            .iter()
             .any(|error| error.contains("'ghost'") && error.contains("does not exist")));
+    }
+
+    #[test]
+    fn should_report_a_duplicate_step_id_once() {
+        let errors =
+            validate_edit_plan_errors(&plan(vec![step("a", &[]), step("b", &[]), step("b", &[])]));
+
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|error| error.contains("Duplicate step id 'b'"))
+                .count(),
+            1,
+            "one fault, one line: {errors:?}"
+        );
     }
 
     #[test]

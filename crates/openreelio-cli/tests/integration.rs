@@ -9047,3 +9047,603 @@ fn test_bundled_family_renders_at_both_weights_through_the_embedded_faces() {
         "the bold weight must render differently from the regular one, only {weights_differ} samples differed"
     );
 }
+
+// =============================================================================
+// OpenTimelineIO interchange
+// =============================================================================
+//
+// These tests never touch FFmpeg: OTIO is JSON, and the assets are stub files
+// whose unknown duration falls back to the engine's 10s default, which is
+// enough to build and compare a cut.
+//
+// The round trip a user actually cares about — OpenReelio to DaVinci Resolve —
+// cannot run in CI. Validating it is a manual step: export a sequence, then in
+// Resolve use File > Import > Timeline > Import AAF, EDL, XML... and pick the
+// .otio file.
+
+/// Builds a project with a two-track cut: a video track holding two adjacent
+/// shots, a 5s hole and a tail shot, plus an audio track; the first cut carries
+/// a one-second cross dissolve. Returns (project path, sequence id).
+fn seed_otio_fixture(dir: &tempfile::TempDir, name: &str) -> (String, String) {
+    let path = project_path(dir, name);
+
+    let video_file = dir.path().join("otio_video.mp4");
+    std::fs::write(&video_file, b"dummy video").expect("write video fixture");
+    let audio_file = dir.path().join("otio_audio.wav");
+    std::fs::write(&audio_file, b"dummy audio").expect("write audio fixture");
+
+    let video_asset = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        video_file.to_str().unwrap(),
+    ])["createdIds"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let audio_asset = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        audio_file.to_str().unwrap(),
+    ])["createdIds"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let video_track = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .expect("the default project should have a video track")
+        .to_string();
+    let audio_track = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Audio")
+        .and_then(|track| track["id"].as_str())
+        .expect("the default project should have an audio track")
+        .to_string();
+
+    // Two adjacent shots, then a hole from 20s to 25s, then a tail shot.
+    for at in ["0.0", "10.0", "25.0"] {
+        run_cli_ok(&[
+            "timeline",
+            "insert",
+            "--path",
+            &path,
+            "--asset",
+            &video_asset,
+            "--track",
+            &video_track,
+            "--at",
+            at,
+        ]);
+    }
+    run_cli_ok(&[
+        "timeline",
+        "insert",
+        "--path",
+        &path,
+        "--asset",
+        &audio_asset,
+        "--track",
+        &audio_track,
+        "--at",
+        "0.0",
+    ]);
+
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The dissolve goes on the outgoing clip of the first cut.
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let first_clip = clips["clips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|clip| clip["trackId"] == video_track.as_str() && clip["timelineInSec"] == 0.0)
+        .and_then(|clip| clip["id"].as_str())
+        .expect("the first video clip should exist")
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "AddEffect",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": video_track,
+            "clipId": first_clip,
+            "effectType": "cross_dissolve",
+            "params": { "duration": 1.0 },
+        })
+        .to_string(),
+    ]);
+
+    (path, sequence_id)
+}
+
+/// Reduces an OTIO document to the cut it describes: track kinds, and each
+/// child's schema and frame extent. Names, ids, metadata and media URLs are
+/// dropped, because a re-import regenerates every one of them.
+fn otio_cut_shape(document: &serde_json::Value) -> Vec<serde_json::Value> {
+    document["tracks"]["children"]
+        .as_array()
+        .expect("stack children must be an array")
+        .iter()
+        .filter(|track| {
+            !track["children"]
+                .as_array()
+                .map(|children| children.is_empty())
+                .unwrap_or(true)
+        })
+        .map(|track| {
+            let children: Vec<serde_json::Value> = track["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|child| match child["OTIO_SCHEMA"].as_str() {
+                    Some("Transition.1") => serde_json::json!({
+                        "schema": "Transition.1",
+                        "in": child["in_offset"]["value"],
+                        "out": child["out_offset"]["value"],
+                    }),
+                    _ => serde_json::json!({
+                        "schema": child["OTIO_SCHEMA"],
+                        "start": child["source_range"]["start_time"]["value"],
+                        "duration": child["source_range"]["duration"]["value"],
+                        "rate": child["source_range"]["duration"]["rate"],
+                    }),
+                })
+                .collect();
+            serde_json::json!({ "kind": track["kind"], "children": children })
+        })
+        .collect()
+}
+
+fn read_otio(path: &std::path::Path) -> serde_json::Value {
+    let raw = std::fs::read_to_string(path).expect("the exported OTIO file should be readable");
+    serde_json::from_str(&raw).expect("the exported OTIO file should be valid JSON")
+}
+
+#[test]
+fn test_otio_export_writes_a_cut_interchange_document() {
+    let dir = create_temp_project("otio_export_test");
+    let (path, _sequence_id) = seed_otio_fixture(&dir, "otio_export_test");
+    let out = dir.path().join("cut.otio");
+
+    let result = run_cli_ok(&[
+        "otio",
+        "export",
+        "--path",
+        &path,
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["clipCount"], 4);
+    assert_eq!(result["trackCount"], 2);
+    // The loss report is always present, so a caller can tell "checked and
+    // clean" from "not reported".
+    assert!(result["warnings"].is_array());
+    assert!(result["unsupported"].is_array());
+
+    let document = read_otio(&out);
+    assert_eq!(document["OTIO_SCHEMA"], "Timeline.1");
+    assert_eq!(document["tracks"]["OTIO_SCHEMA"], "Stack.1");
+
+    let shape = otio_cut_shape(&document);
+    assert_eq!(shape.len(), 2);
+    // Video: clip, dissolve, clip, gap, clip — and nothing after the last clip.
+    let video_children = shape[0]["children"].as_array().unwrap();
+    let schemas: Vec<&str> = video_children
+        .iter()
+        .map(|child| child["schema"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        schemas,
+        vec!["Clip.2", "Transition.1", "Clip.2", "Gap.1", "Clip.2"]
+    );
+}
+
+#[test]
+fn test_otio_round_trip_preserves_the_cut_structure() {
+    // Given: a project exported to OTIO
+    let source_dir = create_temp_project("otio_source");
+    let (source_path, _) = seed_otio_fixture(&source_dir, "otio_source");
+    let interchange = source_dir.path().join("round_trip.otio");
+    run_cli_ok(&[
+        "otio",
+        "export",
+        "--path",
+        &source_path,
+        "--out",
+        interchange.to_str().unwrap(),
+    ]);
+    let first = read_otio(&interchange);
+
+    // When: the file is imported into a fresh project and exported again
+    let target_dir = create_temp_project("otio_target");
+    let target_path = project_path(&target_dir, "otio_target");
+
+    let import = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &target_path,
+        "--file",
+        interchange.to_str().unwrap(),
+        // The fixture's media sits beside the projects rather than inside
+        // either of them, which is exactly the case import refuses by default.
+        // Relinking a foreign edit to media held elsewhere is the workflow the
+        // flag exists for; the refusal itself is covered below.
+        "--allow-external-media",
+    ]);
+    assert_eq!(import["status"], "ok", "import report: {import}");
+    // The fresh project has none of the media, so the plan imports it first.
+    assert_eq!(import["assetImports"].as_array().unwrap().len(), 2);
+
+    let round_tripped = target_dir.path().join("round_trip_2.otio");
+    run_cli_ok(&[
+        "otio",
+        "export",
+        "--path",
+        &target_path,
+        "--out",
+        round_tripped.to_str().unwrap(),
+    ]);
+    let second = read_otio(&round_tripped);
+
+    // Then: the same cut comes back — every clip on the same frame, the gap the
+    // same length, the dissolve the same split. Ids and names regenerate, so
+    // the comparison is structural.
+    assert_eq!(
+        otio_cut_shape(&first),
+        otio_cut_shape(&second),
+        "the round trip changed the cut:\nfirst:  {}\nsecond: {}",
+        serde_json::to_string_pretty(&otio_cut_shape(&first)).unwrap(),
+        serde_json::to_string_pretty(&otio_cut_shape(&second)).unwrap()
+    );
+}
+
+#[test]
+fn test_otio_import_dry_run_leaves_the_project_untouched() {
+    // Given: an OTIO file and a fresh project
+    let source_dir = create_temp_project("otio_dry_source");
+    let (source_path, _) = seed_otio_fixture(&source_dir, "otio_dry_source");
+    let interchange = source_dir.path().join("dry.otio");
+    run_cli_ok(&[
+        "otio",
+        "export",
+        "--path",
+        &source_path,
+        "--out",
+        interchange.to_str().unwrap(),
+    ]);
+
+    let target_dir = create_temp_project("otio_dry_target");
+    let target_path = project_path(&target_dir, "otio_dry_target");
+    let before = run_cli_ok(&["timeline", "clips", "--path", &target_path]);
+    let before_tracks = run_cli_ok(&["timeline", "tracks", "--path", &target_path]);
+
+    // When: importing with --dry-run
+    let result = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &target_path,
+        "--file",
+        interchange.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    // Then: the plan is printed and nothing is applied
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["dryRun"], true);
+    assert!(result["stepCount"].as_u64().unwrap() > 0);
+    assert!(result["plan"]["steps"].is_array());
+    assert!(result["warnings"].is_array());
+
+    let after = run_cli_ok(&["timeline", "clips", "--path", &target_path]);
+    let after_tracks = run_cli_ok(&["timeline", "tracks", "--path", &target_path]);
+    assert_eq!(after["count"], before["count"]);
+    assert_eq!(after_tracks["count"], before_tracks["count"]);
+}
+
+/// Every file under `root`, as (relative path, bytes).
+///
+/// Content rather than mtime: a copy-then-delete migration can preserve a
+/// timestamp, and what a caller cares about is that its bytes are where it left
+/// them.
+fn snapshot_tree(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                let key = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(key, bytes);
+            }
+        }
+    }
+
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn test_otio_import_dry_run_writes_nothing_to_a_legacy_project_layout() {
+    // Given: an OTIO file, and a project whose state still sits in the legacy
+    // root files. Opening an editing session migrates those into the hidden
+    // state directory — renaming, copying and deleting — before anything the
+    // caller asked for happens, so a dry run that opens a session rewrites the
+    // project it promised not to touch.
+    let source_dir = create_temp_project("otio_legacy_source");
+    let (source_path, _) = seed_otio_fixture(&source_dir, "otio_legacy_source");
+    let interchange = source_dir.path().join("legacy.otio");
+    run_cli_ok(&[
+        "otio",
+        "export",
+        "--path",
+        &source_path,
+        "--out",
+        interchange.to_str().unwrap(),
+    ]);
+
+    let target_dir = create_temp_project("otio_legacy_target");
+    let target_root = target_dir.path().join("otio_legacy_target");
+    let target_path = target_root.to_string_lossy().to_string();
+
+    // Move the state back to the legacy layout this project once used.
+    let state_dir = target_root.join(".openreelio").join("state");
+    for name in ["ops.jsonl", "snapshot.json", "project.json"] {
+        let hidden = state_dir.join(name);
+        if hidden.exists() {
+            std::fs::rename(&hidden, target_root.join(name)).expect("move state file");
+        }
+    }
+    std::fs::remove_dir_all(target_root.join(".openreelio")).expect("drop the hidden state dir");
+
+    let before = snapshot_tree(&target_root);
+
+    // When: importing with --dry-run
+    let result = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &target_path,
+        "--file",
+        interchange.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    // Then: the plan is printed, and every byte under the project is where it
+    // was — no migrated state files, no created directory, no lock file.
+    assert_eq!(result["dryRun"], true);
+    assert!(result["stepCount"].as_u64().unwrap() > 0);
+
+    let after = snapshot_tree(&target_root);
+    let before_names: Vec<&String> = before.keys().collect();
+    let after_names: Vec<&String> = after.keys().collect();
+    assert_eq!(
+        after_names, before_names,
+        "a dry run must not add, move or remove a file"
+    );
+    assert!(
+        before == after,
+        "a dry run must not rewrite any file under the project"
+    );
+}
+
+#[test]
+fn test_otio_import_resolves_project_relative_media_against_the_real_project_root() {
+    // Given: media inside the project, named once relatively (what our own
+    // export writes for media the project holds) and once absolutely. The
+    // project root the importer is handed is canonicalised, which on Windows
+    // carries a `\\?\` prefix — joined onto a relative reference it turns into
+    // `//?/C:/…`, which reads as a network authority and opens nothing.
+    let dir = create_temp_project("otio_relative");
+    let project_root = dir.path().join("otio_relative");
+    let path = project_root.to_string_lossy().to_string();
+    std::fs::create_dir_all(project_root.join("media")).expect("create media dir");
+    let media = project_root.join("media").join("inside.mp4");
+    std::fs::write(&media, b"dummy video").expect("write media");
+
+    let absolute = format!(
+        "file:///{}",
+        media
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace(' ', "%20")
+    );
+    let document = serde_json::json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "name": "Relative",
+        "tracks": {
+            "OTIO_SCHEMA": "Stack.1",
+            "name": "Relative",
+            "children": [{
+                "OTIO_SCHEMA": "Track.1",
+                "name": "V1",
+                "kind": "Video",
+                "children": [
+                    otio_clip_node("relative", "media/inside.mp4"),
+                    otio_clip_node("absolute", &absolute),
+                ]
+            }],
+            "markers": []
+        }
+    });
+    let file = dir.path().join("relative.otio");
+    std::fs::write(&file, document.to_string()).expect("write fixture");
+
+    // When: importing without --allow-external-media
+    let result = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        file.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    // Then: both spellings name the same openable file, so it imports once
+    let imports = result["assetImports"].as_array().unwrap();
+    assert_eq!(
+        imports.len(),
+        1,
+        "the two spellings name one file: {result}"
+    );
+    let uri = imports[0]["uri"].as_str().unwrap();
+    assert!(
+        !uri.starts_with("//"),
+        "a project-relative reference must not resolve to an authority path, got: {uri}"
+    );
+    assert!(
+        std::path::Path::new(uri).exists(),
+        "the resolved uri must name the media on disk, got: {uri}"
+    );
+}
+
+/// A one-media OTIO clip node at 30fps, one second long.
+fn otio_clip_node(name: &str, target_url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "OTIO_SCHEMA": "Clip.2",
+        "name": name,
+        "source_range": {
+            "OTIO_SCHEMA": "TimeRange.1",
+            "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0.0, "rate": 30.0 },
+            "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": 30.0, "rate": 30.0 }
+        },
+        "media_reference": {
+            "OTIO_SCHEMA": "ExternalReference.1",
+            "target_url": target_url
+        }
+    })
+}
+
+#[test]
+fn test_otio_import_refuses_media_outside_the_project_by_default() {
+    // Given: an OTIO file whose media sits outside the project it is imported
+    // into. ImportAsset stats — and for some kinds ffprobes — whatever path it
+    // is handed, so an unscoped import is a filesystem probe the file's author
+    // gets to aim.
+    let source_dir = create_temp_project("otio_scope_source");
+    let (source_path, _) = seed_otio_fixture(&source_dir, "otio_scope_source");
+    let interchange = source_dir.path().join("scope.otio");
+    run_cli_ok(&[
+        "otio",
+        "export",
+        "--path",
+        &source_path,
+        "--out",
+        interchange.to_str().unwrap(),
+    ]);
+
+    let target_dir = create_temp_project("otio_scope_target");
+    let target_path = project_path(&target_dir, "otio_scope_target");
+
+    // When: importing without the flag
+    let result = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &target_path,
+        "--file",
+        interchange.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    // Then: no media is imported, and the refusal says why
+    assert!(
+        result["assetImports"].as_array().unwrap().is_empty(),
+        "media outside the project must not be imported: {result}"
+    );
+    let warnings = result["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the project directory")),
+        "the refusal must be reported: {warnings:?}"
+    );
+
+    // And with the flag, the same file imports its media.
+    let allowed = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &target_path,
+        "--file",
+        interchange.to_str().unwrap(),
+        "--dry-run",
+        "--allow-external-media",
+    ]);
+    assert_eq!(allowed["assetImports"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn test_otio_import_rejects_an_unknown_schema_version_by_name() {
+    let dir = create_temp_project("otio_bad_schema");
+    let path = project_path(&dir, "otio_bad_schema");
+    let bad = dir.path().join("bad.otio");
+    std::fs::write(
+        &bad,
+        r#"{"OTIO_SCHEMA":"Timeline.9","name":"x","tracks":{"OTIO_SCHEMA":"Stack.1"}}"#,
+    )
+    .expect("write bad fixture");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "otio",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        bad.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("Timeline.9"),
+        "the refusal must name the schema it could not read, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_otio_verbs_are_documented_in_help_json() {
+    let schema = run_cli_ok(&["help-json"]);
+    let commands = schema["commands"].as_object().unwrap();
+
+    assert!(commands.contains_key("otio.export"));
+    assert!(commands.contains_key("otio.import"));
+    assert!(commands["otio.import"]["params"]["dry-run"].is_object());
+}

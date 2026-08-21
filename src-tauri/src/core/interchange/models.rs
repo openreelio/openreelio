@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::borrow::Cow;
 use std::fmt;
+use std::fmt::Write;
 
 use crate::core::Ratio;
 
@@ -21,7 +23,7 @@ pub enum InterchangeFormat {
     Edl,
     /// Final Cut Pro XML (FCPXML v1.11)
     Fcpxml,
-    /// OpenTimelineIO (not yet implemented)
+    /// OpenTimelineIO cut interchange
     Otio,
 }
 
@@ -298,6 +300,19 @@ pub struct InterchangeExportResult {
     pub track_count: u32,
     /// Sequence duration in seconds
     pub duration_sec: f64,
+    /// Structural notes about what the export had to change: skipped tracks,
+    /// missing media, trimmed overlaps.
+    ///
+    /// Empty for formats that report nothing; never omitted, so a caller can
+    /// tell "checked and clean" from "not reported".
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Editorial detail the format cannot carry.
+    ///
+    /// Interchange is lossy by nature, and a caller that hands the file to
+    /// another tool needs to know what will not arrive with it.
+    #[serde(default)]
+    pub unsupported: Vec<String>,
 }
 
 // =============================================================================
@@ -311,6 +326,172 @@ pub struct InterchangeExportResult {
 /// - 60000/1001 (≈59.94)
 pub fn is_drop_frame_rate(fps: &Ratio) -> bool {
     fps.den == 1001 && (fps.num == 30000 || fps.num == 60000)
+}
+
+/// Percent-encodes a path for use inside a `file://` URL.
+///
+/// Path separators and the Windows drive colon are left intact; everything
+/// outside the unreserved set is escaped.
+fn encode_file_url_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
+                encoded.push(byte as char)
+            }
+            _ => {
+                let _ = write!(encoded, "%{:02X}", byte);
+            }
+        }
+    }
+
+    encoded
+}
+
+/// Strips the Windows extended-length ("verbatim") prefix from a path.
+///
+/// `std::fs::canonicalize` returns verbatim paths on Windows, so an imported
+/// asset's URI routinely reads `\\?\C:\media\clip.mp4`. That prefix is
+/// meaningful to the Win32 API and meaningless to every NLE that reads a
+/// `file://` URL — left in place it percent-encodes to `file:////%3F/C:/…`,
+/// which resolves to nothing and shows up as offline media in the other tool.
+///
+/// `\\?\UNC\server\share` is the verbatim spelling of the share `\\server\share`
+/// and is restored to it.
+pub fn strip_verbatim_prefix(path: &str) -> Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return Cow::Borrowed(rest);
+    }
+    Cow::Borrowed(path)
+}
+
+/// Converts an asset URI into the URL every interchange format wants.
+///
+/// Shared by FCPXML's `src` attribute and OTIO's `ExternalReference.target_url`
+/// so the two formats name the same media the same way. A URI that is already a
+/// `file://` URL is passed through untouched.
+///
+/// An asset stored inside the project keeps a **project-relative** URI, and a
+/// relative path has no place in a `file://` URL: `file://media/a.mp4` makes
+/// `media` the URL's authority — a host — so the round trip reads it back as the
+/// network path `//media/a.mp4` and refuses it. A relative URI therefore stays a
+/// relative reference, which is what RFC 3986 and OTIO both expect, and the
+/// importer resolves it against the project root.
+pub fn asset_src_url(uri: &str) -> String {
+    if uri.starts_with("file://") {
+        return uri.to_string();
+    }
+
+    let plain = strip_verbatim_prefix(uri);
+    let normalized = plain.replace('\\', "/");
+    let encoded = encode_file_url_path(&normalized);
+
+    if let Some(share) = normalized.strip_prefix("//") {
+        // A UNC share is the one case where a file URL carries an authority:
+        // `\\server\share\x` is `file://server/share/x`.
+        format!("file://{}", encode_file_url_path(share))
+    } else if normalized.starts_with('/') {
+        format!("file://{}", encoded)
+    } else if normalized.as_bytes().get(1) == Some(&b':') {
+        format!("file:///{}", encoded)
+    } else {
+        encoded
+    }
+}
+
+/// Recovers the filesystem path from a media URL produced by [`asset_src_url`].
+///
+/// Import needs this to match a foreign `target_url` against the assets already
+/// in the project. Returns `None` for anything that names a remote protocol —
+/// `https:`, `s3:` and the rest of the URLs OTIO also permits — because there is
+/// no local file behind one.
+///
+/// Decoding happens **before** the path is classified. `file:///C%3A/Media/a.mp4`
+/// and `file:///C:/Media/a.mp4` are the same file, and classifying first reads
+/// the encoded spelling as the POSIX path `/C:/Media/a.mp4`, which matches no
+/// Windows asset and imports a second copy of media the project already has.
+///
+/// A relative reference (`media/a.mp4`) is returned as a relative path: an asset
+/// stored inside the project keeps a project-relative URI, and the caller
+/// resolves it against the project root. Callers must not treat the result as
+/// trusted — it is decoded from a foreign file — see the import scoping in
+/// [`super::otio_import`].
+pub fn file_url_to_path(url: &str) -> Option<String> {
+    if let Some(rest) = url.strip_prefix("file://") {
+        let decoded = percent_decode(rest);
+        return match decoded.as_bytes() {
+            // `file:///C:/x` — a Windows drive letter follows the slash.
+            [b'/', _, b':', ..] => Some(decoded[1..].to_string()),
+            // `file:///media/x` — a POSIX absolute path; the slash is part of it.
+            [b'/', ..] => Some(decoded),
+            // `file://server/share/x` — an authority, so a UNC share.
+            _ => Some(format!("//{decoded}")),
+        };
+    }
+
+    if has_remote_scheme(url) {
+        return None;
+    }
+
+    Some(percent_decode(url))
+}
+
+/// Whether a URL names a protocol rather than a path.
+///
+/// A single leading letter before the colon is a Windows drive, not a scheme:
+/// `C:/Media/a.mp4` is a path and `https://…` is not.
+fn has_remote_scheme(url: &str) -> bool {
+    let Some(colon) = url.find(':') else {
+        return false;
+    };
+    let scheme = &url[..colon];
+    scheme.len() > 1
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Reverses [`encode_file_url_path`]. Invalid escapes are kept verbatim.
+///
+/// Decoding walks **bytes**, never the `&str`. A `%` may be followed by any two
+/// bytes, including the middle of a multi-byte character, and re-slicing the
+/// string to read them panics on a non-char boundary — which turns a hostile
+/// `target_url` into a process abort.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) =
+                (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+            {
+                out.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The numeric value of one hexadecimal digit, or `None` for anything else.
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Truncates a string to fit within a maximum byte length,
@@ -423,6 +604,151 @@ mod tests {
     fn should_return_ax_for_empty_reel_name() {
         let result = truncate_reel_name("", 8);
         assert_eq!(result, "AX");
+    }
+
+    // =========================================================================
+    // Media URL Tests
+    // =========================================================================
+
+    #[test]
+    fn should_encode_asset_paths_as_file_urls() {
+        assert_eq!(
+            asset_src_url("/media/My Clip #1.mp4"),
+            "file:///media/My%20Clip%20%231.mp4"
+        );
+        assert_eq!(
+            asset_src_url(r#"C:\Projects\My Clip.mp4"#),
+            "file:///C:/Projects/My%20Clip.mp4"
+        );
+    }
+
+    #[test]
+    fn should_pass_through_a_uri_that_is_already_a_file_url() {
+        assert_eq!(
+            asset_src_url("file:///media/clip.mp4"),
+            "file:///media/clip.mp4"
+        );
+    }
+
+    #[test]
+    fn should_recover_the_original_path_from_a_file_url() {
+        for path in [
+            "/media/My Clip #1.mp4",
+            r#"C:\Projects\My Clip.mp4"#,
+            "/media/한글.mp4",
+            r#"\\server\share\My Clip.mp4"#,
+        ] {
+            let url = asset_src_url(path);
+            let recovered = file_url_to_path(&url).expect("a file URL should decode");
+            assert_eq!(recovered, path.replace('\\', "/"));
+        }
+    }
+
+    #[test]
+    fn should_drop_the_windows_verbatim_prefix_from_a_media_url() {
+        // Given: the path shape `std::fs::canonicalize` returns on Windows,
+        // which is what an imported asset's URI actually holds
+        let verbatim = r#"\\?\C:\Media\My Clip.mp4"#;
+
+        // Then: the URL names the file, not the Win32 escape hatch. Left in,
+        // `\\?\` encodes to `file:////%3F/C:/…` and every NLE reads it as
+        // offline media.
+        assert_eq!(asset_src_url(verbatim), "file:///C:/Media/My%20Clip.mp4");
+        assert_eq!(
+            file_url_to_path(&asset_src_url(verbatim)).as_deref(),
+            Some("C:/Media/My Clip.mp4")
+        );
+    }
+
+    #[test]
+    fn should_restore_a_share_from_the_verbatim_unc_spelling() {
+        assert_eq!(
+            asset_src_url(r#"\\?\UNC\server\share\clip.mp4"#),
+            "file://server/share/clip.mp4"
+        );
+        assert_eq!(
+            file_url_to_path("file://server/share/clip.mp4").as_deref(),
+            Some("//server/share/clip.mp4")
+        );
+    }
+
+    #[test]
+    fn should_leave_a_path_without_a_verbatim_prefix_alone() {
+        assert_eq!(strip_verbatim_prefix("/media/clip.mp4"), "/media/clip.mp4");
+        assert_eq!(
+            strip_verbatim_prefix(r#"C:\Media\clip.mp4"#),
+            r#"C:\Media\clip.mp4"#
+        );
+    }
+
+    #[test]
+    fn should_not_decode_a_non_file_url() {
+        assert_eq!(file_url_to_path("https://example.com/clip.mp4"), None);
+        assert_eq!(file_url_to_path("s3://bucket/clip.mp4"), None);
+    }
+
+    #[test]
+    fn should_not_panic_on_a_percent_escape_that_precedes_a_multibyte_character() {
+        // Given: escapes whose two bytes after '%' are not two ASCII characters.
+        // Decoding over the &str would slice inside a UTF-8 sequence and panic,
+        // which turns a hostile target_url into a process abort and breaks the
+        // CLI's 0/1/2 exit-code contract.
+        for url in [
+            "file:///media/a%한.mp4",
+            "file:///media/a%😀.mp4",
+            "file:///media/한%",
+            "file:///media/%한글",
+        ] {
+            let decoded = file_url_to_path(url).expect("a file URL should decode");
+            assert!(
+                decoded.starts_with("/media/"),
+                "an undecodable escape should be kept verbatim, got: {decoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_keep_an_invalid_percent_escape_verbatim() {
+        assert_eq!(
+            file_url_to_path("file:///media/a%z9.mp4").as_deref(),
+            Some("/media/a%z9.mp4")
+        );
+        assert_eq!(
+            file_url_to_path("file:///media/trailing%").as_deref(),
+            Some("/media/trailing%")
+        );
+        assert_eq!(
+            file_url_to_path("file:///media/short%2").as_deref(),
+            Some("/media/short%2")
+        );
+    }
+
+    #[test]
+    fn should_decode_an_encoded_drive_colon_before_classifying_the_path() {
+        // `file:///C%3A/Media/a.mp4` is the same file as `file:///C:/Media/a.mp4`.
+        // Classifying before decoding reads it as the POSIX path `/C:/Media/a.mp4`,
+        // which matches no Windows asset and imports as a second copy.
+        assert_eq!(
+            file_url_to_path("file:///C%3A/Media/a.mp4").as_deref(),
+            Some("C:/Media/a.mp4")
+        );
+    }
+
+    #[test]
+    fn should_export_a_project_relative_uri_without_inventing_an_authority() {
+        // Assets stored inside the project keep a relative URI. `file://media/a.mp4`
+        // makes `media` the URL's *authority* — a host — so the round trip reads
+        // it back as the network path `//media/a.mp4`.
+        let url = asset_src_url("media/My Clip.mp4");
+        assert!(
+            !url.starts_with("file://"),
+            "a relative URI must not become an authority URL, got: {url}"
+        );
+        assert_eq!(
+            file_url_to_path(&url).as_deref(),
+            Some("media/My Clip.mp4"),
+            "a relative reference must round trip as a relative path"
+        );
     }
 
     #[test]

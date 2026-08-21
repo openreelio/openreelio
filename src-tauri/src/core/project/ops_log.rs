@@ -1014,6 +1014,48 @@ impl OpsLog {
         archive_log.read_all()
     }
 
+    /// Reads every operation, archived ones included, without taking the lock.
+    ///
+    /// For a reader that must not write: taking the shared lock creates
+    /// `ops.jsonl.lock` (and the directory holding it) if they are not there
+    /// already, which is a change to the filesystem — and a caller that promised
+    /// to change nothing, such as `otio import --dry-run`, cannot make it.
+    ///
+    /// The trade is that a line a writer is midway through appending may be read
+    /// as corrupt and skipped, so the result can be one operation behind. Use
+    /// [`Self::read_all_with_archive`] for anything that acts on what it reads.
+    pub fn read_all_with_archive_unlocked(&self) -> CoreResult<ReadResult> {
+        let archive_path = self.archive_path();
+        let mut all_ops = Vec::new();
+        let mut all_errors = Vec::new();
+
+        if archive_path.exists() {
+            let archive = OpsLog::new(&archive_path).read_all_unlocked()?;
+            all_ops.extend(archive.operations);
+            all_errors.extend(
+                archive
+                    .errors
+                    .into_iter()
+                    .map(|(line, error)| (line, format!("[archive] {error}"))),
+            );
+        }
+
+        let current = self.read_all_unlocked()?;
+        let archive_lines = all_ops.len();
+        all_ops.extend(current.operations);
+        all_errors.extend(
+            current
+                .errors
+                .into_iter()
+                .map(|(line, error)| (line + archive_lines, error)),
+        );
+
+        Ok(ReadResult {
+            operations: all_ops,
+            errors: all_errors,
+        })
+    }
+
     /// Reads all operations including archived ones (for full history replay)
     pub fn read_all_with_archive(&self) -> CoreResult<ReadResult> {
         let mut all_ops = Vec::new();
