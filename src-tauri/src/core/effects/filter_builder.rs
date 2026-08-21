@@ -2191,7 +2191,10 @@ impl FilterGraph {
             let has_masks = effect.masks.has_enabled_masks();
             let filter = if let (true, Some(w), Some(h)) = (has_masks, self.width, self.height) {
                 let effect_body = effect.build_filter_params();
-                if effect_body.is_empty() || !effect.enabled || !effect.is_ffmpeg_compatible() {
+                if is_pass_through_body(&effect_body)
+                    || !effect.enabled
+                    || !effect.is_ffmpeg_compatible()
+                {
                     format!("[{current_label}]null[{next_label}]")
                 } else {
                     // For timed mask effects, append enable clause to the effect body
@@ -2214,7 +2217,7 @@ impl FilterGraph {
                 format!("[{current_label}]null[{next_label}]")
             } else {
                 let filter_body = effect.to_filter_body();
-                if filter_body.is_empty() {
+                if is_pass_through_body(&filter_body) {
                     format!("[{current_label}]null[{next_label}]")
                 } else {
                     let enabled_body = add_enable_to_each_filter(&filter_body, &enable_clause);
@@ -2349,6 +2352,20 @@ fn effect_chain_label(output_label: &str, effect_index: usize) -> String {
     format!("{output_label}_fx{effect_index}")
 }
 
+/// Whether an effect body describes no picture change at all.
+///
+/// [`IntoFFmpegFilter::to_filter_body`] answers `null` for a disabled effect,
+/// for one the export cannot render, and for every effect
+/// [`Effect::build_filter_params`] has no arm for — `Levels`, `Glow`,
+/// `MotionBlur`, `BlendMode` and the rest of its `_` fallthrough. That body is a
+/// pass-through, and it must be *emitted* as one: `null` takes no options, so
+/// gating it with `enable=` produces `null:enable='between(t,…)'`, which FFmpeg
+/// refuses to parse at all ("No option name near 'between(…)'") and which
+/// therefore failed the whole export rather than the one effect.
+fn is_pass_through_body(body: &str) -> bool {
+    body.is_empty() || body == "null"
+}
+
 /// Injects an FFmpeg `enable` clause into every top-level filter in a
 /// comma-separated filter chain. FFmpeg requires `enable` on each individual
 /// filter; appending it once only gates the last filter in the chain.
@@ -2401,6 +2418,58 @@ mod tests {
         assert!(filter.contains("eq=brightness=0.5"));
         assert!(filter.starts_with("[0:v]"));
         assert!(filter.ends_with("[out]"));
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect with no filter of its own stays a plain pass-through
+    ///
+    /// `null` takes no options, so gating it produced
+    /// `null:enable='between(t,…)'` — which FFmpeg cannot parse at all ("No
+    /// option name near 'between(…)'") and which therefore failed the entire
+    /// export rather than the one effect that had nothing to say.
+    #[test]
+    fn should_emit_an_ungated_no_op_for_a_timed_effect_with_no_filter_body() {
+        let mut disabled_grade = Effect::new(EffectType::Brightness);
+        disabled_grade.set_param("value", ParamValue::Float(0.5));
+        disabled_grade.enabled = false;
+
+        for effect in [
+            Effect::new(EffectType::Levels),
+            Effect::new(EffectType::Glow),
+            Effect::new(EffectType::MotionBlur),
+            Effect::new(EffectType::BlendMode),
+            Effect::new(EffectType::Custom("nonesuch".to_string())),
+            disabled_grade,
+        ] {
+            let effect_type = effect.effect_type.clone();
+            let mut graph = FilterGraph::new();
+            graph.add_effect(effect);
+
+            let filter = graph.to_video_filter_complex_timed("0:v", "out", 0.0, 1.0);
+
+            assert_eq!(
+                filter, "[0:v]null[out]",
+                "a no-op {effect_type:?} must pass the picture through ungated"
+            );
+        }
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect that does have a filter body is still gated
+    #[test]
+    fn should_still_gate_a_timed_effect_that_has_a_filter_body() {
+        let mut effect = Effect::new(EffectType::Brightness);
+        effect.set_param("value", ParamValue::Float(0.5));
+
+        let mut graph = FilterGraph::new();
+        graph.add_effect(effect);
+
+        let filter = graph.to_video_filter_complex_timed("0:v", "out", 0.0, 1.0);
+
+        assert!(
+            filter.contains("eq=brightness=0.5000:enable='between(t,0.000000,1.000000)'"),
+            "a colour grade still applies only over the layer: {filter}"
+        );
     }
 
     #[test]

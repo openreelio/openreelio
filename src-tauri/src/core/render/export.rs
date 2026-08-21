@@ -12291,6 +12291,59 @@ mod tests {
     }
 
     /// Feature: Adjustment layers
+    /// Scenario: an opacity is refused by name rather than crashing the render
+    ///
+    /// `Opacity` emits `format=rgba,colorchannelmixer=aa=…`, and `format` has no
+    /// timeline support: the gated graph died on "Timeline ('enable' option) not
+    /// supported with filter 'format'", naming a filter the editor never chose.
+    #[test]
+    fn should_refuse_an_opacity_on_an_adjustment_layer() {
+        let (sequence, assets, effects) =
+            sequence_with_adjustment_layer_effect(EffectType::Opacity);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(!validation.is_valid, "the export must be refused up front");
+        let reported = validation.errors.join("; ");
+        assert!(
+            reported.contains("Opacity") && reported.contains("adjustment layer"),
+            "the refusal must name the effect and why: {reported}"
+        );
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect the export has no filter for is a no-op, not a crash
+    ///
+    /// `Levels`, `Glow`, `MotionBlur`, `BlendMode`, `Custom` and every disabled
+    /// effect reach the adjustment path as a bare `null`. Gating that produced
+    /// `null:enable='between(t,…)'`, which FFmpeg cannot parse, so a layer
+    /// carrying one of them failed the whole export.
+    #[test]
+    fn should_allow_an_effect_with_no_filter_of_its_own_on_an_adjustment_layer() {
+        // `Custom` is left out: it is refused a step earlier, by the
+        // unsupported-in-export check that applies to any clip.
+        for effect_type in [
+            EffectType::Levels,
+            EffectType::Glow,
+            EffectType::MotionBlur,
+            EffectType::BlendMode,
+        ] {
+            let (sequence, assets, effects) =
+                sequence_with_adjustment_layer_effect(effect_type.clone());
+
+            let validation =
+                validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+            assert!(
+                validation.is_valid,
+                "a {effect_type:?} renders as a no-op and must not be refused: {:?}",
+                validation.errors
+            );
+        }
+    }
+
+    /// Feature: Adjustment layers
     /// Scenario: an effect that can be time-gated is still allowed
     #[test]
     fn should_allow_a_timeable_effect_on_an_adjustment_layer() {
@@ -12331,11 +12384,20 @@ mod tests {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
 
-        let gated = |effect_type: EffectType| {
+        let graph_of = |effect: Effect| {
             let mut graph = FilterGraph::new().with_dimensions(320, 180);
             graph.set_fps(30.0);
-            graph.add_effect(Effect::new(effect_type));
-            graph.to_video_filter_complex_timed("0:v", "out", 0.0, 1.0)
+            graph.add_effect(effect);
+            graph
+        };
+        let gated =
+            |effect: Effect| graph_of(effect).to_video_filter_complex_timed("0:v", "out", 0.0, 1.0);
+        let ungated = |effect: Effect| graph_of(effect).to_video_filter_complex("0:v", "out");
+
+        let translucent = || {
+            let mut effect = Effect::new(EffectType::Opacity);
+            effect.set_param("value", ParamValue::Float(0.5));
+            effect
         };
 
         let run = |filtergraph: &str| {
@@ -12362,13 +12424,18 @@ mod tests {
                 .output()
         };
 
-        for effect_type in [EffectType::Zoom, EffectType::Crop] {
+        for effect in [
+            Effect::new(EffectType::Zoom),
+            Effect::new(EffectType::Crop),
+            translucent(),
+        ] {
+            let effect_type = effect.effect_type.clone();
             assert!(
                 !effect_type_supports_timeline_enable(&effect_type),
                 "{effect_type:?} is claimed to be untimeable"
             );
 
-            let Ok(refused) = run(&gated(effect_type.clone())) else {
+            let Ok(refused) = run(&gated(effect)) else {
                 eprintln!("Skipping: ffmpeg could not be launched");
                 return;
             };
@@ -12380,12 +12447,55 @@ mod tests {
             );
         }
 
-        let allowed = run(&gated(EffectType::Brightness)).expect("run ffmpeg");
+        let allowed = run(&gated(Effect::new(EffectType::Brightness))).expect("run ffmpeg");
         assert!(
             allowed.status.success(),
             "a time-gated colour grade must still render: {}",
             String::from_utf8_lossy(&allowed.stderr)
         );
+
+        // Every effect the export has no filter body for — and every disabled
+        // one — reaches the adjustment path as a `null`. Decorating that with
+        // `enable=` produced `null:enable='between(t,…)'`, which FFmpeg cannot
+        // even parse ("No option name near 'between(…)'"), so a layer carrying
+        // one of these killed the whole render. They have to render as the
+        // no-ops they are.
+        let mut disabled_grade = Effect::new(EffectType::Brightness);
+        disabled_grade.enabled = false;
+        for effect in [
+            Effect::new(EffectType::Levels),
+            Effect::new(EffectType::Glow),
+            Effect::new(EffectType::MotionBlur),
+            Effect::new(EffectType::BlendMode),
+            Effect::new(EffectType::Custom("nonesuch".to_string())),
+            disabled_grade,
+        ] {
+            let effect_type = effect.effect_type.clone();
+            let graph = gated(effect);
+            assert!(
+                !graph.contains("enable="),
+                "a no-op {effect_type:?} must not be gated at all: {graph}"
+            );
+
+            let rendered = run(&graph).expect("run ffmpeg");
+            assert!(
+                rendered.status.success(),
+                "a {effect_type:?} on an adjustment layer must render as a no-op: {}",
+                String::from_utf8_lossy(&rendered.stderr)
+            );
+        }
+
+        // The same effects on an ordinary clip are untouched by all of this: an
+        // opacity still composites and a bodiless effect still passes through.
+        for effect in [translucent(), Effect::new(EffectType::Levels)] {
+            let effect_type = effect.effect_type.clone();
+            let rendered = run(&ungated(effect)).expect("run ffmpeg");
+            assert!(
+                rendered.status.success(),
+                "an ungated {effect_type:?} must still render: {}",
+                String::from_utf8_lossy(&rendered.stderr)
+            );
+        }
     }
 
     /// Feature: Render output length

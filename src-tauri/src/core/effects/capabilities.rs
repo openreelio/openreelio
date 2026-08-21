@@ -206,14 +206,20 @@ pub fn effect_type_supports_export(effect_type: &EffectType) -> bool {
 /// The list is what the local FFmpeg (9.0.1) actually refuses, checked filter by
 /// filter against every body [`crate::core::effects::Effect::build_filter_params`]
 /// can emit: `zoompan`, `fps`, `scale` and `pad` (`Zoom`), `crop` (`Crop`,
-/// `AutoReframe`), `subtitles` (`Subtitle`), `vidstabtransform` (`Stabilize`) and
-/// `xfade` (the three transition types).
+/// `AutoReframe`), `format` (`Opacity`), `subtitles` (`Subtitle`),
+/// `vidstabtransform` (`Stabilize`) and `xfade` (the three transition types).
+///
+/// `Opacity` is here for the `format=rgba` its body opens with, not for the
+/// `colorchannelmixer` that does the work: a translucency the timeline could
+/// gate still has to reach an alpha channel first, and the conversion that
+/// creates one is untimeable by nature.
 pub fn effect_type_supports_timeline_enable(effect_type: &EffectType) -> bool {
     !matches!(
         effect_type,
         EffectType::Zoom
             | EffectType::Crop
             | EffectType::AutoReframe
+            | EffectType::Opacity
             | EffectType::Subtitle
             | EffectType::Stabilize
             | EffectType::CrossDissolve
