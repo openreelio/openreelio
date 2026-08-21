@@ -351,6 +351,18 @@ pub fn validate_local_input_path(path: &str, label: &str) -> Result<PathBuf, Str
         return Err(format!("{label} must be a local file path"));
     }
 
+    // Refuse network shares *before* the path is turned into a `PathBuf`.
+    // On Windows `\\host\share\x` answers true to `Path::is_absolute`, so it
+    // sails past the absolute-path check below and reaches `fs::metadata` —
+    // and that stat is itself the outbound SMB connection plus the NTLM
+    // handshake that leaks with it. This validator sits on the command
+    // boundary reached by plan files (`plan execute`, the agent plan executor,
+    // MCP `plan.apply`), which are untrusted input, so the check has to be
+    // lexical: it must decide without touching the filesystem.
+    if is_network_path(trimmed) {
+        return Err(format!("{label} must not be a UNC or network share path"));
+    }
+
     let pb = PathBuf::from(trimmed);
     if !pb.is_absolute() {
         return Err(format!(
@@ -540,6 +552,12 @@ pub async fn validate_local_input_path_async(path: &str, label: &str) -> Result<
 
     if lower.contains("://") {
         return Err(format!("{label} must be a local file path"));
+    }
+
+    // Same reasoning as the sync variant: a UNC path is rejected lexically so
+    // the validator never stats a share and leaks an NTLM handshake doing it.
+    if is_network_path(trimmed) {
+        return Err(format!("{label} must not be a UNC or network share path"));
     }
 
     let pb = PathBuf::from(trimmed);
@@ -1450,6 +1468,59 @@ mod tests {
         let result = validate_local_input_path(&dir_path, "inputPath");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not a file"));
+    }
+
+    /// Every separator spelling of a share must be refused *lexically*.
+    ///
+    /// The distinguishing assertion is the error text: none of these paths
+    /// exists, so if the validator had reached `fs::metadata` the error would
+    /// read "file not found". Seeing the network-path message instead is the
+    /// proof that the rejection happened before the filesystem was touched —
+    /// which is the whole point, because on Windows that stat is the outbound
+    /// SMB connection and the NTLM handshake leak.
+    #[test]
+    fn should_reject_a_unc_input_path_before_stat_ing_it() {
+        for path in [
+            r"\\host\share\x.mp4",
+            "//host/share/x.mp4",
+            r"/\host\share\x.mp4",
+            r"\\?\UNC\host\share\x.mp4",
+        ] {
+            let error = validate_local_input_path(path, "inputPath")
+                .expect_err(&format!("'{path}' names a share and must be rejected"));
+            assert!(
+                error.contains("UNC or network share"),
+                "'{path}' must be refused by the network-path check, not by a filesystem \
+                 probe: {error}"
+            );
+            assert!(
+                !error.contains("not found"),
+                "'{path}' reached the filesystem before being rejected: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_unc_input_path_before_stat_ing_it_async() {
+        for path in [
+            r"\\host\share\x.mp4",
+            "//host/share/x.mp4",
+            r"/\host\share\x.mp4",
+            r"\\?\UNC\host\share\x.mp4",
+        ] {
+            let error = validate_local_input_path_async(path, "inputPath")
+                .await
+                .expect_err(&format!("'{path}' names a share and must be rejected"));
+            assert!(
+                error.contains("UNC or network share"),
+                "'{path}' must be refused by the network-path check, not by a filesystem \
+                 probe: {error}"
+            );
+            assert!(
+                !error.contains("not found"),
+                "'{path}' reached the filesystem before being rejected: {error}"
+            );
+        }
     }
 
     #[test]
