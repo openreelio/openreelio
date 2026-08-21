@@ -59,14 +59,20 @@ Notes that change what you see in Resolve:
   on its frame, and it plays at unmodified speed in the importing tool. The clip
   is named in `unsupported`.
 - **A caption, text, compound or adjustment clip becomes a gap**, so the shots
-  around it do not slide.
+  around it do not slide. That includes one at the *end* of a track: the gap runs
+  to the frame the clip would have ended on, so the track keeps its length.
 - **A wipe or slide exports as `"Custom"`**, because OTIO only standardises a
-  dissolve. The real type is preserved under `metadata.openreelio`.
+  dissolve. The real type, and its direction, are preserved under
+  `metadata.openreelio`.
+- **A transition that does not fit is dropped and named.** It must fit inside the
+  shot on each side of the cut; an 8s dissolve in front of a quarter-second shot
+  cannot be written as valid OTIO, so it is reported in `warnings` instead.
 
 ## Import
 
 ```bash
-openreelio-cli otio import --path ./demo --file cut.otio [--sequence <SEQUENCE_ID>] [--dry-run]
+openreelio-cli otio import --path ./demo --file cut.otio [--sequence <SEQUENCE_ID>] \
+  [--dry-run] [--allow-external-media]
 ```
 
 Import builds an edit plan and runs it through the same machinery as
@@ -75,8 +81,8 @@ through the same exit codes — `0` applied and saved, `1` rejected or rolled ba
 cleanly, `2` tool failure or an incomplete rollback.
 
 **Always dry-run first on a file you did not write.** `--dry-run` prints the plan,
-its warnings and the media it would import, and stops without touching the
-project:
+its warnings and the media it would import, and stops without reading or writing
+a single byte of the project beyond the state it needs to build the plan:
 
 ```bash
 openreelio-cli otio import --path ./demo --file foreign.otio --dry-run
@@ -87,14 +93,44 @@ files), then the file path, then the file name. Anything still unmatched becomes
 an `ImportAsset` step and is listed in `assetImports` — so check that list
 before applying a file whose media lives somewhere unexpected.
 
-**Refused outright**, rather than imported approximately: an `OTIO_SCHEMA`
-version this build does not read (the error names it), image-sequence
-references, and a file needing more plan steps than the cap allows — chunking it
-would give up atomicity, so split the timeline instead.
+**Media is scoped to the project.** An `.otio` chooses its own media paths, and
+importing one makes OpenReelio stat — and sometimes ffprobe — whatever it names,
+so a file you did not write is a filesystem probe pointed at your machine. Media
+that matches no existing asset is only imported from **inside the project
+directory**. Pass `--allow-external-media` for a file you trust whose media
+genuinely lives elsewhere; media the project already holds always resolves,
+wherever it is.
+
+**Refused outright**, rather than imported approximately:
+
+- an `OTIO_SCHEMA` version this build does not read, or a node missing the field
+  altogether (the error names it);
+- image-sequence references;
+- a file over 64 MiB, or one needing more plan steps than the cap allows —
+  chunking it would give up atomicity, so split the timeline instead;
+- media on a network / UNC path, in every spelling (`\\host\share`,
+  `/\host\share`, `file://host/share`, percent-encoded separators): reading one
+  opens an outbound connection the file's author chose, and on Windows leaks an
+  NTLM handshake with it;
+- media outside the project directory, unless `--allow-external-media` is passed;
+- a transition type that is not a two-input blend — `metadata.openreelio` is
+  read from an untrusted file, so only cross dissolve, wipe and slide are
+  accepted, and a node naming anything else is skipped rather than added as an
+  arbitrary effect;
+- a clip or marker whose time is unreadable, infinite or negative.
 
 **Reported but not fatal:** nested stacks, non-editorial track kinds, offline
 clips, asymmetric transitions (OpenReelio stores one duration, so the blend is
-re-centred on the cut), and transitions whose handles cannot be verified.
+re-centred on the cut), transitions whose handles cannot be verified, a
+transition next to a clip that was skipped (it is omitted rather than moved to a
+cut the file never named), clip markers, and the speed / reverse / freeze /
+time-remap detail an export recorded but the import does not restore.
+
+**Timing lands on your sequence's grid.** Every `RationalTime` is read at its own
+rate, then every timeline position is snapped to the target sequence's frame
+rate. A file at a different rate is reported in `unsupported`: a cut may move by
+up to half a frame, which is the alternative to leaving sub-frame holes between
+shots.
 
 ## Transition handles
 
@@ -108,11 +144,17 @@ re-trim before delivery.
 ## The `metadata.openreelio` namespace
 
 Our exports stash detail the standard schema cannot carry — exact track kind,
-original ids, mute state, the real transition type behind a `"Custom"`, a
-marker's exact colour — under `metadata.openreelio` on the relevant node.
-Foreign tools ignore it and see ordinary OTIO; our own import reads it to
-restore what it can. It is metadata, not a second timeline: it never changes
-where a clip sits.
+original ids, mute state, the real transition type behind a `"Custom"` and its
+direction, a marker's exact colour, a clip's speed / reverse / freeze /
+time-remap flags — under `metadata.openreelio` on the relevant node. Foreign
+tools ignore it and see ordinary OTIO; our own import reads it to restore what it
+can. It is metadata, not a second timeline: it never changes where a clip sits.
+
+What import restores from it: the asset id, the transition's real type and
+direction. What it only *reports*: `speed`, `reverse`, `freezeFrame` and
+`timeRemap` are named in `unsupported` per clip and the clip is placed at
+unmodified speed — the namespace records what the timeline was, not what the
+import rebuilt.
 
 ## Verifying a Resolve round trip
 
