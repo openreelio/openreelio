@@ -16,14 +16,13 @@ use crate::core::{
 
 use super::{
     export::{
-        append_ass_text_overlay, append_black_video_gap, append_caption_overlays,
-        append_master_audio_output, append_output_time_range_args, append_text_clip_overlays,
-        append_timeline_video_output, append_video_stream_normalization,
-        append_video_transform_composition, apply_audio_mix_settings, asset_has_playable_audio,
-        build_audio_trim_filter, build_video_trim_filter, clip_audio_is_suppressed_by_companion,
+        append_ass_text_overlay, append_black_video_gap, append_drawtext_text_overlays,
+        append_master_audio_output, append_output_time_range_args, append_timeline_video_output,
+        append_video_stream_normalization, append_video_transform_composition,
+        apply_audio_mix_settings, asset_has_playable_audio, build_audio_trim_filter,
+        build_video_trim_filter, clip_audio_is_suppressed_by_companion,
         clip_needs_transform_composition, collect_audio_companion_keys,
-        collect_caption_drawtext_filters, collect_enabled_clips_sorted,
-        collect_overlay_text_drawtext_filters, effective_source_dimensions,
+        collect_drawtext_text_overlays, collect_enabled_clips_sorted, effective_source_dimensions,
         generated_text_visual_end_sec, hdr_metadata_for_asset, is_text_clip,
         output_video_dimensions, output_video_fps, output_video_pixel_format,
         resolve_asset_source_dimensions, resolve_asset_source_duration, resolve_trim_source_kind,
@@ -86,15 +85,10 @@ pub(super) fn build_sequence_ffmpeg_args(
     }
 
     let use_ass_text_overlays = ctx.ass_text_overlay_path.is_some();
-    let caption_filters = if use_ass_text_overlays {
+    let drawtext_text_overlays = if use_ass_text_overlays {
         Vec::new()
     } else {
-        collect_caption_drawtext_filters(&all_clips)
-    };
-    let overlay_text_filters = if use_ass_text_overlays {
-        Vec::new()
-    } else {
-        collect_overlay_text_drawtext_filters(&all_clips, ctx.effects)?
+        collect_drawtext_text_overlays(ctx.sequence, &all_clips, ctx.effects)?
     };
 
     let (output_width, output_height) = output_video_dimensions(ctx.sequence, ctx.settings);
@@ -411,8 +405,7 @@ pub(super) fn build_sequence_ffmpeg_args(
     // picture at all to draw on, so it needs a base canvas; every other case is
     // covered by the black tail `append_timeline_video_output` pads out to
     // `timeline_end_sec`.
-    let has_generated_text_visuals =
-        !caption_filters.is_empty() || !overlay_text_filters.is_empty() || use_ass_text_overlays;
+    let has_generated_text_visuals = !drawtext_text_overlays.is_empty() || use_ass_text_overlays;
     if has_generated_text_visuals && video_segments.is_empty() {
         let generated_visual_end_sec = generated_text_visual_end_sec(&all_clips);
         if generated_visual_end_sec > TIMELINE_EPSILON_SEC {
@@ -484,13 +477,7 @@ pub(super) fn build_sequence_ffmpeg_args(
     let final_video_label = if let Some(ass_path) = ctx.ass_text_overlay_path {
         append_ass_text_overlay(&mut filter_complex, "[outv]", ass_path)
     } else {
-        let text_overlay_video_label =
-            append_text_clip_overlays(&mut filter_complex, "[outv]", &overlay_text_filters);
-        append_caption_overlays(
-            &mut filter_complex,
-            &text_overlay_video_label,
-            &caption_filters,
-        )
+        append_drawtext_text_overlays(&mut filter_complex, "[outv]", &drawtext_text_overlays)
     };
 
     let final_audio_label = append_master_audio_output(
