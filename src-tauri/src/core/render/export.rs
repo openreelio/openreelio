@@ -4502,64 +4502,134 @@ pub(super) fn collect_enabled_clips_sorted(sequence: &Sequence) -> Vec<(&Clip, &
     all_clips
 }
 
-/// Builds drawtext filter strings for all caption clips in the input.
+/// Label prefix for a stream a caption clip has been drawn onto.
+const CAPTION_OVERLAY_LABEL_PREFIX: &str = "capv";
+/// Label prefix for a stream a text clip has been drawn onto.
+const TEXT_CLIP_OVERLAY_LABEL_PREFIX: &str = "txtv";
+
+/// Returns true when the track paints into the output picture.
+///
+/// Audio tracks contribute sound only, so they take no position in the visual
+/// stack even though [`track_included_in_media_collection`] keeps them.
+fn track_draws_into_picture(track: &Track) -> bool {
+    track_included_in_media_collection(track)
+        && matches!(
+            track.kind,
+            TrackKind::Video | TrackKind::Overlay | TrackKind::Caption
+        )
+}
+
+/// Maps each drawing track's id to its back-to-front position in the stack.
+///
+/// This mirrors [`crate::core::render::graph::build_render_graph`], which walks
+/// `sequence.tracks` in reverse: the bottom-most drawing track is composited
+/// first and track index 0 — the topmost track — is composited last, in front
+/// of everything below it. Depth 0 is therefore the bottom-most drawing track
+/// and the topmost track carries the highest depth.
+///
+/// Both burn-in paths order themselves by this one answer, so neither can
+/// invent a stacking convention of its own.
+fn visual_stack_depths(sequence: &Sequence) -> HashMap<&str, usize> {
+    let drawing_tracks: Vec<&str> = sequence
+        .tracks
+        .iter()
+        .filter(|track| track_draws_into_picture(track))
+        .map(|track| track.id.as_str())
+        .collect();
+
+    let bottom_most = drawing_tracks.len().saturating_sub(1);
+    drawing_tracks
+        .into_iter()
+        .enumerate()
+        .map(|(position, track_id)| (track_id, bottom_most - position))
+        .collect()
+}
+
+/// One time-gated `drawtext` filter plus where its track sits in the stack.
+pub(super) struct DrawtextTextOverlay {
+    /// Back-to-front position of the owning track (see [`visual_stack_depths`]).
+    stack_depth: usize,
+    /// Prefix the composited stream's label is built from.
+    label_prefix: &'static str,
+    filter: String,
+}
+
+/// Builds every `drawtext` overlay the fallback burn-in path draws, back to front.
 ///
 /// The caller is expected to pass only enabled clips (e.g. from
 /// [`collect_enabled_clips_sorted`]), so no additional `clip.enabled`
 /// check is performed here.
-pub(super) fn collect_caption_drawtext_filters(all_clips: &[(&Clip, &Track)]) -> Vec<String> {
-    all_clips
-        .iter()
-        .filter_map(|(clip, track)| {
-            if track.kind == TrackKind::Caption {
-                build_caption_drawtext_with_enable(clip)
-            } else {
-                None
+///
+/// Captions and text clips are collected together because they share one filter
+/// chain: keeping them in separate chains would have made every caption draw
+/// over every text clip regardless of which track was on top.
+pub(super) fn collect_drawtext_text_overlays(
+    sequence: &Sequence,
+    all_clips: &[(&Clip, &Track)],
+    effects: &HashMap<String, Effect>,
+) -> Result<Vec<DrawtextTextOverlay>, ExportError> {
+    let stack_depths = visual_stack_depths(sequence);
+    let mut overlays = Vec::new();
+
+    for (clip, track) in all_clips {
+        let stack_depth = stack_depths.get(track.id.as_str()).copied().unwrap_or(0);
+
+        if track.kind == TrackKind::Caption {
+            if let Some(filter) = build_caption_drawtext_with_enable(clip) {
+                overlays.push(DrawtextTextOverlay {
+                    stack_depth,
+                    label_prefix: CAPTION_OVERLAY_LABEL_PREFIX,
+                    filter,
+                });
             }
-        })
-        .collect()
+        } else if matches!(track.kind, TrackKind::Video | TrackKind::Overlay) && is_text_clip(clip)
+        {
+            overlays.push(DrawtextTextOverlay {
+                stack_depth,
+                label_prefix: TEXT_CLIP_OVERLAY_LABEL_PREFIX,
+                filter: build_text_clip_drawtext_with_enable(clip, effects)?,
+            });
+        }
+    }
+
+    // A `drawtext` chain paints in order, so the last filter wins the pixel.
+    // Ordering by ascending depth runs the chain back to front — bottom-most
+    // track first, topmost track last — which is the order the compositor uses.
+    // The sort is stable, so clips keep the timeline order `all_clips` has
+    // inside a single track.
+    overlays.sort_by_key(|overlay| overlay.stack_depth);
+
+    Ok(overlays)
 }
 
-fn append_drawtext_overlays(
+/// Chains the overlays onto `base_video_label`, in the order given.
+pub(super) fn append_drawtext_text_overlays(
     filter_complex: &mut String,
     base_video_label: &str,
-    drawtext_filters: &[String],
-    label_prefix: &str,
+    overlays: &[DrawtextTextOverlay],
 ) -> String {
     let mut current_video_label = base_video_label.to_string();
+    let mut caption_count = 0usize;
+    let mut text_clip_count = 0usize;
 
-    for (index, filter) in drawtext_filters.iter().enumerate() {
-        let next_video_label = format!("[{}{}]", label_prefix, index);
+    for overlay in overlays {
+        let count = if overlay.label_prefix == CAPTION_OVERLAY_LABEL_PREFIX {
+            &mut caption_count
+        } else {
+            &mut text_clip_count
+        };
+        let next_video_label = format!("[{}{}]", overlay.label_prefix, count);
+        *count += 1;
+
         filter_complex.push(';');
         filter_complex.push_str(&format!(
             "{}{}{}",
-            current_video_label, filter, next_video_label
+            current_video_label, overlay.filter, next_video_label
         ));
         current_video_label = next_video_label;
     }
 
     current_video_label
-}
-
-pub(super) fn append_caption_overlays(
-    filter_complex: &mut String,
-    base_video_label: &str,
-    caption_filters: &[String],
-) -> String {
-    append_drawtext_overlays(filter_complex, base_video_label, caption_filters, "capv")
-}
-
-pub(super) fn append_text_clip_overlays(
-    filter_complex: &mut String,
-    base_video_label: &str,
-    overlay_text_filters: &[String],
-) -> String {
-    append_drawtext_overlays(
-        filter_complex,
-        base_video_label,
-        overlay_text_filters,
-        "txtv",
-    )
 }
 
 /// Builds the time-gated `drawtext` filter a text overlay clip renders as.
@@ -4611,21 +4681,6 @@ fn build_text_clip_effect_with_transform(
     let mut resolved_text_effect = text_effect.clone();
     apply_text_transform_overrides(&mut resolved_text_effect, clip);
     Ok(resolved_text_effect)
-}
-
-pub(super) fn collect_overlay_text_drawtext_filters(
-    all_clips: &[(&Clip, &Track)],
-    effects: &HashMap<String, Effect>,
-) -> Result<Vec<String>, ExportError> {
-    let mut filters = Vec::new();
-
-    for (clip, track) in all_clips {
-        if matches!(track.kind, TrackKind::Video | TrackKind::Overlay) && is_text_clip(clip) {
-            filters.push(build_text_clip_drawtext_with_enable(clip, effects)?);
-        }
-    }
-
-    Ok(filters)
 }
 
 pub(super) fn generated_text_visual_end_sec(all_clips: &[(&Clip, &Track)]) -> f64 {
@@ -5157,6 +5212,31 @@ impl AssFontEmbedder {
     }
 }
 
+/// Size of the `Layer` band one track owns in the burned-in ASS script.
+const ASS_LAYERS_PER_TRACK: i32 = 1000;
+
+/// Resolves the ASS `Layer` an event on a given track and clip is drawn at.
+///
+/// libass draws a higher `Layer` in front of a lower one, so the number has to
+/// grow with the visual stack depth: the topmost track (track index 0, the
+/// deepest position — see [`visual_stack_depths`]) gets the largest layer and
+/// therefore draws over everything below it.
+///
+/// `clip_index` only orders events inside a single track, where clips cannot
+/// overlap in time anyway. It is clamped to the track's own band so a track
+/// carrying a very long clip list can never reach into the band owned by the
+/// track above it.
+fn ass_dialogue_layer(stack_depth: usize, clip_index: usize) -> i32 {
+    let depth = i32::try_from(stack_depth).unwrap_or(i32::MAX / ASS_LAYERS_PER_TRACK);
+    let within_track = i32::try_from(clip_index)
+        .unwrap_or(i32::MAX)
+        .min(ASS_LAYERS_PER_TRACK - 1);
+
+    depth
+        .saturating_mul(ASS_LAYERS_PER_TRACK)
+        .saturating_add(within_track)
+}
+
 /// Builds the ASS script the libass export path burns text overlays with.
 ///
 /// The script is authored in a fixed 1080-tall coordinate space (see
@@ -5178,10 +5258,14 @@ pub fn build_ass_text_overlay_script(
     let mut fonts = AssFontEmbedder::default();
     let mut event_count = 0usize;
 
-    for (track_index, track) in sequence.tracks.iter().enumerate() {
+    let stack_depths = visual_stack_depths(sequence);
+
+    for track in &sequence.tracks {
         if !track_included_in_media_collection(track) {
             continue;
         }
+
+        let stack_depth = stack_depths.get(track.id.as_str()).copied().unwrap_or(0);
 
         for (clip_index, clip) in track.clips.iter().enumerate() {
             if !clip.enabled {
@@ -5228,7 +5312,7 @@ pub fn build_ass_text_overlay_script(
                 &mut events,
                 &AssEventContext {
                     style_name: &style_name,
-                    layer: (track_index as i32 * 1000) + clip_index as i32,
+                    layer: ass_dialogue_layer(stack_depth, clip_index),
                     font_family: &font_family,
                     anchor: ass_text_anchor(clip, &track.kind, &effect, play_res_x, play_res_y),
                 },
@@ -8029,6 +8113,240 @@ mod tests {
             "a positioned caption carries no margins. Got: {script}"
         );
         assert!(script.contains("Caption line"));
+    }
+
+    /// Builds a sequence whose topmost track and the track under it both carry
+    /// an overlapping overlay, so the two burn-in paths can be asked which one
+    /// they draw in front.
+    ///
+    /// Track index 0 is the topmost track, exactly as `build_render_graph`
+    /// treats it, so the clip named "Top overlay" has to win the pixel.
+    fn sequence_with_overlapping_overlays_on_two_tracks(
+        top_kind: TrackKind,
+        bottom_kind: TrackKind,
+    ) -> (Sequence, HashMap<String, Effect>) {
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{Effect, EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut effects: HashMap<String, Effect> = HashMap::new();
+
+        for (kind, label, track_name) in [
+            (top_kind, "Top overlay", "Top"),
+            (bottom_kind, "Bottom overlay", "Bottom"),
+        ] {
+            let mut track = match kind {
+                TrackKind::Caption => Track::new_caption(track_name),
+                _ => Track::new_video(track_name),
+            };
+
+            if kind == TrackKind::Caption {
+                let mut clip = Clip::new("caption-asset")
+                    .with_source_range(0.0, 4.0)
+                    .place_at(0.0);
+                clip.label = Some(label.to_string());
+                track.add_clip(clip);
+            } else {
+                let effect_id = format!("effect-{track_name}");
+                let mut clip = Clip::new(&format!("{TEXT_ASSET_PREFIX}{track_name}"))
+                    .with_source_range(0.0, 4.0)
+                    .place_at(0.0);
+                clip.effects.push(effect_id.clone());
+                track.add_clip(clip);
+
+                let mut effect = Effect::with_id(&effect_id, EffectType::TextOverlay);
+                effect.set_param("text", ParamValue::String(label.to_string()));
+                effects.insert(effect_id, effect);
+            }
+
+            sequence.add_track(track);
+        }
+
+        (sequence, effects)
+    }
+
+    /// Returns the ASS `Layer` of the single event whose text is `needle`.
+    fn ass_layer_of_event(script: &str, needle: &str) -> i32 {
+        let matching: Vec<&str> = script
+            .lines()
+            .filter(|line| line.starts_with("Dialogue: ") && line.contains(needle))
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected exactly one event carrying '{needle}'. Got: {matching:?}"
+        );
+
+        matching[0]
+            .trim_start_matches("Dialogue: ")
+            .split(',')
+            .next()
+            .expect("a Dialogue line always has a Layer field")
+            .parse()
+            .expect("the Layer field is an integer")
+    }
+
+    /// Feature: Overlay stacking order in the export
+    ///   Scenario: two overlapping captions sit on different tracks
+    ///     Given a caption on the topmost track and one on the track below it
+    ///     When the ASS burn-in script is built
+    ///     Then the topmost track's event carries the higher `Layer`
+    ///
+    /// libass draws a higher `Layer` in front of a lower one, so the layer has
+    /// to grow with visual stack depth. Deriving it from the raw track index
+    /// instead put the topmost track underneath everything below it.
+    #[test]
+    fn should_draw_the_topmost_track_over_the_track_below_when_captions_overlap() {
+        let (sequence, effects) = sequence_with_overlapping_overlays_on_two_tracks(
+            TrackKind::Caption,
+            TrackKind::Caption,
+        );
+
+        let script = build_ass_text_overlay_script(&sequence, &effects)
+            .expect("script result")
+            .expect("script exists");
+
+        let top_layer = ass_layer_of_event(&script, "Top overlay");
+        let bottom_layer = ass_layer_of_event(&script, "Bottom overlay");
+
+        // Two drawing tracks: the topmost sits at depth 1, the one below it at
+        // depth 0, and each track owns a 1000-wide band of layers.
+        assert_eq!(top_layer, 1000);
+        assert_eq!(bottom_layer, 0);
+        assert!(
+            top_layer > bottom_layer,
+            "the topmost track must draw in front. Got top={top_layer}, bottom={bottom_layer}"
+        );
+    }
+
+    /// Feature: Overlay stacking order in the export
+    ///   Scenario: a text clip on the topmost track overlaps a caption below it
+    ///     Given a text clip on track 0 and a caption on track 1
+    ///     When the ASS burn-in script is built
+    ///     Then the text clip's event carries the higher `Layer`
+    #[test]
+    fn should_draw_a_topmost_text_clip_over_a_caption_on_the_track_below() {
+        let (sequence, effects) =
+            sequence_with_overlapping_overlays_on_two_tracks(TrackKind::Video, TrackKind::Caption);
+
+        let script = build_ass_text_overlay_script(&sequence, &effects)
+            .expect("script result")
+            .expect("script exists");
+
+        assert_eq!(ass_layer_of_event(&script, "Top overlay"), 1000);
+        assert_eq!(ass_layer_of_event(&script, "Bottom overlay"), 0);
+    }
+
+    /// A single overlay track is the whole visual stack, so it sits at depth 0
+    /// and keeps `Layer: 0` — the value every single-track script has always
+    /// carried.
+    #[test]
+    fn should_keep_a_lone_overlay_track_on_layer_zero() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some("Only line".to_string());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists");
+
+        assert_eq!(ass_layer_of_event(&script, "Only line"), 0);
+    }
+
+    /// An audio track draws nothing, so it must not take a position in the
+    /// visual stack: the lone caption track is still the whole picture stack.
+    #[test]
+    fn should_ignore_audio_tracks_when_numbering_overlay_layers() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut caption_track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some("Only line".to_string());
+        caption_track.add_clip(clip);
+        sequence.add_track(caption_track);
+        sequence.add_track(Track::new_audio("Audio 1"));
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists");
+
+        assert_eq!(ass_layer_of_event(&script, "Only line"), 0);
+    }
+
+    /// Feature: Overlay stacking order in the export
+    ///   Scenario: the `drawtext` fallback burns two overlapping overlays
+    ///     Given a caption on the topmost track and one on the track below it
+    ///     When the fallback filter chain is built
+    ///     Then the topmost track's `drawtext` is chained last, over the other
+    ///
+    /// A `drawtext` chain paints in order, so the filter appended last wins the
+    /// pixel. Ordering the chain by start time alone left the bottom track on
+    /// top, the same inversion the ASS path had.
+    #[test]
+    fn should_chain_the_topmost_tracks_drawtext_last_when_overlays_overlap() {
+        let (sequence, effects) = sequence_with_overlapping_overlays_on_two_tracks(
+            TrackKind::Caption,
+            TrackKind::Caption,
+        );
+
+        let all_clips = collect_enabled_clips_sorted(&sequence);
+        let overlays = collect_drawtext_text_overlays(&sequence, &all_clips, &effects)
+            .expect("fallback overlays should build");
+
+        let mut filter_complex = String::from("[0:v]null[outv]");
+        append_drawtext_text_overlays(&mut filter_complex, "[outv]", &overlays);
+
+        let top = filter_complex
+            .find("Top overlay")
+            .expect("the topmost track's drawtext should be in the chain");
+        let bottom = filter_complex
+            .find("Bottom overlay")
+            .expect("the lower track's drawtext should be in the chain");
+
+        assert!(
+            bottom < top,
+            "the topmost track must be painted last. Got: {filter_complex}"
+        );
+    }
+
+    /// The fallback chain also has to respect track order across overlay kinds:
+    /// a caption below a text clip must not paint over it just because captions
+    /// used to be appended in a second pass.
+    #[test]
+    fn should_chain_a_caption_below_a_text_clip_before_it() {
+        let (sequence, effects) =
+            sequence_with_overlapping_overlays_on_two_tracks(TrackKind::Video, TrackKind::Caption);
+
+        let all_clips = collect_enabled_clips_sorted(&sequence);
+        let overlays = collect_drawtext_text_overlays(&sequence, &all_clips, &effects)
+            .expect("fallback overlays should build");
+
+        let mut filter_complex = String::from("[0:v]null[outv]");
+        append_drawtext_text_overlays(&mut filter_complex, "[outv]", &overlays);
+
+        let top = filter_complex
+            .find("Top overlay")
+            .expect("the topmost track's drawtext should be in the chain");
+        let bottom = filter_complex
+            .find("Bottom overlay")
+            .expect("the lower track's drawtext should be in the chain");
+
+        assert!(
+            bottom < top,
+            "the topmost track must be painted last. Got: {filter_complex}"
+        );
     }
 
     #[test]
