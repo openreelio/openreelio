@@ -1007,7 +1007,10 @@ impl Effect {
     /// Both remaining options describe the frame rather than the move, and
     /// FFmpeg will not take an expression for either, so the graph has to supply
     /// them — see [`apply_canvas_to_effect`]. Without them FFmpeg applies its own
-    /// `hd720` default and squeezes the whole chain through 720p.
+    /// `hd720` default and squeezes the whole chain through 720p. `s` is a
+    /// force-scale with no aspect handling of its own, so the frame is
+    /// letterboxed into the canvas in front of the zoom and `s` only restates the
+    /// size it is already being handed.
     ///
     /// Parameters:
     /// - `zoom_type`: Zoom direction ("in", "out") (default: "in")
@@ -1069,16 +1072,30 @@ impl Effect {
         let x_expr = format!("x='iw*{:.4}-(iw/zoom*{:.4})'", center_x, center_x);
         let y_expr = format!("y='ih*{:.4}-(ih/zoom*{:.4})'", center_y, center_y);
 
-        let size = match (
+        // `zoompan` force-scales whatever reaches it to `s` and offers no aspect
+        // handling of its own, so a 4:3 source in a 16:9 sequence came out
+        // stretched sideways. Fitting the frame to the canvas *before* the zoom —
+        // the same letterbox the render's downstream normalization applies —
+        // makes `s` an exact restatement of the size already flowing through, and
+        // leaves that normalization a no-op rather than a second letterbox.
+        let (size, fit) = match (
             self.get_float(CANVAS_WIDTH_PARAM),
             self.get_float(CANVAS_HEIGHT_PARAM),
         ) {
             (Some(width), Some(height)) if width >= 1.0 && height >= 1.0 => {
-                format!(":s={}x{}", width as i64, height as i64)
+                let (width, height) = (width as i64, height as i64);
+                (
+                    format!(":s={}x{}", width, height),
+                    format!(
+                        "scale={}:{}:force_original_aspect_ratio=decrease,\
+                         pad={}:{}:(ow-iw)/2:(oh-ih)/2,",
+                        width, height, width, height
+                    ),
+                )
             }
             // Nothing truthful to say. FFmpeg then applies its own `hd720`
             // default, which is why every render path tells the graph its canvas.
-            _ => String::new(),
+            _ => (String::new(), String::new()),
         };
 
         // `on` counts frames leaving `zoompan`, which run at `fps` — so the move
@@ -1092,8 +1109,9 @@ impl Effect {
         };
 
         format!(
-            "{}zoompan={}:{}:{}:d=1{}:fps={}",
+            "{}{}zoompan={}:{}:{}:d=1{}:fps={}",
             rate_pin,
+            fit,
             zoom_expr,
             x_expr,
             y_expr,
@@ -3680,7 +3698,7 @@ mod tests {
         let filter = zoom_on_canvas(Effect::new(EffectType::Zoom), 1920, 1080, 24.0);
 
         assert!(
-            filter.contains("]fps=24,zoompan="),
+            filter.contains("]fps=24,scale="),
             "expected the canvas rate in front of the zoom, got: {filter}"
         );
         assert!(filter.contains(":fps=24"), "got: {filter}");
@@ -3753,6 +3771,29 @@ mod tests {
             assert!(
                 filter.contains("((1.0100-1)/19799)*on"),
                 "expected the ratio left for FFmpeg to divide, got: {filter}"
+            );
+        }
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: a source shaped unlike the canvas is letterboxed, not stretched
+    ///
+    /// `zoompan` force-scales its output to `s` and offers no aspect handling, so
+    /// a 4:3 source in a 16:9 sequence used to leave the zoom stretched sideways.
+    /// The fit in front of it is the same one the render's downstream
+    /// normalization applies, which makes that normalization a no-op rather than
+    /// a second letterbox.
+    #[test]
+    fn should_letterbox_into_the_canvas_before_zooming() {
+        for (width, height) in [(1920, 1080), (1080, 1920)] {
+            let filter = zoom_on_canvas(Effect::new(EffectType::Zoom), width, height, 30.0);
+
+            assert!(
+                filter.contains(&format!(
+                    "scale={width}:{height}:force_original_aspect_ratio=decrease,\
+                     pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,zoompan="
+                )),
+                "expected an aspect-preserving fit in front of the zoom, got: {filter}"
             );
         }
     }
@@ -6631,6 +6672,48 @@ mod tests {
             "a zoom-out must land back on the whole frame — {UNZOOMED} white \
              pixels — got {landed}"
         );
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: a source shaped unlike the canvas keeps its shape
+    ///
+    /// `zoompan` force-scales to `s`, so a 4:3 source in a 16:9 sequence used to
+    /// come out stretched sideways — and a vertical sequence stretched it the
+    /// other way, much harder.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1): a 120x120 square in a 320x240
+    /// source rendered 120x90 into a 320x180 canvas and 68x160 into a 180x320
+    /// one. With the fit in front of the zoom both come out square.
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_zoom_letterboxes_a_source_shaped_unlike_the_canvas() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = white_box_clip(dir.path(), "square.mp4", (320, 240), (120, 120)) else {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        };
+
+        for (width, height) in [(320_usize, 180_usize), (180, 320)] {
+            let mut effect = Effect::new(EffectType::Zoom);
+            effect.set_param("duration", ParamValue::Float(0.2));
+            effect.set_param("zoom_factor", ParamValue::Float(1.5));
+            let graph = zoom_graph_for_ffmpeg(effect, width as i32, height as i32, 30.0);
+
+            let Some(frames) = render_luma_frames(&input, &graph, width, height) else {
+                eprintln!("Skipping: ffmpeg could not be launched");
+                return;
+            };
+
+            // The first frame of the move is at 1.0x, so the only thing that can
+            // have reshaped the square is the fit into the canvas.
+            let (box_width, box_height, _) = white_region(&frames[0], width);
+
+            assert!(
+                box_width.abs_diff(box_height) <= 2,
+                "a square subject must stay square in a {width}x{height} canvas, \
+                 got {box_width}x{box_height}"
+            );
+        }
     }
 
     #[test]
