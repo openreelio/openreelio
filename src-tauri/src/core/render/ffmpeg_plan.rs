@@ -28,7 +28,7 @@ use super::{
         output_video_dimensions, output_video_fps, output_video_pixel_format,
         resolve_asset_source_dimensions, resolve_asset_source_duration,
         seed_source_dimension_cache, seed_source_duration_cache, unmeasurable_effect_message,
-        AssetAudioInfo, ExportEngine, ExportError, ExportSettings, VideoCodec,
+        AssetAudioInfo, ExportEngine, ExportError, ExportSettings, TrimSourceKind, VideoCodec,
         VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
     transform_layout::compute_clip_transform_layout,
@@ -231,6 +231,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                         &trim_label,
                         &mut filter_complex,
                         handles,
+                        TrimSourceKind::for_asset(asset),
                     );
 
                     if clip_filter_graph.has_video_effects() {

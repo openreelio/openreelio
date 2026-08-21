@@ -2221,6 +2221,33 @@ fn handled_source_window(clip: &Clip, handles: ClipHandles) -> (f64, f64) {
     )
 }
 
+/// What kind of picture the input of a video trim decodes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TrimSourceKind {
+    /// A moving stream: the trim cuts a window out of it.
+    Motion,
+    /// A single still frame, which has to be held across the clip's slot.
+    StillImage,
+}
+
+impl TrimSourceKind {
+    /// Classifies an asset by whether it decodes to one frame or to many.
+    pub(super) fn for_asset(asset: &Asset) -> Self {
+        match asset.kind {
+            AssetKind::Image => Self::StillImage,
+            _ => Self::Motion,
+        }
+    }
+}
+
+/// How long a still has to hold to fill its timeline slot, handles included.
+///
+/// Floored at one frame's worth of time so the `trim` this feeds can never be
+/// asked for an empty window, which FFmpeg answers with a stream of no frames.
+fn still_image_slot_duration(clip: &Clip, handles: ClipHandles) -> f64 {
+    (clip.place.duration_sec + handles.head_sec + handles.tail_sec).max(TIMELINE_EPSILON_SEC)
+}
+
 /// Build video trim filter with speed, reverse, freeze frame, and time remap support.
 ///
 /// Generates the complete video filter chain from input to the trim output label:
@@ -2231,19 +2258,38 @@ fn handled_source_window(clip: &Clip, handles: ClipHandles) -> (f64, f64) {
 /// transition planner refuses frozen, reversed and time-remapped clips
 /// precisely because their timeline-to-source mapping makes the extension
 /// undefined.
+///
+/// `source` says whether the input decodes to moving pictures or to a single
+/// still — see [`TrimSourceKind`].
 pub(super) fn build_video_trim_filter(
     clip: &Clip,
     input_index: usize,
     trim_label: &str,
     filter_complex: &mut String,
     handles: ClipHandles,
+    source: TrimSourceKind,
 ) {
     debug_assert!(
         handles.is_none() || (!clip.freeze_frame && !clip.has_time_remap() && !clip.reverse),
         "transition handles are only defined for constant-speed clips"
     );
 
-    if clip.freeze_frame {
+    if source == TrimSourceKind::StillImage {
+        // A still decodes to exactly one frame, so every other branch here — all
+        // of which cut a *window* out of a moving stream — leaves the clip one
+        // frame long however many seconds the timeline gave it. Cloning that
+        // frame across the slot is what makes a photo a clip: without it a Ken
+        // Burns move exports as a single-frame flash, and an unzoomed still does
+        // the same. The source window is deliberately ignored, because a still
+        // has nothing to seek into: trimming from a non-zero in point would find
+        // no frame at all and render nothing.
+        let slot = format_speed_number(still_image_slot_duration(clip, handles));
+        let filter = format!(
+            "[{}:v]trim=end_frame=1,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={},trim=0:{},setpts=PTS-STARTPTS[{}]",
+            input_index, slot, slot, trim_label
+        );
+        filter_complex.push_str(&filter);
+    } else if clip.freeze_frame {
         // Freeze frame: extract single frame, loop to fill duration
         let tpad_duration = format_speed_number(clip.place.duration_sec);
         let filter = format!(
@@ -14805,7 +14851,14 @@ mod tests {
         clip.slow_motion_interpolation = SlowMotionInterpolation::Nearest;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "vtrim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         assert!(
             !filter.contains("minterpolate"),
@@ -14822,7 +14875,14 @@ mod tests {
         clip.slow_motion_interpolation = SlowMotionInterpolation::FrameBlend;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "vtrim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         assert!(
             filter.contains("minterpolate=mi_mode=blend"),
@@ -14839,7 +14899,14 @@ mod tests {
         clip.slow_motion_interpolation = SlowMotionInterpolation::MotionCompensated;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "vtrim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         assert!(
             filter.contains("minterpolate=mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"),
@@ -14932,7 +14999,14 @@ mod tests {
         clip.reverse = true;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "trim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         // Then filter includes the reverse filter
         assert!(
@@ -14955,13 +15029,258 @@ mod tests {
         clip.place.duration_sec = 3.0;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "trim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         // Then filter includes tpad clone
         assert!(
             filter.contains("tpad=stop_mode=clone:stop_duration=3"),
             "should contain tpad: {filter}"
         );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: a photo fills the slot the editor gave it
+    ///
+    /// An image decodes to exactly one frame, so cutting a window out of it —
+    /// what every other branch of the trim builder does — leaves the clip one
+    /// frame long however many seconds it occupies. The slot is filled by cloning
+    /// that frame, the same way a freeze frame is.
+    #[test]
+    fn should_hold_a_still_image_across_its_whole_slot() {
+        use crate::core::timeline::Clip;
+
+        let mut clip = Clip::new("photo").with_source_range(0.0, 5.0);
+        clip.place.duration_sec = 5.0;
+
+        let mut filter = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::StillImage,
+        );
+
+        assert!(
+            filter.contains("tpad=stop_mode=clone:stop_duration=5"),
+            "a still must be cloned across its slot: {filter}"
+        );
+        assert!(
+            filter.contains("trim=0:5"),
+            "the clone must be cut back to the slot: {filter}"
+        );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: a photo trimmed away from its start still renders
+    ///
+    /// A still has one frame at t=0 and nothing after it, so a `trim` starting at
+    /// the clip's source in point finds no frame at all and the clip renders
+    /// nothing. The source window is not a thing a still has.
+    #[test]
+    fn should_ignore_the_source_window_of_a_still_image() {
+        use crate::core::timeline::Clip;
+
+        let mut clip = Clip::new("photo").with_source_range(2.0, 6.0);
+        clip.place.duration_sec = 4.0;
+
+        let mut filter = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::StillImage,
+        );
+
+        assert!(
+            filter.contains("trim=end_frame=1"),
+            "a still is read as its single frame, not as a window: {filter}"
+        );
+        assert!(
+            !filter.contains("trim=start=2"),
+            "there is no frame at the source in point to seek to: {filter}"
+        );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: the hold covers the handles a transition decodes as well
+    #[test]
+    fn should_hold_a_still_image_across_its_transition_handles() {
+        use crate::core::timeline::Clip;
+
+        let mut clip = Clip::new("photo").with_source_range(0.0, 2.0);
+        clip.place.duration_sec = 2.0;
+
+        let mut filter = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles {
+                head_sec: 0.5,
+                tail_sec: 0.25,
+            },
+            TrimSourceKind::StillImage,
+        );
+
+        assert!(
+            filter.contains("stop_duration=2.75"),
+            "the hold must cover the handles too: {filter}"
+        );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: only images are held; a video is still cut from its window
+    #[test]
+    fn should_classify_only_image_assets_as_stills() {
+        use crate::core::assets::{Asset, VideoInfo};
+
+        let video = Asset::new_video("clip", "file:///a.mp4", VideoInfo::default());
+        assert_eq!(TrimSourceKind::for_asset(&video), TrimSourceKind::Motion);
+
+        let image = Asset::new_image("photo", "file:///a.png", 1920, 1080);
+        assert_eq!(
+            TrimSourceKind::for_asset(&image),
+            TrimSourceKind::StillImage
+        );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: a photo renders every frame of its slot, zoomed or not
+    ///
+    /// The string assertions above encode a belief about what `tpad` does to a
+    /// one-frame input. This one hands the real FFmpeg the graph the export
+    /// builds around a real PNG and counts what comes out: one luma plane per
+    /// frame at the canvas size, so a wrong frame count and a wrong frame size
+    /// both show up as a wrong byte count.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1, 320x180 canvas, 2s at 30fps): the
+    /// plain source-window trim this replaced rendered one frame — 57600 bytes
+    /// where 3456000 were due — whether or not a zoom was in the chain. A Ken
+    /// Burns move on a photo exported as a single-frame flash.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored still
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_still_image_renders_every_frame_of_its_slot() {
+        use crate::core::effects::{Effect, EffectType, FilterGraph};
+        use crate::core::timeline::Clip;
+
+        const CANVAS_WIDTH: u32 = 320;
+        const CANVAS_HEIGHT: u32 = 180;
+        const FPS: f64 = 30.0;
+        const SLOT_SEC: f64 = 2.0;
+
+        let ffmpeg = std::env::var_os("OPENREELIO_FFMPEG_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let photo = dir.path().join("photo.png");
+        let built = std::process::Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x360:rate=1:duration=1",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&photo)
+            .output();
+        let Ok(built) = built else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+        if !built.status.success() || !photo.exists() {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        }
+
+        let mut clip = Clip::new("photo").with_source_range(0.0, SLOT_SEC);
+        clip.place.duration_sec = SLOT_SEC;
+
+        for zoomed in [false, true] {
+            let mut filter_complex = String::new();
+            build_video_trim_filter(
+                &clip,
+                0,
+                "trim0",
+                &mut filter_complex,
+                ClipHandles::default(),
+                TrimSourceKind::StillImage,
+            );
+
+            if zoomed {
+                let mut graph =
+                    FilterGraph::new().with_dimensions(CANVAS_WIDTH as i32, CANVAS_HEIGHT as i32);
+                graph.set_fps(FPS);
+                let mut effect = Effect::new(EffectType::Zoom);
+                effect.set_param("duration", ParamValue::Float(SLOT_SEC));
+                effect.set_param("zoom_factor", ParamValue::Float(1.5));
+                graph.add_effect(effect);
+                filter_complex.push_str(&graph.to_video_filter_complex("trim0", "v0"));
+            } else {
+                filter_complex.push_str("[trim0]null[v0]");
+            }
+            filter_complex.push(';');
+
+            append_video_stream_normalization(
+                &mut filter_complex,
+                "v0",
+                "out",
+                CANVAS_WIDTH,
+                CANVAS_HEIGHT,
+                FPS,
+                "yuv420p",
+                None,
+            );
+
+            let graph_file = dir.path().join("graph.txt");
+            std::fs::write(&graph_file, filter_complex.trim_end_matches(';'))
+                .expect("write filtergraph");
+
+            let render = std::process::Command::new(&ffmpeg)
+                .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+                .arg(&photo)
+                .arg("-/filter_complex")
+                .arg(&graph_file)
+                .args(["-map", "[out]", "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+                .output()
+                .expect("run ffmpeg");
+
+            assert!(
+                render.status.success(),
+                "ffmpeg refused the still-image graph (zoomed={zoomed}): {}",
+                String::from_utf8_lossy(&render.stderr)
+            );
+
+            let expected_frames = (SLOT_SEC * FPS).round() as usize;
+            let frame_bytes = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
+            assert_eq!(
+                render.stdout.len(),
+                expected_frames * frame_bytes,
+                "a {SLOT_SEC}s still at {FPS}fps must render {expected_frames} frames \
+                 of {CANVAS_WIDTH}x{CANVAS_HEIGHT} (zoomed={zoomed}), got {} frames",
+                render.stdout.len() / frame_bytes.max(1)
+            );
+        }
     }
 
     #[test]
@@ -15157,7 +15476,14 @@ mod tests {
         ]));
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "vtrim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         assert!(
             filter.contains("setpts="),
