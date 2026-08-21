@@ -13,7 +13,8 @@ mod qualifier_filters;
 
 pub use capabilities::{
     all_effect_capabilities, effect_capability, effect_capability_dto, effect_type_label,
-    effect_type_supports_export, EffectCapability, EffectCapabilityDto, EffectRuntimeSupport,
+    effect_type_supports_export, effect_type_supports_timeline_enable, EffectCapability,
+    EffectCapabilityDto, EffectRuntimeSupport,
 };
 /// Canonical filtergraph escapers, shared with the render pipeline and the IPC
 /// commands that build filter strings outside of the effect builders.
@@ -23,6 +24,7 @@ pub use capabilities::{
 #[allow(unused_imports)]
 pub(crate) use filter_builder::{
     build_vidstabdetect_filter, escape_ffmpeg_filter_path, escape_ffmpeg_filter_value,
+    BRANCH_OFFSET_PARAM,
 };
 pub use filter_builder::{FilterGraph, IntoFFmpegFilter};
 pub use gpu_filters::{GpuFilterBackend, GpuFilterContext};

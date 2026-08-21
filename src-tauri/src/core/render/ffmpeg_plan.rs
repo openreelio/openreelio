@@ -26,10 +26,10 @@ use super::{
         collect_overlay_text_drawtext_filters, effective_source_dimensions,
         generated_text_visual_end_sec, hdr_metadata_for_asset, is_text_clip,
         output_video_dimensions, output_video_fps, output_video_pixel_format,
-        resolve_asset_source_dimensions, resolve_asset_source_duration,
+        resolve_asset_source_dimensions, resolve_asset_source_duration, resolve_trim_source_kind,
         seed_source_dimension_cache, seed_source_duration_cache, unmeasurable_effect_message,
-        AssetAudioInfo, ExportEngine, ExportError, ExportSettings, VideoCodec,
-        VideoTimelineSegment, TIMELINE_EPSILON_SEC,
+        AssetAudioInfo, ExportEngine, ExportError, ExportSettings, SourceFrameCountCache,
+        VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
     transform_layout::compute_clip_transform_layout,
     transition_stitch::{
@@ -117,6 +117,11 @@ pub(super) fn build_sequence_ffmpeg_args(
             resolve_asset_source_duration(asset, &mut source_durations)
         });
 
+    // Which image assets are photos and which are animations. An extension says
+    // nothing about that, so the answer has to be measured; caching it keeps a
+    // timeline that reuses one GIF to a single probe.
+    let mut source_frame_counts = SourceFrameCountCache::new();
+
     let mut adjustment_layer_effects = Vec::new();
     for (clip, _track) in &all_clips {
         if clip.is_adjustment_layer() && !clip.effects.is_empty() {
@@ -127,6 +132,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                 ctx.effects,
                 Some(output_width),
                 Some(output_height),
+                Some(output_fps),
                 ClipHandles::default(),
             );
             if graph.has_video_effects() {
@@ -183,6 +189,7 @@ pub(super) fn build_sequence_ffmpeg_args(
             ctx.effects,
             Some(output_width),
             Some(output_height),
+            Some(output_fps),
             handles,
         );
 
@@ -229,6 +236,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                         &trim_label,
                         &mut filter_complex,
                         handles,
+                        resolve_trim_source_kind(asset, &mut source_frame_counts),
                     );
 
                     if clip_filter_graph.has_video_effects() {
@@ -617,7 +625,7 @@ pub(super) fn build_audio_only_ffmpeg_args(
         let handles = transition_plan.handles(&clip.id);
         let clip_filter_graph =
             ctx.engine
-                .build_clip_filter_graph(clip, ctx.effects, None, None, handles);
+                .build_clip_filter_graph(clip, ctx.effects, None, None, None, handles);
         let audio_trim_label = format!("atrim{}", input_index);
         let audio_out_label = format!("a{}", input_index);
         let audio_effects_input = build_audio_trim_filter(

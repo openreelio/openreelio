@@ -22,7 +22,7 @@ use super::{
     curve_points_to_ffmpeg, default_flat_curve, effect_type_supports_export,
     is_flat_identity_curve, is_identity_curve, mask_filters::apply_effect_through_mask_group,
     parse_curve_points, parse_curve_points_with_fallback, sample_curve_at, CurvePoint, Effect,
-    EffectType,
+    EffectType, ParamValue,
 };
 use tracing::warn;
 
@@ -995,13 +995,31 @@ impl Effect {
 
     /// Builds FFmpeg zoompan filter for zoom effect.
     ///
+    /// `zoompan` emits `d` output frames for *each* input frame, so `d` is a
+    /// frame multiplier and not, as it reads, the length of the move. It is
+    /// pinned to 1 here: one frame in, one frame out, which is the only setting
+    /// that leaves the clip the length the timeline says it is. The move itself
+    /// is driven by `on`, the output frame counter, ramping over the effect's
+    /// duration and then holding. (The `zoom+step` accumulator this used to
+    /// build cannot replace it: FFmpeg resets `zoom` for every input frame, so
+    /// at `d=1` it never moves off 1.0 and nothing zooms at all.)
+    ///
+    /// Both remaining options describe the frame rather than the move, and
+    /// FFmpeg will not take an expression for either, so the graph has to supply
+    /// them — see [`apply_canvas_to_effect`]. Without them FFmpeg applies its own
+    /// `hd720` default and squeezes the whole chain through 720p. `s` is a
+    /// force-scale with no aspect handling of its own, so the frame is
+    /// letterboxed into the canvas in front of the zoom and `s` only restates the
+    /// size it is already being handed.
+    ///
     /// Parameters:
     /// - `zoom_type`: Zoom direction ("in", "out") (default: "in")
-    /// - `duration`: Effect duration in seconds (default: 1.0)
-    /// - `zoom_factor`: Maximum zoom level (default: 1.5)
+    /// - `duration`: Length of the zoom move in seconds (default: 1.0)
+    /// - `zoom_factor`: Zoom level at the end of the move (default: 1.5)
     /// - `center_x`: Horizontal center (0.0-1.0) (default: 0.5)
     /// - `center_y`: Vertical center (0.0-1.0) (default: 0.5)
-    /// - `fps`: Output framerate (default: 30)
+    /// - `canvas_fps` / `fps`: Frame rate of the canvas (default: 30)
+    /// - `canvas_width` / `canvas_height`: Size of the canvas (default: FFmpeg's)
     fn build_zoom_filter(&self) -> String {
         let zoom_type = self
             .get_param("zoom_type")
@@ -1011,35 +1029,56 @@ impl Effect {
         let zoom_factor = self.get_float("zoom_factor").unwrap_or(1.5);
         let center_x = self.get_float("center_x").unwrap_or(0.5);
         let center_y = self.get_float("center_y").unwrap_or(0.5);
-        let fps = self.get_float("fps").unwrap_or(30.0) as i64;
+
+        // The canvas rate wins over the effect's own param: `zoompan` restamps
+        // its output at this rate, so it has to be the rate the render runs at.
+        let canvas_fps = self.get_float(CANVAS_FPS_PARAM);
+        let fps = canvas_fps.or_else(|| self.get_float("fps")).unwrap_or(30.0);
 
         // Guard against invalid duration or fps that would cause division by zero
-        if !duration.is_finite() || duration <= 0.0 || fps <= 0 {
+        if !duration.is_finite() || duration <= 0.0 || !fps.is_finite() || fps <= 0.0 {
             return "null".to_string();
         }
 
-        // Calculate total frames for the duration
-        let total_frames = (duration * fps as f64) as i64;
+        // How many frames the move lasts. Beyond it the zoom holds.
+        let total_frames = (duration * fps) as i64;
 
         // Guard against zero total frames (edge case with very small duration)
         if total_frames <= 0 {
             return "null".to_string();
         }
 
-        // Build zoom expression based on type
-        // For zoom in: start at 1.0, end at zoom_factor
-        // For zoom out: start at zoom_factor, end at 1.0
+        // `on` is 0 on the first output frame, so the move is divided by the
+        // number of *steps* between frames — one fewer than the number of frames
+        // — for the last frame of the move to land exactly on the target. Divided
+        // by the frame count instead, as this used to be, the move stopped a step
+        // short and a zoom-out never came back to 1.0.
+        let steps = (total_frames - 1).max(1);
+
+        // The ratio is handed to FFmpeg unevaluated. Pre-computing it here meant
+        // rounding it to six decimals, and a move spread thin enough rounds to
+        // `0.000000` — a 1% zoom over eleven minutes at 30fps does — which turns
+        // a zoom-in into no zoom at all and a zoom-out into a permanent hold at
+        // the zoomed size. FFmpeg divides at full double precision instead.
+        // A clip in a transition is decoded from before its in point, so `on` is
+        // already counting while the picture the editor drew the move under has
+        // not started yet. Holding the move at its first frame until then is what
+        // keeps a zoom on a dissolving clip landing where it was authored.
+        let clock = match self
+            .get_float(BRANCH_OFFSET_PARAM)
+            .filter(|offset| offset.is_finite() && *offset > 0.0)
+            .map(|offset| (offset * fps).round() as i64)
+            .filter(|frames| *frames > 0)
+        {
+            Some(frames) => format!("max(on-{},0)", frames),
+            None => "on".to_string(),
+        };
+
+        let factor = format!("{:.4}", zoom_factor);
+        let travelled = format!("(({}-1)/{})*{}", factor, steps, clock);
         let zoom_expr = match zoom_type {
-            "out" => format!(
-                "z='if(lte(zoom,1.0),{:.4},max(1.001,zoom-{:.6}))'",
-                zoom_factor,
-                (zoom_factor - 1.0) / total_frames as f64
-            ),
-            _ => format!(
-                "z='min(zoom+{:.6},{:.4})'",
-                (zoom_factor - 1.0) / total_frames as f64,
-                zoom_factor
-            ),
+            "out" => format!("z='max({}-{},1)'", factor, travelled),
+            _ => format!("z='min(1+{},{})'", travelled, factor),
         };
 
         // Build x/y position expressions to keep centered
@@ -1047,9 +1086,51 @@ impl Effect {
         let x_expr = format!("x='iw*{:.4}-(iw/zoom*{:.4})'", center_x, center_x);
         let y_expr = format!("y='ih*{:.4}-(ih/zoom*{:.4})'", center_y, center_y);
 
+        // `zoompan` force-scales whatever reaches it to `s` and offers no aspect
+        // handling of its own, so a 4:3 source in a 16:9 sequence came out
+        // stretched sideways. Fitting the frame to the canvas *before* the zoom —
+        // the same letterbox the render's downstream normalization applies —
+        // makes `s` an exact restatement of the size already flowing through, and
+        // leaves that normalization a no-op rather than a second letterbox.
+        let (size, fit) = match (
+            self.get_float(CANVAS_WIDTH_PARAM),
+            self.get_float(CANVAS_HEIGHT_PARAM),
+        ) {
+            (Some(width), Some(height)) if width >= 1.0 && height >= 1.0 => {
+                let (width, height) = (width as i64, height as i64);
+                (
+                    format!(":s={}x{}", width, height),
+                    format!(
+                        "scale={}:{}:force_original_aspect_ratio=decrease,\
+                         pad={}:{}:(ow-iw)/2:(oh-ih)/2,",
+                        width, height, width, height
+                    ),
+                )
+            }
+            // Nothing truthful to say. FFmpeg then applies its own `hd720`
+            // default, which is why every render path tells the graph its canvas.
+            _ => (String::new(), String::new()),
+        };
+
+        // `on` counts frames leaving `zoompan`, which run at `fps` — so the move
+        // only lasts `duration` seconds if the frames arriving are at that rate
+        // too. Pinning the rate in front of the zoom makes that true whatever
+        // the source was shot at, and stops `zoompan`'s restamping from
+        // stretching or squashing the clip.
+        let rate_pin = match canvas_fps {
+            Some(_) => format!("fps={},", format_frame_rate(fps)),
+            None => String::new(),
+        };
+
         format!(
-            "zoompan={}:{}:{}:d={}:s=hd720:fps={}",
-            zoom_expr, x_expr, y_expr, total_frames, fps
+            "{}{}zoompan={}:{}:{}:d=1{}:fps={}",
+            rate_pin,
+            fit,
+            zoom_expr,
+            x_expr,
+            y_expr,
+            size,
+            format_frame_rate(fps)
         )
     }
 
@@ -1907,6 +1988,20 @@ impl Effect {
 // Filter Graph Composition
 // =============================================================================
 
+/// Parameter an effect reads to learn the canvas width it is drawing into.
+pub(crate) const CANVAS_WIDTH_PARAM: &str = "canvas_width";
+/// Parameter an effect reads to learn the canvas height it is drawing into.
+pub(crate) const CANVAS_HEIGHT_PARAM: &str = "canvas_height";
+/// Parameter an effect reads to learn the frame rate the canvas runs at.
+pub(crate) const CANVAS_FPS_PARAM: &str = "canvas_fps";
+/// Parameter an effect reads to learn how far before the clip's in point the
+/// stream carrying it begins — the head handle a transition decodes.
+///
+/// The render sets it on the effects of a clip taking part in a transition; see
+/// `anchor_effect_to_branch` in the export. Effects counted in seconds from the
+/// clip's start read it and move by that much; everything else ignores it.
+pub(crate) const BRANCH_OFFSET_PARAM: &str = "branch_offset_sec";
+
 /// Composes multiple effects into a single FFmpeg filter complex string
 pub struct FilterGraph {
     /// List of effects in order
@@ -1915,6 +2010,8 @@ pub struct FilterGraph {
     width: Option<i32>,
     /// Video height in pixels (for mask calculations)
     height: Option<i32>,
+    /// Frame rate of the canvas the chain feeds, in frames per second
+    fps: Option<f64>,
 }
 
 impl FilterGraph {
@@ -1924,13 +2021,13 @@ impl FilterGraph {
             effects: vec![],
             width: None,
             height: None,
+            fps: None,
         }
     }
 
     /// Sets video dimensions for mask-aware filter generation
     pub fn with_dimensions(mut self, width: i32, height: i32) -> Self {
-        self.width = Some(width);
-        self.height = Some(height);
+        self.set_dimensions(width, height);
         self
     }
 
@@ -1938,11 +2035,33 @@ impl FilterGraph {
     pub fn set_dimensions(&mut self, width: i32, height: i32) {
         self.width = Some(width);
         self.height = Some(height);
+        self.publish_canvas();
+    }
+
+    /// Tells the graph what frame rate the canvas it feeds runs at.
+    pub fn set_fps(&mut self, fps: f64) {
+        self.fps = Some(fps);
+        self.publish_canvas();
+    }
+
+    /// Writes the canvas onto every effect that cannot work it out for itself.
+    ///
+    /// The values are stored on the effects rather than applied while emitting,
+    /// because the emitted string is not the only reader: the export measures
+    /// the same effect bodies to find out how big a picture the chain hands the
+    /// transform. Both have to be told the same thing or the transform places
+    /// the clip against a size the render never produces.
+    fn publish_canvas(&mut self) {
+        let (width, height, fps) = (self.width, self.height, self.fps);
+        for effect in &mut self.effects {
+            apply_canvas_to_effect(effect, width, height, fps);
+        }
     }
 
     /// Adds an effect to the graph
-    pub fn add_effect(&mut self, effect: Effect) {
+    pub fn add_effect(&mut self, mut effect: Effect) {
         if effect.enabled && effect.is_ffmpeg_compatible() {
+            apply_canvas_to_effect(&mut effect, self.width, self.height, self.fps);
             self.effects.push(effect);
         }
     }
@@ -1992,7 +2111,7 @@ impl FilterGraph {
             let next_label = if is_last {
                 output_label.to_string()
             } else {
-                format!("v{}", i)
+                effect_chain_label(output_label, i)
             };
 
             // Check if this effect has power window masks and dimensions are available
@@ -2065,14 +2184,17 @@ impl FilterGraph {
             let next_label = if is_last {
                 output_label.to_string()
             } else {
-                format!("{}_{}", output_label, i)
+                effect_chain_label(output_label, i)
             };
 
             // Check if this effect has power window masks and dimensions are available
             let has_masks = effect.masks.has_enabled_masks();
             let filter = if let (true, Some(w), Some(h)) = (has_masks, self.width, self.height) {
                 let effect_body = effect.build_filter_params();
-                if effect_body.is_empty() || !effect.enabled || !effect.is_ffmpeg_compatible() {
+                if is_pass_through_body(&effect_body)
+                    || !effect.enabled
+                    || !effect.is_ffmpeg_compatible()
+                {
                     format!("[{current_label}]null[{next_label}]")
                 } else {
                     // For timed mask effects, append enable clause to the effect body
@@ -2095,7 +2217,7 @@ impl FilterGraph {
                 format!("[{current_label}]null[{next_label}]")
             } else {
                 let filter_body = effect.to_filter_body();
-                if filter_body.is_empty() {
+                if is_pass_through_body(&filter_body) {
                     format!("[{current_label}]null[{next_label}]")
                 } else {
                     let enabled_body = add_enable_to_each_filter(&filter_body, &enable_clause);
@@ -2131,7 +2253,7 @@ impl FilterGraph {
             let next_label = if is_last {
                 output_label.to_string()
             } else {
-                format!("a{}", i)
+                effect_chain_label(output_label, i)
             };
 
             let filter = effect.to_filter_string(&current_label, &next_label);
@@ -2166,6 +2288,83 @@ impl Default for FilterGraph {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// Writes a frame rate the way FFmpeg's video-rate option parser reads it.
+///
+/// Whole rates stay whole so that `30` does not become `30.000000`, and a
+/// fractional rate such as 29.97 keeps enough digits to stay distinguishable
+/// from 30.
+fn format_frame_rate(fps: f64) -> String {
+    if (fps - fps.round()).abs() < 1e-9 {
+        return format!("{}", fps.round() as i64);
+    }
+    let mut formatted = format!("{fps:.6}");
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.').len();
+    formatted.truncate(trimmed);
+    formatted
+}
+
+/// Hands an effect the canvas the graph is drawing into.
+///
+/// Only `zoompan` needs it so far. FFmpeg parses its `s` option as a literal
+/// frame size — no expressions, no "same as the input" — and defaults it to
+/// `hd720`, so a zoom that is not told the canvas resizes every picture that
+/// passes through it to 720p. Its `fps` matters for the same reason: `zoompan`
+/// regenerates output timestamps at that rate, so a wrong one changes how long
+/// the clip lasts.
+fn apply_canvas_to_effect(
+    effect: &mut Effect,
+    width: Option<i32>,
+    height: Option<i32>,
+    fps: Option<f64>,
+) {
+    if effect.effect_type != EffectType::Zoom {
+        return;
+    }
+
+    if let (Some(width), Some(height)) = (width, height) {
+        if width > 0 && height > 0 {
+            effect.set_param(CANVAS_WIDTH_PARAM, ParamValue::Float(f64::from(width)));
+            effect.set_param(CANVAS_HEIGHT_PARAM, ParamValue::Float(f64::from(height)));
+        }
+    }
+
+    if let Some(fps) = fps {
+        if fps.is_finite() && fps > 0.0 {
+            effect.set_param(CANVAS_FPS_PARAM, ParamValue::Float(fps));
+        }
+    }
+}
+
+/// Names the stream that carries the picture (or the sound) between two effects
+/// of one clip's chain.
+///
+/// The name is derived from the chain's own output label, which the caller has
+/// already made unique per clip — the export's per-clip labels are `v{input}`
+/// and `a{input}`. Numbering the intermediates by effect index alone, as this
+/// used to, produced `v0`, `v1`, … for *every* clip, so a clip carrying two
+/// effects re-declared the label its own chain ends on and a clip carrying more
+/// than two re-declared the label a *different* clip's chain ends on. A
+/// filtergraph is only well defined when each label is declared once, so the
+/// export was leaning on how one particular FFmpeg build happens to pair up
+/// repeated names.
+fn effect_chain_label(output_label: &str, effect_index: usize) -> String {
+    format!("{output_label}_fx{effect_index}")
+}
+
+/// Whether an effect body describes no picture change at all.
+///
+/// [`IntoFFmpegFilter::to_filter_body`] answers `null` for a disabled effect,
+/// for one the export cannot render, and for every effect
+/// [`Effect::build_filter_params`] has no arm for — `Levels`, `Glow`,
+/// `MotionBlur`, `BlendMode` and the rest of its `_` fallthrough. That body is a
+/// pass-through, and it must be *emitted* as one: `null` takes no options, so
+/// gating it with `enable=` produces `null:enable='between(t,…)'`, which FFmpeg
+/// refuses to parse at all ("No option name near 'between(…)'") and which
+/// therefore failed the whole export rather than the one effect.
+fn is_pass_through_body(body: &str) -> bool {
+    body.is_empty() || body == "null"
+}
 
 /// Injects an FFmpeg `enable` clause into every top-level filter in a
 /// comma-separated filter chain. FFmpeg requires `enable` on each individual
@@ -2219,6 +2418,58 @@ mod tests {
         assert!(filter.contains("eq=brightness=0.5"));
         assert!(filter.starts_with("[0:v]"));
         assert!(filter.ends_with("[out]"));
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect with no filter of its own stays a plain pass-through
+    ///
+    /// `null` takes no options, so gating it produced
+    /// `null:enable='between(t,…)'` — which FFmpeg cannot parse at all ("No
+    /// option name near 'between(…)'") and which therefore failed the entire
+    /// export rather than the one effect that had nothing to say.
+    #[test]
+    fn should_emit_an_ungated_no_op_for_a_timed_effect_with_no_filter_body() {
+        let mut disabled_grade = Effect::new(EffectType::Brightness);
+        disabled_grade.set_param("value", ParamValue::Float(0.5));
+        disabled_grade.enabled = false;
+
+        for effect in [
+            Effect::new(EffectType::Levels),
+            Effect::new(EffectType::Glow),
+            Effect::new(EffectType::MotionBlur),
+            Effect::new(EffectType::BlendMode),
+            Effect::new(EffectType::Custom("nonesuch".to_string())),
+            disabled_grade,
+        ] {
+            let effect_type = effect.effect_type.clone();
+            let mut graph = FilterGraph::new();
+            graph.add_effect(effect);
+
+            let filter = graph.to_video_filter_complex_timed("0:v", "out", 0.0, 1.0);
+
+            assert_eq!(
+                filter, "[0:v]null[out]",
+                "a no-op {effect_type:?} must pass the picture through ungated"
+            );
+        }
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect that does have a filter body is still gated
+    #[test]
+    fn should_still_gate_a_timed_effect_that_has_a_filter_body() {
+        let mut effect = Effect::new(EffectType::Brightness);
+        effect.set_param("value", ParamValue::Float(0.5));
+
+        let mut graph = FilterGraph::new();
+        graph.add_effect(effect);
+
+        let filter = graph.to_video_filter_complex_timed("0:v", "out", 0.0, 1.0);
+
+        assert!(
+            filter.contains("eq=brightness=0.5000:enable='between(t,0.000000,1.000000)'"),
+            "a colour grade still applies only over the layer: {filter}"
+        );
     }
 
     #[test]
@@ -2319,10 +2570,134 @@ mod tests {
         graph.sort_by_order();
         let complex = graph.to_video_filter_complex("0:v", "vout");
 
-        // Should chain: [0:v]blur[v0];[v0]brightness[vout]
+        // Should chain: [0:v]blur[vout_fx0];[vout_fx0]brightness[vout]
         assert!(complex.contains("gblur"));
         assert!(complex.contains("eq=brightness"));
         assert!(complex.contains(";"));
+    }
+
+    /// Every stream label a filtergraph declares, in declaration order.
+    ///
+    /// A filter's output labels are the bracketed names trailing it, so this
+    /// reads the tail of each `;`-separated link.
+    fn declared_labels(filter_complex: &str) -> Vec<String> {
+        let mut labels = Vec::new();
+        for link in filter_complex.split(';') {
+            let mut rest = link.trim_end();
+            let mut trailing = Vec::new();
+            while rest.ends_with(']') {
+                let Some(open) = rest.rfind('[') else { break };
+                trailing.push(rest[open + 1..rest.len() - 1].to_string());
+                rest = &rest[..open];
+            }
+            trailing.reverse();
+            labels.extend(trailing);
+        }
+        labels
+    }
+
+    /// Feature: Per-clip effect chains
+    /// Scenario: two video effects on the clip that owns the label `v0`
+    ///
+    /// The export names a clip's finished picture `v{input_index}`, so an
+    /// effect chain that numbered its own intermediates `v{effect_index}`
+    /// declared `[v0]` twice on the very first clip of the timeline.
+    #[test]
+    fn should_declare_every_video_chain_label_once_when_chain_ends_on_a_clip_label() {
+        let mut graph = FilterGraph::new();
+
+        let mut blur = Effect::new(EffectType::GaussianBlur);
+        blur.order = 0;
+        graph.add_effect(blur);
+
+        let mut brightness = Effect::new(EffectType::Brightness);
+        brightness.order = 1;
+        brightness.set_param("value", ParamValue::Float(0.2));
+        graph.add_effect(brightness);
+
+        graph.sort_by_order();
+        let complex = graph.to_video_filter_complex("trim0", "v0");
+
+        let labels = declared_labels(&complex);
+        let mut unique = labels.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            labels.len(),
+            unique.len(),
+            "a label is declared twice in: {complex}"
+        );
+        assert_eq!(
+            labels.last().map(String::as_str),
+            Some("v0"),
+            "the chain must still end on the label the export wired up: {complex}"
+        );
+    }
+
+    /// Feature: Per-clip effect chains
+    /// Scenario: three video effects on the first clip of a two-clip timeline
+    ///
+    /// The old scheme's third intermediate was `v1`, which is the finished
+    /// picture of the clip at input index 1 — one clip's chain quietly
+    /// re-declaring another clip's output.
+    #[test]
+    fn should_keep_video_chain_labels_clear_of_other_clips_labels() {
+        let mut graph = FilterGraph::new();
+        for (order, effect_type) in [
+            EffectType::GaussianBlur,
+            EffectType::Brightness,
+            EffectType::Contrast,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut effect = Effect::new(effect_type);
+            effect.order = order as u32;
+            graph.add_effect(effect);
+        }
+        graph.sort_by_order();
+
+        let complex = graph.to_video_filter_complex("trim0", "v0");
+        let other_clip_labels = ["v1", "v2", "vfx1", "trim1"];
+
+        for label in declared_labels(&complex) {
+            assert!(
+                label == "v0" || !other_clip_labels.contains(&label.as_str()),
+                "chain declared '{label}', which belongs to another clip: {complex}"
+            );
+        }
+    }
+
+    /// Feature: Per-clip effect chains
+    /// Scenario: two audio effects on the clip that owns the label `a0`
+    ///
+    /// The audio chain numbered its intermediates `a{effect_index}` and had the
+    /// same collision as the video one.
+    #[test]
+    fn should_declare_every_audio_chain_label_once_when_chain_ends_on_a_clip_label() {
+        let mut graph = FilterGraph::new();
+
+        let mut volume = Effect::new(EffectType::Volume);
+        volume.order = 0;
+        graph.add_effect(volume);
+
+        let mut gain = Effect::new(EffectType::Gain);
+        gain.order = 1;
+        graph.add_effect(gain);
+
+        graph.sort_by_order();
+        let complex = graph.to_audio_filter_complex("atrim0", "a0");
+
+        let labels = declared_labels(&complex);
+        let mut unique = labels.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            labels.len(),
+            unique.len(),
+            "a label is declared twice in: {complex}"
+        );
+        assert_eq!(labels.last().map(String::as_str), Some("a0"));
     }
 
     #[test]
@@ -3135,9 +3510,9 @@ mod tests {
             "Expected zoompan filter, got: {}",
             filter
         );
-        // Zoom in increases zoom, so expression should contain 'min'
+        // Zoom in ramps upwards from 1.0, so the expression should cap with 'min'
         assert!(
-            filter.contains("min(zoom+"),
+            filter.contains("min(1+"),
             "Expected zoom in expression, got: {}",
             filter
         );
@@ -3187,8 +3562,15 @@ mod tests {
 
         let filter = effect.to_filter_string("in", "out");
         assert!(filter.contains("fps=60"));
-        // Duration 1.0s at 60fps = 60 frames
-        assert!(filter.contains("d=60"));
+        // One output frame per input frame, whatever the rate
+        assert!(filter.contains("d=1"), "got: {}", filter);
+        // Duration 1.0s at 60fps is a 60-frame move to the default 1.5x, which
+        // is 59 steps between the first frame and the last.
+        assert!(
+            filter.contains("min(1+((1.5000-1)/59)*on,1.5000)"),
+            "got: {}",
+            filter
+        );
     }
 
     #[test]
@@ -3308,6 +3690,205 @@ mod tests {
     }
 
     // =========================================================================
+    // Zoom output-frame and canvas tests
+    // =========================================================================
+
+    /// Builds the zoom the export builds: through a graph that knows its canvas.
+    fn zoom_on_canvas(effect: Effect, width: i32, height: i32, fps: f64) -> String {
+        let mut graph = FilterGraph::new().with_dimensions(width, height);
+        graph.set_fps(fps);
+        graph.add_effect(effect);
+        graph.to_video_filter_complex("trim0", "v0")
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: a zoom must not change how many frames the clip has
+    ///
+    /// `zoompan`'s `d` is how many output frames it emits for *each* input
+    /// frame, not the length of the move. Setting it to the move's frame count,
+    /// as this used to, multiplied a 60-frame clip into 3600 frames — two
+    /// seconds of picture stretched over two minutes.
+    #[test]
+    fn should_emit_one_frame_per_input_frame_when_zooming() {
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("duration", ParamValue::Float(2.0));
+        effect.set_param("zoom_factor", ParamValue::Float(1.5));
+
+        let filter = zoom_on_canvas(effect, 1920, 1080, 30.0);
+
+        assert!(
+            filter.contains(":d=1:"),
+            "a zoom must emit one frame per input frame, got: {filter}"
+        );
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: the move is driven by a frame counter, not by `zoom` itself
+    ///
+    /// FFmpeg resets the `zoom` variable for every input frame, so the
+    /// `min(zoom+step, factor)` accumulator this used to build never leaves 1.0
+    /// once `d` is 1 — the picture would not zoom at all.
+    #[test]
+    fn should_drive_the_zoom_move_from_the_frame_counter() {
+        let mut zoom_in = Effect::new(EffectType::Zoom);
+        zoom_in.set_param("duration", ParamValue::Float(2.0));
+        zoom_in.set_param("zoom_factor", ParamValue::Float(1.5));
+        let filter = zoom_on_canvas(zoom_in, 1920, 1080, 30.0);
+        assert!(
+            filter.contains("z='min(1+((1.5000-1)/59)*on,1.5000)'"),
+            "got: {filter}"
+        );
+
+        let mut zoom_out = Effect::new(EffectType::Zoom);
+        zoom_out.set_param("zoom_type", ParamValue::String("out".to_string()));
+        zoom_out.set_param("duration", ParamValue::Float(2.0));
+        zoom_out.set_param("zoom_factor", ParamValue::Float(1.5));
+        let filter = zoom_on_canvas(zoom_out, 1920, 1080, 30.0);
+        assert!(
+            filter.contains("z='max(1.5000-((1.5000-1)/59)*on,1)'"),
+            "got: {filter}"
+        );
+
+        assert!(
+            !filter.contains("zoom+") && !filter.contains("zoom-"),
+            "the move must not read back the zoom of the previous frame: {filter}"
+        );
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: the zoom draws into the sequence canvas, not a fixed 720p frame
+    ///
+    /// `zoompan` takes no expression for `s` and defaults it to `hd720`, so a
+    /// zoom that is not told the canvas silently squeezes the whole chain
+    /// through 1280x720 — including a vertical sequence, which it also reshapes.
+    #[test]
+    fn should_zoom_into_the_canvas_the_graph_draws() {
+        for (width, height) in [(1920, 1080), (1080, 1920), (3840, 2160)] {
+            let filter = zoom_on_canvas(Effect::new(EffectType::Zoom), width, height, 30.0);
+
+            assert!(
+                filter.contains(&format!(":s={width}x{height}:")),
+                "expected the {width}x{height} canvas, got: {filter}"
+            );
+            assert!(
+                !filter.contains("hd720"),
+                "the canvas must not be hard-coded: {filter}"
+            );
+        }
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: the zoom keeps the clip's running time
+    ///
+    /// `zoompan` restamps its output at `fps`, so the frames reaching it have to
+    /// arrive at that rate — otherwise a 24fps source in a 30fps sequence comes
+    /// out a quarter shorter than the timeline slot it was cut for.
+    #[test]
+    fn should_pin_the_frame_rate_the_zoom_restamps_to() {
+        let filter = zoom_on_canvas(Effect::new(EffectType::Zoom), 1920, 1080, 24.0);
+
+        assert!(
+            filter.contains("]fps=24,scale="),
+            "expected the canvas rate in front of the zoom, got: {filter}"
+        );
+        assert!(filter.contains(":fps=24"), "got: {filter}");
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: the size the export measures is the size the render produces
+    ///
+    /// The transform is placed against whatever size the effect chain hands it,
+    /// which the export reads back off these same filter bodies. Publishing the
+    /// canvas onto the stored effect — rather than onto a copy made while
+    /// emitting — is what keeps the two answers the same.
+    #[test]
+    fn should_report_the_canvas_as_the_zooms_output_size() {
+        let mut graph = FilterGraph::new().with_dimensions(1080, 1920);
+        graph.set_fps(30.0);
+        graph.add_effect(Effect::new(EffectType::Zoom));
+
+        let measured = graph
+            .video_effects()
+            .next()
+            .expect("the zoom is a video effect")
+            .build_filter_params();
+
+        assert!(measured.contains(":s=1080x1920:"), "got: {measured}");
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: the move reaches its target on the last frame of the move
+    ///
+    /// `on` is 0 on the first output frame and `frames - 1` on the last, so a
+    /// step of `(factor - 1) / frames` — what this used to emit — stops one step
+    /// short of the target and a zoom-out never gets back to 1.0.
+    #[test]
+    fn should_reach_the_zoom_target_on_the_last_frame_of_the_move() {
+        for (duration, fps, frames) in [(2.0, 30.0, 60), (1.0, 24.0, 24), (0.5, 60.0, 30)] {
+            let mut effect = Effect::new(EffectType::Zoom);
+            effect.set_param("duration", ParamValue::Float(duration));
+            effect.set_param("zoom_factor", ParamValue::Float(2.0));
+            let filter = zoom_on_canvas(effect, 1920, 1080, fps);
+
+            assert!(
+                filter.contains(&format!("/{})*on", frames - 1)),
+                "a {frames}-frame move has {} steps, got: {filter}",
+                frames - 1
+            );
+        }
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: a small zoom over a long clip still moves
+    ///
+    /// The per-frame step used to be baked into the expression as a `{:.6}`
+    /// constant. A 1% zoom over eleven minutes at 30fps steps by 5e-7, which
+    /// rounds to a literal `0.000000` — the zoom-in then does nothing at all and
+    /// the zoom-out holds at the zoomed size forever instead of returning.
+    #[test]
+    fn should_not_round_a_slow_zoom_down_to_no_movement() {
+        for zoom_type in ["in", "out"] {
+            let mut effect = Effect::new(EffectType::Zoom);
+            effect.set_param("zoom_type", ParamValue::String(zoom_type.to_string()));
+            effect.set_param("duration", ParamValue::Float(660.0));
+            effect.set_param("zoom_factor", ParamValue::Float(1.01));
+            let filter = zoom_on_canvas(effect, 1920, 1080, 30.0);
+
+            assert!(
+                !filter.contains("0.000000"),
+                "the {zoom_type} move rounded away to nothing: {filter}"
+            );
+            assert!(
+                filter.contains("((1.0100-1)/19799)*on"),
+                "expected the ratio left for FFmpeg to divide, got: {filter}"
+            );
+        }
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: a source shaped unlike the canvas is letterboxed, not stretched
+    ///
+    /// `zoompan` force-scales its output to `s` and offers no aspect handling, so
+    /// a 4:3 source in a 16:9 sequence used to leave the zoom stretched sideways.
+    /// The fit in front of it is the same one the render's downstream
+    /// normalization applies, which makes that normalization a no-op rather than
+    /// a second letterbox.
+    #[test]
+    fn should_letterbox_into_the_canvas_before_zooming() {
+        for (width, height) in [(1920, 1080), (1080, 1920)] {
+            let filter = zoom_on_canvas(Effect::new(EffectType::Zoom), width, height, 30.0);
+
+            assert!(
+                filter.contains(&format!(
+                    "scale={width}:{height}:force_original_aspect_ratio=decrease,\
+                     pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,zoompan="
+                )),
+                "expected an aspect-preserving fit in front of the zoom, got: {filter}"
+            );
+        }
+    }
+
+    // =========================================================================
     // Zoom Filter Edge Case Tests (Division by Zero Prevention)
     // =========================================================================
 
@@ -3419,8 +4000,14 @@ mod tests {
             filter
         );
         assert!(
-            filter.contains("d=60"),
-            "Expected 60 frames (2s * 30fps), got: {}",
+            filter.contains("d=1"),
+            "Expected one output frame per input frame, got: {}",
+            filter
+        );
+        // 2s at 30fps is a 60-frame move, so the zoom steps 0.5/59 per frame.
+        assert!(
+            filter.contains("min(1+((1.5000-1)/59)*on,1.5000)"),
+            "Expected a 60-frame ramp to 1.5x, got: {}",
             filter
         );
     }
@@ -5880,6 +6467,404 @@ mod tests {
     /// `vidstabdetect=result=`. So the `== 1` assertions below genuinely discriminate;
     /// they are not satisfied by every possible input.
     const INJECTION_PAYLOAD: &str = "/proj/x';anullsrc=r=48000";
+
+    /// Feature: Zoom effect
+    /// Scenario: a zoom over a 60-frame clip renders 60 frames at the canvas size
+    ///
+    /// The string assertions above encode a belief about what `zoompan`'s `d`
+    /// and `s` mean. This one hands the real FFmpeg the graph the export would
+    /// build and counts what comes out: one luma plane per frame at the canvas
+    /// size, so a wrong frame count and a wrong frame size both show up as a
+    /// wrong byte count.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1): the `d={move_frames}:s=hd720`
+    /// this replaced turned the same 60-frame source into 3600 frames of
+    /// 1280x720 — a 60x frame explosion and a canvas the sequence never asked
+    /// for.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored zoom
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_zoom_renders_one_frame_per_input_frame_at_the_canvas_size() {
+        const CANVAS_WIDTH: usize = 320;
+        const CANVAS_HEIGHT: usize = 180;
+        const SOURCE_FRAMES: usize = 60;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let input_file = dir.path().join("input.mp4");
+        let mut fixture_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut fixture_cmd);
+        let fixture = fixture_cmd
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x360:rate=30:duration=2",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&input_file)
+            .output();
+        let Ok(fixture) = fixture else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+        if !fixture.status.success() || !input_file.exists() {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        }
+
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("duration", ParamValue::Float(2.0));
+        effect.set_param("zoom_factor", ParamValue::Float(1.5));
+
+        let mut graph =
+            FilterGraph::new().with_dimensions(CANVAS_WIDTH as i32, CANVAS_HEIGHT as i32);
+        graph.set_fps(30.0);
+        graph.add_effect(effect);
+
+        let graph_file = dir.path().join("graph.txt");
+        std::fs::write(&graph_file, graph.to_video_filter_complex("0:v", "out"))
+            .expect("write filtergraph");
+
+        // One byte per pixel of luma, so the byte count is the frame count times
+        // the frame size — both properties under test, measured at once.
+        let mut render_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut render_cmd);
+        let render = render_cmd
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(&input_file)
+            .arg("-/filter_complex")
+            .arg(&graph_file)
+            .args(["-map", "[out]", "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+            .output()
+            .expect("run ffmpeg");
+
+        assert!(
+            render.status.success(),
+            "ffmpeg refused the zoom graph: {}",
+            String::from_utf8_lossy(&render.stderr)
+        );
+        assert_eq!(
+            render.stdout.len(),
+            SOURCE_FRAMES * CANVAS_WIDTH * CANVAS_HEIGHT,
+            "expected {SOURCE_FRAMES} frames of {CANVAS_WIDTH}x{CANVAS_HEIGHT}, \
+             got {} bytes",
+            render.stdout.len()
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Empirical zoom-geometry helpers
+    // -------------------------------------------------------------------------
+
+    /// A test clip: a white rectangle centred on black, encoded to a real file.
+    ///
+    /// A file rather than `-f lavfi` so that the graph under test is the only
+    /// filtergraph in the command, and the frames it is handed have been through
+    /// a decoder exactly as a render's would be.
+    fn white_box_clip(
+        dir: &std::path::Path,
+        name: &str,
+        canvas: (usize, usize),
+        box_size: (usize, usize),
+    ) -> Option<std::path::PathBuf> {
+        let (width, height) = canvas;
+        let (box_width, box_height) = box_size;
+        let path = dir.join(name);
+        let source = format!(
+            "color=c=black:s={width}x{height}:r=30:d=0.2,\
+             drawbox=x={}:y={}:w={box_width}:h={box_height}:color=white:t=fill",
+            (width - box_width) / 2,
+            (height - box_height) / 2,
+        );
+
+        let mut built_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut built_cmd);
+        let built = built_cmd
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &source,
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&path)
+            .output()
+            .ok()?;
+
+        (built.status.success() && path.exists()).then_some(path)
+    }
+
+    /// Renders `graph` over `input` and hands back its frames as single-plane luma.
+    ///
+    /// One byte per pixel, so a frame is exactly `width * height` bytes and the
+    /// white pixels can be counted without decoding anything.
+    fn render_luma_frames(
+        input: &std::path::Path,
+        graph: &str,
+        width: usize,
+        height: usize,
+    ) -> Option<Vec<Vec<u8>>> {
+        let dir = tempfile::tempdir().ok()?;
+        let graph_file = dir.path().join("graph.txt");
+        std::fs::write(&graph_file, graph).ok()?;
+
+        let mut render_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut render_cmd);
+        let render = render_cmd
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(input)
+            .arg("-/filter_complex")
+            .arg(&graph_file)
+            .args(["-map", "[out]", "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+            .output()
+            .ok()?;
+
+        assert!(
+            render.status.success(),
+            "ffmpeg refused the graph: {}\n{graph}",
+            String::from_utf8_lossy(&render.stderr)
+        );
+
+        Some(
+            render
+                .stdout
+                .chunks_exact(width * height)
+                .map(<[u8]>::to_vec)
+                .collect(),
+        )
+    }
+
+    /// Width, height and area of the white region of one luma frame.
+    fn white_region(frame: &[u8], width: usize) -> (usize, usize, usize) {
+        let lit: Vec<(usize, usize)> = frame
+            .iter()
+            .enumerate()
+            .filter(|(_, luma)| **luma > 127)
+            .map(|(index, _)| (index % width, index / width))
+            .collect();
+        if lit.is_empty() {
+            return (0, 0, 0);
+        }
+
+        let span = |values: &mut dyn Iterator<Item = usize>| {
+            let (min, max) = values.fold((usize::MAX, 0), |(min, max), value| {
+                (min.min(value), max.max(value))
+            });
+            max - min + 1
+        };
+        (
+            span(&mut lit.iter().map(|(x, _)| *x)),
+            span(&mut lit.iter().map(|(_, y)| *y)),
+            lit.len(),
+        )
+    }
+
+    /// The zoom graph the export builds, wired for a one-input ffmpeg command.
+    fn zoom_graph_for_ffmpeg(effect: Effect, width: i32, height: i32, fps: f64) -> String {
+        let mut graph = FilterGraph::new().with_dimensions(width, height);
+        graph.set_fps(fps);
+        graph.add_effect(effect);
+        graph.to_video_filter_complex("0:v", "out")
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: the last frame of the move is at the zoom the editor asked for
+    ///
+    /// The area a zoom of `f` shows grows by `f²`, so a white rectangle of known
+    /// size measures the zoom the render actually reached. The move is six frames
+    /// long, which makes a one-frame shortfall a sixth of the whole move rather
+    /// than something hiding inside rounding.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1, 320x180 canvas, 3520 white source
+    /// pixels, 2x zoom over six frames): dividing the move by the frame count
+    /// instead of by the steps between frames — what this replaced — reached
+    /// 11906 white pixels instead of 14080, a zoom of 1.83x where 2.0x was asked
+    /// for.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored zoom
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_zoom_in_reaches_its_target_on_the_last_frame_of_the_move() {
+        const CANVAS: (usize, usize) = (320, 180);
+        const FACTOR: f64 = 2.0;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = white_box_clip(dir.path(), "box.mp4", CANVAS, (80, 44)) else {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        };
+
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("duration", ParamValue::Float(0.2));
+        effect.set_param("zoom_factor", ParamValue::Float(FACTOR));
+        let graph = zoom_graph_for_ffmpeg(effect, CANVAS.0 as i32, CANVAS.1 as i32, 30.0);
+
+        let Some(frames) = render_luma_frames(&input, &graph, CANVAS.0, CANVAS.1) else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+        assert_eq!(frames.len(), 6, "the zoom must not change the frame count");
+
+        let (_, _, unzoomed) = white_region(&frames[0], CANVAS.0);
+        let (_, _, zoomed) = white_region(frames.last().expect("frames"), CANVAS.0);
+        let expected = unzoomed as f64 * FACTOR * FACTOR;
+
+        assert!(
+            (zoomed as f64 - expected).abs() <= expected * 0.02,
+            "expected the move to end at {FACTOR}x — {expected} white pixels — \
+             got {zoomed} from {unzoomed}"
+        );
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: a zoom-out ends on the picture it started from
+    ///
+    /// A zoom-out that stops a step short never gets back to 1.0, so the clip
+    /// hands the rest of the timeline a picture that is still slightly enlarged.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1, same fixture): the old step
+    /// finished a 2x zoom-out at 4885 white pixels against the source's 3520 —
+    /// still 1.18x in.
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_zoom_out_returns_to_the_unzoomed_frame() {
+        const CANVAS: (usize, usize) = (320, 180);
+        // The fixture is an 80x44 white box, which is what an untouched frame
+        // measures.
+        const UNZOOMED: usize = 80 * 44;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = white_box_clip(dir.path(), "box.mp4", CANVAS, (80, 44)) else {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        };
+
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("zoom_type", ParamValue::String("out".to_string()));
+        effect.set_param("duration", ParamValue::Float(0.2));
+        effect.set_param("zoom_factor", ParamValue::Float(2.0));
+        let graph = zoom_graph_for_ffmpeg(effect, CANVAS.0 as i32, CANVAS.1 as i32, 30.0);
+
+        let Some(frames) = render_luma_frames(&input, &graph, CANVAS.0, CANVAS.1) else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+
+        let (_, _, landed) = white_region(frames.last().expect("frames"), CANVAS.0);
+
+        assert!(
+            (landed as f64 - UNZOOMED as f64).abs() <= UNZOOMED as f64 * 0.02,
+            "a zoom-out must land back on the whole frame — {UNZOOMED} white \
+             pixels — got {landed}"
+        );
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: a source shaped unlike the canvas keeps its shape
+    ///
+    /// `zoompan` force-scales to `s`, so a 4:3 source in a 16:9 sequence used to
+    /// come out stretched sideways — and a vertical sequence stretched it the
+    /// other way, much harder.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1): a 120x120 square in a 320x240
+    /// source rendered 120x90 into a 320x180 canvas and 68x160 into a 180x320
+    /// one. With the fit in front of the zoom both come out square.
+    /// Feature: Zoom effect
+    /// Scenario: a zoom on a clip in a transition waits out the head handle
+    ///
+    /// The stream a dissolving clip renders from starts before its in point, and
+    /// `on` counts from the first frame of *that* stream. Unanchored, the move is
+    /// already part-way through when the clip's own picture appears.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1, 320x180, six frames, a 2x move
+    /// three frames long behind a three-frame handle): without the offset the
+    /// move is finished by the fourth frame — 14080 white pixels where the
+    /// handle should still be showing the source's 3520.
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_zoom_behind_a_head_handle_starts_on_the_clips_own_picture() {
+        const CANVAS: (usize, usize) = (320, 180);
+        const UNZOOMED: usize = 80 * 44;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = white_box_clip(dir.path(), "box.mp4", CANVAS, (80, 44)) else {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        };
+
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("duration", ParamValue::Float(0.1));
+        effect.set_param("zoom_factor", ParamValue::Float(2.0));
+        // Three frames of the six-frame branch belong to the handle.
+        effect.set_param(BRANCH_OFFSET_PARAM, ParamValue::Float(0.1));
+        let graph = zoom_graph_for_ffmpeg(effect, CANVAS.0 as i32, CANVAS.1 as i32, 30.0);
+
+        let Some(frames) = render_luma_frames(&input, &graph, CANVAS.0, CANVAS.1) else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+        assert_eq!(frames.len(), 6);
+
+        let (_, _, held) = white_region(&frames[3], CANVAS.0);
+        assert!(
+            (held as f64 - UNZOOMED as f64).abs() <= UNZOOMED as f64 * 0.02,
+            "the last frame of the handle must still be unzoomed — {UNZOOMED} \
+             white pixels — got {held}"
+        );
+
+        let (_, _, landed) = white_region(frames.last().expect("frames"), CANVAS.0);
+        let expected = UNZOOMED as f64 * 4.0;
+        assert!(
+            (landed as f64 - expected).abs() <= expected * 0.02,
+            "the move must still finish on the clip's last frame — {expected} \
+             white pixels — got {landed}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_zoom_letterboxes_a_source_shaped_unlike_the_canvas() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = white_box_clip(dir.path(), "square.mp4", (320, 240), (120, 120)) else {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        };
+
+        for (width, height) in [(320_usize, 180_usize), (180, 320)] {
+            let mut effect = Effect::new(EffectType::Zoom);
+            effect.set_param("duration", ParamValue::Float(0.2));
+            effect.set_param("zoom_factor", ParamValue::Float(1.5));
+            let graph = zoom_graph_for_ffmpeg(effect, width as i32, height as i32, 30.0);
+
+            let Some(frames) = render_luma_frames(&input, &graph, width, height) else {
+                eprintln!("Skipping: ffmpeg could not be launched");
+                return;
+            };
+
+            // The first frame of the move is at 1.0x, so the only thing that can
+            // have reshaped the square is the fit into the canvas.
+            let (box_width, box_height, _) = white_region(&frames[0], width);
+
+            assert!(
+                box_width.abs_diff(box_height) <= 2,
+                "a square subject must stay square in a {width}x{height} canvas, \
+                 got {box_width}x{box_height}"
+            );
+        }
+    }
 
     #[test]
     #[ignore = "requires an ffmpeg binary; run with --ignored"]

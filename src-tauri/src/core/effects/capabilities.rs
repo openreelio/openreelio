@@ -193,6 +193,48 @@ pub fn effect_type_supports_export(effect_type: &EffectType) -> bool {
     effect_capability(effect_type).export.is_supported()
 }
 
+/// Whether the filter this effect emits accepts FFmpeg's timeline `enable=`.
+///
+/// An adjustment layer grades only the stretch of timeline it covers, which the
+/// render expresses by gating each of the layer's filters with
+/// `enable='between(t,…)'`. FFmpeg rejects the whole filtergraph when a filter
+/// that has no timeline support is given one — `Timeline ('enable' option) not
+/// supported with filter 'zoompan'` — so an effect listed here on an adjustment
+/// layer has to be refused before the command is built, or the export dies on a
+/// message that names an FFmpeg filter the editor never chose.
+///
+/// The rule, not a hand-count: an effect belongs here when the filter body
+/// [`crate::core::effects::Effect::build_filter_params`] emits *opens with* a
+/// filter the local FFmpeg (9.0.1) refuses an `enable=` on — a geometry or
+/// pixel-format conversion has to run before the graded pixels exist, and those
+/// conversions are untimeable by nature. Any new effect whose leading filter is
+/// untimeable must be added here, or an adjustment-layer export dies on a
+/// message naming an FFmpeg filter the editor never chose.
+///
+/// The current members, each confirmed against FFmpeg 9.0.1: `zoompan`, `fps`,
+/// `scale` and `pad` (`Zoom`), `crop` (`Crop`, `AutoReframe`), `subtitles`
+/// (`Subtitle`), `vidstabtransform` (`Stabilize`), `xfade` (the three transition
+/// types), and the `format=` conversion that opens `Opacity` (`format=rgba`),
+/// `Curves` (`format=yuv444p`, the Luma-vs-Sat leg) and `HSLQualifier`
+/// (`format=rgba`). For the `format` cases it is the conversion, not the
+/// `colorchannelmixer`/`geq` that does the work, that FFmpeg cannot gate.
+pub fn effect_type_supports_timeline_enable(effect_type: &EffectType) -> bool {
+    !matches!(
+        effect_type,
+        EffectType::Zoom
+            | EffectType::Crop
+            | EffectType::AutoReframe
+            | EffectType::Opacity
+            | EffectType::Curves
+            | EffectType::HSLQualifier
+            | EffectType::Subtitle
+            | EffectType::Stabilize
+            | EffectType::CrossDissolve
+            | EffectType::Wipe
+            | EffectType::Slide
+    )
+}
+
 pub fn effect_capability_dto(effect_type: &EffectType) -> EffectCapabilityDto {
     let capability = effect_capability(effect_type);
 

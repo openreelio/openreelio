@@ -20,8 +20,8 @@ use crate::core::{
     },
     commands::TEXT_ASSET_PREFIX,
     effects::{
-        effect_capability, effect_type_label, Effect, EffectType, FilterGraph, IntoFFmpegFilter,
-        ParamValue,
+        effect_capability, effect_type_label, effect_type_supports_timeline_enable, Effect,
+        EffectType, FilterGraph, IntoFFmpegFilter, ParamValue, BRANCH_OFFSET_PARAM,
     },
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
@@ -2221,6 +2221,90 @@ fn handled_source_window(clip: &Clip, handles: ClipHandles) -> (f64, f64) {
     )
 }
 
+/// What kind of picture the input of a video trim decodes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TrimSourceKind {
+    /// A moving stream: the trim cuts a window out of it.
+    Motion,
+    /// A single still frame, which has to be held across the clip's slot.
+    StillImage,
+}
+
+impl TrimSourceKind {
+    /// Classifies a source by whether it decodes to one picture or to many.
+    ///
+    /// `probed_frame_count` is what the file actually holds, from
+    /// [`resolve_trim_source_kind`]. The asset's *kind* cannot answer this on
+    /// its own: `AssetKind::Image` is assigned from the file extension alone,
+    /// and `gif`, `webp`, `avif` and `png` are all extensions an animation can
+    /// wear. Treating every one of them as a still froze animated media to its
+    /// first frame — the reaction GIFs the meme pack serves included.
+    ///
+    /// An unreadable count falls back to the still path for an image, which is
+    /// what a photo — the overwhelmingly common case — needs, and is also the
+    /// only reading under which a one-frame source fills its slot at all.
+    pub(super) fn for_asset(asset: &Asset, probed_frame_count: Option<u64>) -> Self {
+        if asset.kind != AssetKind::Image {
+            return Self::Motion;
+        }
+
+        match probed_frame_count {
+            Some(frames) if frames > 1 => Self::Motion,
+            _ => Self::StillImage,
+        }
+    }
+}
+
+/// How many pictures each asset's stream holds, cached for one export run.
+///
+/// Keyed by asset id, with the same "a `None` entry means already looked at and
+/// unmeasurable" contract as [`SourceDurationCache`], so an unreadable file is
+/// probed once rather than once per clip that uses it.
+pub(super) type SourceFrameCountCache = HashMap<String, Option<u64>>;
+
+/// Decides which trim branch a clip's source needs, probing it if necessary.
+///
+/// Only an image is probed: every other kind is moving media by construction,
+/// and paying an FFprobe per video asset to learn what the container already
+/// says would be waste.
+pub(super) fn resolve_trim_source_kind(
+    asset: &Asset,
+    cache: &mut SourceFrameCountCache,
+) -> TrimSourceKind {
+    if asset.kind != AssetKind::Image {
+        return TrimSourceKind::Motion;
+    }
+
+    if let Some(cached) = cache.get(&asset.id) {
+        return TrimSourceKind::for_asset(asset, *cached);
+    }
+
+    let frames = match crate::core::assets::MetadataExtractor::count_video_frames(&asset.uri) {
+        Ok(frames) => frames,
+        Err(error) => {
+            tracing::warn!(
+                asset_id = %asset.id,
+                error = %error,
+                "Could not probe image asset for its frame count; treating it as a still"
+            );
+            None
+        }
+    };
+
+    cache.insert(asset.id.clone(), frames);
+    TrimSourceKind::for_asset(asset, frames)
+}
+
+/// How long a still has to hold to fill its timeline slot, handles included.
+///
+/// Floored at [`TIMELINE_EPSILON_SEC`] so the `trim` this feeds can never be
+/// asked for an empty window, which FFmpeg answers with a stream of no frames.
+/// That floor is the timeline's own resolution, not a frame's: a slot shorter
+/// than it is a slot the timeline cannot express in the first place.
+fn still_image_slot_duration(clip: &Clip, handles: ClipHandles) -> f64 {
+    (clip.place.duration_sec + handles.head_sec + handles.tail_sec).max(TIMELINE_EPSILON_SEC)
+}
+
 /// Build video trim filter with speed, reverse, freeze frame, and time remap support.
 ///
 /// Generates the complete video filter chain from input to the trim output label:
@@ -2231,19 +2315,38 @@ fn handled_source_window(clip: &Clip, handles: ClipHandles) -> (f64, f64) {
 /// transition planner refuses frozen, reversed and time-remapped clips
 /// precisely because their timeline-to-source mapping makes the extension
 /// undefined.
+///
+/// `source` says whether the input decodes to moving pictures or to a single
+/// still — see [`TrimSourceKind`].
 pub(super) fn build_video_trim_filter(
     clip: &Clip,
     input_index: usize,
     trim_label: &str,
     filter_complex: &mut String,
     handles: ClipHandles,
+    source: TrimSourceKind,
 ) {
     debug_assert!(
         handles.is_none() || (!clip.freeze_frame && !clip.has_time_remap() && !clip.reverse),
         "transition handles are only defined for constant-speed clips"
     );
 
-    if clip.freeze_frame {
+    if source == TrimSourceKind::StillImage {
+        // A still decodes to exactly one frame, so every other branch here — all
+        // of which cut a *window* out of a moving stream — leaves the clip one
+        // frame long however many seconds the timeline gave it. Cloning that
+        // frame across the slot is what makes a photo a clip: without it a Ken
+        // Burns move exports as a single-frame flash, and an unzoomed still does
+        // the same. The source window is deliberately ignored, because a still
+        // has nothing to seek into: trimming from a non-zero in point would find
+        // no frame at all and render nothing.
+        let slot = format_speed_number(still_image_slot_duration(clip, handles));
+        let filter = format!(
+            "[{}:v]trim=end_frame=1,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={},trim=0:{},setpts=PTS-STARTPTS[{}]",
+            input_index, slot, slot, trim_label
+        );
+        filter_complex.push_str(&filter);
+    } else if clip.freeze_frame {
         // Freeze frame: extract single frame, loop to fill duration
         let tpad_duration = format_speed_number(clip.place.duration_sec);
         let filter = format!(
@@ -3115,6 +3218,27 @@ pub(super) fn unmeasurable_effect_message(effect_label: &str, clip_id: &str) -> 
     )
 }
 
+/// The error text for an adjustment-layer effect the render cannot time-gate.
+///
+/// An adjustment layer applies only over the timeline it covers, which the render
+/// expresses by gating each of its filters with `enable='between(t,…)'`. FFmpeg
+/// refuses a filtergraph that puts `enable` on a filter without timeline support
+/// and the whole export dies, quoting an FFmpeg filter name the editor never
+/// chose. Naming the clip and the effect instead is the difference between a
+/// fixable message and a crash.
+pub(super) fn untimeable_adjustment_effect_message(
+    effect_label: &str,
+    clip_id: &str,
+    track_name: &str,
+) -> String {
+    format!(
+        "Effect '{}' is not supported on an adjustment layer (clip '{}' on track '{}'): \
+         it cannot be limited to the layer's timeline range. Apply it to the clips \
+         underneath instead",
+        effect_label, clip_id, track_name
+    )
+}
+
 /// Measures the media an asset points at.
 ///
 /// FFprobe comes first because it reports what will actually be decoded. The
@@ -3283,9 +3407,10 @@ fn split_filter_arguments(arguments: &str) -> Vec<&str> {
 /// Reads the output size of a single filter.
 ///
 /// Every arm here was checked against `Effect::build_filter_params`: of the
-/// filters that builder can emit, only `crop` (`Crop`, `AutoReframe`) and
-/// `zoompan` (`Zoom`) resize. `scale`/`pad`/`transpose` never come out of it
-/// today and are listed so a future effect that emits one is caught loudly by
+/// filters that builder can emit, `crop` (`Crop`, `AutoReframe`), `zoompan` and
+/// the `scale`/`pad` pair a `Zoom` fits its source to the canvas with are the
+/// ones that resize. `transpose` never comes out of it today and is listed so a
+/// future effect that emits one is caught loudly by
 /// [`effective_source_dimensions`] rather than mis-sizing a transform.
 fn filter_segment_dimensions(segment: &str) -> SegmentDimensions {
     let (name, arguments) = match segment.split_once('=') {
@@ -5393,15 +5518,18 @@ impl ExportEngine {
     /// If effects have keyframes, they are resolved at the midpoint of the clip
     /// duration since FFmpeg filters cannot animate parameters directly.
     /// Dimensions are used for mask-aware (power window) filter generation.
+    /// Dimensions and frame rate are also handed to effects that cannot express
+    /// their output frame — `zoompan` is the one that cannot.
     pub(super) fn build_clip_filter_graph(
         &self,
         clip: &Clip,
         effects: &std::collections::HashMap<String, Effect>,
         width: Option<u32>,
         height: Option<u32>,
+        fps: Option<f64>,
         handles: ClipHandles,
     ) -> FilterGraph {
-        build_clip_filter_graph(clip, effects, width, height, handles)
+        build_clip_filter_graph(clip, effects, width, height, fps, handles)
     }
 }
 
@@ -5432,6 +5560,16 @@ fn anchor_effect_to_branch(effect: Effect, head_sec: f64) -> Effect {
             anchored
         }
         EffectType::AutoReframe => anchor_auto_reframe_keyframes(effect, head_sec),
+        EffectType::Zoom => {
+            // `zoompan` counts output frames rather than seconds, so the builder
+            // is told the offset in seconds and converts it against the canvas
+            // rate it is already given. Without it the move starts on the first
+            // frame of the *branch* and is `head_sec` through by the time the
+            // clip's own picture appears.
+            let mut anchored = effect;
+            anchored.set_param(BRANCH_OFFSET_PARAM, ParamValue::Float(head_sec));
+            anchored
+        }
         // Everything else is either time-invariant (a colour grade looks the
         // same on every frame) or keyframed, and keyframed effects are already
         // resolved to a single sampled value before they reach the graph — and
@@ -5493,6 +5631,7 @@ pub(super) fn build_clip_filter_graph(
     effects: &std::collections::HashMap<String, Effect>,
     width: Option<u32>,
     height: Option<u32>,
+    fps: Option<f64>,
     handles: ClipHandles,
 ) -> FilterGraph {
     {
@@ -5501,6 +5640,9 @@ pub(super) fn build_clip_filter_graph(
         let mut graph = FilterGraph::new();
         if let (Some(w), Some(h)) = (width, height) {
             graph.set_dimensions(w as i32, h as i32);
+        }
+        if let Some(fps) = fps {
+            graph.set_fps(fps);
         }
 
         // Calculate midpoint of clip for keyframe interpolation
@@ -6876,6 +7018,18 @@ pub fn validate_export_settings_with_dimensions(
 
             // Adjustment layers have no source media — skip file validation
             if clip.is_adjustment_layer() {
+                for effect in clip.effects.iter().filter_map(|id| effects.get(id)) {
+                    if effect.enabled
+                        && effect.is_video()
+                        && !effect_type_supports_timeline_enable(&effect.effect_type)
+                    {
+                        validation.add_error(untimeable_adjustment_effect_message(
+                            &effect_type_label(&effect.effect_type),
+                            &clip.id,
+                            &track.name,
+                        ));
+                    }
+                }
                 continue;
             }
 
@@ -6917,6 +7071,7 @@ pub fn validate_export_settings_with_dimensions(
                             effects,
                             Some(canvas_width),
                             Some(canvas_height),
+                            Some(output_video_fps(sequence, settings)),
                             ClipHandles::default(),
                         );
                         if let Err(effect_label) =
@@ -11843,11 +11998,12 @@ mod tests {
     }
 
     /// Feature: Effect-aware transform placement
-    /// Scenario: a zoom hands the transform a fixed 1280x720 frame
+    /// Scenario: a zoom hands the transform the canvas it was told about
     ///
-    /// `zoompan` is emitted with `s=hd720`, so the picture reaching the
-    /// transform is 720p no matter how big the source was — this bites even a
-    /// clip whose only "transform" is an opacity change.
+    /// `zoompan` resizes, so the picture reaching the transform is whatever the
+    /// zoom's `s` says and not the size of the source — this bites even a clip
+    /// whose only "transform" is an opacity change. The graph publishes the
+    /// canvas onto the effect, so the measurement and the emitted filter agree.
     #[test]
     fn test_effective_source_dimensions_follows_a_zoom() {
         let mut zoom = Effect::new(EffectType::Zoom);
@@ -11855,8 +12011,29 @@ mod tests {
         zoom.set_param("duration", ParamValue::Float(2.0));
         zoom.set_param("zoom_factor", ParamValue::Float(1.5));
 
-        let dimensions = effective_source_dimensions((3840, 2160), &graph_with_effect(zoom))
+        let mut graph = FilterGraph::new().with_dimensions(1920, 1080);
+        graph.set_fps(30.0);
+        graph.add_effect(zoom);
+
+        let dimensions = effective_source_dimensions((3840, 2160), &graph)
             .expect("zoompan states its output size");
+
+        assert_eq!(dimensions, (1920, 1080));
+    }
+
+    /// Feature: Effect-aware transform placement
+    /// Scenario: a zoom on a graph that was never told its canvas
+    ///
+    /// FFmpeg's own `zoompan` default is `hd720`, so a chain that says nothing
+    /// still resizes to 720p. The measurement has to report that rather than
+    /// pretend the picture came through untouched.
+    #[test]
+    fn test_effective_source_dimensions_follows_a_zoom_without_a_canvas() {
+        let dimensions = effective_source_dimensions(
+            (3840, 2160),
+            &graph_with_effect(Effect::new(EffectType::Zoom)),
+        )
+        .expect("zoompan states its output size");
 
         assert_eq!(dimensions, (1280, 720));
     }
@@ -12055,6 +12232,304 @@ mod tests {
             filter_complex.contains("color=c=black:s=1920x1080:r=30:d=7"),
             "the render must reach the adjustment layer's out point. Got: {filter_complex}"
         );
+    }
+
+    /// Builds a sequence whose second video track is an adjustment layer
+    /// carrying one enabled effect of the given type.
+    fn sequence_with_adjustment_layer_effect(
+        effect_type: EffectType,
+    ) -> (
+        Sequence,
+        std::collections::HashMap<String, Asset>,
+        std::collections::HashMap<String, Effect>,
+    ) {
+        use crate::core::timeline::Clip;
+
+        let effect = Effect::new(effect_type);
+        let effect_id = effect.id.clone();
+
+        let mut adjustment_track = Track::new_video("Adjustments");
+        let mut adjustment = Clip::new("adjustment")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        adjustment.is_adjustment_layer = true;
+        adjustment.effects.push(effect_id.clone());
+        adjustment_track.add_clip(adjustment);
+
+        let (sequence, assets) = sequence_with_video_body_and_tail(adjustment_track);
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(effect_id, effect);
+
+        (sequence, assets, effects)
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect that cannot be time-gated is refused by name
+    ///
+    /// An adjustment layer's effects are gated with `enable='between(t,…)'` so
+    /// they apply only over the layer. FFmpeg refuses `enable` on `zoompan`
+    /// outright — "Timeline ('enable' option) not supported with filter
+    /// 'zoompan'" — and the whole export died on that message, quoting a filter
+    /// the editor never chose. Validation now refuses the edit instead.
+    #[test]
+    fn should_refuse_an_untimeable_effect_on_an_adjustment_layer() {
+        let (sequence, assets, effects) = sequence_with_adjustment_layer_effect(EffectType::Zoom);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(!validation.is_valid, "the export must be refused up front");
+        let reported = validation.errors.join("; ");
+        assert!(
+            reported.contains("Zoom") && reported.contains("adjustment layer"),
+            "the refusal must name the effect and why: {reported}"
+        );
+        assert!(
+            reported.contains("adjustment"),
+            "the refusal must name the clip: {reported}"
+        );
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an opacity is refused by name rather than crashing the render
+    ///
+    /// `Opacity` emits `format=rgba,colorchannelmixer=aa=…`, and `format` has no
+    /// timeline support: the gated graph died on "Timeline ('enable' option) not
+    /// supported with filter 'format'", naming a filter the editor never chose.
+    #[test]
+    fn should_refuse_an_opacity_on_an_adjustment_layer() {
+        let (sequence, assets, effects) =
+            sequence_with_adjustment_layer_effect(EffectType::Opacity);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(!validation.is_valid, "the export must be refused up front");
+        let reported = validation.errors.join("; ");
+        assert!(
+            reported.contains("Opacity") && reported.contains("adjustment layer"),
+            "the refusal must name the effect and why: {reported}"
+        );
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: a colour tool that opens with `format=` is refused by name
+    ///
+    /// `Curves` (its Luma-vs-Sat leg emits `format=yuv444p,geq=…`) and
+    /// `HSLQualifier` (`format=rgba,geq=…`) both lead with a `format` conversion
+    /// once a curve or a qualifier is set, and `format` has no timeline support,
+    /// so the gated graph died on "Timeline ('enable' option) not supported with
+    /// filter 'format'" — a path a user reaches from the Color panel. They are
+    /// refused up front by name, like `Opacity`, rather than crashing the render.
+    #[test]
+    fn should_refuse_a_format_leading_colour_effect_on_an_adjustment_layer() {
+        for (effect_type, label) in [
+            (EffectType::Curves, "Curves"),
+            (EffectType::HSLQualifier, "HSL Qualifier"),
+        ] {
+            let (sequence, assets, effects) =
+                sequence_with_adjustment_layer_effect(effect_type.clone());
+
+            let validation =
+                validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+            assert!(
+                !validation.is_valid,
+                "a {effect_type:?} on an adjustment layer must be refused up front"
+            );
+            let reported = validation.errors.join("; ");
+            assert!(
+                reported.contains(label) && reported.contains("adjustment layer"),
+                "the refusal must name the effect and why: {reported}"
+            );
+        }
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect the export has no filter for is a no-op, not a crash
+    ///
+    /// `Levels`, `Glow`, `MotionBlur`, `BlendMode`, `Custom` and every disabled
+    /// effect reach the adjustment path as a bare `null`. Gating that produced
+    /// `null:enable='between(t,…)'`, which FFmpeg cannot parse, so a layer
+    /// carrying one of them failed the whole export.
+    #[test]
+    fn should_allow_an_effect_with_no_filter_of_its_own_on_an_adjustment_layer() {
+        // `Custom` is left out: it is refused a step earlier, by the
+        // unsupported-in-export check that applies to any clip.
+        for effect_type in [
+            EffectType::Levels,
+            EffectType::Glow,
+            EffectType::MotionBlur,
+            EffectType::BlendMode,
+        ] {
+            let (sequence, assets, effects) =
+                sequence_with_adjustment_layer_effect(effect_type.clone());
+
+            let validation =
+                validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+            assert!(
+                validation.is_valid,
+                "a {effect_type:?} renders as a no-op and must not be refused: {:?}",
+                validation.errors
+            );
+        }
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect that can be time-gated is still allowed
+    #[test]
+    fn should_allow_a_timeable_effect_on_an_adjustment_layer() {
+        let (sequence, assets, effects) =
+            sequence_with_adjustment_layer_effect(EffectType::Brightness);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(
+            validation.is_valid,
+            "a colour grade is exactly what an adjustment layer is for: {:?}",
+            validation.errors
+        );
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: FFmpeg really does refuse the graph the refusal replaces
+    ///
+    /// The refusal above is only worth having if the alternative is a failed
+    /// render. This hands the real FFmpeg the gated graph the adjustment path
+    /// would otherwise emit for each effect the table calls untimeable, and
+    /// asserts FFmpeg rejects it *for that reason* — and that a gated colour
+    /// grade in the same shape still renders, so the assertion discriminates.
+    ///
+    /// `Subtitle`, `Stabilize` and the `xfade` transitions are in the table too
+    /// but are not checkable this way: they fail on a missing file, a missing
+    /// build option or a missing second input before FFmpeg gets as far as the
+    /// timeline check. They were measured by hand against ffmpeg 9.0.1 with
+    /// valid arguments and all three refuse `enable`.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored adjustment
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn ffmpeg_refuses_a_time_gated_effect_on_an_adjustment_layer() {
+        let ffmpeg = std::env::var_os("OPENREELIO_FFMPEG_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+
+        let graph_of = |effect: Effect| {
+            let mut graph = FilterGraph::new().with_dimensions(320, 180);
+            graph.set_fps(30.0);
+            graph.add_effect(effect);
+            graph
+        };
+        let gated =
+            |effect: Effect| graph_of(effect).to_video_filter_complex_timed("0:v", "out", 0.0, 1.0);
+        let ungated = |effect: Effect| graph_of(effect).to_video_filter_complex("0:v", "out");
+
+        let translucent = || {
+            let mut effect = Effect::new(EffectType::Opacity);
+            effect.set_param("value", ParamValue::Float(0.5));
+            effect
+        };
+
+        let run = |filtergraph: &str| {
+            let mut cmd = std::process::Command::new(&ffmpeg);
+            crate::core::process::configure_std_command(&mut cmd);
+            cmd.args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x180:r=30:d=0.2",
+                "-filter_complex",
+                filtergraph,
+                "-map",
+                "[out]",
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+        };
+
+        for effect in [
+            Effect::new(EffectType::Zoom),
+            Effect::new(EffectType::Crop),
+            translucent(),
+        ] {
+            let effect_type = effect.effect_type.clone();
+            assert!(
+                !effect_type_supports_timeline_enable(&effect_type),
+                "{effect_type:?} is claimed to be untimeable"
+            );
+
+            let Ok(refused) = run(&gated(effect)) else {
+                eprintln!("Skipping: ffmpeg could not be launched");
+                return;
+            };
+            let stderr = String::from_utf8_lossy(&refused.stderr);
+            assert!(
+                !refused.status.success() && stderr.contains("not supported with filter"),
+                "a time-gated {effect_type:?} must be refused by ffmpeg for its lack of \
+                 timeline support, got: {stderr}"
+            );
+        }
+
+        let allowed = run(&gated(Effect::new(EffectType::Brightness))).expect("run ffmpeg");
+        assert!(
+            allowed.status.success(),
+            "a time-gated colour grade must still render: {}",
+            String::from_utf8_lossy(&allowed.stderr)
+        );
+
+        // Every effect the export has no filter body for — and every disabled
+        // one — reaches the adjustment path as a `null`. Decorating that with
+        // `enable=` produced `null:enable='between(t,…)'`, which FFmpeg cannot
+        // even parse ("No option name near 'between(…)'"), so a layer carrying
+        // one of these killed the whole render. They have to render as the
+        // no-ops they are.
+        let mut disabled_grade = Effect::new(EffectType::Brightness);
+        disabled_grade.enabled = false;
+        for effect in [
+            Effect::new(EffectType::Levels),
+            Effect::new(EffectType::Glow),
+            Effect::new(EffectType::MotionBlur),
+            Effect::new(EffectType::BlendMode),
+            Effect::new(EffectType::Custom("nonesuch".to_string())),
+            disabled_grade,
+        ] {
+            let effect_type = effect.effect_type.clone();
+            let graph = gated(effect);
+            assert!(
+                !graph.contains("enable="),
+                "a no-op {effect_type:?} must not be gated at all: {graph}"
+            );
+
+            let rendered = run(&graph).expect("run ffmpeg");
+            assert!(
+                rendered.status.success(),
+                "a {effect_type:?} on an adjustment layer must render as a no-op: {}",
+                String::from_utf8_lossy(&rendered.stderr)
+            );
+        }
+
+        // The same effects on an ordinary clip are untouched by all of this: an
+        // opacity still composites and a bodiless effect still passes through.
+        for effect in [translucent(), Effect::new(EffectType::Levels)] {
+            let effect_type = effect.effect_type.clone();
+            let rendered = run(&ungated(effect)).expect("run ffmpeg");
+            assert!(
+                rendered.status.success(),
+                "an ungated {effect_type:?} must still render: {}",
+                String::from_utf8_lossy(&rendered.stderr)
+            );
+        }
     }
 
     /// Feature: Render output length
@@ -13232,6 +13707,43 @@ mod tests {
         assert_eq!(
             untouched_payload["keyframes"][0]["t"], 0.0,
             "a clip with no handle keeps the track it was given"
+        );
+    }
+
+    /// Feature: Transitions
+    /// Scenario: a zoom on a dissolving clip starts where it was authored
+    ///
+    /// A clip in a transition is decoded from `head_sec` before its in point, so
+    /// `zoompan`'s output-frame counter is already running while the picture the
+    /// editor drew the move under has not appeared yet. Unanchored, the move is
+    /// `head_sec` through by the time the clip's own footage starts.
+    #[test]
+    fn a_zoom_on_a_clip_with_handles_waits_for_the_clips_own_picture() {
+        use crate::core::effects::EffectType;
+
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("duration", ParamValue::Float(2.0));
+
+        let mut graph = FilterGraph::new().with_dimensions(1920, 1080);
+        graph.set_fps(30.0);
+        graph.add_effect(anchor_effect_to_branch(effect.clone(), 0.5));
+        let anchored = graph.to_video_filter_complex("trim0", "v0");
+
+        // Half a second of head handle at 30fps is fifteen frames of branch that
+        // are not the clip's own picture.
+        assert!(
+            anchored.contains("*max(on-15,0)"),
+            "the move must hold until the clip's own picture starts: {anchored}"
+        );
+
+        let mut unhandled = FilterGraph::new().with_dimensions(1920, 1080);
+        unhandled.set_fps(30.0);
+        unhandled.add_effect(anchor_effect_to_branch(effect, 0.0));
+        let plain = unhandled.to_video_filter_complex("trim0", "v0");
+
+        assert!(
+            plain.contains("*on,") && !plain.contains("max(on-"),
+            "a clip with no handle keeps the graph it has always had: {plain}"
         );
     }
 
@@ -14775,7 +15287,14 @@ mod tests {
         clip.slow_motion_interpolation = SlowMotionInterpolation::Nearest;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "vtrim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         assert!(
             !filter.contains("minterpolate"),
@@ -14792,7 +15311,14 @@ mod tests {
         clip.slow_motion_interpolation = SlowMotionInterpolation::FrameBlend;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "vtrim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         assert!(
             filter.contains("minterpolate=mi_mode=blend"),
@@ -14809,7 +15335,14 @@ mod tests {
         clip.slow_motion_interpolation = SlowMotionInterpolation::MotionCompensated;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "vtrim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         assert!(
             filter.contains("minterpolate=mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"),
@@ -14902,7 +15435,14 @@ mod tests {
         clip.reverse = true;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "trim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         // Then filter includes the reverse filter
         assert!(
@@ -14925,12 +15465,479 @@ mod tests {
         clip.place.duration_sec = 3.0;
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "trim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         // Then filter includes tpad clone
         assert!(
             filter.contains("tpad=stop_mode=clone:stop_duration=3"),
             "should contain tpad: {filter}"
+        );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: a photo fills the slot the editor gave it
+    ///
+    /// An image decodes to exactly one frame, so cutting a window out of it —
+    /// what every other branch of the trim builder does — leaves the clip one
+    /// frame long however many seconds it occupies. The slot is filled by cloning
+    /// that frame, the same way a freeze frame is.
+    #[test]
+    fn should_hold_a_still_image_across_its_whole_slot() {
+        use crate::core::timeline::Clip;
+
+        let mut clip = Clip::new("photo").with_source_range(0.0, 5.0);
+        clip.place.duration_sec = 5.0;
+
+        let mut filter = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::StillImage,
+        );
+
+        assert!(
+            filter.contains("tpad=stop_mode=clone:stop_duration=5"),
+            "a still must be cloned across its slot: {filter}"
+        );
+        assert!(
+            filter.contains("trim=0:5"),
+            "the clone must be cut back to the slot: {filter}"
+        );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: a photo trimmed away from its start still renders
+    ///
+    /// A still has one frame at t=0 and nothing after it, so a `trim` starting at
+    /// the clip's source in point finds no frame at all and the clip renders
+    /// nothing. The source window is not a thing a still has.
+    #[test]
+    fn should_ignore_the_source_window_of_a_still_image() {
+        use crate::core::timeline::Clip;
+
+        let mut clip = Clip::new("photo").with_source_range(2.0, 6.0);
+        clip.place.duration_sec = 4.0;
+
+        let mut filter = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::StillImage,
+        );
+
+        assert!(
+            filter.contains("trim=end_frame=1"),
+            "a still is read as its single frame, not as a window: {filter}"
+        );
+        assert!(
+            !filter.contains("trim=start=2"),
+            "there is no frame at the source in point to seek to: {filter}"
+        );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: the hold covers the handles a transition decodes as well
+    #[test]
+    fn should_hold_a_still_image_across_its_transition_handles() {
+        use crate::core::timeline::Clip;
+
+        let mut clip = Clip::new("photo").with_source_range(0.0, 2.0);
+        clip.place.duration_sec = 2.0;
+
+        let mut filter = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter,
+            ClipHandles {
+                head_sec: 0.5,
+                tail_sec: 0.25,
+            },
+            TrimSourceKind::StillImage,
+        );
+
+        assert!(
+            filter.contains("stop_duration=2.75"),
+            "the hold must cover the handles too: {filter}"
+        );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: only a source that really holds one picture is held
+    #[test]
+    fn should_classify_only_single_frame_images_as_stills() {
+        use crate::core::assets::{Asset, VideoInfo};
+
+        let video = Asset::new_video("clip", "file:///a.mp4", VideoInfo::default());
+        assert_eq!(
+            TrimSourceKind::for_asset(&video, None),
+            TrimSourceKind::Motion,
+            "a video is cut from its window whatever a frame count says"
+        );
+        assert_eq!(
+            TrimSourceKind::for_asset(&video, Some(1)),
+            TrimSourceKind::Motion
+        );
+
+        let image = Asset::new_image("photo", "file:///a.png", 1920, 1080);
+        assert_eq!(
+            TrimSourceKind::for_asset(&image, Some(1)),
+            TrimSourceKind::StillImage
+        );
+        assert_eq!(
+            TrimSourceKind::for_asset(&image, None),
+            TrimSourceKind::StillImage,
+            "an unmeasurable image falls back to the still path"
+        );
+    }
+
+    /// Feature: Animated images on the timeline
+    /// Scenario: a GIF, WebP or APNG that holds many frames keeps its motion
+    ///
+    /// `AssetKind::Image` is decided by file extension alone, and `gif`, `webp`,
+    /// `avif` and `png` are all extensions an animation can wear. Classifying on
+    /// the kind froze every one of them to its first frame.
+    #[test]
+    fn should_cut_an_animated_image_from_its_window_like_any_other_motion() {
+        use crate::core::assets::Asset;
+
+        let animated = Asset::new_image("reaction", "file:///a.gif", 320, 240);
+        assert_eq!(
+            TrimSourceKind::for_asset(&animated, Some(30)),
+            TrimSourceKind::Motion,
+            "an animation must keep its frames and its source-in window"
+        );
+
+        let clip = Clip::new("asset").with_source_range(0.5, 1.5).place_at(0.0);
+        let mut filter_complex = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter_complex,
+            ClipHandles::default(),
+            TrimSourceKind::for_asset(&animated, Some(30)),
+        );
+
+        assert!(
+            filter_complex.contains("trim=start=0.5:end=1.5"),
+            "an animation keeps the window the edit asked for: {filter_complex}"
+        );
+        assert!(
+            !filter_complex.contains("end_frame=1"),
+            "an animation must not be cut to a single frame: {filter_complex}"
+        );
+    }
+
+    /// Feature: Still images on the timeline
+    /// Scenario: a photo renders every frame of its slot, zoomed or not
+    ///
+    /// The string assertions above encode a belief about what `tpad` does to a
+    /// one-frame input. This one hands the real FFmpeg the graph the export
+    /// builds around a real PNG and counts what comes out: one luma plane per
+    /// frame at the canvas size, so a wrong frame count and a wrong frame size
+    /// both show up as a wrong byte count.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1, 320x180 canvas, 2s at 30fps): the
+    /// plain source-window trim this replaced rendered one frame — 57600 bytes
+    /// where 3456000 were due — whether or not a zoom was in the chain. A Ken
+    /// Burns move on a photo exported as a single-frame flash.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored still
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_still_image_renders_every_frame_of_its_slot() {
+        use crate::core::effects::{Effect, EffectType, FilterGraph};
+        use crate::core::timeline::Clip;
+
+        const CANVAS_WIDTH: u32 = 320;
+        const CANVAS_HEIGHT: u32 = 180;
+        const FPS: f64 = 30.0;
+        const SLOT_SEC: f64 = 2.0;
+
+        let ffmpeg = std::env::var_os("OPENREELIO_FFMPEG_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let photo = dir.path().join("photo.png");
+        let mut built_cmd = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut built_cmd);
+        let built = built_cmd
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x360:rate=1:duration=1",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&photo)
+            .output();
+        let Ok(built) = built else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+        if !built.status.success() || !photo.exists() {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        }
+
+        let mut clip = Clip::new("photo").with_source_range(0.0, SLOT_SEC);
+        clip.place.duration_sec = SLOT_SEC;
+
+        // Classified the way the export classifies it, so this also guards the
+        // photo against being mistaken for an animation and cut to its window.
+        let asset = crate::core::assets::Asset::new_image(
+            "photo",
+            &photo.to_string_lossy(),
+            CANVAS_WIDTH,
+            CANVAS_HEIGHT,
+        );
+        let mut frame_counts = SourceFrameCountCache::new();
+        let source_kind = resolve_trim_source_kind(&asset, &mut frame_counts);
+        assert_eq!(
+            source_kind,
+            TrimSourceKind::StillImage,
+            "a real PNG holds one picture and must take the still path"
+        );
+
+        for zoomed in [false, true] {
+            let mut filter_complex = String::new();
+            build_video_trim_filter(
+                &clip,
+                0,
+                "trim0",
+                &mut filter_complex,
+                ClipHandles::default(),
+                source_kind,
+            );
+
+            if zoomed {
+                let mut graph =
+                    FilterGraph::new().with_dimensions(CANVAS_WIDTH as i32, CANVAS_HEIGHT as i32);
+                graph.set_fps(FPS);
+                let mut effect = Effect::new(EffectType::Zoom);
+                effect.set_param("duration", ParamValue::Float(SLOT_SEC));
+                effect.set_param("zoom_factor", ParamValue::Float(1.5));
+                graph.add_effect(effect);
+                filter_complex.push_str(&graph.to_video_filter_complex("trim0", "v0"));
+            } else {
+                filter_complex.push_str("[trim0]null[v0]");
+            }
+            filter_complex.push(';');
+
+            append_video_stream_normalization(
+                &mut filter_complex,
+                "v0",
+                "out",
+                CANVAS_WIDTH,
+                CANVAS_HEIGHT,
+                FPS,
+                "yuv420p",
+                None,
+            );
+
+            let graph_file = dir.path().join("graph.txt");
+            std::fs::write(&graph_file, filter_complex.trim_end_matches(';'))
+                .expect("write filtergraph");
+
+            let mut render_cmd = std::process::Command::new(&ffmpeg);
+            crate::core::process::configure_std_command(&mut render_cmd);
+            let render = render_cmd
+                .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+                .arg(&photo)
+                .arg("-/filter_complex")
+                .arg(&graph_file)
+                .args(["-map", "[out]", "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+                .output()
+                .expect("run ffmpeg");
+
+            assert!(
+                render.status.success(),
+                "ffmpeg refused the still-image graph (zoomed={zoomed}): {}",
+                String::from_utf8_lossy(&render.stderr)
+            );
+
+            let expected_frames = (SLOT_SEC * FPS).round() as usize;
+            let frame_bytes = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
+            assert_eq!(
+                render.stdout.len(),
+                expected_frames * frame_bytes,
+                "a {SLOT_SEC}s still at {FPS}fps must render {expected_frames} frames \
+                 of {CANVAS_WIDTH}x{CANVAS_HEIGHT} (zoomed={zoomed}), got {} frames",
+                render.stdout.len() / frame_bytes.max(1)
+            );
+        }
+    }
+
+    /// Feature: Animated images on the timeline
+    /// Scenario: a GIF, WebP or APNG exports its animation, not its first frame
+    ///
+    /// `AssetKind::Image` comes from the file extension alone, so holding every
+    /// image across its slot held the animated ones too: a reaction GIF exported
+    /// as one frame cloned for the length of the clip. Measured against ffmpeg
+    /// 9.0.1, a 30-frame GIF rendered 30 identical frames — one unique picture
+    /// where 30 were due — and `freezedetect` fired at 0.133s and never ended.
+    ///
+    /// The classification is measured here rather than asserted from the
+    /// extension, because the declared metadata cannot answer it: a still JPEG
+    /// advertises a duration, a one-frame GIF advertises a frame count of 1, and
+    /// an animated APNG or WebP advertises neither.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored animated
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn an_animated_image_renders_its_animation_and_not_a_frozen_frame() {
+        use crate::core::assets::Asset;
+        use crate::core::timeline::Clip;
+        use std::collections::HashSet;
+
+        const CANVAS_WIDTH: u32 = 320;
+        const CANVAS_HEIGHT: u32 = 180;
+        const FPS: f64 = 30.0;
+        const SLOT_SEC: f64 = 1.0;
+        const SOURCE_FRAMES: usize = 30;
+
+        let ffmpeg = std::env::var_os("OPENREELIO_FFMPEG_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let build = |name: &str, frames: usize, rate: u32| -> Option<std::path::PathBuf> {
+            let path = dir.path().join(name);
+            let mut built_cmd = std::process::Command::new(&ffmpeg);
+            crate::core::process::configure_std_command(&mut built_cmd);
+            let built = built_cmd
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("testsrc=size=320x240:rate={rate}"),
+                    "-frames:v",
+                    &frames.to_string(),
+                ])
+                .arg(&path)
+                .output()
+                .ok()?;
+            (built.status.success() && path.exists()).then_some(path)
+        };
+
+        let (Some(animated), Some(single_frame), Some(apng)) = (
+            build("anim.gif", SOURCE_FRAMES, 30),
+            build("one.gif", 1, 30),
+            build("anim.apng", 20, 10),
+        ) else {
+            eprintln!("Skipping: ffmpeg could not build the fixtures");
+            return;
+        };
+
+        let mut frame_counts = SourceFrameCountCache::new();
+        let kind_of = |path: &std::path::Path, cache: &mut SourceFrameCountCache| {
+            let asset = Asset::new_image("image", &path.to_string_lossy(), 320, 240);
+            resolve_trim_source_kind(&asset, cache)
+        };
+
+        assert_eq!(
+            kind_of(&animated, &mut frame_counts),
+            TrimSourceKind::Motion,
+            "a 30-frame GIF is moving media"
+        );
+        assert_eq!(
+            kind_of(&apng, &mut frame_counts),
+            TrimSourceKind::Motion,
+            "an animated APNG is moving media, though it advertises no duration \
+             and no frame count"
+        );
+        assert_eq!(
+            kind_of(&single_frame, &mut frame_counts),
+            TrimSourceKind::StillImage,
+            "a one-frame GIF is a photo, though it advertises a duration"
+        );
+
+        let mut clip = Clip::new("anim").with_source_range(0.0, SLOT_SEC);
+        clip.place.duration_sec = SLOT_SEC;
+
+        let mut filter_complex = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter_complex,
+            ClipHandles::default(),
+            kind_of(&animated, &mut frame_counts),
+        );
+        filter_complex.push_str("[trim0]null[v0];");
+        append_video_stream_normalization(
+            &mut filter_complex,
+            "v0",
+            "out",
+            CANVAS_WIDTH,
+            CANVAS_HEIGHT,
+            FPS,
+            "yuv420p",
+            None,
+        );
+
+        let graph_file = dir.path().join("graph.txt");
+        std::fs::write(&graph_file, filter_complex.trim_end_matches(';')).expect("write graph");
+
+        let mut render_cmd = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut render_cmd);
+        let render = render_cmd
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(&animated)
+            .arg("-/filter_complex")
+            .arg(&graph_file)
+            .args(["-map", "[out]", "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+            .output()
+            .expect("run ffmpeg");
+
+        assert!(
+            render.status.success(),
+            "ffmpeg refused the animated-image graph: {}",
+            String::from_utf8_lossy(&render.stderr)
+        );
+
+        let frame_bytes = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
+        let frames: Vec<&[u8]> = render.stdout.chunks_exact(frame_bytes).collect();
+        assert_eq!(
+            frames.len(),
+            (SLOT_SEC * FPS).round() as usize,
+            "the clip still has to fill its slot"
+        );
+
+        let unique: HashSet<&[u8]> = frames.iter().copied().collect();
+        assert!(
+            unique.len() > 1,
+            "an animated GIF must render its animation, got {} unique picture(s) \
+             across {} frames — the still path cloned one frame",
+            unique.len(),
+            frames.len()
         );
     }
 
@@ -15127,7 +16134,14 @@ mod tests {
         ]));
 
         let mut filter = String::new();
-        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter, ClipHandles::default());
+        build_video_trim_filter(
+            &clip,
+            0,
+            "vtrim0",
+            &mut filter,
+            ClipHandles::default(),
+            TrimSourceKind::Motion,
+        );
 
         assert!(
             filter.contains("setpts="),
