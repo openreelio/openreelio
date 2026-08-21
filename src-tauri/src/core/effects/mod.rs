@@ -24,6 +24,7 @@ pub use capabilities::{
 #[allow(unused_imports)]
 pub(crate) use filter_builder::{
     build_vidstabdetect_filter, escape_ffmpeg_filter_path, escape_ffmpeg_filter_value,
+    BRANCH_OFFSET_PARAM,
 };
 pub use filter_builder::{FilterGraph, IntoFFmpegFilter};
 pub use gpu_filters::{GpuFilterBackend, GpuFilterContext};

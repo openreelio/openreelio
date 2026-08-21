@@ -1060,8 +1060,22 @@ impl Effect {
         // `0.000000` — a 1% zoom over eleven minutes at 30fps does — which turns
         // a zoom-in into no zoom at all and a zoom-out into a permanent hold at
         // the zoomed size. FFmpeg divides at full double precision instead.
+        // A clip in a transition is decoded from before its in point, so `on` is
+        // already counting while the picture the editor drew the move under has
+        // not started yet. Holding the move at its first frame until then is what
+        // keeps a zoom on a dissolving clip landing where it was authored.
+        let clock = match self
+            .get_float(BRANCH_OFFSET_PARAM)
+            .filter(|offset| offset.is_finite() && *offset > 0.0)
+            .map(|offset| (offset * fps).round() as i64)
+            .filter(|frames| *frames > 0)
+        {
+            Some(frames) => format!("max(on-{},0)", frames),
+            None => "on".to_string(),
+        };
+
         let factor = format!("{:.4}", zoom_factor);
-        let travelled = format!("(({}-1)/{})*on", factor, steps);
+        let travelled = format!("(({}-1)/{})*{}", factor, steps, clock);
         let zoom_expr = match zoom_type {
             "out" => format!("z='max({}-{},1)'", factor, travelled),
             _ => format!("z='min(1+{},{})'", travelled, factor),
@@ -1980,6 +1994,13 @@ pub(crate) const CANVAS_WIDTH_PARAM: &str = "canvas_width";
 pub(crate) const CANVAS_HEIGHT_PARAM: &str = "canvas_height";
 /// Parameter an effect reads to learn the frame rate the canvas runs at.
 pub(crate) const CANVAS_FPS_PARAM: &str = "canvas_fps";
+/// Parameter an effect reads to learn how far before the clip's in point the
+/// stream carrying it begins — the head handle a transition decodes.
+///
+/// The render sets it on the effects of a clip taking part in a transition; see
+/// `anchor_effect_to_branch` in the export. Effects counted in seconds from the
+/// clip's start read it and move by that much; everything else ignores it.
+pub(crate) const BRANCH_OFFSET_PARAM: &str = "branch_offset_sec";
 
 /// Composes multiple effects into a single FFmpeg filter complex string
 pub struct FilterGraph {
@@ -6684,6 +6705,58 @@ mod tests {
     /// Measured negative control (ffmpeg 9.0.1): a 120x120 square in a 320x240
     /// source rendered 120x90 into a 320x180 canvas and 68x160 into a 180x320
     /// one. With the fit in front of the zoom both come out square.
+    /// Feature: Zoom effect
+    /// Scenario: a zoom on a clip in a transition waits out the head handle
+    ///
+    /// The stream a dissolving clip renders from starts before its in point, and
+    /// `on` counts from the first frame of *that* stream. Unanchored, the move is
+    /// already part-way through when the clip's own picture appears.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1, 320x180, six frames, a 2x move
+    /// three frames long behind a three-frame handle): without the offset the
+    /// move is finished by the fourth frame — 14080 white pixels where the
+    /// handle should still be showing the source's 3520.
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_zoom_behind_a_head_handle_starts_on_the_clips_own_picture() {
+        const CANVAS: (usize, usize) = (320, 180);
+        const UNZOOMED: usize = 80 * 44;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = white_box_clip(dir.path(), "box.mp4", CANVAS, (80, 44)) else {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        };
+
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("duration", ParamValue::Float(0.1));
+        effect.set_param("zoom_factor", ParamValue::Float(2.0));
+        // Three frames of the six-frame branch belong to the handle.
+        effect.set_param(BRANCH_OFFSET_PARAM, ParamValue::Float(0.1));
+        let graph = zoom_graph_for_ffmpeg(effect, CANVAS.0 as i32, CANVAS.1 as i32, 30.0);
+
+        let Some(frames) = render_luma_frames(&input, &graph, CANVAS.0, CANVAS.1) else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+        assert_eq!(frames.len(), 6);
+
+        let (_, _, held) = white_region(&frames[3], CANVAS.0);
+        assert!(
+            (held as f64 - UNZOOMED as f64).abs() <= UNZOOMED as f64 * 0.02,
+            "the last frame of the handle must still be unzoomed — {UNZOOMED} \
+             white pixels — got {held}"
+        );
+
+        let (_, _, landed) = white_region(frames.last().expect("frames"), CANVAS.0);
+        let expected = UNZOOMED as f64 * 4.0;
+        assert!(
+            (landed as f64 - expected).abs() <= expected * 0.02,
+            "the move must still finish on the clip's last frame — {expected} \
+             white pixels — got {landed}"
+        );
+    }
+
     #[test]
     #[ignore = "requires an ffmpeg binary; run with --ignored"]
     fn a_zoom_letterboxes_a_source_shaped_unlike_the_canvas() {

@@ -21,7 +21,7 @@ use crate::core::{
     commands::TEXT_ASSET_PREFIX,
     effects::{
         effect_capability, effect_type_label, effect_type_supports_timeline_enable, Effect,
-        EffectType, FilterGraph, IntoFFmpegFilter, ParamValue,
+        EffectType, FilterGraph, IntoFFmpegFilter, ParamValue, BRANCH_OFFSET_PARAM,
     },
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
@@ -5502,6 +5502,16 @@ fn anchor_effect_to_branch(effect: Effect, head_sec: f64) -> Effect {
             anchored
         }
         EffectType::AutoReframe => anchor_auto_reframe_keyframes(effect, head_sec),
+        EffectType::Zoom => {
+            // `zoompan` counts output frames rather than seconds, so the builder
+            // is told the offset in seconds and converts it against the canvas
+            // rate it is already given. Without it the move starts on the first
+            // frame of the *branch* and is `head_sec` through by the time the
+            // clip's own picture appears.
+            let mut anchored = effect;
+            anchored.set_param(BRANCH_OFFSET_PARAM, ParamValue::Float(head_sec));
+            anchored
+        }
         // Everything else is either time-invariant (a colour grade looks the
         // same on every frame) or keyframed, and keyframed effects are already
         // resolved to a single sampled value before they reach the graph — and
@@ -13495,6 +13505,43 @@ mod tests {
         assert_eq!(
             untouched_payload["keyframes"][0]["t"], 0.0,
             "a clip with no handle keeps the track it was given"
+        );
+    }
+
+    /// Feature: Transitions
+    /// Scenario: a zoom on a dissolving clip starts where it was authored
+    ///
+    /// A clip in a transition is decoded from `head_sec` before its in point, so
+    /// `zoompan`'s output-frame counter is already running while the picture the
+    /// editor drew the move under has not appeared yet. Unanchored, the move is
+    /// `head_sec` through by the time the clip's own footage starts.
+    #[test]
+    fn a_zoom_on_a_clip_with_handles_waits_for_the_clips_own_picture() {
+        use crate::core::effects::EffectType;
+
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("duration", ParamValue::Float(2.0));
+
+        let mut graph = FilterGraph::new().with_dimensions(1920, 1080);
+        graph.set_fps(30.0);
+        graph.add_effect(anchor_effect_to_branch(effect.clone(), 0.5));
+        let anchored = graph.to_video_filter_complex("trim0", "v0");
+
+        // Half a second of head handle at 30fps is fifteen frames of branch that
+        // are not the clip's own picture.
+        assert!(
+            anchored.contains("*max(on-15,0)"),
+            "the move must hold until the clip's own picture starts: {anchored}"
+        );
+
+        let mut unhandled = FilterGraph::new().with_dimensions(1920, 1080);
+        unhandled.set_fps(30.0);
+        unhandled.add_effect(anchor_effect_to_branch(effect, 0.0));
+        let plain = unhandled.to_video_filter_complex("trim0", "v0");
+
+        assert!(
+            plain.contains("*on,") && !plain.contains("max(on-"),
+            "a clip with no handle keeps the graph it has always had: {plain}"
         );
     }
 
