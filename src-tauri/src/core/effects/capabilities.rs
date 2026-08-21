@@ -203,16 +203,21 @@ pub fn effect_type_supports_export(effect_type: &EffectType) -> bool {
 /// layer has to be refused before the command is built, or the export dies on a
 /// message that names an FFmpeg filter the editor never chose.
 ///
-/// The list is what the local FFmpeg (9.0.1) actually refuses, checked filter by
-/// filter against every body [`crate::core::effects::Effect::build_filter_params`]
-/// can emit: `zoompan`, `fps`, `scale` and `pad` (`Zoom`), `crop` (`Crop`,
-/// `AutoReframe`), `format` (`Opacity`), `subtitles` (`Subtitle`),
-/// `vidstabtransform` (`Stabilize`) and `xfade` (the three transition types).
+/// The rule, not a hand-count: an effect belongs here when the filter body
+/// [`crate::core::effects::Effect::build_filter_params`] emits *opens with* a
+/// filter the local FFmpeg (9.0.1) refuses an `enable=` on — a geometry or
+/// pixel-format conversion has to run before the graded pixels exist, and those
+/// conversions are untimeable by nature. Any new effect whose leading filter is
+/// untimeable must be added here, or an adjustment-layer export dies on a
+/// message naming an FFmpeg filter the editor never chose.
 ///
-/// `Opacity` is here for the `format=rgba` its body opens with, not for the
-/// `colorchannelmixer` that does the work: a translucency the timeline could
-/// gate still has to reach an alpha channel first, and the conversion that
-/// creates one is untimeable by nature.
+/// The current members, each confirmed against FFmpeg 9.0.1: `zoompan`, `fps`,
+/// `scale` and `pad` (`Zoom`), `crop` (`Crop`, `AutoReframe`), `subtitles`
+/// (`Subtitle`), `vidstabtransform` (`Stabilize`), `xfade` (the three transition
+/// types), and the `format=` conversion that opens `Opacity` (`format=rgba`),
+/// `Curves` (`format=yuv444p`, the Luma-vs-Sat leg) and `HSLQualifier`
+/// (`format=rgba`). For the `format` cases it is the conversion, not the
+/// `colorchannelmixer`/`geq` that does the work, that FFmpeg cannot gate.
 pub fn effect_type_supports_timeline_enable(effect_type: &EffectType) -> bool {
     !matches!(
         effect_type,
@@ -220,6 +225,8 @@ pub fn effect_type_supports_timeline_enable(effect_type: &EffectType) -> bool {
             | EffectType::Crop
             | EffectType::AutoReframe
             | EffectType::Opacity
+            | EffectType::Curves
+            | EffectType::HSLQualifier
             | EffectType::Subtitle
             | EffectType::Stabilize
             | EffectType::CrossDissolve

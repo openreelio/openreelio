@@ -6493,7 +6493,9 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("temp dir");
         let input_file = dir.path().join("input.mp4");
-        let fixture = std::process::Command::new(ffmpeg_binary_for_tests())
+        let mut fixture_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut fixture_cmd);
+        let fixture = fixture_cmd
             .args([
                 "-y",
                 "-hide_banner",
@@ -6532,7 +6534,9 @@ mod tests {
 
         // One byte per pixel of luma, so the byte count is the frame count times
         // the frame size — both properties under test, measured at once.
-        let render = std::process::Command::new(ffmpeg_binary_for_tests())
+        let mut render_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut render_cmd);
+        let render = render_cmd
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
             .arg(&input_file)
             .arg("-/filter_complex")
@@ -6580,7 +6584,9 @@ mod tests {
             (height - box_height) / 2,
         );
 
-        let built = std::process::Command::new(ffmpeg_binary_for_tests())
+        let mut built_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut built_cmd);
+        let built = built_cmd
             .args([
                 "-y",
                 "-hide_banner",
@@ -6614,7 +6620,9 @@ mod tests {
         let graph_file = dir.path().join("graph.txt");
         std::fs::write(&graph_file, graph).ok()?;
 
-        let render = std::process::Command::new(ffmpeg_binary_for_tests())
+        let mut render_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut render_cmd);
+        let render = render_cmd
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
             .arg(input)
             .arg("-/filter_complex")

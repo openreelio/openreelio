@@ -12313,6 +12313,39 @@ mod tests {
     }
 
     /// Feature: Adjustment layers
+    /// Scenario: a colour tool that opens with `format=` is refused by name
+    ///
+    /// `Curves` (its Luma-vs-Sat leg emits `format=yuv444p,geq=…`) and
+    /// `HSLQualifier` (`format=rgba,geq=…`) both lead with a `format` conversion
+    /// once a curve or a qualifier is set, and `format` has no timeline support,
+    /// so the gated graph died on "Timeline ('enable' option) not supported with
+    /// filter 'format'" — a path a user reaches from the Color panel. They are
+    /// refused up front by name, like `Opacity`, rather than crashing the render.
+    #[test]
+    fn should_refuse_a_format_leading_colour_effect_on_an_adjustment_layer() {
+        for (effect_type, label) in [
+            (EffectType::Curves, "Curves"),
+            (EffectType::HSLQualifier, "HSL Qualifier"),
+        ] {
+            let (sequence, assets, effects) =
+                sequence_with_adjustment_layer_effect(effect_type.clone());
+
+            let validation =
+                validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+            assert!(
+                !validation.is_valid,
+                "a {effect_type:?} on an adjustment layer must be refused up front"
+            );
+            let reported = validation.errors.join("; ");
+            assert!(
+                reported.contains(label) && reported.contains("adjustment layer"),
+                "the refusal must name the effect and why: {reported}"
+            );
+        }
+    }
+
+    /// Feature: Adjustment layers
     /// Scenario: an effect the export has no filter for is a no-op, not a crash
     ///
     /// `Levels`, `Glow`, `MotionBlur`, `BlendMode`, `Custom` and every disabled
@@ -12401,27 +12434,28 @@ mod tests {
         };
 
         let run = |filtergraph: &str| {
-            std::process::Command::new(&ffmpeg)
-                .args([
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-nostdin",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "color=c=black:s=320x180:r=30:d=0.2",
-                    "-filter_complex",
-                    filtergraph,
-                    "-map",
-                    "[out]",
-                    "-frames:v",
-                    "1",
-                    "-f",
-                    "null",
-                    "-",
-                ])
-                .output()
+            let mut cmd = std::process::Command::new(&ffmpeg);
+            crate::core::process::configure_std_command(&mut cmd);
+            cmd.args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x180:r=30:d=0.2",
+                "-filter_complex",
+                filtergraph,
+                "-map",
+                "[out]",
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
         };
 
         for effect in [
@@ -15642,7 +15676,9 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("temp dir");
         let photo = dir.path().join("photo.png");
-        let built = std::process::Command::new(&ffmpeg)
+        let mut built_cmd = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut built_cmd);
+        let built = built_cmd
             .args([
                 "-y",
                 "-hide_banner",
@@ -15725,7 +15761,9 @@ mod tests {
             std::fs::write(&graph_file, filter_complex.trim_end_matches(';'))
                 .expect("write filtergraph");
 
-            let render = std::process::Command::new(&ffmpeg)
+            let mut render_cmd = std::process::Command::new(&ffmpeg);
+            crate::core::process::configure_std_command(&mut render_cmd);
+            let render = render_cmd
                 .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
                 .arg(&photo)
                 .arg("-/filter_complex")
@@ -15788,7 +15826,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let build = |name: &str, frames: usize, rate: u32| -> Option<std::path::PathBuf> {
             let path = dir.path().join(name);
-            let built = std::process::Command::new(&ffmpeg)
+            let mut built_cmd = std::process::Command::new(&ffmpeg);
+            crate::core::process::configure_std_command(&mut built_cmd);
+            let built = built_cmd
                 .args([
                     "-y",
                     "-hide_banner",
@@ -15866,7 +15906,9 @@ mod tests {
         let graph_file = dir.path().join("graph.txt");
         std::fs::write(&graph_file, filter_complex.trim_end_matches(';')).expect("write graph");
 
-        let render = std::process::Command::new(&ffmpeg)
+        let mut render_cmd = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut render_cmd);
+        let render = render_cmd
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
             .arg(&animated)
             .arg("-/filter_complex")
