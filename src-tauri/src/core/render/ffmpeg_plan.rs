@@ -127,6 +127,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                 ctx.effects,
                 Some(output_width),
                 Some(output_height),
+                Some(output_fps),
                 ClipHandles::default(),
             );
             if graph.has_video_effects() {
@@ -183,6 +184,7 @@ pub(super) fn build_sequence_ffmpeg_args(
             ctx.effects,
             Some(output_width),
             Some(output_height),
+            Some(output_fps),
             handles,
         );
 
@@ -617,7 +619,7 @@ pub(super) fn build_audio_only_ffmpeg_args(
         let handles = transition_plan.handles(&clip.id);
         let clip_filter_graph =
             ctx.engine
-                .build_clip_filter_graph(clip, ctx.effects, None, None, handles);
+                .build_clip_filter_graph(clip, ctx.effects, None, None, None, handles);
         let audio_trim_label = format!("atrim{}", input_index);
         let audio_out_label = format!("a{}", input_index);
         let audio_effects_input = build_audio_trim_filter(

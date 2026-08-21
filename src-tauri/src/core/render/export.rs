@@ -5393,15 +5393,18 @@ impl ExportEngine {
     /// If effects have keyframes, they are resolved at the midpoint of the clip
     /// duration since FFmpeg filters cannot animate parameters directly.
     /// Dimensions are used for mask-aware (power window) filter generation.
+    /// Dimensions and frame rate are also handed to effects that cannot express
+    /// their output frame — `zoompan` is the one that cannot.
     pub(super) fn build_clip_filter_graph(
         &self,
         clip: &Clip,
         effects: &std::collections::HashMap<String, Effect>,
         width: Option<u32>,
         height: Option<u32>,
+        fps: Option<f64>,
         handles: ClipHandles,
     ) -> FilterGraph {
-        build_clip_filter_graph(clip, effects, width, height, handles)
+        build_clip_filter_graph(clip, effects, width, height, fps, handles)
     }
 }
 
@@ -5493,6 +5496,7 @@ pub(super) fn build_clip_filter_graph(
     effects: &std::collections::HashMap<String, Effect>,
     width: Option<u32>,
     height: Option<u32>,
+    fps: Option<f64>,
     handles: ClipHandles,
 ) -> FilterGraph {
     {
@@ -5501,6 +5505,9 @@ pub(super) fn build_clip_filter_graph(
         let mut graph = FilterGraph::new();
         if let (Some(w), Some(h)) = (width, height) {
             graph.set_dimensions(w as i32, h as i32);
+        }
+        if let Some(fps) = fps {
+            graph.set_fps(fps);
         }
 
         // Calculate midpoint of clip for keyframe interpolation
@@ -6917,6 +6924,7 @@ pub fn validate_export_settings_with_dimensions(
                             effects,
                             Some(canvas_width),
                             Some(canvas_height),
+                            Some(output_video_fps(sequence, settings)),
                             ClipHandles::default(),
                         );
                         if let Err(effect_label) =
@@ -11843,11 +11851,12 @@ mod tests {
     }
 
     /// Feature: Effect-aware transform placement
-    /// Scenario: a zoom hands the transform a fixed 1280x720 frame
+    /// Scenario: a zoom hands the transform the canvas it was told about
     ///
-    /// `zoompan` is emitted with `s=hd720`, so the picture reaching the
-    /// transform is 720p no matter how big the source was — this bites even a
-    /// clip whose only "transform" is an opacity change.
+    /// `zoompan` resizes, so the picture reaching the transform is whatever the
+    /// zoom's `s` says and not the size of the source — this bites even a clip
+    /// whose only "transform" is an opacity change. The graph publishes the
+    /// canvas onto the effect, so the measurement and the emitted filter agree.
     #[test]
     fn test_effective_source_dimensions_follows_a_zoom() {
         let mut zoom = Effect::new(EffectType::Zoom);
@@ -11855,8 +11864,29 @@ mod tests {
         zoom.set_param("duration", ParamValue::Float(2.0));
         zoom.set_param("zoom_factor", ParamValue::Float(1.5));
 
-        let dimensions = effective_source_dimensions((3840, 2160), &graph_with_effect(zoom))
+        let mut graph = FilterGraph::new().with_dimensions(1920, 1080);
+        graph.set_fps(30.0);
+        graph.add_effect(zoom);
+
+        let dimensions = effective_source_dimensions((3840, 2160), &graph)
             .expect("zoompan states its output size");
+
+        assert_eq!(dimensions, (1920, 1080));
+    }
+
+    /// Feature: Effect-aware transform placement
+    /// Scenario: a zoom on a graph that was never told its canvas
+    ///
+    /// FFmpeg's own `zoompan` default is `hd720`, so a chain that says nothing
+    /// still resizes to 720p. The measurement has to report that rather than
+    /// pretend the picture came through untouched.
+    #[test]
+    fn test_effective_source_dimensions_follows_a_zoom_without_a_canvas() {
+        let dimensions = effective_source_dimensions(
+            (3840, 2160),
+            &graph_with_effect(Effect::new(EffectType::Zoom)),
+        )
+        .expect("zoompan states its output size");
 
         assert_eq!(dimensions, (1280, 720));
     }
