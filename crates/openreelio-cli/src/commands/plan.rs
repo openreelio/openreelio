@@ -654,9 +654,11 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> PlanValidation {
         }
     }
 
+    let mut has_duplicate_ids = false;
     for step in &plan.steps {
         if !step_ids.insert(step.id.as_str()) {
             errors.push(format!("Duplicate step id '{}'", step.id));
+            has_duplicate_ids = true;
         }
     }
 
@@ -703,8 +705,13 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> PlanValidation {
         }
     }
 
-    if let Err(cycle_err) = topological_sort(&plan.steps) {
-        errors.push(cycle_err.to_string());
+    // Only worth asking once the ids are unique: the sort refuses a duplicated
+    // id too, so running it anyway would report the same fault twice and never
+    // reach the cycle the caller also wants to know about.
+    if !has_duplicate_ids {
+        if let Err(cycle_err) = topological_sort(&plan.steps) {
+            errors.push(cycle_err.to_string());
+        }
     }
 
     PlanValidation {
@@ -850,9 +857,21 @@ fn execute_step(
 }
 
 /// Sort plan steps in dependency order (Kahn's algorithm).
-/// Returns an error if the dependency graph contains a cycle.
+///
+/// Returns an error if the dependency graph contains a cycle, or if two steps
+/// share an id. The duplicate check is a backstop — [`validate_edit_plan`] runs
+/// first and rejects duplicates there — but it is not redundant: every id-keyed
+/// map below collapses the duplicates into one entry while the seed queue is
+/// built from the step *list*, so a duplicated id makes the sort emit the same
+/// step twice and the length check that guards against a cycle still passes.
+/// Executing a step twice is worse than refusing the plan.
 fn topological_sort(steps: &[PlanStep]) -> anyhow::Result<Vec<&PlanStep>> {
-    let step_map: HashMap<&str, &PlanStep> = steps.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut step_map: HashMap<&str, &PlanStep> = HashMap::with_capacity(steps.len());
+    for step in steps {
+        if step_map.insert(step.id.as_str(), step).is_some() {
+            return Err(anyhow::anyhow!("Duplicate step id '{}'", step.id));
+        }
+    }
     let mut in_degree: HashMap<&str, usize> = steps.iter().map(|s| (s.id.as_str(), 0)).collect();
     let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
 
@@ -972,6 +991,23 @@ mod tests {
             "the producer must run first, got {order:?}"
         );
         assert_eq!(order.len(), 3);
+    }
+
+    #[test]
+    fn should_refuse_to_sort_a_plan_that_repeats_a_step_id() {
+        // Given: two steps sharing an id. Every id-keyed map collapses them into
+        // one entry, but the seed queue is built from the step list, so the sort
+        // emitted the same step twice and the cycle check — which only compares
+        // lengths — still passed. A plan generator with an id collision would
+        // therefore run one step twice instead of being refused.
+        let steps = vec![step("a", &[]), step("a", &[]), step("b", &["a"])];
+
+        let error = topological_sort(&steps).expect_err("a repeated step id must be refused");
+
+        assert!(
+            error.to_string().contains("Duplicate step id 'a'"),
+            "the refusal must name the id, got: {error}"
+        );
     }
 
     /// Validation errors alone, for the tests that only care about those.
@@ -1180,21 +1216,32 @@ mod tests {
     }
 
     #[test]
-    fn should_report_cycles_duplicates_and_missing_dependencies() {
+    fn should_report_cycles_and_missing_dependencies() {
         let errors = validate_edit_plan_errors(&plan(vec![
             step("a", &["b"]),
             step("b", &["a"]),
-            step("b", &[]),
             step("c", &["ghost"]),
         ]));
 
         assert!(errors.iter().any(|error| error.contains("Cycle detected")));
         assert!(errors
             .iter()
-            .any(|error| error.contains("Duplicate step id 'b'")));
-        assert!(errors
-            .iter()
             .any(|error| error.contains("'ghost'") && error.contains("does not exist")));
+    }
+
+    #[test]
+    fn should_report_a_duplicate_step_id_once() {
+        let errors =
+            validate_edit_plan_errors(&plan(vec![step("a", &[]), step("b", &[]), step("b", &[])]));
+
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|error| error.contains("Duplicate step id 'b'"))
+                .count(),
+            1,
+            "one fault, one line: {errors:?}"
+        );
     }
 
     #[test]
