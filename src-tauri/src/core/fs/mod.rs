@@ -7,6 +7,7 @@
 //! - A partial write (power loss, crash) must not leave the project unrecoverable.
 //! - Windows semantics differ from Unix for rename-over-existing; we handle both.
 
+use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
@@ -94,6 +95,227 @@ pub fn validate_filter_safe_path(path: &Path, label: &str) -> Result<(), String>
         ));
     }
     Ok(())
+}
+
+/// Removes the Windows verbatim (`\\?\`) prefix from a path string.
+///
+/// `std::fs::canonicalize` returns verbatim paths on Windows, so a stored
+/// asset's URI routinely reads `\\?\C:\media\clip.mp4`. That prefix is
+/// meaningful to the Win32 API and meaningless to every NLE that reads a
+/// `file://` URL — left in place it percent-encodes to `file:////%3F/C:/…`,
+/// which resolves to nothing and shows up as offline media in the other tool.
+///
+/// `\\?\UNC\server\share` is the verbatim spelling of the share `\\server\share`
+/// and is restored to it.
+pub fn strip_verbatim_prefix(path: &str) -> Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return Cow::Borrowed(rest);
+    }
+    Cow::Borrowed(path)
+}
+
+/// Whether a path points at a UNC / network location.
+///
+/// A hand-written project file may carry `\\host\share\x`, `//host/share/x`,
+/// `/\host\share\x` or the verbatim `\\?\UNC\host\share\x`. Windows resolves
+/// every one of them as the same share, so the test cannot be a list of literal
+/// prefixes — it strips the verbatim prefix, normalises the separators, and then
+/// asks whether the path starts with two of them.
+///
+/// Naming a share lets whoever wrote the path trigger an outbound connection
+/// (and an NTLM handshake leak on Windows) the moment anything stats the path,
+/// so the check is deliberately lexical: it must be able to run *before* the
+/// filesystem is touched.
+pub fn is_network_path(path: &str) -> bool {
+    strip_verbatim_prefix(path)
+        .replace('\\', "/")
+        .starts_with("//")
+}
+
+/// Whether a path string names an absolute location, answered without the host.
+///
+/// Deliberately answered from the string rather than [`Path::is_absolute`]: a
+/// project written on Windows is routinely read on Linux and the reverse, and
+/// `Path::is_absolute` answers for the *host*, so `C:/Windows/win.ini` reads as
+/// a relative path on Linux and would be joined onto the project root — landing
+/// inside the scope it was supposed to be measured against.
+fn is_absolute_path_string(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    matches!(bytes.first(), Some(b'/') | Some(b'\\'))
+        || matches!(bytes, [drive, b':', ..] if drive.is_ascii_alphabetic())
+}
+
+/// Validates a workspace-relative asset path before it is stored on an asset.
+///
+/// [`Asset::resolved_path`](crate::core::assets::Asset::resolved_path) joins this
+/// value onto the project root with no traversal check of its own, so a `..`
+/// segment or an absolute/UNC prefix stored here escapes the project exactly like
+/// an out-of-tree `uri` would — and the result is handed to FFmpeg by render,
+/// analysis, and transcription.
+///
+/// Rejection is purely lexical: the path is never touched on disk, so validating
+/// a hostile value cannot itself probe outside the project or open a network
+/// connection.
+pub fn validate_asset_relative_path(relative_path: &str, label: &str) -> Result<(), String> {
+    let trimmed = relative_path.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(format!("{label} contains control characters"));
+    }
+    if trimmed.contains("://") {
+        return Err(format!("{label} must be a relative path, not a URL"));
+    }
+    // Reject backslashes on every platform: on Windows a backslash is a path
+    // separator (so `\\host\share` is a UNC path), but on Unix it is an ordinary
+    // filename character, so `Path::components` would not flag a UNC-style value
+    // as a Prefix. Requiring forward slashes keeps this check platform-agnostic.
+    if trimmed.contains('\\') {
+        return Err(format!(
+            "{label} must use forward slashes and must not be a UNC path"
+        ));
+    }
+
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() || is_absolute_path_string(trimmed) {
+        return Err(format!("{label} must be relative to the project root"));
+    }
+    if candidate.components().any(|component| {
+        matches!(
+            component,
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(format!(
+            "{label} must not contain '.', '..', or a drive/UNC prefix"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validates a stored asset URI without touching the filesystem.
+///
+/// This is the `uri` sibling of [`validate_asset_relative_path`]: it enforces
+/// what every write path already guarantees — an absolute, local, non-traversing
+/// path — but does it *lexically*, so it can run on state that was read off disk
+/// rather than produced by a command.
+///
+/// Not touching the disk is the point, not an optimisation. `\\attacker\share\x`
+/// is refused here before anything stats or canonicalises it, because on Windows
+/// the stat *is* the outbound SMB connection and the NTLM handshake that leaks
+/// with it. For the same reason existence is deliberately **not** checked: an
+/// asset whose file is simply gone is offline media the user can relink, not an
+/// attack, and asking the filesystem about it is what this guard exists to
+/// prevent doing blindly.
+pub fn validate_asset_uri(uri: &str, label: &str) -> Result<(), String> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(format!("{label} contains control characters"));
+    }
+    if trimmed.contains("://") {
+        return Err(format!("{label} must be a local file path, not a URL"));
+    }
+    if is_network_path(trimmed) {
+        return Err(format!("{label} must not be a UNC or network share path"));
+    }
+
+    let plain = strip_verbatim_prefix(trimmed);
+    if !is_absolute_path_string(&plain) {
+        return Err(format!("{label} must be an absolute path"));
+    }
+    if Path::new(plain.as_ref())
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(format!("{label} must not contain '.' or '..' segments"));
+    }
+    // `Path::components` only classifies `..` as a `ParentDir` when the host
+    // treats the separator as one, so a Windows-style `C:\media\..\..\secrets`
+    // read on Linux is a single `Normal` component. Re-check on normalised
+    // separators so the answer does not depend on which machine opened the file.
+    if plain
+        .replace('\\', "/")
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(format!("{label} must not contain '.' or '..' segments"));
+    }
+
+    Ok(())
+}
+
+/// Why a stored media path is not eligible for project-scoped access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectMediaRejection {
+    /// The asset carries no path at all.
+    Empty,
+    /// The path is relative, so it does not name a location on its own.
+    NotAbsolute,
+    /// The path is a UNC or network share, so resolving it would reach off-host.
+    NetworkPath,
+    /// The path does not resolve on this machine.
+    Unresolved,
+    /// The path resolves outside the project directory.
+    OutsideProject,
+}
+
+/// Confines a stored media path to a project directory, by resolution rather
+/// than by string comparison.
+///
+/// Everything a project file says about its media is attacker-controllable —
+/// the `uri`, and equally the `workspaceManaged` flag that used to be the only
+/// gate on the workspace scan's `asset://` grants. The one property worth
+/// trusting is where the file actually *is*, so the path is canonicalized and
+/// compared against a canonicalized project root.
+///
+/// Canonicalizing is load-bearing, not tidiness: a prefix test on the raw string
+/// is defeated by drive-relative (`C:foo`, resolved against the process CWD),
+/// root-relative (`\Windows`), 8.3 short-name and symlinked spellings, all of
+/// which name a location the string does not look like it names. Resolution
+/// collapses every one of those to the same answer the OS will give when the
+/// file is finally opened.
+///
+/// `canonical_project` is expected to already be canonical; pass the result of
+/// [`std::fs::canonicalize`] on the project root.
+pub fn confine_media_path_to_project(
+    canonical_project: &Path,
+    uri: &str,
+) -> Result<PathBuf, ProjectMediaRejection> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return Err(ProjectMediaRejection::Empty);
+    }
+
+    // Refuse UNC/network shares before touching the filesystem: canonicalizing a
+    // `\\host\share` path is itself the outbound SMB/NTLM connection we must not
+    // make on behalf of an attacker-authored project file. No caller can reach
+    // here with such a uri today, but this keeps that an invariant of the helper
+    // rather than an emergent property of the callers.
+    if is_network_path(trimmed) {
+        return Err(ProjectMediaRejection::NetworkPath);
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(ProjectMediaRejection::NotAbsolute);
+    }
+
+    let canonical_path =
+        std::fs::canonicalize(&path).map_err(|_| ProjectMediaRejection::Unresolved)?;
+
+    if !canonical_path.starts_with(canonical_project) {
+        return Err(ProjectMediaRejection::OutsideProject);
+    }
+
+    Ok(canonical_path)
 }
 
 /// Validates a project-relative workspace document path.
@@ -193,6 +415,18 @@ pub fn validate_local_input_path(path: &str, label: &str) -> Result<PathBuf, Str
     // Reject other URL schemes that could be dangerous
     if lower.contains("://") {
         return Err(format!("{label} must be a local file path"));
+    }
+
+    // Refuse network shares *before* the path is turned into a `PathBuf`.
+    // On Windows `\\host\share\x` answers true to `Path::is_absolute`, so it
+    // sails past the absolute-path check below and reaches `fs::metadata` —
+    // and that stat is itself the outbound SMB connection plus the NTLM
+    // handshake that leaks with it. This validator sits on the command
+    // boundary reached by plan files (`plan execute`, the agent plan executor,
+    // MCP `plan.apply`), which are untrusted input, so the check has to be
+    // lexical: it must decide without touching the filesystem.
+    if is_network_path(trimmed) {
+        return Err(format!("{label} must not be a UNC or network share path"));
     }
 
     let pb = PathBuf::from(trimmed);
@@ -384,6 +618,12 @@ pub async fn validate_local_input_path_async(path: &str, label: &str) -> Result<
 
     if lower.contains("://") {
         return Err(format!("{label} must be a local file path"));
+    }
+
+    // Same reasoning as the sync variant: a UNC path is rejected lexically so
+    // the validator never stats a share and leaks an NTLM handshake doing it.
+    if is_network_path(trimmed) {
+        return Err(format!("{label} must not be a UNC or network share path"));
     }
 
     let pb = PathBuf::from(trimmed);
@@ -1165,6 +1405,76 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_asset_uri_accepts_paths_the_command_layer_produces() {
+        // `ImportAsset` canonicalizes, which on Windows yields a verbatim path.
+        assert!(validate_asset_uri(r"\\?\C:\Media\clip.mp4", "asset.uri").is_ok());
+        assert!(validate_asset_uri(r"C:\Media\clip.mp4", "asset.uri").is_ok());
+        assert!(validate_asset_uri("C:/Media/clip.mp4", "asset.uri").is_ok());
+        assert!(validate_asset_uri("/home/ben/media/clip.mp4", "asset.uri").is_ok());
+        // A file that simply is not there is offline media, not an attack: the
+        // check never asks the filesystem, so relink keeps working.
+        assert!(validate_asset_uri("/home/ben/media/deleted.mp4", "asset.uri").is_ok());
+    }
+
+    #[test]
+    fn test_validate_asset_uri_rejects_urls_traversal_and_shares() {
+        for hostile in [
+            "https://attacker.example/payload.mp4",
+            "file:///etc/passwd",
+            "data:video/mp4;base64,AAAA",
+            "media/clip.mp4",
+            "../outside.mp4",
+            "/home/ben/../../etc/passwd",
+            r"C:\Media\..\..\Windows\win.ini",
+            r"\\attacker\share\clip.mp4",
+            "//attacker/share/clip.mp4",
+            r"/\attacker\share\clip.mp4",
+            r"\/attacker/share/clip.mp4",
+            r"\\?\UNC\attacker\share\clip.mp4",
+            "",
+            "   ",
+        ] {
+            assert!(
+                validate_asset_uri(hostile, "asset.uri").is_err(),
+                "'{hostile}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_network_path_sees_through_separator_spellings() {
+        assert!(is_network_path(r"\\host\share\x.mp4"));
+        assert!(is_network_path("//host/share/x.mp4"));
+        assert!(is_network_path(r"/\host\share\x.mp4"));
+        assert!(is_network_path(r"\\?\UNC\host\share\x.mp4"));
+
+        assert!(!is_network_path("/media/x.mp4"));
+        assert!(!is_network_path(r"C:\media\x.mp4"));
+        assert!(!is_network_path(r"\\?\C:\media\x.mp4"));
+    }
+
+    #[test]
+    fn test_validate_asset_relative_path_rejects_escapes() {
+        assert!(validate_asset_relative_path("media/clip.mp4", "asset.relativePath").is_ok());
+
+        for hostile in [
+            "../outside.mp4",
+            "media/../../outside.mp4",
+            "./media/clip.mp4",
+            "/etc/passwd",
+            "C:/Windows/win.ini",
+            r"\\host\share\x.mp4",
+            "https://attacker.example/x.mp4",
+            "",
+        ] {
+            assert!(
+                validate_asset_relative_path(hostile, "asset.relativePath").is_err(),
+                "'{hostile}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_local_input_path_empty() {
         let result = validate_local_input_path("", "inputPath");
         assert!(result.is_err());
@@ -1224,6 +1534,196 @@ mod tests {
         let result = validate_local_input_path(&dir_path, "inputPath");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not a file"));
+    }
+
+    /// Every separator spelling of a share must be refused *lexically*.
+    ///
+    /// The distinguishing assertion is the error text: none of these paths
+    /// exists, so if the validator had reached `fs::metadata` the error would
+    /// read "file not found". Seeing the network-path message instead is the
+    /// proof that the rejection happened before the filesystem was touched —
+    /// which is the whole point, because on Windows that stat is the outbound
+    /// SMB connection and the NTLM handshake leak.
+    #[test]
+    fn should_reject_a_unc_input_path_before_stat_ing_it() {
+        for path in [
+            r"\\host\share\x.mp4",
+            "//host/share/x.mp4",
+            r"/\host\share\x.mp4",
+            r"\\?\UNC\host\share\x.mp4",
+        ] {
+            let error = validate_local_input_path(path, "inputPath")
+                .expect_err(&format!("'{path}' names a share and must be rejected"));
+            assert!(
+                error.contains("UNC or network share"),
+                "'{path}' must be refused by the network-path check, not by a filesystem \
+                 probe: {error}"
+            );
+            assert!(
+                !error.contains("not found"),
+                "'{path}' reached the filesystem before being rejected: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_unc_input_path_before_stat_ing_it_async() {
+        for path in [
+            r"\\host\share\x.mp4",
+            "//host/share/x.mp4",
+            r"/\host\share\x.mp4",
+            r"\\?\UNC\host\share\x.mp4",
+        ] {
+            let error = validate_local_input_path_async(path, "inputPath")
+                .await
+                .expect_err(&format!("'{path}' names a share and must be rejected"));
+            assert!(
+                error.contains("UNC or network share"),
+                "'{path}' must be refused by the network-path check, not by a filesystem \
+                 probe: {error}"
+            );
+            assert!(
+                !error.contains("not found"),
+                "'{path}' reached the filesystem before being rejected: {error}"
+            );
+        }
+    }
+
+    /// The workspace scan used to grant `asset://` access to every asset the
+    /// project file marked `workspaceManaged`, with no confinement at all — so a
+    /// crafted project could pair that flag with a clean absolute out-of-project
+    /// uri and hand the webview a read primitive for that file.
+    #[test]
+    fn should_refuse_media_that_resolves_outside_the_project() {
+        let project = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.mp4");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let canonical_project = std::fs::canonicalize(project.path()).unwrap();
+
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, &secret.to_string_lossy()),
+            Err(ProjectMediaRejection::OutsideProject)
+        );
+    }
+
+    #[test]
+    fn should_admit_media_that_resolves_inside_the_project() {
+        let project = TempDir::new().unwrap();
+        let footage = project.path().join("footage");
+        std::fs::create_dir_all(&footage).unwrap();
+        let clip = footage.join("clip.mp4");
+        std::fs::write(&clip, b"clip").unwrap();
+
+        let canonical_project = std::fs::canonicalize(project.path()).unwrap();
+
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, &clip.to_string_lossy()),
+            Ok(std::fs::canonicalize(&clip).unwrap()),
+            "project-local media is what the scope exists to serve"
+        );
+    }
+
+    /// A traversing spelling of an in-project path must be judged by where it
+    /// lands, not by how it reads — the reason the check resolves rather than
+    /// string-compares.
+    #[test]
+    fn should_judge_a_traversing_uri_by_where_it_resolves() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let sibling = root.path().join("sibling");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let secret = sibling.join("secret.mp4");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let canonical_project = std::fs::canonicalize(&project).unwrap();
+        // Reads as a project path, resolves to the sibling directory.
+        let traversing = project.join("..").join("sibling").join("secret.mp4");
+
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, &traversing.to_string_lossy()),
+            Err(ProjectMediaRejection::OutsideProject)
+        );
+    }
+
+    #[test]
+    fn should_reject_media_paths_that_name_no_location() {
+        let project = TempDir::new().unwrap();
+        let canonical_project = std::fs::canonicalize(project.path()).unwrap();
+
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, "   "),
+            Err(ProjectMediaRejection::Empty)
+        );
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, "footage/clip.mp4"),
+            Err(ProjectMediaRejection::NotAbsolute)
+        );
+        assert_eq!(
+            confine_media_path_to_project(
+                &canonical_project,
+                &project.path().join("gone.mp4").to_string_lossy()
+            ),
+            Err(ProjectMediaRejection::Unresolved)
+        );
+    }
+
+    /// A UNC/network uri must be refused lexically, before canonicalize, because
+    /// resolving it *is* the outbound SMB/NTLM connection. The error must be
+    /// `NetworkPath`, not `Unresolved` — the latter would mean the filesystem
+    /// (and the network) was already touched.
+    #[test]
+    fn should_reject_network_media_paths_before_touching_the_filesystem() {
+        let project = TempDir::new().unwrap();
+        let canonical_project = std::fs::canonicalize(project.path()).unwrap();
+
+        for hostile in [
+            r"\\host\share\clip.mp4",
+            r"//host/share/clip.mp4",
+            r"/\host\share\clip.mp4",
+            r"\\?\UNC\host\share\clip.mp4",
+        ] {
+            assert_eq!(
+                confine_media_path_to_project(&canonical_project, hostile),
+                Err(ProjectMediaRejection::NetworkPath),
+                "{hostile} must be refused as a network path, not resolved"
+            );
+        }
+    }
+
+    /// The confinement is only worth anything if every grant site honours it.
+    ///
+    /// The workspace scan, the workspace watcher and the external-import command
+    /// each walk `project.state.assets` and used to grant `asset://` access on
+    /// the `workspaceManaged` flag alone — a second, unconfined door into the
+    /// scope `allow_project_asset_protocol` guards. `src/ipc/commands` is
+    /// compiled out under `cfg(test)`, so this reads the source: the grant sites
+    /// must go through the confined helper.
+    #[test]
+    fn should_route_every_workspace_asset_protocol_grant_through_the_confined_helper() {
+        const WORKSPACE_SOURCE: &str = include_str!("../../ipc/commands/workspace.rs");
+
+        // Deny every direct asset-protocol grant, not just the file variant: a
+        // `allow_asset_protocol_directory(` call would grant an unconfined
+        // *directory* — strictly worse than the file bug this guards. The
+        // confined helper's own name (`allow_confined_asset_protocol_file(`)
+        // does not contain either denied substring, so it is not self-tripping.
+        for denied in [
+            "allow_asset_protocol_file(",
+            "allow_asset_protocol_directory(",
+        ] {
+            assert!(
+                !WORKSPACE_SOURCE.contains(denied),
+                "workspace.rs must not grant asset-protocol access directly ({denied}); \
+                 call allow_confined_asset_protocol_file so the project confinement applies"
+            );
+        }
+        assert!(
+            WORKSPACE_SOURCE.contains("allow_confined_asset_protocol_file("),
+            "the workspace grant sites are expected to still exist, confined"
+        );
     }
 
     #[test]

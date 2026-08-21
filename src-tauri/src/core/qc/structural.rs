@@ -638,6 +638,23 @@ impl QCRule for MissingAssetRule {
                          the clip."
                             .to_string(),
                     ),
+                    // Quarantine is checked before `missing`, which it also sets:
+                    // "the file is gone" and "the project claimed a path we
+                    // refuse to open" need different fixes, and the second one
+                    // has no path left to print.
+                    Some(asset) if asset.quarantined_uri.is_some() => {
+                        let rejected = asset.quarantined_uri.as_deref().unwrap_or_default();
+                        (
+                            format!("Source path for '{}' was rejected as unsafe", asset.name),
+                            format!(
+                                "This project stored '{rejected}' for '{}', which is not a path \
+                                 OpenReelio will open — it is a URL, escapes the project, or names \
+                                 a network share. The path was cleared on load; relink the clip to \
+                                 local media you trust.",
+                                asset.name
+                            ),
+                        )
+                    }
                     Some(asset) if asset.missing => (
                         format!("Source file for '{}' is missing from disk", asset.name),
                         format!("Expected at '{}'. Relink or restore the file.", asset.uri),
@@ -2225,6 +2242,46 @@ mod tests {
         assert!(violations
             .iter()
             .all(|violation| violation.severity == Severity::Critical));
+    }
+
+    #[tokio::test]
+    async fn should_tell_a_quarantined_asset_apart_from_one_whose_file_is_gone() {
+        // A quarantined asset has no path left to print, and "restore the file"
+        // is the wrong advice for it: the file may well be there, it is the
+        // stored path that will not be opened.
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        track.add_clip(video_clip("asset_quarantined", 0.0, 2.0));
+        sequence.add_track(track);
+
+        let mut quarantined = video_asset("asset_quarantined", false);
+        quarantined.uri = String::new();
+        quarantined.missing = true;
+        quarantined.quarantined_uri = Some(r"\\attacker.example\share\payload.mp4".to_string());
+        let state = state_with(vec![quarantined]);
+
+        let context = context_for(&sequence);
+        let violations = MissingAssetRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        let violation = &violations[0];
+        assert!(
+            violation.message.contains("rejected as unsafe"),
+            "unexpected message: {}",
+            violation.message
+        );
+        let details = violation.details.as_deref().unwrap_or_default();
+        assert!(
+            details.contains(r"\\attacker.example\share\payload.mp4"),
+            "the rejected path must be shown so the user recognises it: {details}"
+        );
+        assert!(
+            details.contains("relink"),
+            "the fix must be actionable: {details}"
+        );
     }
 
     #[tokio::test]

@@ -266,6 +266,15 @@ export interface Asset {
   relativePath?: string;
   /** Whether this asset was auto-discovered from workspace scan */
   workspaceManaged?: boolean;
+  /**
+   * The stored path that was rejected when the project was loaded.
+   *
+   * Set when a project arrives off disk naming a path no command would have
+   * accepted — a URL, a `..` escape, a network share. The live path fields are
+   * cleared and the asset is marked missing, so this is the only place the
+   * rejected value survives for the user to see and relink from.
+   */
+  quarantinedUri?: string;
 }
 
 /** Check if an asset requires proxy generation based on video dimensions */

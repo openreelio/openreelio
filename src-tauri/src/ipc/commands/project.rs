@@ -8,7 +8,11 @@ use std::path::PathBuf;
 use specta::Type;
 use tauri::State;
 
-use crate::core::{assets::Asset, fs::validate_existing_project_dir, CoreError};
+use crate::core::{
+    assets::Asset,
+    fs::{confine_media_path_to_project, validate_existing_project_dir, ProjectMediaRejection},
+    CoreError,
+};
 use crate::{ActiveProject, AppState};
 
 /// How many times [`reload_project_from_disk`] re-reads the project when another
@@ -75,54 +79,63 @@ pub(crate) fn allow_project_asset_protocol(
     // Allow the project-managed runtime directory used by previews, thumbnails, waveforms, etc.
     state.allow_asset_protocol_directory(&project_path.join(".openreelio"), true);
 
-    let canonical_project = std::fs::canonicalize(project_path).unwrap_or_else(|_| {
+    let canonical_project = canonical_project_root(project_path);
+
+    for asset in assets {
+        allow_confined_asset_protocol_file(state, &canonical_project, asset);
+    }
+}
+
+/// Canonicalizes a project root for use as an asset-protocol confinement scope.
+///
+/// Falls back to the path as given when the directory cannot be resolved, which
+/// only ever narrows the scope: a non-canonical root matches fewer canonical
+/// asset paths, never more.
+pub(crate) fn canonical_project_root(project_path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(project_path).unwrap_or_else(|_| {
         tracing::warn!(
             "Failed to canonicalize project path for asset protocol scope: {}",
             project_path.display()
         );
         project_path.to_path_buf()
-    });
+    })
+}
 
-    // Project files are untrusted input. Only auto-allow asset source files that canonicalize
-    // inside the project; external files must be granted by an explicit import/relink action.
-    for asset in assets {
-        let uri = asset.uri.trim();
-        if uri.is_empty() {
-            continue;
-        }
-
-        let path = PathBuf::from(uri);
-        if !path.is_absolute() {
+/// Grants `asset://` access to one asset's source file, but only if it resolves
+/// inside `canonical_project`.
+///
+/// Project files are untrusted input, and so is anything derived from them:
+/// `workspaceManaged` is just another field an attacker-written project can set,
+/// so it can never be the whole gate. The decision itself lives in
+/// [`confine_media_path_to_project`], which resolves the path instead of
+/// string-comparing it.
+///
+/// Every caller that walks assets from project state — project open, and the
+/// workspace scan/watch/import paths — must go through here, so the confinement
+/// cannot be reintroduced as a bypass by a second grant site. External media is
+/// granted only by an explicit import or relink action.
+pub(crate) fn allow_confined_asset_protocol_file(
+    state: &AppState,
+    canonical_project: &std::path::Path,
+    asset: &Asset,
+) {
+    let canonical_path = match confine_media_path_to_project(canonical_project, &asset.uri) {
+        Ok(path) => path,
+        Err(ProjectMediaRejection::Empty) => return,
+        Err(reason) => {
             tracing::warn!(
-                "Skipping non-absolute asset uri for asset protocol scope: assetId={}, uri={}",
+                "Skipping asset uri for asset protocol scope ({:?}): assetId={}, uri={}",
+                reason,
                 asset.id,
-                uri
+                asset.uri
             );
-            continue;
+            return;
         }
+    };
 
-        let Ok(canonical_path) = std::fs::canonicalize(&path) else {
-            tracing::warn!(
-                "Skipping unresolved asset uri for asset protocol scope: assetId={}, uri={}",
-                asset.id,
-                uri
-            );
-            continue;
-        };
-
-        if !canonical_path.starts_with(&canonical_project) {
-            tracing::warn!(
-                "Skipping external asset uri from project file for asset protocol scope: assetId={}, uri={}",
-                asset.id,
-                uri
-            );
-            continue;
-        }
-
-        if let Ok(meta) = std::fs::metadata(&canonical_path) {
-            if meta.is_file() {
-                state.allow_asset_protocol_file(&canonical_path);
-            }
+    if let Ok(meta) = std::fs::metadata(&canonical_path) {
+        if meta.is_file() {
+            state.allow_asset_protocol_file(&canonical_path);
         }
     }
 }

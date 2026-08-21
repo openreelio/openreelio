@@ -29,6 +29,7 @@ use crate::core::workspace::{
     watcher::{WorkspaceEvent, WorkspaceWatcher, WORKSPACE_EVENT_CHANNEL_CAPACITY},
 };
 use crate::core::CoreError;
+use crate::ipc::commands::project::{allow_confined_asset_protocol_file, canonical_project_root};
 use crate::{ActiveProject, AppState};
 use tauri::{Emitter, Manager};
 
@@ -286,11 +287,14 @@ pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanR
 
         record_workspace_asset_imports(project, &new_asset_ids)?;
 
-        // Allow the asset protocol to serve newly registered files
+        // Allow the asset protocol to serve newly registered files. `workspaceManaged`
+        // is a project-file field, so it cannot be the whole gate: the grant is
+        // confined to files that canonicalize inside the project, exactly as a
+        // project open is.
+        let canonical_project = canonical_project_root(&project_root);
         for asset in project.state.assets.values() {
             if asset.workspace_managed {
-                let resolved_path = std::path::PathBuf::from(&asset.uri);
-                state.allow_asset_protocol_file(&resolved_path);
+                allow_confined_asset_protocol_file(&state, &canonical_project, asset);
             }
         }
 
@@ -490,11 +494,16 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
                                 );
                             }
 
-                            // Allow asset-protocol access for all managed assets
+                            // Allow asset-protocol access for all managed assets,
+                            // confined to the project the same way a project open is.
+                            let canonical_project = canonical_project_root(&project_root_for_loop);
                             for asset in project.state.assets.values() {
                                 if asset.workspace_managed {
-                                    let path = PathBuf::from(&asset.uri);
-                                    app_state.allow_asset_protocol_file(&path);
+                                    allow_confined_asset_protocol_file(
+                                        &app_state,
+                                        &canonical_project,
+                                        asset,
+                                    );
                                 }
                             }
                         }
@@ -694,10 +703,10 @@ pub async fn import_external_files_to_workspace(
                 .map(|asset| asset.id.clone());
         }
 
+        let canonical_project = canonical_project_root(&project.path);
         for asset in project.state.assets.values() {
             if asset.workspace_managed {
-                let resolved_path = PathBuf::from(&asset.uri);
-                state.allow_asset_protocol_file(&resolved_path);
+                allow_confined_asset_protocol_file(&state, &canonical_project, asset);
             }
         }
 

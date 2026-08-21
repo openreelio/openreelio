@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::Path;
 
-use crate::core::CoreResult;
+use crate::core::{fs::validate_asset_uri, CoreResult};
 
 use super::{
     AnalysisProvider as ProviderType, AnalysisResult, AnalysisType, CostBreakdownItem,
@@ -334,8 +334,18 @@ pub fn create_cost_estimate(
     }
 }
 
-/// Validates that the file exists and is readable
+/// Validates the media path an analysis request names.
+///
+/// Both providers start here, and the cloud one goes on to put the path in a
+/// Google Cloud `inputUri` and upload the file, so "does this file exist" is not
+/// a sufficient question: a URL, a `..` escape or a `\\host\share` would sail
+/// through it. The lexical guards run first, before anything touches the path,
+/// because stat-ing a share is itself the outbound SMB connection.
 pub fn validate_asset_path(path: &str) -> CoreResult<()> {
+    validate_asset_uri(path, "assetPath").map_err(crate::core::CoreError::ValidationError)?;
+
+    // Existence keeps its own error variant: callers tell "you have not got this
+    // file" apart from "this is not a path we will accept".
     let path = Path::new(path);
     if !path.exists() {
         return Err(crate::core::CoreError::FileNotFound(
@@ -562,5 +572,34 @@ mod tests {
     fn test_validate_asset_path_not_found() {
         let result = validate_asset_path("/nonexistent/file.mp4");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_reject_urls_shares_and_traversal_before_touching_the_filesystem() {
+        // The cloud provider puts this path in a Google Cloud `inputUri` and
+        // uploads the file, so existence alone is not the question being asked.
+        for hostile in [
+            "https://attacker.example/payload.mp4",
+            "file:///etc/passwd",
+            r"\\attacker.example\share\payload.mp4",
+            "//attacker.example/share/payload.mp4",
+            r"\\?\UNC\attacker.example\share\payload.mp4",
+            "/media/../../etc/passwd",
+            "media/clip.mp4",
+        ] {
+            let error = validate_asset_path(hostile)
+                .expect_err(&format!("'{hostile}' must be rejected"))
+                .to_string();
+            assert!(
+                error.contains("assetPath"),
+                "'{hostile}' should be rejected as a bad path, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_accept_a_real_local_file() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(validate_asset_path(&file.path().to_string_lossy()).is_ok());
     }
 }

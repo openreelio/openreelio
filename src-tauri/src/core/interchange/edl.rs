@@ -312,6 +312,7 @@ mod tests {
             relative_path: None,
             workspace_managed: false,
             missing: false,
+            quarantined_uri: None,
         }
     }
 

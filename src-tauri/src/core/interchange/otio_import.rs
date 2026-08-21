@@ -50,11 +50,15 @@ use crate::core::timeline::TimelineClock;
 use crate::core::Ratio;
 
 use super::models::{file_url_to_path, strip_verbatim_prefix};
+// `file_url_to_path` turns `file://host/share/x` into `//host/share/x`, and a
+// hand-written `.otio` may carry `\\host\share\x`, `/\host\share\x` or the
+// percent-encoded `%5C%5Chost`; the shared check recognises all of them.
 use super::otio_schema::{
     openreelio_meta_bool, openreelio_meta_f64, openreelio_meta_str, OtioClip, OtioComposable,
     OtioMarker, OtioMediaRef, OtioTimeline, OtioTrack, OtioTrackOrItem, OtioTransition,
     RationalTime,
 };
+use crate::core::fs::is_network_path;
 
 /// Extra handle, in frames, a transition is required to have beyond its own
 /// length. Mirrors the render engine's slack so a plan this importer accepts
@@ -1040,22 +1044,6 @@ fn transition_direction(transition: &OtioTransition, effect_type: &str) -> Optio
         .then(|| direction.to_string())
 }
 
-/// Whether a resolved media path points at a UNC / network location.
-///
-/// `file_url_to_path` turns `file://host/share/x` into `//host/share/x`, and a
-/// hand-written `.otio` may carry `\\host\share\x`, `/\host\share\x` or the
-/// percent-encoded `%5C%5Chost`. Windows resolves every one of them as the same
-/// share, so the test cannot be a list of literal prefixes — it normalises the
-/// separators first and then asks whether the path starts with two of them.
-///
-/// Importing from a share lets the file's author trigger an outbound connection
-/// (and an NTLM handshake leak on Windows), so they are refused.
-fn is_network_path(path: &str) -> bool {
-    strip_verbatim_prefix(path)
-        .replace('\\', "/")
-        .starts_with("//")
-}
-
 /// Whether a decoded media path names an absolute location.
 ///
 /// Deliberately answered from the string rather than `Path::is_absolute`: an
@@ -1115,6 +1103,7 @@ mod tests {
             relative_path: None,
             workspace_managed: false,
             missing: false,
+            quarantined_uri: None,
         }
     }
 

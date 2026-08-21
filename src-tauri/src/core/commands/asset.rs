@@ -10,68 +10,11 @@ use crate::core::{
         ProxyStatus, VideoInfo,
     },
     commands::{Command, CommandResult, StateChange},
-    fs::validate_local_input_path,
+    fs::{validate_asset_relative_path, validate_local_input_path},
     project::ProjectState,
     workspace::path_resolver,
     AssetId, CoreError, CoreResult,
 };
-
-// =============================================================================
-// Asset path validation
-// =============================================================================
-
-/// Validates a workspace-relative asset path before it is stored on an asset.
-///
-/// [`Asset::resolved_path`](crate::core::assets::Asset::resolved_path) joins this
-/// value onto the project root with no traversal check of its own, so a `..`
-/// segment or an absolute/UNC prefix stored here escapes the project exactly like
-/// an out-of-tree `uri` would — and the result is handed to FFmpeg by render,
-/// analysis, and transcription.
-///
-/// Rejection is purely lexical: the path is never touched on disk, so validating
-/// a hostile value cannot itself probe outside the project or open a network
-/// connection.
-fn validate_asset_relative_path(relative_path: &str, label: &str) -> Result<(), String> {
-    let trimmed = relative_path.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{label} is empty"));
-    }
-    if trimmed.chars().any(char::is_control) {
-        return Err(format!("{label} contains control characters"));
-    }
-    if trimmed.contains("://") {
-        return Err(format!("{label} must be a relative path, not a URL"));
-    }
-    // Reject backslashes on every platform: on Windows a backslash is a path
-    // separator (so `\\host\share` is a UNC path), but on Unix it is an ordinary
-    // filename character, so `Path::components` would not flag a UNC-style value
-    // as a Prefix. Requiring forward slashes keeps this check platform-agnostic.
-    if trimmed.contains('\\') {
-        return Err(format!(
-            "{label} must use forward slashes and must not be a UNC path"
-        ));
-    }
-
-    let candidate = std::path::Path::new(trimmed);
-    if candidate.is_absolute() {
-        return Err(format!("{label} must be relative to the project root"));
-    }
-    if candidate.components().any(|component| {
-        matches!(
-            component,
-            std::path::Component::CurDir
-                | std::path::Component::ParentDir
-                | std::path::Component::RootDir
-                | std::path::Component::Prefix(_)
-        )
-    }) {
-        return Err(format!(
-            "{label} must not contain '.', '..', or a drive/UNC prefix"
-        ));
-    }
-
-    Ok(())
-}
 
 // =============================================================================
 // ImportAssetCommand
@@ -422,6 +365,10 @@ pub struct UpdateAssetCommand {
     original_workspace_managed: Option<bool>,
     #[serde(skip)]
     original_missing: Option<bool>,
+    /// Quarantined URI recorded at load time, captured so `undo` can put a
+    /// still-unresolved quarantine back after a relink is rolled back.
+    #[serde(skip)]
+    original_quarantined_uri: Option<Option<String>>,
 }
 
 impl UpdateAssetCommand {
@@ -457,6 +404,7 @@ impl UpdateAssetCommand {
             original_relative_path: None,
             original_workspace_managed: None,
             original_missing: None,
+            original_quarantined_uri: None,
         }
     }
 
@@ -592,6 +540,7 @@ impl Command for UpdateAssetCommand {
         self.original_relative_path = Some(asset.relative_path.clone());
         self.original_workspace_managed = Some(asset.workspace_managed);
         self.original_missing = Some(asset.missing);
+        self.original_quarantined_uri = Some(asset.quarantined_uri.clone());
 
         // Apply new values
         if let Some(name) = &self.new_name {
@@ -614,6 +563,13 @@ impl Command for UpdateAssetCommand {
         }
         if let Some(uri) = &validated_uri {
             asset.uri = uri.clone();
+            // A relink resolves the quarantine. The path that replaced the
+            // rejected one just passed the same command-boundary validator an
+            // import has to pass, so keeping the quarantine marker would make
+            // `MissingAssetRule` report a Critical violation — and
+            // `verify --fail-on critical` exit 1 — on a project the user has
+            // correctly repaired.
+            asset.quarantined_uri = None;
         }
         if let Some(duration_sec) = self.duration_sec {
             asset.duration_sec = duration_sec;
@@ -689,6 +645,9 @@ impl Command for UpdateAssetCommand {
             }
             if let Some(missing) = self.original_missing {
                 asset.missing = missing;
+            }
+            if let Some(quarantined_uri) = &self.original_quarantined_uri {
+                asset.quarantined_uri = quarantined_uri.clone();
             }
         }
         Ok(())
@@ -1250,5 +1209,91 @@ mod tests {
 
         let resolved = asset.resolved_path(std::path::Path::new("/project"));
         assert_eq!(resolved, std::path::PathBuf::from("/abs/path/clip.mp4"));
+    }
+
+    /// Builds the state a quarantined project loads into: an asset whose stored
+    /// path was refused, with a clip still referencing it.
+    fn state_with_quarantined_asset() -> (ProjectState, AssetId, String) {
+        let mut state = create_test_state();
+
+        let mut asset = Asset::new_video("payload.mp4", "", VideoInfo::default());
+        asset.missing = true;
+        asset.quarantined_uri = Some(r"\\attacker.example\share\payload.mp4".to_string());
+        let asset_id = asset.id.clone();
+        state.assets.insert(asset_id.clone(), asset);
+
+        let mut sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let mut track = Track::new("Video 1", TrackKind::Video);
+        track.clips.push(Clip::with_range(&asset_id, 0.0, 2.0));
+        sequence.tracks.push(track);
+        let sequence_id = sequence.id.clone();
+        state.sequences.insert(sequence_id.clone(), sequence);
+
+        (state, asset_id, sequence_id)
+    }
+
+    async fn quarantine_violation_count(state: &ProjectState, sequence_id: &str) -> usize {
+        use crate::core::qc::{MissingAssetRule, QCContext, QCRule, RuleConfig};
+
+        let sequence = state
+            .sequences
+            .get(sequence_id)
+            .expect("the sequence under test exists");
+        let context = QCContext::from_sequence(sequence);
+        MissingAssetRule::new()
+            .check(sequence, state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs")
+            .iter()
+            .filter(|violation| violation.message.contains("rejected as unsafe"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn should_clear_the_quarantine_when_the_asset_is_relinked() {
+        // Relinking is the documented repair for a quarantined asset. If the
+        // marker survives it, `MissingAssetRule` keeps reporting a Critical
+        // violation and `verify --fail-on critical` fails a project the user
+        // has already fixed.
+        let (mut state, asset_id, sequence_id) = state_with_quarantined_asset();
+        assert_eq!(quarantine_violation_count(&state, &sequence_id).await, 1);
+
+        let (_dir, uri) = create_temp_asset_file("relinked.mp4");
+        let mut relink = UpdateAssetCommand::new(&asset_id)
+            .with_uri(&uri)
+            .with_missing(false);
+        relink.execute(&mut state).expect("relink succeeds");
+
+        assert_eq!(
+            state.assets[&asset_id].quarantined_uri, None,
+            "a validated relink resolves the quarantine"
+        );
+        assert_eq!(
+            quarantine_violation_count(&state, &sequence_id).await,
+            0,
+            "the repaired project must pass QC"
+        );
+
+        // Undoing the repair puts the unresolved quarantine back, otherwise the
+        // rejected path would silently stop being reported.
+        relink.undo(&mut state).expect("undo succeeds");
+        assert_eq!(
+            state.assets[&asset_id].quarantined_uri.as_deref(),
+            Some(r"\\attacker.example\share\payload.mp4")
+        );
+        assert_eq!(quarantine_violation_count(&state, &sequence_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn should_keep_the_quarantine_when_an_update_does_not_relink() {
+        // Renaming an asset is not a repair: the stored path is still the one
+        // that was refused, so the violation has to stand.
+        let (mut state, asset_id, sequence_id) = state_with_quarantined_asset();
+
+        let mut rename = UpdateAssetCommand::new(&asset_id).with_name("renamed.mp4");
+        rename.execute(&mut state).expect("rename succeeds");
+
+        assert!(state.assets[&asset_id].quarantined_uri.is_some());
+        assert_eq!(quarantine_violation_count(&state, &sequence_id).await, 1);
     }
 }
