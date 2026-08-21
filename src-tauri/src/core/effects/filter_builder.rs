@@ -1045,13 +1045,23 @@ impl Effect {
             return "null".to_string();
         }
 
-        // Build zoom expression based on type
-        // For zoom in: start at 1.0, end at zoom_factor
-        // For zoom out: start at zoom_factor, end at 1.0
-        let step = (zoom_factor - 1.0) / total_frames as f64;
+        // `on` is 0 on the first output frame, so the move is divided by the
+        // number of *steps* between frames — one fewer than the number of frames
+        // — for the last frame of the move to land exactly on the target. Divided
+        // by the frame count instead, as this used to be, the move stopped a step
+        // short and a zoom-out never came back to 1.0.
+        let steps = (total_frames - 1).max(1);
+
+        // The ratio is handed to FFmpeg unevaluated. Pre-computing it here meant
+        // rounding it to six decimals, and a move spread thin enough rounds to
+        // `0.000000` — a 1% zoom over eleven minutes at 30fps does — which turns
+        // a zoom-in into no zoom at all and a zoom-out into a permanent hold at
+        // the zoomed size. FFmpeg divides at full double precision instead.
+        let factor = format!("{:.4}", zoom_factor);
+        let travelled = format!("(({}-1)/{})*on", factor, steps);
         let zoom_expr = match zoom_type {
-            "out" => format!("z='max({:.4}-{:.6}*on,1)'", zoom_factor, step),
-            _ => format!("z='min(1+{:.6}*on,{:.4})'", step, zoom_factor),
+            "out" => format!("z='max({}-{},1)'", factor, travelled),
+            _ => format!("z='min(1+{},{})'", travelled, factor),
         };
 
         // Build x/y position expressions to keep centered
@@ -3446,9 +3456,10 @@ mod tests {
         assert!(filter.contains("fps=60"));
         // One output frame per input frame, whatever the rate
         assert!(filter.contains("d=1"), "got: {}", filter);
-        // Duration 1.0s at 60fps is a 60-frame move to the default 1.5x
+        // Duration 1.0s at 60fps is a 60-frame move to the default 1.5x, which
+        // is 59 steps between the first frame and the last.
         assert!(
-            filter.contains("min(1+0.008333*on,1.5000)"),
+            filter.contains("min(1+((1.5000-1)/59)*on,1.5000)"),
             "got: {}",
             filter
         );
@@ -3616,7 +3627,7 @@ mod tests {
         zoom_in.set_param("zoom_factor", ParamValue::Float(1.5));
         let filter = zoom_on_canvas(zoom_in, 1920, 1080, 30.0);
         assert!(
-            filter.contains("z='min(1+0.008333*on,1.5000)'"),
+            filter.contains("z='min(1+((1.5000-1)/59)*on,1.5000)'"),
             "got: {filter}"
         );
 
@@ -3626,7 +3637,7 @@ mod tests {
         zoom_out.set_param("zoom_factor", ParamValue::Float(1.5));
         let filter = zoom_on_canvas(zoom_out, 1920, 1080, 30.0);
         assert!(
-            filter.contains("z='max(1.5000-0.008333*on,1)'"),
+            filter.contains("z='max(1.5000-((1.5000-1)/59)*on,1)'"),
             "got: {filter}"
         );
 
@@ -3695,6 +3706,55 @@ mod tests {
             .build_filter_params();
 
         assert!(measured.contains(":s=1080x1920:"), "got: {measured}");
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: the move reaches its target on the last frame of the move
+    ///
+    /// `on` is 0 on the first output frame and `frames - 1` on the last, so a
+    /// step of `(factor - 1) / frames` — what this used to emit — stops one step
+    /// short of the target and a zoom-out never gets back to 1.0.
+    #[test]
+    fn should_reach_the_zoom_target_on_the_last_frame_of_the_move() {
+        for (duration, fps, frames) in [(2.0, 30.0, 60), (1.0, 24.0, 24), (0.5, 60.0, 30)] {
+            let mut effect = Effect::new(EffectType::Zoom);
+            effect.set_param("duration", ParamValue::Float(duration));
+            effect.set_param("zoom_factor", ParamValue::Float(2.0));
+            let filter = zoom_on_canvas(effect, 1920, 1080, fps);
+
+            assert!(
+                filter.contains(&format!("/{})*on", frames - 1)),
+                "a {frames}-frame move has {} steps, got: {filter}",
+                frames - 1
+            );
+        }
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: a small zoom over a long clip still moves
+    ///
+    /// The per-frame step used to be baked into the expression as a `{:.6}`
+    /// constant. A 1% zoom over eleven minutes at 30fps steps by 5e-7, which
+    /// rounds to a literal `0.000000` — the zoom-in then does nothing at all and
+    /// the zoom-out holds at the zoomed size forever instead of returning.
+    #[test]
+    fn should_not_round_a_slow_zoom_down_to_no_movement() {
+        for zoom_type in ["in", "out"] {
+            let mut effect = Effect::new(EffectType::Zoom);
+            effect.set_param("zoom_type", ParamValue::String(zoom_type.to_string()));
+            effect.set_param("duration", ParamValue::Float(660.0));
+            effect.set_param("zoom_factor", ParamValue::Float(1.01));
+            let filter = zoom_on_canvas(effect, 1920, 1080, 30.0);
+
+            assert!(
+                !filter.contains("0.000000"),
+                "the {zoom_type} move rounded away to nothing: {filter}"
+            );
+            assert!(
+                filter.contains("((1.0100-1)/19799)*on"),
+                "expected the ratio left for FFmpeg to divide, got: {filter}"
+            );
+        }
     }
 
     // =========================================================================
@@ -3813,9 +3873,9 @@ mod tests {
             "Expected one output frame per input frame, got: {}",
             filter
         );
-        // 2s at 30fps is a 60-frame move, so the zoom steps 0.5/60 per frame.
+        // 2s at 30fps is a 60-frame move, so the zoom steps 0.5/59 per frame.
         assert!(
-            filter.contains("min(1+0.008333*on,1.5000)"),
+            filter.contains("min(1+((1.5000-1)/59)*on,1.5000)"),
             "Expected a 60-frame ramp to 1.5x, got: {}",
             filter
         );
@@ -6361,6 +6421,215 @@ mod tests {
             "expected {SOURCE_FRAMES} frames of {CANVAS_WIDTH}x{CANVAS_HEIGHT}, \
              got {} bytes",
             render.stdout.len()
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Empirical zoom-geometry helpers
+    // -------------------------------------------------------------------------
+
+    /// A test clip: a white rectangle centred on black, encoded to a real file.
+    ///
+    /// A file rather than `-f lavfi` so that the graph under test is the only
+    /// filtergraph in the command, and the frames it is handed have been through
+    /// a decoder exactly as a render's would be.
+    fn white_box_clip(
+        dir: &std::path::Path,
+        name: &str,
+        canvas: (usize, usize),
+        box_size: (usize, usize),
+    ) -> Option<std::path::PathBuf> {
+        let (width, height) = canvas;
+        let (box_width, box_height) = box_size;
+        let path = dir.join(name);
+        let source = format!(
+            "color=c=black:s={width}x{height}:r=30:d=0.2,\
+             drawbox=x={}:y={}:w={box_width}:h={box_height}:color=white:t=fill",
+            (width - box_width) / 2,
+            (height - box_height) / 2,
+        );
+
+        let built = std::process::Command::new(ffmpeg_binary_for_tests())
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &source,
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&path)
+            .output()
+            .ok()?;
+
+        (built.status.success() && path.exists()).then_some(path)
+    }
+
+    /// Renders `graph` over `input` and hands back its frames as single-plane luma.
+    ///
+    /// One byte per pixel, so a frame is exactly `width * height` bytes and the
+    /// white pixels can be counted without decoding anything.
+    fn render_luma_frames(
+        input: &std::path::Path,
+        graph: &str,
+        width: usize,
+        height: usize,
+    ) -> Option<Vec<Vec<u8>>> {
+        let dir = tempfile::tempdir().ok()?;
+        let graph_file = dir.path().join("graph.txt");
+        std::fs::write(&graph_file, graph).ok()?;
+
+        let render = std::process::Command::new(ffmpeg_binary_for_tests())
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(input)
+            .arg("-/filter_complex")
+            .arg(&graph_file)
+            .args(["-map", "[out]", "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+            .output()
+            .ok()?;
+
+        assert!(
+            render.status.success(),
+            "ffmpeg refused the graph: {}\n{graph}",
+            String::from_utf8_lossy(&render.stderr)
+        );
+
+        Some(
+            render
+                .stdout
+                .chunks_exact(width * height)
+                .map(<[u8]>::to_vec)
+                .collect(),
+        )
+    }
+
+    /// Width, height and area of the white region of one luma frame.
+    fn white_region(frame: &[u8], width: usize) -> (usize, usize, usize) {
+        let lit: Vec<(usize, usize)> = frame
+            .iter()
+            .enumerate()
+            .filter(|(_, luma)| **luma > 127)
+            .map(|(index, _)| (index % width, index / width))
+            .collect();
+        if lit.is_empty() {
+            return (0, 0, 0);
+        }
+
+        let span = |values: &mut dyn Iterator<Item = usize>| {
+            let (min, max) = values.fold((usize::MAX, 0), |(min, max), value| {
+                (min.min(value), max.max(value))
+            });
+            max - min + 1
+        };
+        (
+            span(&mut lit.iter().map(|(x, _)| *x)),
+            span(&mut lit.iter().map(|(_, y)| *y)),
+            lit.len(),
+        )
+    }
+
+    /// The zoom graph the export builds, wired for a one-input ffmpeg command.
+    fn zoom_graph_for_ffmpeg(effect: Effect, width: i32, height: i32, fps: f64) -> String {
+        let mut graph = FilterGraph::new().with_dimensions(width, height);
+        graph.set_fps(fps);
+        graph.add_effect(effect);
+        graph.to_video_filter_complex("0:v", "out")
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: the last frame of the move is at the zoom the editor asked for
+    ///
+    /// The area a zoom of `f` shows grows by `f²`, so a white rectangle of known
+    /// size measures the zoom the render actually reached. The move is six frames
+    /// long, which makes a one-frame shortfall a sixth of the whole move rather
+    /// than something hiding inside rounding.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1, 320x180 canvas, 3520 white source
+    /// pixels, 2x zoom over six frames): dividing the move by the frame count
+    /// instead of by the steps between frames — what this replaced — reached
+    /// 11906 white pixels instead of 14080, a zoom of 1.83x where 2.0x was asked
+    /// for.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored zoom
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_zoom_in_reaches_its_target_on_the_last_frame_of_the_move() {
+        const CANVAS: (usize, usize) = (320, 180);
+        const FACTOR: f64 = 2.0;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = white_box_clip(dir.path(), "box.mp4", CANVAS, (80, 44)) else {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        };
+
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("duration", ParamValue::Float(0.2));
+        effect.set_param("zoom_factor", ParamValue::Float(FACTOR));
+        let graph = zoom_graph_for_ffmpeg(effect, CANVAS.0 as i32, CANVAS.1 as i32, 30.0);
+
+        let Some(frames) = render_luma_frames(&input, &graph, CANVAS.0, CANVAS.1) else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+        assert_eq!(frames.len(), 6, "the zoom must not change the frame count");
+
+        let (_, _, unzoomed) = white_region(&frames[0], CANVAS.0);
+        let (_, _, zoomed) = white_region(frames.last().expect("frames"), CANVAS.0);
+        let expected = unzoomed as f64 * FACTOR * FACTOR;
+
+        assert!(
+            (zoomed as f64 - expected).abs() <= expected * 0.02,
+            "expected the move to end at {FACTOR}x — {expected} white pixels — \
+             got {zoomed} from {unzoomed}"
+        );
+    }
+
+    /// Feature: Zoom effect
+    /// Scenario: a zoom-out ends on the picture it started from
+    ///
+    /// A zoom-out that stops a step short never gets back to 1.0, so the clip
+    /// hands the rest of the timeline a picture that is still slightly enlarged.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1, same fixture): the old step
+    /// finished a 2x zoom-out at 4885 white pixels against the source's 3520 —
+    /// still 1.18x in.
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_zoom_out_returns_to_the_unzoomed_frame() {
+        const CANVAS: (usize, usize) = (320, 180);
+        // The fixture is an 80x44 white box, which is what an untouched frame
+        // measures.
+        const UNZOOMED: usize = 80 * 44;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = white_box_clip(dir.path(), "box.mp4", CANVAS, (80, 44)) else {
+            eprintln!("Skipping: ffmpeg could not build the fixture");
+            return;
+        };
+
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("zoom_type", ParamValue::String("out".to_string()));
+        effect.set_param("duration", ParamValue::Float(0.2));
+        effect.set_param("zoom_factor", ParamValue::Float(2.0));
+        let graph = zoom_graph_for_ffmpeg(effect, CANVAS.0 as i32, CANVAS.1 as i32, 30.0);
+
+        let Some(frames) = render_luma_frames(&input, &graph, CANVAS.0, CANVAS.1) else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+
+        let (_, _, landed) = white_region(frames.last().expect("frames"), CANVAS.0);
+
+        assert!(
+            (landed as f64 - UNZOOMED as f64).abs() <= UNZOOMED as f64 * 0.02,
+            "a zoom-out must land back on the whole frame — {UNZOOMED} white \
+             pixels — got {landed}"
         );
     }
 
