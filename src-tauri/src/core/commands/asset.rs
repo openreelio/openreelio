@@ -10,68 +10,11 @@ use crate::core::{
         ProxyStatus, VideoInfo,
     },
     commands::{Command, CommandResult, StateChange},
-    fs::validate_local_input_path,
+    fs::{validate_asset_relative_path, validate_local_input_path},
     project::ProjectState,
     workspace::path_resolver,
     AssetId, CoreError, CoreResult,
 };
-
-// =============================================================================
-// Asset path validation
-// =============================================================================
-
-/// Validates a workspace-relative asset path before it is stored on an asset.
-///
-/// [`Asset::resolved_path`](crate::core::assets::Asset::resolved_path) joins this
-/// value onto the project root with no traversal check of its own, so a `..`
-/// segment or an absolute/UNC prefix stored here escapes the project exactly like
-/// an out-of-tree `uri` would — and the result is handed to FFmpeg by render,
-/// analysis, and transcription.
-///
-/// Rejection is purely lexical: the path is never touched on disk, so validating
-/// a hostile value cannot itself probe outside the project or open a network
-/// connection.
-fn validate_asset_relative_path(relative_path: &str, label: &str) -> Result<(), String> {
-    let trimmed = relative_path.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{label} is empty"));
-    }
-    if trimmed.chars().any(char::is_control) {
-        return Err(format!("{label} contains control characters"));
-    }
-    if trimmed.contains("://") {
-        return Err(format!("{label} must be a relative path, not a URL"));
-    }
-    // Reject backslashes on every platform: on Windows a backslash is a path
-    // separator (so `\\host\share` is a UNC path), but on Unix it is an ordinary
-    // filename character, so `Path::components` would not flag a UNC-style value
-    // as a Prefix. Requiring forward slashes keeps this check platform-agnostic.
-    if trimmed.contains('\\') {
-        return Err(format!(
-            "{label} must use forward slashes and must not be a UNC path"
-        ));
-    }
-
-    let candidate = std::path::Path::new(trimmed);
-    if candidate.is_absolute() {
-        return Err(format!("{label} must be relative to the project root"));
-    }
-    if candidate.components().any(|component| {
-        matches!(
-            component,
-            std::path::Component::CurDir
-                | std::path::Component::ParentDir
-                | std::path::Component::RootDir
-                | std::path::Component::Prefix(_)
-        )
-    }) {
-        return Err(format!(
-            "{label} must not contain '.', '..', or a drive/UNC prefix"
-        ));
-    }
-
-    Ok(())
-}
 
 // =============================================================================
 // ImportAssetCommand

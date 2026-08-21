@@ -263,6 +263,21 @@ pub struct Asset {
     /// while still referenced by clips)
     #[serde(default)]
     pub missing: bool,
+
+    /// The stored path that was rejected when the project was loaded, if any.
+    ///
+    /// Set by
+    /// [`ProjectState::scope_assets_to_project`](crate::core::project::ProjectState::scope_assets_to_project)
+    /// when an asset arrives off disk carrying a `uri` or `relativePath` that no
+    /// command would have accepted — a URL, a `..` escape, a `\\host\share`. The
+    /// offending value is moved here and the live path fields are cleared, so
+    /// nothing downstream can hand it to FFmpeg, but the user can still see what
+    /// the project claimed and relink from it.
+    ///
+    /// `None` on every asset that loaded cleanly, which is every asset written by
+    /// this application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantined_uri: Option<String>,
 }
 
 impl Asset {
@@ -310,6 +325,7 @@ impl Asset {
             relative_path: None,
             workspace_managed: false,
             missing: false,
+            quarantined_uri: None,
         }
     }
 
@@ -335,6 +351,7 @@ impl Asset {
             relative_path: None,
             workspace_managed: false,
             missing: false,
+            quarantined_uri: None,
         }
     }
 
@@ -378,6 +395,7 @@ impl Asset {
             relative_path: None,
             workspace_managed: false,
             missing: false,
+            quarantined_uri: None,
         }
     }
 

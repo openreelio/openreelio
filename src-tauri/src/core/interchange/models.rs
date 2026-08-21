@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write;
 
@@ -351,23 +350,11 @@ fn encode_file_url_path(path: &str) -> String {
 
 /// Strips the Windows extended-length ("verbatim") prefix from a path.
 ///
-/// `std::fs::canonicalize` returns verbatim paths on Windows, so an imported
-/// asset's URI routinely reads `\\?\C:\media\clip.mp4`. That prefix is
-/// meaningful to the Win32 API and meaningless to every NLE that reads a
-/// `file://` URL — left in place it percent-encodes to `file:////%3F/C:/…`,
-/// which resolves to nothing and shows up as offline media in the other tool.
-///
-/// `\\?\UNC\server\share` is the verbatim spelling of the share `\\server\share`
-/// and is restored to it.
-pub fn strip_verbatim_prefix(path: &str) -> Cow<'_, str> {
-    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
-        return Cow::Owned(format!(r"\\{rest}"));
-    }
-    if let Some(rest) = path.strip_prefix(r"\\?\") {
-        return Cow::Borrowed(rest);
-    }
-    Cow::Borrowed(path)
-}
+/// Re-exported from [`crate::core::fs`], which owns it because the same
+/// normalisation guards the load-time asset URI check: `\\?\UNC\host\share` and
+/// `\\host\share` name one share, and both have to be recognised as one before
+/// anything touches the path.
+pub use crate::core::fs::strip_verbatim_prefix;
 
 /// Converts an asset URI into the URL every interchange format wants.
 ///

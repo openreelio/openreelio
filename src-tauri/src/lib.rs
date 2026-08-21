@@ -572,7 +572,7 @@ impl ActiveProject {
         let history_meta = history.base_meta.clone().unwrap_or_else(|| meta.clone());
 
         // Load state from history when available. Fall back to snapshot + replay or full ops replay.
-        let state = if !history.applied_op_ids.is_empty() || has_history_manifest {
+        let mut state = if !history.applied_op_ids.is_empty() || has_history_manifest {
             let by_id: std::collections::HashMap<&str, crate::core::project::Operation> =
                 read_result
                     .operations
@@ -599,6 +599,7 @@ impl ActiveProject {
         } else {
             ProjectState::from_ops_log(&ops_log, meta)?
         };
+        Self::scope_loaded_assets(&mut state, &path, "opening the project");
 
         // Create executor with its own OpsLog handle (both point to same file and
         // share the session-local append counter).
@@ -616,6 +617,26 @@ impl ActiveProject {
             history,
             adopted_op_ids,
         })
+    }
+
+    /// Applies the load-time asset scoping pass and logs what it quarantined.
+    ///
+    /// Every path that produces a [`ProjectState`] from files on disk routes
+    /// through here, so a hostile `uri` is cleared once, centrally, before the
+    /// state is handed to anything that renders, analyses or probes it.
+    fn scope_loaded_assets(state: &mut ProjectState, project_root: &Path, during: &str) {
+        let report = state.scope_assets_to_project(project_root);
+        if report.is_empty() {
+            return;
+        }
+
+        tracing::warn!(
+            quarantined_assets = report.len(),
+            project = %project_root.display(),
+            during = during,
+            "Quarantined assets whose stored paths were rejected as unsafe; \
+             they are marked missing and must be relinked"
+        );
     }
 
     /// Reads a project's state without opening an editing session.
@@ -640,6 +661,16 @@ impl ActiveProject {
     /// preview and unacceptable for anything that writes, which is why this
     /// returns a bare [`ProjectState`]: there is no session to save through.
     pub fn read_state_without_session(path: &Path) -> crate::core::CoreResult<ProjectState> {
+        // The read itself has three exits — history replay, snapshot-only
+        // recovery, and plain replay — and the snapshot-only one never goes
+        // through `from_operations`. Wrapping is what guarantees the scoping pass
+        // cannot be missed by whichever exit a given project happens to take.
+        let mut state = Self::read_state_without_session_unscoped(path)?;
+        Self::scope_loaded_assets(&mut state, path, "reading the project without a session");
+        Ok(state)
+    }
+
+    fn read_state_without_session_unscoped(path: &Path) -> crate::core::CoreResult<ProjectState> {
         let state_dir = Self::default_state_dir(path);
 
         // No migration: whichever copy exists is read where it lies.
@@ -881,6 +912,10 @@ impl ActiveProject {
             .clone()
             .unwrap_or_else(|| self.state.meta.clone());
         let mut state = ProjectState::from_operations(active_ops, meta)?;
+        // Undo, redo and history jumps rebuild the state from the same on-disk
+        // operations, so a quarantined path is re-materialised every time unless
+        // the pass runs again — the quarantine lives in the state, not the log.
+        Self::scope_loaded_assets(&mut state, &self.path, "rebuilding project history");
         state.last_op_id = history.current_head().map(str::to_string);
         state.op_count = history.applied_op_ids.len();
         state.is_dirty = true;
@@ -2441,6 +2476,164 @@ pub use tauri_app::run;
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// The hostile spelling used by the load tests below.
+    ///
+    /// A share, because it is the worst of the three classes: on Windows the
+    /// first thing that stats this path opens the SMB connection and leaks the
+    /// NTLM handshake, so it has to be refused before any of the load paths
+    /// touches it.
+    const HOSTILE_ASSET_URI: &str = r"\\attacker.example\share\payload.mp4";
+
+    fn hostile_asset() -> crate::core::assets::Asset {
+        crate::core::assets::Asset::new_video(
+            "payload",
+            HOSTILE_ASSET_URI,
+            crate::core::assets::VideoInfo::default(),
+        )
+    }
+
+    /// Appends an `AssetImport` operation straight to `ops.jsonl`.
+    ///
+    /// Deliberately bypasses `ImportAssetCommand`, because that is the point:
+    /// the command layer validates and the file does not, so this is exactly
+    /// what a hand-edited, synced or agent-generated project folder looks like.
+    fn append_raw_asset_import(
+        project_path: &Path,
+        asset: &crate::core::assets::Asset,
+    ) -> crate::core::CoreResult<()> {
+        let ops_path = project_path.join(".openreelio/state/ops.jsonl");
+        let ops_log = OpsLog::new(&ops_path);
+        ops_log.append(&crate::core::project::Operation::new(
+            crate::core::project::OpKind::AssetImport,
+            serde_json::to_value(asset).unwrap(),
+        ))?;
+        Ok(())
+    }
+
+    #[test]
+    fn should_quarantine_a_hostile_asset_uri_when_opening_a_project() {
+        // Given: a project folder whose ops log names a network share
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("hostile_open");
+        let project = ActiveProject::create("Hostile Open", project_path.clone()).unwrap();
+        drop(project);
+        let asset = hostile_asset();
+        append_raw_asset_import(&project_path, &asset).unwrap();
+
+        // When: the project is opened
+        let opened = ActiveProject::open(project_path).unwrap();
+
+        // Then: it opens — a partly corrupt project must stay inspectable — but
+        // the path never reaches the state the render pipeline reads.
+        let loaded = opened
+            .state
+            .assets
+            .get(&asset.id)
+            .expect("the asset is still listed so it can be relinked");
+        assert!(loaded.uri.is_empty());
+        assert!(loaded.missing);
+        assert_eq!(loaded.quarantined_uri.as_deref(), Some(HOSTILE_ASSET_URI));
+    }
+
+    #[test]
+    fn should_quarantine_a_hostile_asset_uri_when_reading_without_a_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("hostile_read_only");
+        let project = ActiveProject::create("Hostile Read Only", project_path.clone()).unwrap();
+        drop(project);
+        let asset = hostile_asset();
+        append_raw_asset_import(&project_path, &asset).unwrap();
+
+        let state = ActiveProject::read_state_without_session(&project_path).unwrap();
+
+        let loaded = state.assets.get(&asset.id).expect("asset present");
+        assert!(loaded.uri.is_empty());
+        assert_eq!(loaded.quarantined_uri.as_deref(), Some(HOSTILE_ASSET_URI));
+    }
+
+    #[test]
+    fn should_quarantine_a_hostile_asset_uri_carried_only_by_a_snapshot() {
+        // Given: a project with nothing to replay, so the read takes the
+        // snapshot-only exit that never goes through operation replay
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("hostile_snapshot");
+        let project = ActiveProject::create("Hostile Snapshot", project_path.clone()).unwrap();
+        let mut state = project.state.clone();
+        drop(project);
+
+        let asset = hostile_asset();
+        state.assets.insert(asset.id.clone(), asset.clone());
+        let state_dir = project_path.join(".openreelio/state");
+        Snapshot::save(&state_dir.join("snapshot.json"), &state, None).unwrap();
+        std::fs::write(state_dir.join("ops.jsonl"), "").unwrap();
+        let _ = std::fs::remove_file(state_dir.join("history.json"));
+
+        // When / Then
+        let read = ActiveProject::read_state_without_session(&project_path).unwrap();
+        let loaded = read.assets.get(&asset.id).expect("asset present");
+        assert!(loaded.uri.is_empty());
+        assert_eq!(loaded.quarantined_uri.as_deref(), Some(HOSTILE_ASSET_URI));
+
+        let opened = ActiveProject::open(project_path).unwrap();
+        let loaded = opened.state.assets.get(&asset.id).expect("asset present");
+        assert!(loaded.uri.is_empty());
+        assert_eq!(loaded.quarantined_uri.as_deref(), Some(HOSTILE_ASSET_URI));
+    }
+
+    #[test]
+    fn should_not_resurrect_a_quarantined_uri_when_history_is_rebuilt() {
+        // The quarantine lives in the state, not in the log, so every rebuild
+        // from the same operations has to re-apply it — otherwise one undo hands
+        // the share back to the render pipeline.
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("hostile_history");
+        let project = ActiveProject::create("Hostile History", project_path.clone()).unwrap();
+        drop(project);
+        let asset = hostile_asset();
+        append_raw_asset_import(&project_path, &asset).unwrap();
+
+        let mut opened = ActiveProject::open(project_path).unwrap();
+        opened.undo_persisted().unwrap();
+        opened.redo_persisted().unwrap();
+
+        let loaded = opened.state.assets.get(&asset.id).expect("asset present");
+        assert!(loaded.uri.is_empty());
+        assert_eq!(loaded.quarantined_uri.as_deref(), Some(HOSTILE_ASSET_URI));
+    }
+
+    #[test]
+    fn should_keep_an_offline_asset_relinkable_when_opening_a_project() {
+        // Regression guard for the deferral: a legitimate absolute path whose
+        // file is gone must survive the load verbatim, because relink and
+        // workspace auto-reconnect both read it back.
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("offline_open");
+        let project = ActiveProject::create("Offline Open", project_path.clone()).unwrap();
+        drop(project);
+
+        let offline_uri = temp_dir
+            .path()
+            .join("footage")
+            .join("deleted.mp4")
+            .to_string_lossy()
+            .to_string();
+        let asset = crate::core::assets::Asset::new_video(
+            "deleted",
+            &offline_uri,
+            crate::core::assets::VideoInfo::default(),
+        )
+        .with_relative_path("footage/deleted.mp4");
+        append_raw_asset_import(&project_path, &asset).unwrap();
+
+        let opened = ActiveProject::open(project_path).unwrap();
+
+        let loaded = opened.state.assets.get(&asset.id).expect("asset present");
+        assert_eq!(loaded.uri, offline_uri);
+        assert_eq!(loaded.relative_path.as_deref(), Some("footage/deleted.mp4"));
+        assert_eq!(loaded.quarantined_uri, None);
+        assert!(!loaded.missing);
+    }
 
     #[test]
     fn test_active_project_create() {

@@ -7,6 +7,7 @@
 //! - A partial write (power loss, crash) must not leave the project unrecoverable.
 //! - Windows semantics differ from Unix for rename-over-existing; we handle both.
 
+use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
@@ -93,6 +94,161 @@ pub fn validate_filter_safe_path(path: &Path, label: &str) -> Result<(), String>
              apostrophe (') and retry."
         ));
     }
+    Ok(())
+}
+
+/// Removes the Windows verbatim (`\\?\`) prefix from a path string.
+///
+/// `std::fs::canonicalize` returns verbatim paths on Windows, so a stored
+/// asset's URI routinely reads `\\?\C:\media\clip.mp4`. That prefix is
+/// meaningful to the Win32 API and meaningless to every NLE that reads a
+/// `file://` URL — left in place it percent-encodes to `file:////%3F/C:/…`,
+/// which resolves to nothing and shows up as offline media in the other tool.
+///
+/// `\\?\UNC\server\share` is the verbatim spelling of the share `\\server\share`
+/// and is restored to it.
+pub fn strip_verbatim_prefix(path: &str) -> Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return Cow::Borrowed(rest);
+    }
+    Cow::Borrowed(path)
+}
+
+/// Whether a path points at a UNC / network location.
+///
+/// A hand-written project file may carry `\\host\share\x`, `//host/share/x`,
+/// `/\host\share\x` or the verbatim `\\?\UNC\host\share\x`. Windows resolves
+/// every one of them as the same share, so the test cannot be a list of literal
+/// prefixes — it strips the verbatim prefix, normalises the separators, and then
+/// asks whether the path starts with two of them.
+///
+/// Naming a share lets whoever wrote the path trigger an outbound connection
+/// (and an NTLM handshake leak on Windows) the moment anything stats the path,
+/// so the check is deliberately lexical: it must be able to run *before* the
+/// filesystem is touched.
+pub fn is_network_path(path: &str) -> bool {
+    strip_verbatim_prefix(path)
+        .replace('\\', "/")
+        .starts_with("//")
+}
+
+/// Whether a path string names an absolute location, answered without the host.
+///
+/// Deliberately answered from the string rather than [`Path::is_absolute`]: a
+/// project written on Windows is routinely read on Linux and the reverse, and
+/// `Path::is_absolute` answers for the *host*, so `C:/Windows/win.ini` reads as
+/// a relative path on Linux and would be joined onto the project root — landing
+/// inside the scope it was supposed to be measured against.
+fn is_absolute_path_string(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    matches!(bytes.first(), Some(b'/') | Some(b'\\'))
+        || matches!(bytes, [drive, b':', ..] if drive.is_ascii_alphabetic())
+}
+
+/// Validates a workspace-relative asset path before it is stored on an asset.
+///
+/// [`Asset::resolved_path`](crate::core::assets::Asset::resolved_path) joins this
+/// value onto the project root with no traversal check of its own, so a `..`
+/// segment or an absolute/UNC prefix stored here escapes the project exactly like
+/// an out-of-tree `uri` would — and the result is handed to FFmpeg by render,
+/// analysis, and transcription.
+///
+/// Rejection is purely lexical: the path is never touched on disk, so validating
+/// a hostile value cannot itself probe outside the project or open a network
+/// connection.
+pub fn validate_asset_relative_path(relative_path: &str, label: &str) -> Result<(), String> {
+    let trimmed = relative_path.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(format!("{label} contains control characters"));
+    }
+    if trimmed.contains("://") {
+        return Err(format!("{label} must be a relative path, not a URL"));
+    }
+    // Reject backslashes on every platform: on Windows a backslash is a path
+    // separator (so `\\host\share` is a UNC path), but on Unix it is an ordinary
+    // filename character, so `Path::components` would not flag a UNC-style value
+    // as a Prefix. Requiring forward slashes keeps this check platform-agnostic.
+    if trimmed.contains('\\') {
+        return Err(format!(
+            "{label} must use forward slashes and must not be a UNC path"
+        ));
+    }
+
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() || is_absolute_path_string(trimmed) {
+        return Err(format!("{label} must be relative to the project root"));
+    }
+    if candidate.components().any(|component| {
+        matches!(
+            component,
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(format!(
+            "{label} must not contain '.', '..', or a drive/UNC prefix"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validates a stored asset URI without touching the filesystem.
+///
+/// This is the `uri` sibling of [`validate_asset_relative_path`]: it enforces
+/// what every write path already guarantees — an absolute, local, non-traversing
+/// path — but does it *lexically*, so it can run on state that was read off disk
+/// rather than produced by a command.
+///
+/// Not touching the disk is the point, not an optimisation. `\\attacker\share\x`
+/// is refused here before anything stats or canonicalises it, because on Windows
+/// the stat *is* the outbound SMB connection and the NTLM handshake that leaks
+/// with it. For the same reason existence is deliberately **not** checked: an
+/// asset whose file is simply gone is offline media the user can relink, not an
+/// attack, and asking the filesystem about it is what this guard exists to
+/// prevent doing blindly.
+pub fn validate_asset_uri(uri: &str, label: &str) -> Result<(), String> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(format!("{label} contains control characters"));
+    }
+    if trimmed.contains("://") {
+        return Err(format!("{label} must be a local file path, not a URL"));
+    }
+    if is_network_path(trimmed) {
+        return Err(format!("{label} must not be a UNC or network share path"));
+    }
+
+    let plain = strip_verbatim_prefix(trimmed);
+    if !is_absolute_path_string(&plain) {
+        return Err(format!("{label} must be an absolute path"));
+    }
+    if Path::new(plain.as_ref())
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(format!("{label} must not contain '.' or '..' segments"));
+    }
+    // `Path::components` only classifies `..` as a `ParentDir` when the host
+    // treats the separator as one, so a Windows-style `C:\media\..\..\secrets`
+    // read on Linux is a single `Normal` component. Re-check on normalised
+    // separators so the answer does not depend on which machine opened the file.
+    if plain
+        .replace('\\', "/")
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(format!("{label} must not contain '.' or '..' segments"));
+    }
+
     Ok(())
 }
 
@@ -1162,6 +1318,76 @@ mod tests {
         assert!(validate_workspace_relative_path("dist/assets/index.js").is_err());
         assert!(validate_workspace_relative_path("build/output.log").is_err());
         assert!(validate_workspace_relative_path("target/debug/app.log").is_err());
+    }
+
+    #[test]
+    fn test_validate_asset_uri_accepts_paths_the_command_layer_produces() {
+        // `ImportAsset` canonicalizes, which on Windows yields a verbatim path.
+        assert!(validate_asset_uri(r"\\?\C:\Media\clip.mp4", "asset.uri").is_ok());
+        assert!(validate_asset_uri(r"C:\Media\clip.mp4", "asset.uri").is_ok());
+        assert!(validate_asset_uri("C:/Media/clip.mp4", "asset.uri").is_ok());
+        assert!(validate_asset_uri("/home/ben/media/clip.mp4", "asset.uri").is_ok());
+        // A file that simply is not there is offline media, not an attack: the
+        // check never asks the filesystem, so relink keeps working.
+        assert!(validate_asset_uri("/home/ben/media/deleted.mp4", "asset.uri").is_ok());
+    }
+
+    #[test]
+    fn test_validate_asset_uri_rejects_urls_traversal_and_shares() {
+        for hostile in [
+            "https://attacker.example/payload.mp4",
+            "file:///etc/passwd",
+            "data:video/mp4;base64,AAAA",
+            "media/clip.mp4",
+            "../outside.mp4",
+            "/home/ben/../../etc/passwd",
+            r"C:\Media\..\..\Windows\win.ini",
+            r"\\attacker\share\clip.mp4",
+            "//attacker/share/clip.mp4",
+            r"/\attacker\share\clip.mp4",
+            r"\/attacker/share/clip.mp4",
+            r"\\?\UNC\attacker\share\clip.mp4",
+            "",
+            "   ",
+        ] {
+            assert!(
+                validate_asset_uri(hostile, "asset.uri").is_err(),
+                "'{hostile}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_network_path_sees_through_separator_spellings() {
+        assert!(is_network_path(r"\\host\share\x.mp4"));
+        assert!(is_network_path("//host/share/x.mp4"));
+        assert!(is_network_path(r"/\host\share\x.mp4"));
+        assert!(is_network_path(r"\\?\UNC\host\share\x.mp4"));
+
+        assert!(!is_network_path("/media/x.mp4"));
+        assert!(!is_network_path(r"C:\media\x.mp4"));
+        assert!(!is_network_path(r"\\?\C:\media\x.mp4"));
+    }
+
+    #[test]
+    fn test_validate_asset_relative_path_rejects_escapes() {
+        assert!(validate_asset_relative_path("media/clip.mp4", "asset.relativePath").is_ok());
+
+        for hostile in [
+            "../outside.mp4",
+            "media/../../outside.mp4",
+            "./media/clip.mp4",
+            "/etc/passwd",
+            "C:/Windows/win.ini",
+            r"\\host\share\x.mp4",
+            "https://attacker.example/x.mp4",
+            "",
+        ] {
+            assert!(
+                validate_asset_relative_path(hostile, "asset.relativePath").is_err(),
+                "'{hostile}' must be rejected"
+            );
+        }
     }
 
     #[test]

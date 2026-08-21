@@ -308,7 +308,21 @@ impl BackupManager {
             )));
         }
 
-        let (state, _last_op_id) = Snapshot::load(backup_path)?;
+        let (mut state, _last_op_id) = Snapshot::load(backup_path)?;
+
+        // A backup is a snapshot file like any other and bypasses replay
+        // entirely, so it is its own way into `ProjectState` and needs the same
+        // load-time asset scoping as opening the project does.
+        let report = state.scope_assets_to_project(&self.project_dir);
+        if !report.is_empty() {
+            tracing::warn!(
+                quarantined_assets = report.len(),
+                backup = %backup_path.display(),
+                "Quarantined assets whose stored paths were rejected as unsafe while restoring a \
+                 backup; they are marked missing and must be relinked"
+            );
+        }
+
         Ok(state)
     }
 
@@ -440,6 +454,36 @@ mod tests {
             op_count: 0,
             is_dirty: false,
         }
+    }
+
+    #[test]
+    fn should_quarantine_a_hostile_asset_uri_when_restoring_a_backup() {
+        // A backup is a snapshot file like any other and never goes through
+        // operation replay, so it is its own way into `ProjectState`.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::with_defaults(temp_dir.path().to_path_buf());
+
+        let mut state = create_test_state();
+        let asset = crate::core::assets::Asset::new_video(
+            "payload",
+            r"\\attacker.example\share\payload.mp4",
+            crate::core::assets::VideoInfo::default(),
+        );
+        let asset_id = asset.id.clone();
+        state.assets.insert(asset_id.clone(), asset);
+
+        let info = manager
+            .create_backup(&state, Some("op-1"), "manual", false)
+            .unwrap();
+        let restored = manager.restore_backup(&info.path).unwrap();
+
+        let loaded = restored.assets.get(&asset_id).expect("asset present");
+        assert!(loaded.uri.is_empty());
+        assert!(loaded.missing);
+        assert_eq!(
+            loaded.quarantined_uri.as_deref(),
+            Some(r"\\attacker.example\share\payload.mp4")
+        );
     }
 
     #[test]
