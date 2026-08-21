@@ -140,6 +140,20 @@ fn run_import(
     sequence: Option<String>,
     dry_run: bool,
 ) -> anyhow::Result<i32> {
+    // An OTIO document is a cut list, not media; a sane one is well under this.
+    // Cap the read so a hostile or accidental multi-gigabyte file can't exhaust
+    // memory before `parse_otio` (a plain serde parse) even sees it.
+    const MAX_OTIO_BYTES: u64 = 64 * 1024 * 1024;
+    if let Ok(meta) = std::fs::metadata(file) {
+        if meta.len() > MAX_OTIO_BYTES {
+            anyhow::bail!(
+                "OTIO file '{}' is {} bytes, larger than the {} MiB limit",
+                file.display(),
+                meta.len(),
+                MAX_OTIO_BYTES / (1024 * 1024)
+            );
+        }
+    }
     let document = std::fs::read_to_string(file).map_err(|error| {
         anyhow::anyhow!("Failed to read OTIO file '{}': {}", file.display(), error)
     })?;

@@ -352,6 +352,22 @@ impl<'a> PlanBuilder<'a> {
             return Ok(Some(ResolvedMedia::Existing(asset_id)));
         }
 
+        // A UNC / network target from an untrusted `.otio` must never reach the
+        // import path: `ImportAsset` stats (and, for some kinds, ffprobes) the
+        // path, and on Windows a `\\host\share` reference initiates an outbound
+        // SMB connection that leaks an NTLM handshake to a host the file's author
+        // chose. Only a path that already matched a locally-imported asset above
+        // is trusted; a novel network path is refused, not imported. Full
+        // project-root scoping of local target URLs is tracked separately.
+        if is_network_path(&path) {
+            self.plan.warnings.push(format!(
+                "clip '{}' references the network path '{}', which OpenReelio will not import from an \
+                 OTIO file; relink it to local media instead",
+                clip.name, path
+            ));
+            return Ok(None);
+        }
+
         let base_name = base_name(&path);
         if let Some(asset_id) = self.find_asset_by_name(&base_name) {
             self.plan.warnings.push(format!(
@@ -638,6 +654,16 @@ fn base_name(path: &str) -> String {
         .to_string()
 }
 
+/// Whether a resolved media path points at a UNC / network location.
+///
+/// `file_url_to_path` turns `file://host/share/x` into `//host/share/x`, and a
+/// hand-written `.otio` may carry `\\host\share\x`. Both denote a remote SMB
+/// path; importing from one lets the file's author trigger an outbound
+/// connection (and an NTLM leak on Windows), so they are refused.
+fn is_network_path(path: &str) -> bool {
+    path.starts_with("//") || path.starts_with("\\\\")
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -910,6 +936,41 @@ mod tests {
             .expect("dependsOn is an array")
             .iter()
             .any(|dep| dep == "import_0"));
+    }
+
+    #[test]
+    fn should_refuse_to_import_a_network_path_from_an_otio_file() {
+        // file://host/share/x -> //host/share/x, the SMB/NTLM-leak vector.
+        let timeline = timeline_of(
+            json!([video_track(json!([clip_node(
+                "a",
+                0.0,
+                48.0,
+                "file://attacker.example.com/share/clip.mp4"
+            )]))]),
+            json!([]),
+        );
+
+        let plan =
+            otio_to_plan_steps(&timeline, "seq1", &HashMap::new()).expect("plan should build");
+
+        // No ImportAsset step and no InsertClip for the offending clip.
+        assert_eq!(step_types(&plan), vec!["CreateTrack"]);
+        assert!(plan.asset_imports.is_empty());
+        assert!(
+            plan.warnings.iter().any(|w| w.contains("network path")),
+            "a network reference must warn: {:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn should_classify_unc_and_local_paths() {
+        assert!(is_network_path("//host/share/x.mp4"));
+        assert!(is_network_path("\\\\host\\share\\x.mp4"));
+        assert!(!is_network_path("/media/x.mp4"));
+        assert!(!is_network_path("C:/media/x.mp4"));
+        assert!(!is_network_path("C:\\media\\x.mp4"));
     }
 
     #[test]
