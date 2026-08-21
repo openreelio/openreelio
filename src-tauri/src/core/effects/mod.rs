@@ -13,7 +13,8 @@ mod qualifier_filters;
 
 pub use capabilities::{
     all_effect_capabilities, effect_capability, effect_capability_dto, effect_type_label,
-    effect_type_supports_export, EffectCapability, EffectCapabilityDto, EffectRuntimeSupport,
+    effect_type_supports_export, effect_type_supports_timeline_enable, EffectCapability,
+    EffectCapabilityDto, EffectRuntimeSupport,
 };
 /// Canonical filtergraph escapers, shared with the render pipeline and the IPC
 /// commands that build filter strings outside of the effect builders.

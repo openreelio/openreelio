@@ -193,6 +193,35 @@ pub fn effect_type_supports_export(effect_type: &EffectType) -> bool {
     effect_capability(effect_type).export.is_supported()
 }
 
+/// Whether the filter this effect emits accepts FFmpeg's timeline `enable=`.
+///
+/// An adjustment layer grades only the stretch of timeline it covers, which the
+/// render expresses by gating each of the layer's filters with
+/// `enable='between(t,…)'`. FFmpeg rejects the whole filtergraph when a filter
+/// that has no timeline support is given one — `Timeline ('enable' option) not
+/// supported with filter 'zoompan'` — so an effect listed here on an adjustment
+/// layer has to be refused before the command is built, or the export dies on a
+/// message that names an FFmpeg filter the editor never chose.
+///
+/// The list is what the local FFmpeg (9.0.1) actually refuses, checked filter by
+/// filter against every body [`crate::core::effects::Effect::build_filter_params`]
+/// can emit: `zoompan`, `fps`, `scale` and `pad` (`Zoom`), `crop` (`Crop`,
+/// `AutoReframe`), `subtitles` (`Subtitle`), `vidstabtransform` (`Stabilize`) and
+/// `xfade` (the three transition types).
+pub fn effect_type_supports_timeline_enable(effect_type: &EffectType) -> bool {
+    !matches!(
+        effect_type,
+        EffectType::Zoom
+            | EffectType::Crop
+            | EffectType::AutoReframe
+            | EffectType::Subtitle
+            | EffectType::Stabilize
+            | EffectType::CrossDissolve
+            | EffectType::Wipe
+            | EffectType::Slide
+    )
+}
+
 pub fn effect_capability_dto(effect_type: &EffectType) -> EffectCapabilityDto {
     let capability = effect_capability(effect_type);
 

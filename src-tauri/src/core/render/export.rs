@@ -20,8 +20,8 @@ use crate::core::{
     },
     commands::TEXT_ASSET_PREFIX,
     effects::{
-        effect_capability, effect_type_label, Effect, EffectType, FilterGraph, IntoFFmpegFilter,
-        ParamValue,
+        effect_capability, effect_type_label, effect_type_supports_timeline_enable, Effect,
+        EffectType, FilterGraph, IntoFFmpegFilter, ParamValue,
     },
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
@@ -3158,6 +3158,27 @@ pub(super) fn unmeasurable_effect_message(effect_label: &str, clip_id: &str) -> 
         "Effect '{}' on clip '{}' changes the picture size in a way the export cannot measure, \
          so the clip's transform cannot be placed",
         effect_label, clip_id
+    )
+}
+
+/// The error text for an adjustment-layer effect the render cannot time-gate.
+///
+/// An adjustment layer applies only over the timeline it covers, which the render
+/// expresses by gating each of its filters with `enable='between(t,…)'`. FFmpeg
+/// refuses a filtergraph that puts `enable` on a filter without timeline support
+/// and the whole export dies, quoting an FFmpeg filter name the editor never
+/// chose. Naming the clip and the effect instead is the difference between a
+/// fixable message and a crash.
+pub(super) fn untimeable_adjustment_effect_message(
+    effect_label: &str,
+    clip_id: &str,
+    track_name: &str,
+) -> String {
+    format!(
+        "Effect '{}' is not supported on an adjustment layer (clip '{}' on track '{}'): \
+         it cannot be limited to the layer's timeline range. Apply it to the clips \
+         underneath instead",
+        effect_label, clip_id, track_name
     )
 }
 
@@ -6929,6 +6950,18 @@ pub fn validate_export_settings_with_dimensions(
 
             // Adjustment layers have no source media — skip file validation
             if clip.is_adjustment_layer() {
+                for effect in clip.effects.iter().filter_map(|id| effects.get(id)) {
+                    if effect.enabled
+                        && effect.is_video()
+                        && !effect_type_supports_timeline_enable(&effect.effect_type)
+                    {
+                        validation.add_error(untimeable_adjustment_effect_message(
+                            &effect_type_label(&effect.effect_type),
+                            &clip.id,
+                            &track.name,
+                        ));
+                    }
+                }
                 continue;
             }
 
@@ -12130,6 +12163,160 @@ mod tests {
         assert!(
             filter_complex.contains("color=c=black:s=1920x1080:r=30:d=7"),
             "the render must reach the adjustment layer's out point. Got: {filter_complex}"
+        );
+    }
+
+    /// Builds a sequence whose second video track is an adjustment layer
+    /// carrying one enabled effect of the given type.
+    fn sequence_with_adjustment_layer_effect(
+        effect_type: EffectType,
+    ) -> (
+        Sequence,
+        std::collections::HashMap<String, Asset>,
+        std::collections::HashMap<String, Effect>,
+    ) {
+        use crate::core::timeline::Clip;
+
+        let effect = Effect::new(effect_type);
+        let effect_id = effect.id.clone();
+
+        let mut adjustment_track = Track::new_video("Adjustments");
+        let mut adjustment = Clip::new("adjustment")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        adjustment.is_adjustment_layer = true;
+        adjustment.effects.push(effect_id.clone());
+        adjustment_track.add_clip(adjustment);
+
+        let (sequence, assets) = sequence_with_video_body_and_tail(adjustment_track);
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(effect_id, effect);
+
+        (sequence, assets, effects)
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect that cannot be time-gated is refused by name
+    ///
+    /// An adjustment layer's effects are gated with `enable='between(t,…)'` so
+    /// they apply only over the layer. FFmpeg refuses `enable` on `zoompan`
+    /// outright — "Timeline ('enable' option) not supported with filter
+    /// 'zoompan'" — and the whole export died on that message, quoting a filter
+    /// the editor never chose. Validation now refuses the edit instead.
+    #[test]
+    fn should_refuse_an_untimeable_effect_on_an_adjustment_layer() {
+        let (sequence, assets, effects) = sequence_with_adjustment_layer_effect(EffectType::Zoom);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(!validation.is_valid, "the export must be refused up front");
+        let reported = validation.errors.join("; ");
+        assert!(
+            reported.contains("Zoom") && reported.contains("adjustment layer"),
+            "the refusal must name the effect and why: {reported}"
+        );
+        assert!(
+            reported.contains("adjustment"),
+            "the refusal must name the clip: {reported}"
+        );
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: an effect that can be time-gated is still allowed
+    #[test]
+    fn should_allow_a_timeable_effect_on_an_adjustment_layer() {
+        let (sequence, assets, effects) =
+            sequence_with_adjustment_layer_effect(EffectType::Brightness);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(
+            validation.is_valid,
+            "a colour grade is exactly what an adjustment layer is for: {:?}",
+            validation.errors
+        );
+    }
+
+    /// Feature: Adjustment layers
+    /// Scenario: FFmpeg really does refuse the graph the refusal replaces
+    ///
+    /// The refusal above is only worth having if the alternative is a failed
+    /// render. This hands the real FFmpeg the gated graph the adjustment path
+    /// would otherwise emit for each effect the table calls untimeable, and
+    /// asserts FFmpeg rejects it *for that reason* — and that a gated colour
+    /// grade in the same shape still renders, so the assertion discriminates.
+    ///
+    /// `Subtitle`, `Stabilize` and the `xfade` transitions are in the table too
+    /// but are not checkable this way: they fail on a missing file, a missing
+    /// build option or a missing second input before FFmpeg gets as far as the
+    /// timeline check. They were measured by hand against ffmpeg 9.0.1 with
+    /// valid arguments and all three refuse `enable`.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored adjustment
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn ffmpeg_refuses_a_time_gated_effect_on_an_adjustment_layer() {
+        let ffmpeg = std::env::var_os("OPENREELIO_FFMPEG_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+
+        let gated = |effect_type: EffectType| {
+            let mut graph = FilterGraph::new().with_dimensions(320, 180);
+            graph.set_fps(30.0);
+            graph.add_effect(Effect::new(effect_type));
+            graph.to_video_filter_complex_timed("0:v", "out", 0.0, 1.0)
+        };
+
+        let run = |filtergraph: &str| {
+            std::process::Command::new(&ffmpeg)
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=320x180:r=30:d=0.2",
+                    "-filter_complex",
+                    filtergraph,
+                    "-map",
+                    "[out]",
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "null",
+                    "-",
+                ])
+                .output()
+        };
+
+        for effect_type in [EffectType::Zoom, EffectType::Crop] {
+            assert!(
+                !effect_type_supports_timeline_enable(&effect_type),
+                "{effect_type:?} is claimed to be untimeable"
+            );
+
+            let Ok(refused) = run(&gated(effect_type.clone())) else {
+                eprintln!("Skipping: ffmpeg could not be launched");
+                return;
+            };
+            let stderr = String::from_utf8_lossy(&refused.stderr);
+            assert!(
+                !refused.status.success() && stderr.contains("not supported with filter"),
+                "a time-gated {effect_type:?} must be refused by ffmpeg for its lack of \
+                 timeline support, got: {stderr}"
+            );
+        }
+
+        let allowed = run(&gated(EffectType::Brightness)).expect("run ffmpeg");
+        assert!(
+            allowed.status.success(),
+            "a time-gated colour grade must still render: {}",
+            String::from_utf8_lossy(&allowed.stderr)
         );
     }
 
