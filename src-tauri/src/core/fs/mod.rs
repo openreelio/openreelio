@@ -259,6 +259,8 @@ pub enum ProjectMediaRejection {
     Empty,
     /// The path is relative, so it does not name a location on its own.
     NotAbsolute,
+    /// The path is a UNC or network share, so resolving it would reach off-host.
+    NetworkPath,
     /// The path does not resolve on this machine.
     Unresolved,
     /// The path resolves outside the project directory.
@@ -290,6 +292,15 @@ pub fn confine_media_path_to_project(
     let trimmed = uri.trim();
     if trimmed.is_empty() {
         return Err(ProjectMediaRejection::Empty);
+    }
+
+    // Refuse UNC/network shares before touching the filesystem: canonicalizing a
+    // `\\host\share` path is itself the outbound SMB/NTLM connection we must not
+    // make on behalf of an attacker-authored project file. No caller can reach
+    // here with such a uri today, but this keeps that an invariant of the helper
+    // rather than an emergent property of the callers.
+    if is_network_path(trimmed) {
+        return Err(ProjectMediaRejection::NetworkPath);
     }
 
     let path = PathBuf::from(trimmed);
@@ -1659,6 +1670,29 @@ mod tests {
         );
     }
 
+    /// A UNC/network uri must be refused lexically, before canonicalize, because
+    /// resolving it *is* the outbound SMB/NTLM connection. The error must be
+    /// `NetworkPath`, not `Unresolved` — the latter would mean the filesystem
+    /// (and the network) was already touched.
+    #[test]
+    fn should_reject_network_media_paths_before_touching_the_filesystem() {
+        let project = TempDir::new().unwrap();
+        let canonical_project = std::fs::canonicalize(project.path()).unwrap();
+
+        for hostile in [
+            r"\\host\share\clip.mp4",
+            r"//host/share/clip.mp4",
+            r"/\host\share\clip.mp4",
+            r"\\?\UNC\host\share\clip.mp4",
+        ] {
+            assert_eq!(
+                confine_media_path_to_project(&canonical_project, hostile),
+                Err(ProjectMediaRejection::NetworkPath),
+                "{hostile} must be refused as a network path, not resolved"
+            );
+        }
+    }
+
     /// The confinement is only worth anything if every grant site honours it.
     ///
     /// The workspace scan, the workspace watcher and the external-import command
@@ -1671,11 +1705,21 @@ mod tests {
     fn should_route_every_workspace_asset_protocol_grant_through_the_confined_helper() {
         const WORKSPACE_SOURCE: &str = include_str!("../../ipc/commands/workspace.rs");
 
-        assert!(
-            !WORKSPACE_SOURCE.contains("allow_asset_protocol_file("),
-            "workspace.rs must not grant asset-protocol access directly; call \
-             allow_confined_asset_protocol_file so the project confinement applies"
-        );
+        // Deny every direct asset-protocol grant, not just the file variant: a
+        // `allow_asset_protocol_directory(` call would grant an unconfined
+        // *directory* — strictly worse than the file bug this guards. The
+        // confined helper's own name (`allow_confined_asset_protocol_file(`)
+        // does not contain either denied substring, so it is not self-tripping.
+        for denied in [
+            "allow_asset_protocol_file(",
+            "allow_asset_protocol_directory(",
+        ] {
+            assert!(
+                !WORKSPACE_SOURCE.contains(denied),
+                "workspace.rs must not grant asset-protocol access directly ({denied}); \
+                 call allow_confined_asset_protocol_file so the project confinement applies"
+            );
+        }
         assert!(
             WORKSPACE_SOURCE.contains("allow_confined_asset_protocol_file("),
             "the workspace grant sites are expected to still exist, confined"
