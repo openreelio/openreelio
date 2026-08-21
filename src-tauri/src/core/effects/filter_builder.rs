@@ -1992,7 +1992,7 @@ impl FilterGraph {
             let next_label = if is_last {
                 output_label.to_string()
             } else {
-                format!("v{}", i)
+                effect_chain_label(output_label, i)
             };
 
             // Check if this effect has power window masks and dimensions are available
@@ -2065,7 +2065,7 @@ impl FilterGraph {
             let next_label = if is_last {
                 output_label.to_string()
             } else {
-                format!("{}_{}", output_label, i)
+                effect_chain_label(output_label, i)
             };
 
             // Check if this effect has power window masks and dimensions are available
@@ -2131,7 +2131,7 @@ impl FilterGraph {
             let next_label = if is_last {
                 output_label.to_string()
             } else {
-                format!("a{}", i)
+                effect_chain_label(output_label, i)
             };
 
             let filter = effect.to_filter_string(&current_label, &next_label);
@@ -2166,6 +2166,22 @@ impl Default for FilterGraph {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// Names the stream that carries the picture (or the sound) between two effects
+/// of one clip's chain.
+///
+/// The name is derived from the chain's own output label, which the caller has
+/// already made unique per clip — the export's per-clip labels are `v{input}`
+/// and `a{input}`. Numbering the intermediates by effect index alone, as this
+/// used to, produced `v0`, `v1`, … for *every* clip, so a clip carrying two
+/// effects re-declared the label its own chain ends on and a clip carrying more
+/// than two re-declared the label a *different* clip's chain ends on. A
+/// filtergraph is only well defined when each label is declared once, so the
+/// export was leaning on how one particular FFmpeg build happens to pair up
+/// repeated names.
+fn effect_chain_label(output_label: &str, effect_index: usize) -> String {
+    format!("{output_label}_fx{effect_index}")
+}
 
 /// Injects an FFmpeg `enable` clause into every top-level filter in a
 /// comma-separated filter chain. FFmpeg requires `enable` on each individual
@@ -2319,10 +2335,134 @@ mod tests {
         graph.sort_by_order();
         let complex = graph.to_video_filter_complex("0:v", "vout");
 
-        // Should chain: [0:v]blur[v0];[v0]brightness[vout]
+        // Should chain: [0:v]blur[vout_fx0];[vout_fx0]brightness[vout]
         assert!(complex.contains("gblur"));
         assert!(complex.contains("eq=brightness"));
         assert!(complex.contains(";"));
+    }
+
+    /// Every stream label a filtergraph declares, in declaration order.
+    ///
+    /// A filter's output labels are the bracketed names trailing it, so this
+    /// reads the tail of each `;`-separated link.
+    fn declared_labels(filter_complex: &str) -> Vec<String> {
+        let mut labels = Vec::new();
+        for link in filter_complex.split(';') {
+            let mut rest = link.trim_end();
+            let mut trailing = Vec::new();
+            while rest.ends_with(']') {
+                let Some(open) = rest.rfind('[') else { break };
+                trailing.push(rest[open + 1..rest.len() - 1].to_string());
+                rest = &rest[..open];
+            }
+            trailing.reverse();
+            labels.extend(trailing);
+        }
+        labels
+    }
+
+    /// Feature: Per-clip effect chains
+    /// Scenario: two video effects on the clip that owns the label `v0`
+    ///
+    /// The export names a clip's finished picture `v{input_index}`, so an
+    /// effect chain that numbered its own intermediates `v{effect_index}`
+    /// declared `[v0]` twice on the very first clip of the timeline.
+    #[test]
+    fn should_declare_every_video_chain_label_once_when_chain_ends_on_a_clip_label() {
+        let mut graph = FilterGraph::new();
+
+        let mut blur = Effect::new(EffectType::GaussianBlur);
+        blur.order = 0;
+        graph.add_effect(blur);
+
+        let mut brightness = Effect::new(EffectType::Brightness);
+        brightness.order = 1;
+        brightness.set_param("value", ParamValue::Float(0.2));
+        graph.add_effect(brightness);
+
+        graph.sort_by_order();
+        let complex = graph.to_video_filter_complex("trim0", "v0");
+
+        let labels = declared_labels(&complex);
+        let mut unique = labels.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            labels.len(),
+            unique.len(),
+            "a label is declared twice in: {complex}"
+        );
+        assert_eq!(
+            labels.last().map(String::as_str),
+            Some("v0"),
+            "the chain must still end on the label the export wired up: {complex}"
+        );
+    }
+
+    /// Feature: Per-clip effect chains
+    /// Scenario: three video effects on the first clip of a two-clip timeline
+    ///
+    /// The old scheme's third intermediate was `v1`, which is the finished
+    /// picture of the clip at input index 1 — one clip's chain quietly
+    /// re-declaring another clip's output.
+    #[test]
+    fn should_keep_video_chain_labels_clear_of_other_clips_labels() {
+        let mut graph = FilterGraph::new();
+        for (order, effect_type) in [
+            EffectType::GaussianBlur,
+            EffectType::Brightness,
+            EffectType::Contrast,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut effect = Effect::new(effect_type);
+            effect.order = order as u32;
+            graph.add_effect(effect);
+        }
+        graph.sort_by_order();
+
+        let complex = graph.to_video_filter_complex("trim0", "v0");
+        let other_clip_labels = ["v1", "v2", "vfx1", "trim1"];
+
+        for label in declared_labels(&complex) {
+            assert!(
+                label == "v0" || !other_clip_labels.contains(&label.as_str()),
+                "chain declared '{label}', which belongs to another clip: {complex}"
+            );
+        }
+    }
+
+    /// Feature: Per-clip effect chains
+    /// Scenario: two audio effects on the clip that owns the label `a0`
+    ///
+    /// The audio chain numbered its intermediates `a{effect_index}` and had the
+    /// same collision as the video one.
+    #[test]
+    fn should_declare_every_audio_chain_label_once_when_chain_ends_on_a_clip_label() {
+        let mut graph = FilterGraph::new();
+
+        let mut volume = Effect::new(EffectType::Volume);
+        volume.order = 0;
+        graph.add_effect(volume);
+
+        let mut gain = Effect::new(EffectType::Gain);
+        gain.order = 1;
+        graph.add_effect(gain);
+
+        graph.sort_by_order();
+        let complex = graph.to_audio_filter_complex("atrim0", "a0");
+
+        let labels = declared_labels(&complex);
+        let mut unique = labels.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            labels.len(),
+            unique.len(),
+            "a label is declared twice in: {complex}"
+        );
+        assert_eq!(labels.last().map(String::as_str), Some("a0"));
     }
 
     #[test]
