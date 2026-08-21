@@ -5807,7 +5807,9 @@ mod tests {
         std::fs::write(&graph_file, filtergraph).expect("write filtergraph");
 
         let input_file = dir.path().join("input.mp4");
-        let fixture = std::process::Command::new(ffmpeg_binary_for_tests())
+        let mut fixture_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut fixture_cmd);
+        let fixture = fixture_cmd
             .args([
                 "-y",
                 "-hide_banner",
@@ -5829,7 +5831,9 @@ mod tests {
             return None;
         }
 
-        let output = std::process::Command::new(ffmpeg_binary_for_tests())
+        let mut render_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut render_cmd);
+        let output = render_cmd
             .args(["-hide_banner", "-v", "debug", "-nostdin", "-i"])
             .arg(&input_file)
             .arg("-/filter_complex")
@@ -5858,8 +5862,9 @@ mod tests {
 
     /// Whether the local ffmpeg advertises `filter_name`.
     fn ffmpeg_has_filter(filter_name: &str) -> bool {
-        std::process::Command::new(ffmpeg_binary_for_tests())
-            .args(["-hide_banner", "-filters"])
+        let mut cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        crate::core::process::configure_std_command(&mut cmd);
+        cmd.args(["-hide_banner", "-filters"])
             .output()
             .is_ok_and(|output| {
                 String::from_utf8_lossy(&output.stdout).contains(&format!(" {filter_name} "))
