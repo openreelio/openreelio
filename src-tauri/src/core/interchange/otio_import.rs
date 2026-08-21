@@ -232,15 +232,18 @@ impl<'a> PlanBuilder<'a> {
         self.context.assets
     }
 
-    /// Notes a rate the file expressed a time at.
-    fn note_rate(&mut self, time: &RationalTime) {
-        let rate = time.rate;
-        if !rate.is_finite() || rate <= 0.0 {
-            return;
+    /// Converts a time, remembering the rate it was expressed at.
+    ///
+    /// The rate is only remembered when the conversion succeeds: a node this
+    /// build refuses to read is not evidence of what the file's timing is, and
+    /// reporting `1e-308 fps` as the timeline's rate would be noise on top of a
+    /// refusal the caller already has.
+    fn seconds_of(&mut self, time: &RationalTime) -> Option<f64> {
+        let seconds = time.to_seconds()?;
+        if !self.foreign_rates.contains(&time.rate) {
+            self.foreign_rates.push(time.rate);
         }
-        if !self.foreign_rates.contains(&rate) {
-            self.foreign_rates.push(rate);
-        }
+        Some(seconds)
     }
 
     /// Reports, once, that the file's timing does not live on the sequence's
@@ -311,8 +314,7 @@ impl<'a> PlanBuilder<'a> {
                     // A hole is implicit in our model: nothing is placed, the
                     // cursor simply advances. This is the exact inverse of the
                     // gap synthesis the exporter does.
-                    self.note_rate(&gap.source_range.duration);
-                    match gap.source_range.duration.to_seconds() {
+                    match self.seconds_of(&gap.source_range.duration) {
                         Some(duration_sec) if duration_sec >= 0.0 => cursor_sec += duration_sec,
                         _ => self.plan.warnings.push(format!(
                             "a gap on track '{}' has a length this build cannot read and was \
@@ -322,11 +324,10 @@ impl<'a> PlanBuilder<'a> {
                     }
                 }
                 OtioComposable::Clip(clip) => {
-                    self.note_rate(&clip.source_range.duration);
-                    let Some(duration_sec) = clip.source_range.duration.to_seconds() else {
+                    let Some(duration_sec) = self.seconds_of(&clip.source_range.duration) else {
                         self.plan.warnings.push(format!(
-                            "clip '{}' has a duration this build cannot read ({} at rate {}) and \
-                             was not imported",
+                            "clip '{}' has a duration this build cannot read ({:e} at rate {:e}) \
+                             and was not imported",
                             clip.name,
                             clip.source_range.duration.value,
                             clip.source_range.duration.rate
@@ -404,11 +405,10 @@ impl<'a> PlanBuilder<'a> {
         timeline_start_sec: f64,
         duration_sec: f64,
     ) -> Result<Option<PlacedClip>, String> {
-        self.note_rate(&clip.source_range.start_time);
-        let Some(source_in_sec) = clip.source_range.start_time.to_seconds() else {
+        let Some(source_in_sec) = self.seconds_of(&clip.source_range.start_time) else {
             self.plan.warnings.push(format!(
-                "clip '{}' has a source in-point this build cannot read ({} at rate {}) and was \
-                 not imported",
+                "clip '{}' has a source in-point this build cannot read ({:e} at rate {:e}) and \
+                 was not imported",
                 clip.name, clip.source_range.start_time.value, clip.source_range.start_time.rate
             ));
             return Ok(None);
@@ -729,11 +729,9 @@ impl<'a> PlanBuilder<'a> {
             return;
         };
 
-        self.note_rate(&transition.in_offset);
-        self.note_rate(&transition.out_offset);
         let (Some(in_sec), Some(out_sec)) = (
-            transition.in_offset.to_seconds(),
-            transition.out_offset.to_seconds(),
+            self.seconds_of(&transition.in_offset),
+            self.seconds_of(&transition.out_offset),
         ) else {
             self.plan.warnings.push(format!(
                 "a transition on track '{track_name}' has offsets this build cannot read and was \
@@ -902,8 +900,7 @@ impl<'a> PlanBuilder<'a> {
             Some(name) => format!("track '{name}'"),
             None => "the sequence".to_string(),
         };
-        self.note_rate(&marker.marked_range.start_time);
-        let Some(time_sec) = marker.marked_range.start_time.to_seconds() else {
+        let Some(time_sec) = self.seconds_of(&marker.marked_range.start_time) else {
             self.plan.warnings.push(format!(
                 "the marker '{}' on {origin} has a position this build cannot read and was not \
                  imported",
