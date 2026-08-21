@@ -252,6 +252,61 @@ pub fn validate_asset_uri(uri: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Why a stored media path is not eligible for project-scoped access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectMediaRejection {
+    /// The asset carries no path at all.
+    Empty,
+    /// The path is relative, so it does not name a location on its own.
+    NotAbsolute,
+    /// The path does not resolve on this machine.
+    Unresolved,
+    /// The path resolves outside the project directory.
+    OutsideProject,
+}
+
+/// Confines a stored media path to a project directory, by resolution rather
+/// than by string comparison.
+///
+/// Everything a project file says about its media is attacker-controllable —
+/// the `uri`, and equally the `workspaceManaged` flag that used to be the only
+/// gate on the workspace scan's `asset://` grants. The one property worth
+/// trusting is where the file actually *is*, so the path is canonicalized and
+/// compared against a canonicalized project root.
+///
+/// Canonicalizing is load-bearing, not tidiness: a prefix test on the raw string
+/// is defeated by drive-relative (`C:foo`, resolved against the process CWD),
+/// root-relative (`\Windows`), 8.3 short-name and symlinked spellings, all of
+/// which name a location the string does not look like it names. Resolution
+/// collapses every one of those to the same answer the OS will give when the
+/// file is finally opened.
+///
+/// `canonical_project` is expected to already be canonical; pass the result of
+/// [`std::fs::canonicalize`] on the project root.
+pub fn confine_media_path_to_project(
+    canonical_project: &Path,
+    uri: &str,
+) -> Result<PathBuf, ProjectMediaRejection> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return Err(ProjectMediaRejection::Empty);
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(ProjectMediaRejection::NotAbsolute);
+    }
+
+    let canonical_path =
+        std::fs::canonicalize(&path).map_err(|_| ProjectMediaRejection::Unresolved)?;
+
+    if !canonical_path.starts_with(canonical_project) {
+        return Err(ProjectMediaRejection::OutsideProject);
+    }
+
+    Ok(canonical_path)
+}
+
 /// Validates a project-relative workspace document path.
 ///
 /// Agent-facing workspace document tools must not reach internal project state,
@@ -1521,6 +1576,110 @@ mod tests {
                 "'{path}' reached the filesystem before being rejected: {error}"
             );
         }
+    }
+
+    /// The workspace scan used to grant `asset://` access to every asset the
+    /// project file marked `workspaceManaged`, with no confinement at all — so a
+    /// crafted project could pair that flag with a clean absolute out-of-project
+    /// uri and hand the webview a read primitive for that file.
+    #[test]
+    fn should_refuse_media_that_resolves_outside_the_project() {
+        let project = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.mp4");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let canonical_project = std::fs::canonicalize(project.path()).unwrap();
+
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, &secret.to_string_lossy()),
+            Err(ProjectMediaRejection::OutsideProject)
+        );
+    }
+
+    #[test]
+    fn should_admit_media_that_resolves_inside_the_project() {
+        let project = TempDir::new().unwrap();
+        let footage = project.path().join("footage");
+        std::fs::create_dir_all(&footage).unwrap();
+        let clip = footage.join("clip.mp4");
+        std::fs::write(&clip, b"clip").unwrap();
+
+        let canonical_project = std::fs::canonicalize(project.path()).unwrap();
+
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, &clip.to_string_lossy()),
+            Ok(std::fs::canonicalize(&clip).unwrap()),
+            "project-local media is what the scope exists to serve"
+        );
+    }
+
+    /// A traversing spelling of an in-project path must be judged by where it
+    /// lands, not by how it reads — the reason the check resolves rather than
+    /// string-compares.
+    #[test]
+    fn should_judge_a_traversing_uri_by_where_it_resolves() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let sibling = root.path().join("sibling");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let secret = sibling.join("secret.mp4");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let canonical_project = std::fs::canonicalize(&project).unwrap();
+        // Reads as a project path, resolves to the sibling directory.
+        let traversing = project.join("..").join("sibling").join("secret.mp4");
+
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, &traversing.to_string_lossy()),
+            Err(ProjectMediaRejection::OutsideProject)
+        );
+    }
+
+    #[test]
+    fn should_reject_media_paths_that_name_no_location() {
+        let project = TempDir::new().unwrap();
+        let canonical_project = std::fs::canonicalize(project.path()).unwrap();
+
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, "   "),
+            Err(ProjectMediaRejection::Empty)
+        );
+        assert_eq!(
+            confine_media_path_to_project(&canonical_project, "footage/clip.mp4"),
+            Err(ProjectMediaRejection::NotAbsolute)
+        );
+        assert_eq!(
+            confine_media_path_to_project(
+                &canonical_project,
+                &project.path().join("gone.mp4").to_string_lossy()
+            ),
+            Err(ProjectMediaRejection::Unresolved)
+        );
+    }
+
+    /// The confinement is only worth anything if every grant site honours it.
+    ///
+    /// The workspace scan, the workspace watcher and the external-import command
+    /// each walk `project.state.assets` and used to grant `asset://` access on
+    /// the `workspaceManaged` flag alone — a second, unconfined door into the
+    /// scope `allow_project_asset_protocol` guards. `src/ipc/commands` is
+    /// compiled out under `cfg(test)`, so this reads the source: the grant sites
+    /// must go through the confined helper.
+    #[test]
+    fn should_route_every_workspace_asset_protocol_grant_through_the_confined_helper() {
+        const WORKSPACE_SOURCE: &str = include_str!("../../ipc/commands/workspace.rs");
+
+        assert!(
+            !WORKSPACE_SOURCE.contains("allow_asset_protocol_file("),
+            "workspace.rs must not grant asset-protocol access directly; call \
+             allow_confined_asset_protocol_file so the project confinement applies"
+        );
+        assert!(
+            WORKSPACE_SOURCE.contains("allow_confined_asset_protocol_file("),
+            "the workspace grant sites are expected to still exist, confined"
+        );
     }
 
     #[test]
