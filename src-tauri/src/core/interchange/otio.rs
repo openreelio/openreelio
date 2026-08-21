@@ -288,6 +288,10 @@ fn build_track(
     let mut pending: Vec<PendingTransition> = Vec::new();
     let mut clip_count: u32 = 0;
     let mut cursor: Frame = 0;
+    // The frame a skipped clip would have run to. A gap is otherwise only
+    // synthesised to reach the *next* exported clip, so a track that ends in one
+    // OpenReelio cannot express would silently come out short.
+    let mut skipped_end: Frame = 0;
 
     for clip in sorted_clips(track) {
         if !clip.enabled {
@@ -295,6 +299,8 @@ fn build_track(
                 "clip '{}' on track '{}' is disabled and was exported as a gap",
                 clip.id, track.name
             ));
+            skipped_end =
+                skipped_end.max(clock.seconds_to_nearest_frame(clip.place.timeline_out_sec()));
             continue;
         }
 
@@ -303,6 +309,8 @@ fn build_track(
                 "clip '{}' on track '{}' was exported as a gap: {reason}",
                 clip.id, track.name
             ));
+            skipped_end =
+                skipped_end.max(clock.seconds_to_nearest_frame(clip.place.timeline_out_sec()));
             continue;
         }
 
@@ -335,7 +343,7 @@ fn build_track(
             )));
         }
 
-        record_clip_losses(clip, track, report);
+        record_clip_losses(clip, track, effects, report);
 
         let otio_clip = build_clip(clip, assets, clock, rate, duration, report);
         if let Some(transition) =
@@ -353,11 +361,38 @@ fn build_track(
         cursor = start + duration;
     }
 
+    // A trailing skipped clip leaves the track shorter than the timeline it came
+    // from, and a track's length is part of the cut. The hole is filled in the
+    // one place the track's real end is known: after the walk.
+    if skipped_end > cursor {
+        children.push(OtioComposable::Gap(OtioGap::of_frames(
+            skipped_end - cursor,
+            rate,
+        )));
+    }
+
     // Insert from the back so earlier indices stay valid. A transition is only
     // meaningful between two shots: one hanging off the last clip, or off a clip
     // followed by a gap, blends into nothing.
     for owed in pending.into_iter().rev() {
         match children.get(owed.child_index + 1) {
+            // The incoming shot is only known here, which is why the fit test
+            // lives here and not where the transition was built: out_offset
+            // reaches *into* the next item, so an 8s dissolve in front of a
+            // quarter-second shot writes a 96-frame reach into a 6-frame item —
+            // an invalid document that no reader can make sense of.
+            Some(OtioComposable::Clip(incoming))
+                if owed.transition.out_offset.value >= incoming.source_range.duration.value =>
+            {
+                report.warnings.push(format!(
+                    "the transition on clip '{}' (track '{}') was not exported: its {} frames \
+                     after the cut do not fit inside the {}-frame incoming shot",
+                    owed.outgoing_clip_id,
+                    track.name,
+                    owed.transition.out_offset.value,
+                    incoming.source_range.duration.value
+                ));
+            }
             Some(OtioComposable::Clip(_)) => {
                 children.insert(
                     owed.child_index + 1,
@@ -435,7 +470,12 @@ fn unexportable_reason(clip: &Clip) -> Option<&'static str> {
 }
 
 /// Records the editorial detail this clip carries that OTIO cannot express.
-fn record_clip_losses(clip: &Clip, track: &Track, report: &mut LossReport) {
+fn record_clip_losses(
+    clip: &Clip,
+    track: &Track,
+    effects: &HashMap<String, Effect>,
+    report: &mut LossReport,
+) {
     // Timing losses change *when* a viewer sees a frame, so each one is named.
     let mut timing: Vec<&str> = Vec::new();
     if (clip.speed - 1.0).abs() > f32::EPSILON {
@@ -464,7 +504,19 @@ fn record_clip_losses(clip: &Clip, track: &Track, report: &mut LossReport) {
 
     // Appearance losses are aggregated: a graded timeline would otherwise bury
     // the structural warnings under one line per clip.
-    if !clip.effects.is_empty() {
+    //
+    // A two-input transition is not among them: it is exported as an OTIO
+    // transition, so counting it here would tell the caller their dissolve was
+    // dropped on the one export where it survived. When such a transition cannot
+    // be placed after all, [`build_transition`] and the insertion pass say so by
+    // name, which is more useful than a count.
+    // An id the project cannot resolve counts as dropped: something was on this
+    // clip and is not in the file.
+    if clip.effects.iter().any(|effect_id| {
+        !effects
+            .get(effect_id)
+            .is_some_and(|effect| effect.enabled && effect.effect_type.is_two_input_transition())
+    }) {
         report
             .aggregates
             .record("effects", "carry effects that were dropped", &clip.id);
@@ -1307,6 +1359,140 @@ mod tests {
         assert_eq!(
             children[1]["metadata"]["openreelio"]["transitionType"],
             "wipe"
+        );
+    }
+
+    #[test]
+    fn should_not_export_a_transition_longer_than_the_shot_it_blends_into() {
+        // Given: an 8s dissolve on a long clip, followed by a quarter-second one.
+        // The fit check only ever saw the outgoing clip, because the incoming one
+        // is not known until the transition is placed — so out_offset reached 96
+        // frames into a 6-frame item, which is not a valid OTIO document and was
+        // written without a word.
+        let mut sequence = make_sequence("Overrun");
+        let mut track = Track::new_video("V1");
+        let mut first = make_clip("c1", "a1", 0.0, 0.0, 20.0);
+        first.effects = vec!["e1".to_string()];
+        track.add_clip(first);
+        track.add_clip(make_clip("c2", "a1", 30.0, 20.0, 0.25));
+        sequence.add_track(track);
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+        let effects: HashMap<String, Effect> = [("e1".to_string(), dissolve("e1", 8.0))]
+            .into_iter()
+            .collect();
+
+        // When: exporting
+        let export = export_otio(&sequence, &assets, &effects).expect("export should work");
+        let children = children_of(&parse_value(&export.json), 0);
+
+        // Then: no transition is written, and the drop is reported
+        assert!(
+            children
+                .iter()
+                .all(|child| child["OTIO_SCHEMA"] != "Transition.1"),
+            "a transition that overruns the incoming shot must not be written: {children:#?}"
+        );
+        assert!(
+            export
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("incoming")),
+            "the drop must be reported: {:?}",
+            export.warnings
+        );
+    }
+
+    #[test]
+    fn should_keep_a_tracks_length_when_its_last_clip_cannot_be_exported() {
+        // Given: a track whose final clip is disabled. The warning said it was
+        // exported as a gap, and no gap was written — gaps are only synthesised
+        // to reach a *later* clip — so the track silently lost its tail.
+        let mut sequence = make_sequence("Trailing");
+        let mut track = Track::new_video("V1");
+        track.add_clip(make_clip("c1", "a1", 0.0, 0.0, 4.0));
+        let mut disabled = make_clip("c2", "a1", 10.0, 4.0, 6.0);
+        disabled.enabled = false;
+        track.add_clip(disabled);
+        sequence.add_track(track);
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+
+        // When: exporting
+        let export = export_otio(&sequence, &assets, &HashMap::new()).expect("export should work");
+        let children = children_of(&parse_value(&export.json), 0);
+
+        // Then: the track still runs 10s — 96 frames of clip, 144 of gap
+        let frames: f64 = children
+            .iter()
+            .map(|child| {
+                child["source_range"]["duration"]["value"]
+                    .as_f64()
+                    .unwrap_or_default()
+            })
+            .sum();
+        assert_eq!(frames, 240.0, "the track lost its tail: {children:#?}");
+        assert_eq!(
+            children.last().expect("a trailing gap")["OTIO_SCHEMA"],
+            "Gap.1"
+        );
+    }
+
+    #[test]
+    fn should_not_report_an_exported_transition_as_a_dropped_effect() {
+        // The dissolve below *is* exported, as the transition between the two
+        // shots. Counting it again in the dropped-effects aggregate tells the
+        // caller their transition did not survive, which is the opposite of true.
+        let mut sequence = make_sequence("Clean");
+        let mut track = Track::new_video("V1");
+        let mut first = make_clip("c1", "a1", 2.0, 0.0, 3.0);
+        first.effects = vec!["e1".to_string()];
+        track.add_clip(first);
+        track.add_clip(make_clip("c2", "a1", 10.0, 3.0, 3.0));
+        sequence.add_track(track);
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+        let effects: HashMap<String, Effect> = [("e1".to_string(), dissolve("e1", 1.0))]
+            .into_iter()
+            .collect();
+
+        let export = export_otio(&sequence, &assets, &effects).expect("export should work");
+
+        assert!(
+            !export
+                .unsupported
+                .iter()
+                .any(|entry| entry.contains("effects that were dropped")),
+            "a clean dissolve export must not claim an effect was dropped: {:?}",
+            export.unsupported
+        );
+    }
+
+    #[test]
+    fn should_still_report_a_real_effect_on_a_clip_that_also_has_a_transition() {
+        let mut sequence = make_sequence("Mixed");
+        let mut track = Track::new_video("V1");
+        let mut first = make_clip("c1", "a1", 2.0, 0.0, 3.0);
+        first.effects = vec!["e1".to_string(), "e2".to_string()];
+        track.add_clip(first);
+        track.add_clip(make_clip("c2", "a1", 10.0, 3.0, 3.0));
+        sequence.add_track(track);
+        let assets = assets_with(&[("a1", "a.mp4", "/media/a.mp4", Some(60.0))]);
+        let mut grade = Effect::new(EffectType::Brightness);
+        grade.id = "e2".to_string();
+        let effects: HashMap<String, Effect> = [
+            ("e1".to_string(), dissolve("e1", 1.0)),
+            ("e2".to_string(), grade),
+        ]
+        .into_iter()
+        .collect();
+
+        let export = export_otio(&sequence, &assets, &effects).expect("export should work");
+
+        assert!(
+            export
+                .unsupported
+                .iter()
+                .any(|entry| entry.contains("effects that were dropped")),
+            "the grade is still lost and must be reported: {:?}",
+            export.unsupported
         );
     }
 
