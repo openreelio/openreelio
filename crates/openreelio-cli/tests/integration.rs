@@ -9465,6 +9465,94 @@ fn test_otio_import_dry_run_writes_nothing_to_a_legacy_project_layout() {
 }
 
 #[test]
+fn test_otio_import_resolves_project_relative_media_against_the_real_project_root() {
+    // Given: media inside the project, named once relatively (what our own
+    // export writes for media the project holds) and once absolutely. The
+    // project root the importer is handed is canonicalised, which on Windows
+    // carries a `\\?\` prefix — joined onto a relative reference it turns into
+    // `//?/C:/…`, which reads as a network authority and opens nothing.
+    let dir = create_temp_project("otio_relative");
+    let project_root = dir.path().join("otio_relative");
+    let path = project_root.to_string_lossy().to_string();
+    std::fs::create_dir_all(project_root.join("media")).expect("create media dir");
+    let media = project_root.join("media").join("inside.mp4");
+    std::fs::write(&media, b"dummy video").expect("write media");
+
+    let absolute = format!(
+        "file:///{}",
+        media
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace(' ', "%20")
+    );
+    let document = serde_json::json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "name": "Relative",
+        "tracks": {
+            "OTIO_SCHEMA": "Stack.1",
+            "name": "Relative",
+            "children": [{
+                "OTIO_SCHEMA": "Track.1",
+                "name": "V1",
+                "kind": "Video",
+                "children": [
+                    otio_clip_node("relative", "media/inside.mp4"),
+                    otio_clip_node("absolute", &absolute),
+                ]
+            }],
+            "markers": []
+        }
+    });
+    let file = dir.path().join("relative.otio");
+    std::fs::write(&file, document.to_string()).expect("write fixture");
+
+    // When: importing without --allow-external-media
+    let result = run_cli_ok(&[
+        "otio",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        file.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    // Then: both spellings name the same openable file, so it imports once
+    let imports = result["assetImports"].as_array().unwrap();
+    assert_eq!(
+        imports.len(),
+        1,
+        "the two spellings name one file: {result}"
+    );
+    let uri = imports[0]["uri"].as_str().unwrap();
+    assert!(
+        !uri.starts_with("//"),
+        "a project-relative reference must not resolve to an authority path, got: {uri}"
+    );
+    assert!(
+        std::path::Path::new(uri).exists(),
+        "the resolved uri must name the media on disk, got: {uri}"
+    );
+}
+
+/// A one-media OTIO clip node at 30fps, one second long.
+fn otio_clip_node(name: &str, target_url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "OTIO_SCHEMA": "Clip.2",
+        "name": name,
+        "source_range": {
+            "OTIO_SCHEMA": "TimeRange.1",
+            "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0.0, "rate": 30.0 },
+            "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": 30.0, "rate": 30.0 }
+        },
+        "media_reference": {
+            "OTIO_SCHEMA": "ExternalReference.1",
+            "target_url": target_url
+        }
+    })
+}
+
+#[test]
 fn test_otio_import_refuses_media_outside_the_project_by_default() {
     // Given: an OTIO file whose media sits outside the project it is imported
     // into. ImportAsset stats — and for some kinds ffprobes — whatever path it

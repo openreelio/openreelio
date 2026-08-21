@@ -674,7 +674,12 @@ impl<'a> PlanBuilder<'a> {
             return None;
         }
 
-        Some(candidate.to_string_lossy().replace('\\', "/"))
+        // The project root arrives canonicalised, which on Windows means
+        // `\\?\C:\…`. Left in, joining a relative reference onto it and swapping
+        // separators yields `//?/C:/…` — a path that reads as a network
+        // authority, that ImportAsset cannot open, and that no longer matches
+        // the same file named absolutely.
+        Some(strip_verbatim_prefix(&candidate.to_string_lossy()).replace('\\', "/"))
     }
 
     fn find_asset_by_path(&self, path: &str) -> Option<String> {
