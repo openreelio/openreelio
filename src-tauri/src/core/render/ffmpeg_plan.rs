@@ -26,10 +26,10 @@ use super::{
         collect_overlay_text_drawtext_filters, effective_source_dimensions,
         generated_text_visual_end_sec, hdr_metadata_for_asset, is_text_clip,
         output_video_dimensions, output_video_fps, output_video_pixel_format,
-        resolve_asset_source_dimensions, resolve_asset_source_duration,
+        resolve_asset_source_dimensions, resolve_asset_source_duration, resolve_trim_source_kind,
         seed_source_dimension_cache, seed_source_duration_cache, unmeasurable_effect_message,
-        AssetAudioInfo, ExportEngine, ExportError, ExportSettings, TrimSourceKind, VideoCodec,
-        VideoTimelineSegment, TIMELINE_EPSILON_SEC,
+        AssetAudioInfo, ExportEngine, ExportError, ExportSettings, SourceFrameCountCache,
+        VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
     transform_layout::compute_clip_transform_layout,
     transition_stitch::{
@@ -116,6 +116,11 @@ pub(super) fn build_sequence_ffmpeg_args(
         plan_sequence_transitions(ctx.sequence, ctx.assets, ctx.effects, output_fps, |asset| {
             resolve_asset_source_duration(asset, &mut source_durations)
         });
+
+    // Which image assets are photos and which are animations. An extension says
+    // nothing about that, so the answer has to be measured; caching it keeps a
+    // timeline that reuses one GIF to a single probe.
+    let mut source_frame_counts = SourceFrameCountCache::new();
 
     let mut adjustment_layer_effects = Vec::new();
     for (clip, _track) in &all_clips {
@@ -231,7 +236,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                         &trim_label,
                         &mut filter_complex,
                         handles,
-                        TrimSourceKind::for_asset(asset),
+                        resolve_trim_source_kind(asset, &mut source_frame_counts),
                     );
 
                     if clip_filter_graph.has_video_effects() {

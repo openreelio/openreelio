@@ -2231,19 +2231,76 @@ pub(super) enum TrimSourceKind {
 }
 
 impl TrimSourceKind {
-    /// Classifies an asset by whether it decodes to one frame or to many.
-    pub(super) fn for_asset(asset: &Asset) -> Self {
-        match asset.kind {
-            AssetKind::Image => Self::StillImage,
-            _ => Self::Motion,
+    /// Classifies a source by whether it decodes to one picture or to many.
+    ///
+    /// `probed_frame_count` is what the file actually holds, from
+    /// [`resolve_trim_source_kind`]. The asset's *kind* cannot answer this on
+    /// its own: `AssetKind::Image` is assigned from the file extension alone,
+    /// and `gif`, `webp`, `avif` and `png` are all extensions an animation can
+    /// wear. Treating every one of them as a still froze animated media to its
+    /// first frame — the reaction GIFs the meme pack serves included.
+    ///
+    /// An unreadable count falls back to the still path for an image, which is
+    /// what a photo — the overwhelmingly common case — needs, and is also the
+    /// only reading under which a one-frame source fills its slot at all.
+    pub(super) fn for_asset(asset: &Asset, probed_frame_count: Option<u64>) -> Self {
+        if asset.kind != AssetKind::Image {
+            return Self::Motion;
+        }
+
+        match probed_frame_count {
+            Some(frames) if frames > 1 => Self::Motion,
+            _ => Self::StillImage,
         }
     }
 }
 
+/// How many pictures each asset's stream holds, cached for one export run.
+///
+/// Keyed by asset id, with the same "a `None` entry means already looked at and
+/// unmeasurable" contract as [`SourceDurationCache`], so an unreadable file is
+/// probed once rather than once per clip that uses it.
+pub(super) type SourceFrameCountCache = HashMap<String, Option<u64>>;
+
+/// Decides which trim branch a clip's source needs, probing it if necessary.
+///
+/// Only an image is probed: every other kind is moving media by construction,
+/// and paying an FFprobe per video asset to learn what the container already
+/// says would be waste.
+pub(super) fn resolve_trim_source_kind(
+    asset: &Asset,
+    cache: &mut SourceFrameCountCache,
+) -> TrimSourceKind {
+    if asset.kind != AssetKind::Image {
+        return TrimSourceKind::Motion;
+    }
+
+    if let Some(cached) = cache.get(&asset.id) {
+        return TrimSourceKind::for_asset(asset, *cached);
+    }
+
+    let frames = match crate::core::assets::MetadataExtractor::count_video_frames(&asset.uri) {
+        Ok(frames) => frames,
+        Err(error) => {
+            tracing::warn!(
+                asset_id = %asset.id,
+                error = %error,
+                "Could not probe image asset for its frame count; treating it as a still"
+            );
+            None
+        }
+    };
+
+    cache.insert(asset.id.clone(), frames);
+    TrimSourceKind::for_asset(asset, frames)
+}
+
 /// How long a still has to hold to fill its timeline slot, handles included.
 ///
-/// Floored at one frame's worth of time so the `trim` this feeds can never be
+/// Floored at [`TIMELINE_EPSILON_SEC`] so the `trim` this feeds can never be
 /// asked for an empty window, which FFmpeg answers with a stream of no frames.
+/// That floor is the timeline's own resolution, not a frame's: a slot shorter
+/// than it is a slot the timeline cannot express in the first place.
 fn still_image_slot_duration(clip: &Clip, handles: ClipHandles) -> f64 {
     (clip.place.duration_sec + handles.head_sec + handles.tail_sec).max(TIMELINE_EPSILON_SEC)
 }
@@ -3350,9 +3407,10 @@ fn split_filter_arguments(arguments: &str) -> Vec<&str> {
 /// Reads the output size of a single filter.
 ///
 /// Every arm here was checked against `Effect::build_filter_params`: of the
-/// filters that builder can emit, only `crop` (`Crop`, `AutoReframe`) and
-/// `zoompan` (`Zoom`) resize. `scale`/`pad`/`transpose` never come out of it
-/// today and are listed so a future effect that emits one is caught loudly by
+/// filters that builder can emit, `crop` (`Crop`, `AutoReframe`), `zoompan` and
+/// the `scale`/`pad` pair a `Zoom` fits its source to the canvas with are the
+/// ones that resize. `transpose` never comes out of it today and is listed so a
+/// future effect that emits one is caught loudly by
 /// [`effective_source_dimensions`] rather than mis-sizing a transform.
 fn filter_segment_dimensions(segment: &str) -> SegmentDimensions {
     let (name, arguments) = match segment.split_once('=') {
@@ -15375,18 +15433,69 @@ mod tests {
     }
 
     /// Feature: Still images on the timeline
-    /// Scenario: only images are held; a video is still cut from its window
+    /// Scenario: only a source that really holds one picture is held
     #[test]
-    fn should_classify_only_image_assets_as_stills() {
+    fn should_classify_only_single_frame_images_as_stills() {
         use crate::core::assets::{Asset, VideoInfo};
 
         let video = Asset::new_video("clip", "file:///a.mp4", VideoInfo::default());
-        assert_eq!(TrimSourceKind::for_asset(&video), TrimSourceKind::Motion);
+        assert_eq!(
+            TrimSourceKind::for_asset(&video, None),
+            TrimSourceKind::Motion,
+            "a video is cut from its window whatever a frame count says"
+        );
+        assert_eq!(
+            TrimSourceKind::for_asset(&video, Some(1)),
+            TrimSourceKind::Motion
+        );
 
         let image = Asset::new_image("photo", "file:///a.png", 1920, 1080);
         assert_eq!(
-            TrimSourceKind::for_asset(&image),
+            TrimSourceKind::for_asset(&image, Some(1)),
             TrimSourceKind::StillImage
+        );
+        assert_eq!(
+            TrimSourceKind::for_asset(&image, None),
+            TrimSourceKind::StillImage,
+            "an unmeasurable image falls back to the still path"
+        );
+    }
+
+    /// Feature: Animated images on the timeline
+    /// Scenario: a GIF, WebP or APNG that holds many frames keeps its motion
+    ///
+    /// `AssetKind::Image` is decided by file extension alone, and `gif`, `webp`,
+    /// `avif` and `png` are all extensions an animation can wear. Classifying on
+    /// the kind froze every one of them to its first frame.
+    #[test]
+    fn should_cut_an_animated_image_from_its_window_like_any_other_motion() {
+        use crate::core::assets::Asset;
+
+        let animated = Asset::new_image("reaction", "file:///a.gif", 320, 240);
+        assert_eq!(
+            TrimSourceKind::for_asset(&animated, Some(30)),
+            TrimSourceKind::Motion,
+            "an animation must keep its frames and its source-in window"
+        );
+
+        let clip = Clip::new("asset").with_source_range(0.5, 1.5).place_at(0.0);
+        let mut filter_complex = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter_complex,
+            ClipHandles::default(),
+            TrimSourceKind::for_asset(&animated, Some(30)),
+        );
+
+        assert!(
+            filter_complex.contains("trim=start=0.5:end=1.5"),
+            "an animation keeps the window the edit asked for: {filter_complex}"
+        );
+        assert!(
+            !filter_complex.contains("end_frame=1"),
+            "an animation must not be cut to a single frame: {filter_complex}"
         );
     }
 
@@ -15450,6 +15559,22 @@ mod tests {
         let mut clip = Clip::new("photo").with_source_range(0.0, SLOT_SEC);
         clip.place.duration_sec = SLOT_SEC;
 
+        // Classified the way the export classifies it, so this also guards the
+        // photo against being mistaken for an animation and cut to its window.
+        let asset = crate::core::assets::Asset::new_image(
+            "photo",
+            &photo.to_string_lossy(),
+            CANVAS_WIDTH,
+            CANVAS_HEIGHT,
+        );
+        let mut frame_counts = SourceFrameCountCache::new();
+        let source_kind = resolve_trim_source_kind(&asset, &mut frame_counts);
+        assert_eq!(
+            source_kind,
+            TrimSourceKind::StillImage,
+            "a real PNG holds one picture and must take the still path"
+        );
+
         for zoomed in [false, true] {
             let mut filter_complex = String::new();
             build_video_trim_filter(
@@ -15458,7 +15583,7 @@ mod tests {
                 "trim0",
                 &mut filter_complex,
                 ClipHandles::default(),
-                TrimSourceKind::StillImage,
+                source_kind,
             );
 
             if zoomed {
@@ -15515,6 +15640,153 @@ mod tests {
                 render.stdout.len() / frame_bytes.max(1)
             );
         }
+    }
+
+    /// Feature: Animated images on the timeline
+    /// Scenario: a GIF, WebP or APNG exports its animation, not its first frame
+    ///
+    /// `AssetKind::Image` comes from the file extension alone, so holding every
+    /// image across its slot held the animated ones too: a reaction GIF exported
+    /// as one frame cloned for the length of the clip. Measured against ffmpeg
+    /// 9.0.1, a 30-frame GIF rendered 30 identical frames — one unique picture
+    /// where 30 were due — and `freezedetect` fired at 0.133s and never ended.
+    ///
+    /// The classification is measured here rather than asserted from the
+    /// extension, because the declared metadata cannot answer it: a still JPEG
+    /// advertises a duration, a one-frame GIF advertises a frame count of 1, and
+    /// an animated APNG or WebP advertises neither.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored animated
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn an_animated_image_renders_its_animation_and_not_a_frozen_frame() {
+        use crate::core::assets::Asset;
+        use crate::core::timeline::Clip;
+        use std::collections::HashSet;
+
+        const CANVAS_WIDTH: u32 = 320;
+        const CANVAS_HEIGHT: u32 = 180;
+        const FPS: f64 = 30.0;
+        const SLOT_SEC: f64 = 1.0;
+        const SOURCE_FRAMES: usize = 30;
+
+        let ffmpeg = std::env::var_os("OPENREELIO_FFMPEG_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let build = |name: &str, frames: usize, rate: u32| -> Option<std::path::PathBuf> {
+            let path = dir.path().join(name);
+            let built = std::process::Command::new(&ffmpeg)
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("testsrc=size=320x240:rate={rate}"),
+                    "-frames:v",
+                    &frames.to_string(),
+                ])
+                .arg(&path)
+                .output()
+                .ok()?;
+            (built.status.success() && path.exists()).then_some(path)
+        };
+
+        let (Some(animated), Some(single_frame), Some(apng)) = (
+            build("anim.gif", SOURCE_FRAMES, 30),
+            build("one.gif", 1, 30),
+            build("anim.apng", 20, 10),
+        ) else {
+            eprintln!("Skipping: ffmpeg could not build the fixtures");
+            return;
+        };
+
+        let mut frame_counts = SourceFrameCountCache::new();
+        let kind_of = |path: &std::path::Path, cache: &mut SourceFrameCountCache| {
+            let asset = Asset::new_image("image", &path.to_string_lossy(), 320, 240);
+            resolve_trim_source_kind(&asset, cache)
+        };
+
+        assert_eq!(
+            kind_of(&animated, &mut frame_counts),
+            TrimSourceKind::Motion,
+            "a 30-frame GIF is moving media"
+        );
+        assert_eq!(
+            kind_of(&apng, &mut frame_counts),
+            TrimSourceKind::Motion,
+            "an animated APNG is moving media, though it advertises no duration \
+             and no frame count"
+        );
+        assert_eq!(
+            kind_of(&single_frame, &mut frame_counts),
+            TrimSourceKind::StillImage,
+            "a one-frame GIF is a photo, though it advertises a duration"
+        );
+
+        let mut clip = Clip::new("anim").with_source_range(0.0, SLOT_SEC);
+        clip.place.duration_sec = SLOT_SEC;
+
+        let mut filter_complex = String::new();
+        build_video_trim_filter(
+            &clip,
+            0,
+            "trim0",
+            &mut filter_complex,
+            ClipHandles::default(),
+            kind_of(&animated, &mut frame_counts),
+        );
+        filter_complex.push_str("[trim0]null[v0];");
+        append_video_stream_normalization(
+            &mut filter_complex,
+            "v0",
+            "out",
+            CANVAS_WIDTH,
+            CANVAS_HEIGHT,
+            FPS,
+            "yuv420p",
+            None,
+        );
+
+        let graph_file = dir.path().join("graph.txt");
+        std::fs::write(&graph_file, filter_complex.trim_end_matches(';')).expect("write graph");
+
+        let render = std::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(&animated)
+            .arg("-/filter_complex")
+            .arg(&graph_file)
+            .args(["-map", "[out]", "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+            .output()
+            .expect("run ffmpeg");
+
+        assert!(
+            render.status.success(),
+            "ffmpeg refused the animated-image graph: {}",
+            String::from_utf8_lossy(&render.stderr)
+        );
+
+        let frame_bytes = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
+        let frames: Vec<&[u8]> = render.stdout.chunks_exact(frame_bytes).collect();
+        assert_eq!(
+            frames.len(),
+            (SLOT_SEC * FPS).round() as usize,
+            "the clip still has to fill its slot"
+        );
+
+        let unique: HashSet<&[u8]> = frames.iter().copied().collect();
+        assert!(
+            unique.len() > 1,
+            "an animated GIF must render its animation, got {} unique picture(s) \
+             across {} frames — the still path cloned one frame",
+            unique.len(),
+            frames.len()
+        );
     }
 
     #[test]

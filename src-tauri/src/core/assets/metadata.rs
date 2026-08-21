@@ -333,6 +333,73 @@ impl MetadataExtractor {
         Ratio::new(30, 1)
     }
 
+    /// Counts the pictures the primary video stream holds.
+    ///
+    /// Neither the stream's `duration` nor its `nb_frames` answers this for the
+    /// image formats that can be either a photo or an animation. Measured
+    /// against ffprobe 9.0.1: a still JPEG advertises `duration=0.040000` and no
+    /// frame count, a single-frame GIF advertises `duration=0.030000` and
+    /// `nb_frames=1`, and an animated APNG or WebP advertises *neither* — so a
+    /// classification built on the declared metadata calls a photo an animation
+    /// and an animation a photo, in both directions.
+    ///
+    /// `-count_packets` is what actually separates them. It demuxes the file
+    /// without decoding it, which is cheap even for a long animation, and gives
+    /// `1` for every still and the true frame count for every animation.
+    ///
+    /// Returns `None` when the file carries no video stream or the count cannot
+    /// be read, so a caller can tell "one picture" from "could not tell".
+    pub fn count_video_frames<P: AsRef<Path>>(path: P) -> CoreResult<Option<u64>> {
+        let path = path.as_ref();
+
+        if !path.exists() {
+            return Err(CoreError::FileNotFound(path.to_string_lossy().to_string()));
+        }
+
+        let mut command = Command::new(resolved_ffprobe_path());
+        configure_std_command(&mut command);
+        let output = command
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_packets",
+                "-show_entries",
+                "stream=nb_read_packets",
+                "-print_format",
+                "json",
+            ])
+            .arg(path)
+            .output()
+            .map_err(|e| CoreError::FFprobeError(format!("Failed to run ffprobe: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CoreError::FFprobeError(format!(
+                "FFprobe failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(Self::parse_packet_count(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
+    }
+
+    /// Reads `nb_read_packets` out of a `-count_packets` probe.
+    fn parse_packet_count(json: &str) -> Option<u64> {
+        let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
+        parsed
+            .get("streams")?
+            .as_array()?
+            .first()?
+            .get("nb_read_packets")?
+            .as_str()?
+            .parse()
+            .ok()
+    }
+
     /// Check if FFprobe is available on the system
     pub fn is_available() -> bool {
         let mut command = Command::new(resolved_ffprobe_path());
