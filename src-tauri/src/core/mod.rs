@@ -59,3 +59,6 @@ pub use error::*;
 
 #[cfg(test)]
 mod tests_destructive;
+
+#[cfg(test)]
+mod test_ffmpeg;
