@@ -246,6 +246,32 @@ jobs:
           REQUIRE_FFMPEG_TESTS: '1'
         run: cargo test --locked -p openreelio-cli
 
+      # The library's ffmpeg-backed tests hand a real FFmpeg the filtergraph the
+      # export builds and measure what comes out. They are `#[ignore]`d because
+      # they need a binary, so the `Run tests` step above never ran them and the
+      # properties they measure - zoom frame counts and geometry, still and
+      # animated image handling, the adjustment-layer refusal, filtergraph
+      # injection - went unexercised in CI.
+      #
+      # They are named by module rather than run as a bare `--ignored`, because
+      # the lib's other ignored tests download FFmpeg archives, drive a live
+      # `claude` login, or rewrite a checked-in manifest.
+      #
+      # `REQUIRE_FFMPEG_TESTS` turns their quiet skips into failures, so a
+      # broken FFmpeg install fails the job instead of passing vacuously.
+      - name: Run src-tauri ffmpeg-backed tests
+        working-directory: src-tauri
+        shell: bash
+        env:
+          REQUIRE_FFMPEG_TESTS: '1'
+        run: |
+          cargo test --locked --features dev-full --lib -- --ignored \
+            core::effects::filter_builder::tests:: \
+            core::render::export::tests:: 2>&1 | tee "${RUNNER_TEMP}/ffmpeg-tests.log"
+          # A renamed or moved test would leave the filters matching nothing,
+          # which libtest still reports as a pass. Require that something ran.
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' "${RUNNER_TEMP}/ffmpeg-tests.log"
+
   # ==========================================================================
   # Build Check
   # ==========================================================================
