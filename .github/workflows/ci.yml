@@ -246,6 +246,50 @@ jobs:
           REQUIRE_FFMPEG_TESTS: '1'
         run: cargo test --locked -p openreelio-cli
 
+      # Fetch the bundled FFmpeg (9.x) the app ships. The job sets
+      # SKIP_FFMPEG_DOWNLOAD=1, so the build.rs never lays it down; this is the
+      # same script release.yml uses, writing ffmpeg/ffprobe into
+      # src-tauri/binaries/. ubuntu-latest is the x86_64 linux runner.
+      - name: Prepare bundled FFmpeg for the ffmpeg-backed tests
+        timeout-minutes: 15
+        run: node scripts/prepare-bundled-ffmpeg.mjs x86_64-unknown-linux-gnu
+
+      # The library's ffmpeg-backed tests hand a real FFmpeg the filtergraph the
+      # export builds and measure what comes out. They are `#[ignore]`d because
+      # they need a binary, so the `Run tests` step above never ran them and the
+      # properties they measure - zoom frame counts and geometry, still and
+      # animated image handling, the adjustment-layer refusal, filtergraph
+      # injection - went unexercised in CI.
+      #
+      # They run against the BUNDLED FFmpeg, not apt's: the assertions were
+      # measured against the exact build the app ships (9.x), and most of them
+      # pass the filtergraph with `-/filter_complex <file>`, whose read-from-file
+      # syntax only exists in FFmpeg >= 7.0 - ubuntu-latest's apt build is 6.1.
+      # The `dev-full` builds above have already downloaded the bundled binaries
+      # into `src-tauri/binaries/` (the `bundled-ffmpeg` feature), so they are
+      # present here; pointing the resolver at them tests what users actually run.
+      #
+      # They are named by module rather than run as a bare `--ignored`, because
+      # the lib's other ignored tests download FFmpeg archives, drive a live
+      # `claude` login, or rewrite a checked-in manifest.
+      #
+      # `REQUIRE_FFMPEG_TESTS` turns their quiet skips into failures, so a missing
+      # bundled binary fails the job instead of passing vacuously.
+      - name: Run src-tauri ffmpeg-backed tests
+        working-directory: src-tauri
+        shell: bash
+        env:
+          REQUIRE_FFMPEG_TESTS: '1'
+          OPENREELIO_FFMPEG_PATH: ${{ github.workspace }}/src-tauri/binaries/ffmpeg
+          OPENREELIO_FFPROBE_PATH: ${{ github.workspace }}/src-tauri/binaries/ffprobe
+        run: |
+          cargo test --locked --features dev-full --lib -- --ignored \
+            core::effects::filter_builder::tests:: \
+            core::render::export::tests:: 2>&1 | tee "${RUNNER_TEMP}/ffmpeg-tests.log"
+          # A renamed or moved test would leave the filters matching nothing,
+          # which libtest still reports as a pass. Require that something ran.
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' "${RUNNER_TEMP}/ffmpeg-tests.log"
+
   # ==========================================================================
   # Build Check
   # ==========================================================================

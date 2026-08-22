@@ -6367,14 +6367,13 @@ mod tests {
     //
     // Ignored by default because they need an `ffmpeg` binary. Run with:
     //   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored injection
+    //
+    // Every one of them starts at `require_or_skip_ffmpeg`, which skips quietly
+    // on a machine without ffmpeg and fails when `REQUIRE_FFMPEG_TESTS` says the
+    // run was supposed to have one — so CI cannot pass these without running them.
     // =========================================================================
 
-    /// Resolves an ffmpeg binary for the empirical tests.
-    fn ffmpeg_binary_for_tests() -> std::path::PathBuf {
-        std::env::var_os("OPENREELIO_FFMPEG_PATH")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"))
-    }
+    use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
 
     /// Parses a filtergraph with the real FFmpeg and returns the node names it built.
     ///
@@ -6388,13 +6387,16 @@ mod tests {
     /// would be counted as if the payload had produced it.
     ///
     /// Returns `None` when ffmpeg could not be launched at all.
-    fn parsed_filter_node_names(filtergraph: &str) -> Option<Vec<String>> {
+    fn parsed_filter_node_names(
+        ffmpeg: &std::path::Path,
+        filtergraph: &str,
+    ) -> Option<Vec<String>> {
         let dir = tempfile::tempdir().expect("temp dir");
         let graph_file = dir.path().join("graph.txt");
         std::fs::write(&graph_file, filtergraph).expect("write filtergraph");
 
         let input_file = dir.path().join("input.mp4");
-        let mut fixture_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        let mut fixture_cmd = std::process::Command::new(ffmpeg);
         crate::core::process::configure_std_command(&mut fixture_cmd);
         let fixture = fixture_cmd
             .args([
@@ -6418,7 +6420,7 @@ mod tests {
             return None;
         }
 
-        let mut render_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        let mut render_cmd = std::process::Command::new(ffmpeg);
         crate::core::process::configure_std_command(&mut render_cmd);
         let output = render_cmd
             .args(["-hide_banner", "-v", "debug", "-nostdin", "-i"])
@@ -6448,8 +6450,8 @@ mod tests {
     }
 
     /// Whether the local ffmpeg advertises `filter_name`.
-    fn ffmpeg_has_filter(filter_name: &str) -> bool {
-        let mut cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+    fn ffmpeg_has_filter(ffmpeg: &std::path::Path, filter_name: &str) -> bool {
+        let mut cmd = std::process::Command::new(ffmpeg);
         crate::core::process::configure_std_command(&mut cmd);
         cmd.args(["-hide_banner", "-filters"])
             .output()
@@ -6491,9 +6493,13 @@ mod tests {
         const CANVAS_HEIGHT: usize = 180;
         const SOURCE_FRAMES: usize = 60;
 
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
         let dir = tempfile::tempdir().expect("temp dir");
         let input_file = dir.path().join("input.mp4");
-        let mut fixture_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        let mut fixture_cmd = std::process::Command::new(&ffmpeg);
         crate::core::process::configure_std_command(&mut fixture_cmd);
         let fixture = fixture_cmd
             .args([
@@ -6511,11 +6517,11 @@ mod tests {
             .arg(&input_file)
             .output();
         let Ok(fixture) = fixture else {
-            eprintln!("Skipping: ffmpeg could not be launched");
+            skip_without_ffmpeg("ffmpeg could not be launched");
             return;
         };
         if !fixture.status.success() || !input_file.exists() {
-            eprintln!("Skipping: ffmpeg could not build the fixture");
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
             return;
         }
 
@@ -6534,7 +6540,7 @@ mod tests {
 
         // One byte per pixel of luma, so the byte count is the frame count times
         // the frame size — both properties under test, measured at once.
-        let mut render_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        let mut render_cmd = std::process::Command::new(&ffmpeg);
         crate::core::process::configure_std_command(&mut render_cmd);
         let render = render_cmd
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
@@ -6569,6 +6575,7 @@ mod tests {
     /// filtergraph in the command, and the frames it is handed have been through
     /// a decoder exactly as a render's would be.
     fn white_box_clip(
+        ffmpeg: &std::path::Path,
         dir: &std::path::Path,
         name: &str,
         canvas: (usize, usize),
@@ -6584,7 +6591,7 @@ mod tests {
             (height - box_height) / 2,
         );
 
-        let mut built_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        let mut built_cmd = std::process::Command::new(ffmpeg);
         crate::core::process::configure_std_command(&mut built_cmd);
         let built = built_cmd
             .args([
@@ -6611,6 +6618,7 @@ mod tests {
     /// One byte per pixel, so a frame is exactly `width * height` bytes and the
     /// white pixels can be counted without decoding anything.
     fn render_luma_frames(
+        ffmpeg: &std::path::Path,
         input: &std::path::Path,
         graph: &str,
         width: usize,
@@ -6620,7 +6628,7 @@ mod tests {
         let graph_file = dir.path().join("graph.txt");
         std::fs::write(&graph_file, graph).ok()?;
 
-        let mut render_cmd = std::process::Command::new(ffmpeg_binary_for_tests());
+        let mut render_cmd = std::process::Command::new(ffmpeg);
         crate::core::process::configure_std_command(&mut render_cmd);
         let render = render_cmd
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
@@ -6701,9 +6709,13 @@ mod tests {
         const CANVAS: (usize, usize) = (320, 180);
         const FACTOR: f64 = 2.0;
 
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
         let dir = tempfile::tempdir().expect("temp dir");
-        let Some(input) = white_box_clip(dir.path(), "box.mp4", CANVAS, (80, 44)) else {
-            eprintln!("Skipping: ffmpeg could not build the fixture");
+        let Some(input) = white_box_clip(&ffmpeg, dir.path(), "box.mp4", CANVAS, (80, 44)) else {
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
             return;
         };
 
@@ -6712,8 +6724,8 @@ mod tests {
         effect.set_param("zoom_factor", ParamValue::Float(FACTOR));
         let graph = zoom_graph_for_ffmpeg(effect, CANVAS.0 as i32, CANVAS.1 as i32, 30.0);
 
-        let Some(frames) = render_luma_frames(&input, &graph, CANVAS.0, CANVAS.1) else {
-            eprintln!("Skipping: ffmpeg could not be launched");
+        let Some(frames) = render_luma_frames(&ffmpeg, &input, &graph, CANVAS.0, CANVAS.1) else {
+            skip_without_ffmpeg("ffmpeg could not render the zoom graph");
             return;
         };
         assert_eq!(frames.len(), 6, "the zoom must not change the frame count");
@@ -6746,9 +6758,13 @@ mod tests {
         // measures.
         const UNZOOMED: usize = 80 * 44;
 
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
         let dir = tempfile::tempdir().expect("temp dir");
-        let Some(input) = white_box_clip(dir.path(), "box.mp4", CANVAS, (80, 44)) else {
-            eprintln!("Skipping: ffmpeg could not build the fixture");
+        let Some(input) = white_box_clip(&ffmpeg, dir.path(), "box.mp4", CANVAS, (80, 44)) else {
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
             return;
         };
 
@@ -6758,8 +6774,8 @@ mod tests {
         effect.set_param("zoom_factor", ParamValue::Float(2.0));
         let graph = zoom_graph_for_ffmpeg(effect, CANVAS.0 as i32, CANVAS.1 as i32, 30.0);
 
-        let Some(frames) = render_luma_frames(&input, &graph, CANVAS.0, CANVAS.1) else {
-            eprintln!("Skipping: ffmpeg could not be launched");
+        let Some(frames) = render_luma_frames(&ffmpeg, &input, &graph, CANVAS.0, CANVAS.1) else {
+            skip_without_ffmpeg("ffmpeg could not render the zoom graph");
             return;
         };
 
@@ -6799,9 +6815,13 @@ mod tests {
         const CANVAS: (usize, usize) = (320, 180);
         const UNZOOMED: usize = 80 * 44;
 
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
         let dir = tempfile::tempdir().expect("temp dir");
-        let Some(input) = white_box_clip(dir.path(), "box.mp4", CANVAS, (80, 44)) else {
-            eprintln!("Skipping: ffmpeg could not build the fixture");
+        let Some(input) = white_box_clip(&ffmpeg, dir.path(), "box.mp4", CANVAS, (80, 44)) else {
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
             return;
         };
 
@@ -6812,8 +6832,8 @@ mod tests {
         effect.set_param(BRANCH_OFFSET_PARAM, ParamValue::Float(0.1));
         let graph = zoom_graph_for_ffmpeg(effect, CANVAS.0 as i32, CANVAS.1 as i32, 30.0);
 
-        let Some(frames) = render_luma_frames(&input, &graph, CANVAS.0, CANVAS.1) else {
-            eprintln!("Skipping: ffmpeg could not be launched");
+        let Some(frames) = render_luma_frames(&ffmpeg, &input, &graph, CANVAS.0, CANVAS.1) else {
+            skip_without_ffmpeg("ffmpeg could not render the zoom graph");
             return;
         };
         assert_eq!(frames.len(), 6);
@@ -6837,9 +6857,14 @@ mod tests {
     #[test]
     #[ignore = "requires an ffmpeg binary; run with --ignored"]
     fn a_zoom_letterboxes_a_source_shaped_unlike_the_canvas() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
         let dir = tempfile::tempdir().expect("temp dir");
-        let Some(input) = white_box_clip(dir.path(), "square.mp4", (320, 240), (120, 120)) else {
-            eprintln!("Skipping: ffmpeg could not build the fixture");
+        let Some(input) = white_box_clip(&ffmpeg, dir.path(), "square.mp4", (320, 240), (120, 120))
+        else {
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
             return;
         };
 
@@ -6849,8 +6874,8 @@ mod tests {
             effect.set_param("zoom_factor", ParamValue::Float(1.5));
             let graph = zoom_graph_for_ffmpeg(effect, width as i32, height as i32, 30.0);
 
-            let Some(frames) = render_luma_frames(&input, &graph, width, height) else {
-                eprintln!("Skipping: ffmpeg could not be launched");
+            let Some(frames) = render_luma_frames(&ffmpeg, &input, &graph, width, height) else {
+                skip_without_ffmpeg("ffmpeg could not render the zoom graph");
                 return;
             };
 
@@ -6869,12 +6894,16 @@ mod tests {
     #[test]
     #[ignore = "requires an ffmpeg binary; run with --ignored"]
     fn subtitles_path_injection_creates_exactly_one_filter_node() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
         // Built exactly as `append_ass_text_overlay` builds it.
         let escaped = escape_ffmpeg_filter_value(&format!("{INJECTION_PAYLOAD}.ass"));
         let graph = format!("[0:v]subtitles=filename='{escaped}'[out]");
 
-        let Some(nodes) = parsed_filter_node_names(&graph) else {
-            eprintln!("Skipping: ffmpeg could not be launched");
+        let Some(nodes) = parsed_filter_node_names(&ffmpeg, &graph) else {
+            skip_without_ffmpeg("ffmpeg could not parse the filtergraph under test");
             return;
         };
 
@@ -6892,8 +6921,15 @@ mod tests {
     #[test]
     #[ignore = "requires an ffmpeg binary built with libvidstab; run with --ignored"]
     fn vidstabdetect_path_injection_creates_exactly_one_filter_node() {
-        if !ffmpeg_has_filter("vidstabdetect") {
-            eprintln!("Skipping: this ffmpeg has no vidstabdetect filter");
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        // `libvidstab` is an optional build option rather than part of a working
+        // install, so this skip stays quiet even under `REQUIRE_FFMPEG_TESTS`:
+        // a build without the filter cannot answer the question at all.
+        if !ffmpeg_has_filter(&ffmpeg, "vidstabdetect") {
+            eprintln!("Skipping test: this ffmpeg has no vidstabdetect filter");
             return;
         }
 
@@ -6901,8 +6937,8 @@ mod tests {
             build_vidstabdetect_filter(std::path::Path::new(&format!("{INJECTION_PAYLOAD}.trf")));
         let graph = format!("[0:v]{detect}[out]");
 
-        let Some(nodes) = parsed_filter_node_names(&graph) else {
-            eprintln!("Skipping: ffmpeg could not be launched");
+        let Some(nodes) = parsed_filter_node_names(&ffmpeg, &graph) else {
+            skip_without_ffmpeg("ffmpeg could not parse the filtergraph under test");
             return;
         };
 

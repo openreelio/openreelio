@@ -12731,9 +12731,11 @@ mod tests {
     #[test]
     #[ignore = "requires an ffmpeg binary; run with --ignored"]
     fn ffmpeg_refuses_a_time_gated_effect_on_an_adjustment_layer() {
-        let ffmpeg = std::env::var_os("OPENREELIO_FFMPEG_PATH")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
 
         let graph_of = |effect: Effect| {
             let mut graph = FilterGraph::new().with_dimensions(320, 180);
@@ -12788,7 +12790,7 @@ mod tests {
             );
 
             let Ok(refused) = run(&gated(effect)) else {
-                eprintln!("Skipping: ffmpeg could not be launched");
+                skip_without_ffmpeg("ffmpeg could not be launched");
                 return;
             };
             let stderr = String::from_utf8_lossy(&refused.stderr);
@@ -15981,6 +15983,7 @@ mod tests {
     #[ignore = "requires an ffmpeg binary; run with --ignored"]
     fn a_still_image_renders_every_frame_of_its_slot() {
         use crate::core::effects::{Effect, EffectType, FilterGraph};
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
         use crate::core::timeline::Clip;
 
         const CANVAS_WIDTH: u32 = 320;
@@ -15988,9 +15991,9 @@ mod tests {
         const FPS: f64 = 30.0;
         const SLOT_SEC: f64 = 2.0;
 
-        let ffmpeg = std::env::var_os("OPENREELIO_FFMPEG_PATH")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
 
         let dir = tempfile::tempdir().expect("temp dir");
         let photo = dir.path().join("photo.png");
@@ -16012,11 +16015,11 @@ mod tests {
             .arg(&photo)
             .output();
         let Ok(built) = built else {
-            eprintln!("Skipping: ffmpeg could not be launched");
+            skip_without_ffmpeg("ffmpeg could not be launched");
             return;
         };
         if !built.status.success() || !photo.exists() {
-            eprintln!("Skipping: ffmpeg could not build the fixture");
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
             return;
         }
 
@@ -16128,6 +16131,7 @@ mod tests {
     #[ignore = "requires an ffmpeg binary; run with --ignored"]
     fn an_animated_image_renders_its_animation_and_not_a_frozen_frame() {
         use crate::core::assets::Asset;
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
         use crate::core::timeline::Clip;
         use std::collections::HashSet;
 
@@ -16137,9 +16141,9 @@ mod tests {
         const SLOT_SEC: f64 = 1.0;
         const SOURCE_FRAMES: usize = 30;
 
-        let ffmpeg = std::env::var_os("OPENREELIO_FFMPEG_PATH")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
 
         let dir = tempfile::tempdir().expect("temp dir");
         let build = |name: &str, frames: usize, rate: u32| -> Option<std::path::PathBuf> {
@@ -16170,7 +16174,7 @@ mod tests {
             build("one.gif", 1, 30),
             build("anim.apng", 20, 10),
         ) else {
-            eprintln!("Skipping: ffmpeg could not build the fixtures");
+            skip_without_ffmpeg("ffmpeg could not build the fixtures");
             return;
         };
 
