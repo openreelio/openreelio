@@ -22,15 +22,17 @@ use crate::core::fs::{
     write_bytes_atomic_no_symlink,
 };
 use crate::core::process::configure_std_command;
-use crate::core::project::{OpKind, Operation};
 use crate::core::workspace::{
     ignore::IgnoreRules,
+    project_sync::{
+        apply_workspace_event_to_project, record_workspace_asset_imports, WorkspaceEventOutcome,
+    },
     service::{FileTreeEntry, WorkspaceService},
     watcher::{WorkspaceEvent, WorkspaceWatcher, WORKSPACE_EVENT_CHANNEL_CAPACITY},
 };
 use crate::core::CoreError;
 use crate::ipc::commands::project::{allow_confined_asset_protocol_file, canonical_project_root};
-use crate::{ActiveProject, AppState};
+use crate::AppState;
 use tauri::{Emitter, Manager};
 
 /// Tauri event emitted when the active project's state files were changed by
@@ -190,58 +192,14 @@ async fn external_change_payload(
     }))
 }
 
-fn record_workspace_operation(
-    project: &mut ActiveProject,
-    operation: Operation,
-) -> Result<(), String> {
-    project
-        .ops_log
-        .append(&operation)
-        .map_err(|e| e.to_ipc_error())?;
-    project.state.last_op_id = Some(operation.id.clone());
-    project.state.op_count += 1;
-    project.state.is_dirty = true;
-    project.state.meta.touch_at(&operation.timestamp);
-    Ok(())
-}
-
-fn record_workspace_asset_imports(
-    project: &mut ActiveProject,
-    asset_ids: &[String],
-) -> Result<(), String> {
-    for asset_id in asset_ids {
-        let asset =
-            project.state.assets.get(asset_id).cloned().ok_or_else(|| {
-                format!("Workspace asset not found after registration: {asset_id}")
-            })?;
-        let payload = serde_json::to_value(&asset)
-            .map_err(|e| format!("Failed to serialize workspace asset import payload: {e}"))?;
-        record_workspace_operation(project, Operation::new(OpKind::AssetImport, payload))?;
+/// The workspace-relative path an event refers to.
+fn workspace_event_relative_path(event: &WorkspaceEvent) -> &str {
+    match event {
+        WorkspaceEvent::FileAdded(path)
+        | WorkspaceEvent::FileRemoved(path)
+        | WorkspaceEvent::FileModified(path)
+        | WorkspaceEvent::ProjectStateChanged(path) => path.as_str(),
     }
-    Ok(())
-}
-
-fn record_workspace_asset_updates(
-    project: &mut ActiveProject,
-    asset_ids: &[String],
-) -> Result<(), String> {
-    for asset_id in asset_ids {
-        let asset = project
-            .state
-            .assets
-            .get(asset_id)
-            .ok_or_else(|| format!("Workspace asset not found for update: {asset_id}"))?;
-        let payload = serde_json::json!({
-            "assetId": asset.id,
-            "uri": asset.uri,
-            "fileSize": asset.file_size,
-            "relativePath": asset.relative_path,
-            "workspaceManaged": asset.workspace_managed,
-            "missing": asset.missing,
-        });
-        record_workspace_operation(project, Operation::new(OpKind::AssetUpdate, payload))?;
-    }
-    Ok(())
 }
 
 // =============================================================================
@@ -351,6 +309,9 @@ pub async fn stop_workspace_watcher(state: &AppState) {
 ///   3. Auto-registers newly discovered files as project assets
 ///   4. Emits `workspace:file-added`, `workspace:file-removed`, or
 ///      `workspace:file-modified` Tauri events so the frontend refreshes its tree
+///   5. Emits [`PROJECT_EXTERNAL_CHANGE_EVENT`] instead of any of the above when
+///      step 2 could not be applied or persisted, so the frontend reloads the
+///      authoritative on-disk state rather than trusting diverged memory
 async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Result<(), String> {
     use std::sync::Arc;
 
@@ -410,108 +371,69 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
             }
 
             // 2. Update the in-memory project state + auto-register
+            let mut diverged = false;
             {
                 let app_state = app_handle.state::<crate::AppState>();
                 let mut guard = app_state.project.lock().await;
                 if let Some(project) = guard.as_mut() {
-                    match &event {
-                        WorkspaceEvent::FileRemoved(rel_path) => {
-                            let mut updated_asset_ids = Vec::new();
-                            for asset in project.state.assets.values_mut() {
-                                if !asset.missing
-                                    && asset.relative_path.as_deref() == Some(rel_path.as_str())
-                                {
-                                    asset.missing = true;
-                                    updated_asset_ids.push(asset.id.clone());
-                                    tracing::info!(
-                                        path = %rel_path,
-                                        "Asset marked missing (file removed externally)"
-                                    );
-                                }
-                            }
-
-                            if let Err(e) =
-                                record_workspace_asset_updates(project, &updated_asset_ids)
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Workspace watcher: failed to persist missing-asset updates"
-                                );
-                            }
-                        }
-                        WorkspaceEvent::FileAdded(rel_path)
-                        | WorkspaceEvent::FileModified(rel_path) => {
-                            let existing_asset_ids: std::collections::HashSet<String> =
-                                project.state.assets.keys().cloned().collect();
-                            let mut updated_asset_ids = Vec::new();
-
-                            // Reconnect previously missing assets at this path
-                            for asset in project.state.assets.values_mut() {
-                                if asset.missing
-                                    && asset.relative_path.as_deref() == Some(rel_path.as_str())
-                                {
-                                    asset.missing = false;
-                                    updated_asset_ids.push(asset.id.clone());
-                                    tracing::info!(
-                                        path = %rel_path,
-                                        "Asset reconnected (file re-appeared)"
-                                    );
-                                }
-                            }
-                            // Auto-register any brand-new files
-                            if let Err(e) = service.auto_register_discovered_files(
-                                &mut project.state,
-                                &project_root_for_loop,
+                    match apply_workspace_event_to_project(
+                        project,
+                        &event,
+                        &service,
+                        &project_root_for_loop,
+                    ) {
+                        WorkspaceEventOutcome::Applied => {
+                            if matches!(
+                                event,
+                                WorkspaceEvent::FileAdded(_) | WorkspaceEvent::FileModified(_)
                             ) {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Workspace watcher: failed to auto-register files"
-                                );
-                            }
-
-                            let new_asset_ids: Vec<String> = project
-                                .state
-                                .assets
-                                .keys()
-                                .filter(|asset_id| !existing_asset_ids.contains(*asset_id))
-                                .cloned()
-                                .collect();
-
-                            if let Err(e) = record_workspace_asset_imports(project, &new_asset_ids)
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Workspace watcher: failed to persist auto-registered assets"
-                                );
-                            }
-
-                            if let Err(e) =
-                                record_workspace_asset_updates(project, &updated_asset_ids)
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Workspace watcher: failed to persist asset reconnection updates"
-                                );
-                            }
-
-                            // Allow asset-protocol access for all managed assets,
-                            // confined to the project the same way a project open is.
-                            let canonical_project = canonical_project_root(&project_root_for_loop);
-                            for asset in project.state.assets.values() {
-                                if asset.workspace_managed {
-                                    allow_confined_asset_protocol_file(
-                                        &app_state,
-                                        &canonical_project,
-                                        asset,
-                                    );
+                                // Allow asset-protocol access for all managed assets,
+                                // confined to the project the same way a project open is.
+                                // Every managed asset is re-granted, not just the newly
+                                // registered ones: a reconnected asset had no grant while
+                                // its file was gone.
+                                let canonical_project =
+                                    canonical_project_root(&project_root_for_loop);
+                                for asset in project.state.assets.values() {
+                                    if asset.workspace_managed {
+                                        allow_confined_asset_protocol_file(
+                                            &app_state,
+                                            &canonical_project,
+                                            asset,
+                                        );
+                                    }
                                 }
                             }
                         }
-                        // Handled before indexing; the loop never reaches here.
-                        WorkspaceEvent::ProjectStateChanged(_) => {}
+                        WorkspaceEventOutcome::Diverged => diverged = true,
                     }
                 }
             } // project lock released here
+
+            // 2b. The session no longer matches the log. Ask the frontend to
+            //     reload from disk — the authoritative rebuild — instead of
+            //     carrying a half-applied mutation forward silently. Emitted
+            //     only after the project lock is released, because
+            //     `external_change_payload` takes that same lock.
+            //
+            //     Then fall through to the per-file notify below rather than
+            //     `continue`: the project reload rebuilds the op-sourced project
+            //     state, but it does not rebuild the file-explorer tree, which
+            //     is refreshed only by the `workspace:file-*` events. Skipping
+            //     the notify would leave the tree showing the pre-change file
+            //     listing until the next unrelated event.
+            if diverged {
+                let rel_path = workspace_event_relative_path(&event);
+                if let Some(payload) = external_change_payload(&app_handle, rel_path).await {
+                    if let Err(e) = app_handle.emit(PROJECT_EXTERNAL_CHANGE_EVENT, payload) {
+                        tracing::warn!(
+                            event = PROJECT_EXTERNAL_CHANGE_EVENT,
+                            error = %e,
+                            "Workspace watcher: failed to emit external change event"
+                        );
+                    }
+                }
+            }
 
             // 3. Notify the frontend
             let (event_name, rel_path) = match &event {
