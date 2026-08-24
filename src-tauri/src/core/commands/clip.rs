@@ -3379,29 +3379,42 @@ impl Command for SetClipSpeedCommand {
             .position(|c| c.id == self.clip_id)
             .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
 
-        {
+        // Compute and validate the new duration and placement WITHOUT mutating,
+        // so a rejected command leaves the clip untouched. The executor only
+        // logs an operation after `execute` returns `Ok`, so a mutation made
+        // before a late `Err` would live in memory yet never reach the op log —
+        // exactly the live/reopen divergence this command must not create.
+        let (previous_speed, previous_reverse, previous_duration_sec, new_duration_sec) = {
             let clip = &sequence.tracks[track_idx].clips[clip_idx];
-            self.previous_speed = Some(clip.speed);
-            self.previous_reverse = Some(clip.reverse);
-            self.previous_duration_sec = Some(clip.place.duration_sec);
-        }
+            let new_duration_sec = clip.range.duration() / self.speed as f64;
+            if !new_duration_sec.is_finite() || new_duration_sec <= 0.0 {
+                return Err(CoreError::ValidationError(
+                    "Clip duration must be finite and > 0 after speed change".to_string(),
+                ));
+            }
+            let mut candidate_place = clip.place.clone();
+            candidate_place.duration_sec = new_duration_sec;
+            validate_no_overlap(
+                &sequence.tracks[track_idx],
+                &candidate_place,
+                Some(&self.clip_id),
+            )?;
+            (
+                clip.speed,
+                clip.reverse,
+                clip.place.duration_sec,
+                new_duration_sec,
+            )
+        };
 
+        // All validation passed — commit.
+        self.previous_speed = Some(previous_speed);
+        self.previous_reverse = Some(previous_reverse);
+        self.previous_duration_sec = Some(previous_duration_sec);
         let clip = &mut sequence.tracks[track_idx].clips[clip_idx];
         clip.speed = self.speed;
         clip.reverse = self.reverse;
-        clip.place.duration_sec = clip.range.duration() / self.speed as f64;
-
-        if !clip.place.duration_sec.is_finite() || clip.place.duration_sec <= 0.0 {
-            return Err(CoreError::ValidationError(
-                "Clip duration must be finite and > 0 after speed change".to_string(),
-            ));
-        }
-
-        {
-            let clip_ref = &sequence.tracks[track_idx].clips[clip_idx];
-            let track = &sequence.tracks[track_idx];
-            validate_no_overlap(track, &clip_ref.place, Some(&clip_ref.id))?;
-        }
+        clip.place.duration_sec = new_duration_sec;
 
         let op_id = ulid::Ulid::new().to_string();
         Ok(
@@ -8246,6 +8259,54 @@ mod tests {
         let err = speed_cmd.execute(&mut state).unwrap_err();
         assert!(matches!(err, CoreError::ValidationError(_)));
         assert!(err.to_string().contains("locked"));
+    }
+
+    #[test]
+    fn test_set_clip_speed_leaves_clip_unchanged_when_it_would_overlap() {
+        // A rejected speed change must not mutate the clip: the executor logs
+        // nothing when `execute` errors, so any mutation made before the error
+        // would live only in memory and vanish on reopen.
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Clip A occupies [0, 5); clip B occupies [5, 10) on the same track.
+        let mut insert_a =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 5.0);
+        insert_a.execute(&mut state).unwrap();
+        let clip_a_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut insert_b =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 5.0).with_source_range(0.0, 5.0);
+        insert_b.execute(&mut state).unwrap();
+
+        let before = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == clip_a_id)
+            .unwrap()
+            .clone();
+
+        // Slowing A to 0.5x would double its duration to 10 s, running it into B.
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_a_id, 0.5, false);
+        let err = speed_cmd.execute(&mut state).unwrap_err();
+        assert!(
+            matches!(err, CoreError::ClipOverlap { .. }),
+            "expected ClipOverlap, got {err:?}"
+        );
+
+        let after = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == clip_a_id)
+            .unwrap();
+        assert_eq!(after.speed, before.speed, "speed must be unchanged");
+        assert_eq!(after.reverse, before.reverse, "reverse must be unchanged");
+        assert_eq!(
+            after.place.duration_sec, before.place.duration_sec,
+            "duration must be unchanged"
+        );
     }
 
     #[test]
