@@ -5274,4 +5274,695 @@ mod tests {
         assert!(executor.jump_to_history_index(5, &mut state).is_err());
         assert!(executor.jump_to_history_index(-2, &mut state).is_err());
     }
+
+    /// Replay-equivalence harness for the `OpKind::ClipUpdate` command family.
+    ///
+    /// Sixteen commands share `OpKind::ClipUpdate`. Replay
+    /// (`ProjectState::apply_operation`) sees only the op kind, never the
+    /// command behind it, so it rebuilds each edit by sniffing keys out of the
+    /// logged payload. A command whose fields that sniffing does not know about
+    /// executes cleanly, appends an op, and then silently loses its edit the
+    /// next time the project is reopened. That is exactly what happened to
+    /// `SetClipSpeed` and `SetClipSlowMotionInterpolation`.
+    ///
+    /// Every case here executes one command against a real executor and a real
+    /// op log, reopens the project from that log alone, and asserts the two
+    /// timelines serialize identically. No mocks: a case fails only when a real
+    /// reopen would lose real work.
+    mod clip_update_replay_equivalence {
+        use super::*;
+        use crate::core::commands::{
+            MoveAudioKeyframeCommand, RemoveAudioKeyframeCommand, SetAudioKeyframeValueCommand,
+            SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand,
+        };
+        use serde_json::Value;
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        /// Every command type this harness drives end-to-end.
+        ///
+        /// [`every_clip_update_command_type_is_covered_by_the_replay_harness`]
+        /// ties this list to `CommandPayload::SUPPORTED_COMMAND_TYPES`, so a
+        /// newly added command that maps to `OpKind::ClipUpdate` fails the
+        /// suite until it is listed here and given a case in
+        /// [`clip_update_replay_cases`].
+        ///
+        /// That build failure is the point. `ClipUpdate` is a shared op kind
+        /// whose replay path reconstructs each edit from payload keys, so a new
+        /// member is exactly as likely to be dropped on reopen as `SetClipSpeed`
+        /// was — and the failure mode is silent data loss on the user's next
+        /// open, not a crash or a red test. Making "not covered" a compile-time
+        /// obligation is what keeps the next one from shipping unnoticed.
+        const HARNESS_COVERED_CLIP_UPDATE_TYPES: &[&str] = &[
+            "AddAudioKeyframe",
+            "MoveAudioKeyframe",
+            "RemoveAudioKeyframe",
+            "ReverseClip",
+            "SetAudioFadeIn",
+            "SetAudioFadeOut",
+            "SetAudioKeyframeValue",
+            "SetClipAudio",
+            "SetClipBlendMode",
+            "SetClipEnabled",
+            "SetClipMotionKeyframes",
+            "SetClipMute",
+            "SetClipOpacity",
+            "SetClipSlowMotionInterpolation",
+            "SetClipSpeed",
+            "SetClipTransform",
+        ];
+
+        /// Ids of the single-clip fixture every case runs against.
+        struct ClipUpdateIds {
+            sequence_id: String,
+            track_id: String,
+            clip_id: String,
+        }
+
+        /// A live editing session plus the op log it appends to.
+        struct ClipUpdateFixture {
+            /// Owns the ops file and the media file; dropping it removes both.
+            _temp_dir: TempDir,
+            ops_path: PathBuf,
+            executor: CommandExecutor,
+            state: ProjectState,
+            ids: ClipUpdateIds,
+        }
+
+        /// One sequence, one video track, one asset, one five-second clip.
+        ///
+        /// Seeded through real commands so the resulting op log is one a real
+        /// session could have written — a hand-built log would not prove that
+        /// `build_operation_payload` and `apply_operation` agree.
+        fn build_clip_update_fixture() -> ClipUpdateFixture {
+            let temp_dir = TempDir::new().unwrap();
+            let ops_path = temp_dir.path().join("ops.jsonl");
+
+            let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+            let mut state = ProjectState::new_empty("Replay Harness");
+
+            let sequence_result = executor
+                .execute(
+                    Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                    &mut state,
+                )
+                .unwrap();
+            let sequence_id = sequence_result.created_ids[0].clone();
+            let track_id = state.sequences[&sequence_id].tracks[0].id.clone();
+
+            let asset_path = temp_dir.path().join("test.mp4");
+            std::fs::write(&asset_path, b"test").unwrap();
+            let asset_uri = asset_path.to_string_lossy().to_string();
+            let import_command =
+                ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+            executor
+                .execute(Box::new(import_command.clone()), &mut state)
+                .unwrap();
+
+            let insert_result = executor
+                .execute(
+                    Box::new(
+                        InsertClipCommand::new(
+                            &sequence_id,
+                            &track_id,
+                            import_command.asset_id(),
+                            0.0,
+                        )
+                        .with_source_range(0.0, 5.0),
+                    ),
+                    &mut state,
+                )
+                .unwrap();
+            let clip_id = insert_result.created_ids[0].clone();
+
+            ClipUpdateFixture {
+                _temp_dir: temp_dir,
+                ops_path,
+                executor,
+                state,
+                ids: ClipUpdateIds {
+                    sequence_id,
+                    track_id,
+                    clip_id,
+                },
+            }
+        }
+
+        /// One `ClipUpdate` command under test, plus whatever must exist first.
+        struct ClipUpdateReplayCase {
+            /// The `Command::type_name()` this case exercises.
+            type_name: &'static str,
+            /// Commands executed live before the one under test. Their ops land
+            /// in the same log, so the assertion covers the whole replay rather
+            /// than the final command in isolation.
+            preconditions: fn(&ClipUpdateIds) -> Vec<Box<dyn Command>>,
+            /// The command whose replay equivalence is asserted. It must change
+            /// the timeline, otherwise the equality assertion proves nothing.
+            command: fn(&ClipUpdateIds) -> Box<dyn Command>,
+        }
+
+        fn no_preconditions(_ids: &ClipUpdateIds) -> Vec<Box<dyn Command>> {
+            Vec::new()
+        }
+
+        /// The remove/move/set audio-keyframe commands need a keyframe to act
+        /// on, so it is added live and its op replays alongside theirs.
+        fn one_audio_keyframe(ids: &ClipUpdateIds) -> Vec<Box<dyn Command>> {
+            vec![Box::new(AddAudioKeyframeCommand::new(
+                &ids.sequence_id,
+                &ids.track_id,
+                &ids.clip_id,
+                1.0,
+                -6.0,
+                KeyframeInterpolation::Linear,
+            ))]
+        }
+
+        /// Every `ClipUpdate` command, each with a representative non-default
+        /// instance.
+        fn clip_update_replay_cases() -> Vec<ClipUpdateReplayCase> {
+            vec![
+                ClipUpdateReplayCase {
+                    type_name: "SetClipMute",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(SetClipMuteCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            true,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetClipTransform",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        let mut transform = Transform {
+                            rotation_deg: 30.0,
+                            ..Transform::default()
+                        };
+                        transform.position.x = 0.25;
+                        transform.scale.x = 0.5;
+                        Box::new(SetClipTransformCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            transform,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetClipMotionKeyframes",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        let mut end_transform = Transform::default();
+                        end_transform.scale.x = 2.0;
+                        end_transform.scale.y = 2.0;
+                        let keyframes = vec![
+                            TransformKeyframe {
+                                time_offset: 0.0,
+                                transform: Transform::default(),
+                                interpolation: KeyframeInterpolation::Linear,
+                            },
+                            TransformKeyframe {
+                                time_offset: 2.5,
+                                transform: end_transform,
+                                interpolation: KeyframeInterpolation::Hold,
+                            },
+                        ];
+                        Box::new(SetClipMotionKeyframesCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            keyframes,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetClipAudio",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(SetClipAudioCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            Some(-6.0),
+                            Some(0.5),
+                            None,
+                            None,
+                            None,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetClipSpeed",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(SetClipSpeedCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            2.0,
+                            true,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetClipSlowMotionInterpolation",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(SetClipSlowMotionInterpolationCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            SlowMotionInterpolation::FrameBlend,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetClipBlendMode",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(SetClipBlendModeCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            BlendMode::Multiply,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "AddAudioKeyframe",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(AddAudioKeyframeCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            1.0,
+                            -6.0,
+                            KeyframeInterpolation::Linear,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "RemoveAudioKeyframe",
+                    preconditions: one_audio_keyframe,
+                    command: |ids| {
+                        Box::new(RemoveAudioKeyframeCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            0,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "MoveAudioKeyframe",
+                    preconditions: one_audio_keyframe,
+                    command: |ids| {
+                        Box::new(MoveAudioKeyframeCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            0,
+                            2.0,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetAudioKeyframeValue",
+                    preconditions: one_audio_keyframe,
+                    command: |ids| {
+                        Box::new(SetAudioKeyframeValueCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            0,
+                            -3.0,
+                            Some(KeyframeInterpolation::Hold),
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetAudioFadeIn",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(SetAudioFadeInCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            0.5,
+                            FadeType::ConstantPower,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetAudioFadeOut",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(SetAudioFadeOutCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            0.5,
+                            FadeType::ConstantPower,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetClipOpacity",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(SetClipOpacityCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            0.5,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "SetClipEnabled",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(SetClipEnabledCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                            false,
+                        ))
+                    },
+                },
+                ClipUpdateReplayCase {
+                    type_name: "ReverseClip",
+                    preconditions: no_preconditions,
+                    command: |ids| {
+                        Box::new(ReverseClipCommand::new(
+                            &ids.sequence_id,
+                            &ids.track_id,
+                            &ids.clip_id,
+                        ))
+                    },
+                },
+            ]
+        }
+
+        /// Executes one case live and asserts the reopened timeline matches.
+        fn assert_clip_update_replays(case: &ClipUpdateReplayCase) {
+            let mut fixture = build_clip_update_fixture();
+
+            for precondition in (case.preconditions)(&fixture.ids) {
+                let precondition_type = precondition.type_name().to_string();
+                fixture
+                    .executor
+                    .execute(precondition, &mut fixture.state)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "precondition '{precondition_type}' for '{}' failed: {error}",
+                            case.type_name
+                        )
+                    });
+            }
+
+            let before: Value = serde_json::to_value(&fixture.state.sequences).unwrap();
+
+            let command = (case.command)(&fixture.ids);
+            assert_eq!(
+                command.type_name(),
+                case.type_name,
+                "the case table claims to exercise '{}' but builds a different command",
+                case.type_name
+            );
+            fixture
+                .executor
+                .execute(command, &mut fixture.state)
+                .unwrap_or_else(|error| panic!("'{}' failed to execute: {error}", case.type_name));
+
+            let live: Value = serde_json::to_value(&fixture.state.sequences).unwrap();
+            assert_ne!(
+                live, before,
+                "'{}' left the timeline unchanged, so its replay assertion has no teeth — \
+                 give the case a value that actually differs from the default",
+                case.type_name
+            );
+
+            let reopened_state = ProjectState::from_ops_log(
+                &OpsLog::new(&fixture.ops_path),
+                ProjectMeta::new("Replay"),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "reopening the project after '{}' failed: {error}",
+                    case.type_name
+                )
+            });
+            let reopened: Value = serde_json::to_value(&reopened_state.sequences).unwrap();
+
+            assert!(
+                live == reopened,
+                "'{}' does not survive a reopen: replaying its op log yields a different timeline \
+                 than the live session that wrote it. Either the logged payload is missing the \
+                 command's fields or ProjectState::apply_operation does not read them.\n{}",
+                case.type_name,
+                describe_json_difference(&live, &reopened)
+            );
+        }
+
+        /// Looks a case up by command type and runs it.
+        fn assert_named_clip_update_replays(type_name: &str) {
+            let cases = clip_update_replay_cases();
+            let case = cases
+                .iter()
+                .find(|case| case.type_name == type_name)
+                .unwrap_or_else(|| panic!("no replay case is declared for '{type_name}'"));
+            assert_clip_update_replays(case);
+        }
+
+        /// Upper bound on differing paths reported in a failure message.
+        const MAX_REPORTED_DIFFERENCES: usize = 20;
+
+        /// Renders the JSON paths where the live and reopened timelines differ.
+        ///
+        /// A whole-map `assert_eq!` dump of every sequence is unreadable; the
+        /// differing paths are what name the dropped field.
+        fn describe_json_difference(live: &Value, reopened: &Value) -> String {
+            let mut differences: Vec<String> = Vec::new();
+            collect_json_differences("", live, reopened, &mut differences);
+
+            if differences.is_empty() {
+                return "  (values differ but no leaf difference was located)".to_string();
+            }
+
+            let truncated = differences.len() >= MAX_REPORTED_DIFFERENCES;
+            let mut report = String::from("differing paths (live vs reopened):\n");
+            report.push_str(&differences.join("\n"));
+            if truncated {
+                report.push_str("\n  ... more differences not shown");
+            }
+            report
+        }
+
+        fn collect_json_differences(
+            path: &str,
+            live: &Value,
+            reopened: &Value,
+            out: &mut Vec<String>,
+        ) {
+            if live == reopened || out.len() >= MAX_REPORTED_DIFFERENCES {
+                return;
+            }
+
+            let null = Value::Null;
+            match (live, reopened) {
+                (Value::Object(live_map), Value::Object(reopened_map)) => {
+                    let mut keys: Vec<&String> =
+                        live_map.keys().chain(reopened_map.keys()).collect();
+                    keys.sort();
+                    keys.dedup();
+                    for key in keys {
+                        collect_json_differences(
+                            &format!("{path}/{key}"),
+                            live_map.get(key).unwrap_or(&null),
+                            reopened_map.get(key).unwrap_or(&null),
+                            out,
+                        );
+                    }
+                }
+                (Value::Array(live_items), Value::Array(reopened_items))
+                    if live_items.len() == reopened_items.len() =>
+                {
+                    for (index, (left, right)) in
+                        live_items.iter().zip(reopened_items.iter()).enumerate()
+                    {
+                        collect_json_differences(&format!("{path}/{index}"), left, right, out);
+                    }
+                }
+                _ => out.push(format!("  {path}: live={live} reopened={reopened}")),
+            }
+        }
+
+        /// Completeness guard: no `ClipUpdate` command may go unharnessed.
+        ///
+        /// `CommandPayload::SUPPORTED_COMMAND_TYPES` is what the CLI, MCP and
+        /// the frontend advertise as callable. Every one of those that resolves
+        /// to `OpKind::ClipUpdate` shares the replay path that already dropped
+        /// two commands' fields, so each must be covered here. Nothing in the
+        /// type system connects the two lists; this test is that connection.
+        #[test]
+        fn every_clip_update_command_type_is_covered_by_the_replay_harness() {
+            let advertised: Vec<&str> = crate::ipc::CommandPayload::SUPPORTED_COMMAND_TYPES
+                .iter()
+                .copied()
+                .filter(|payload_type| {
+                    matches!(
+                        CommandExecutor::type_name_to_op_kind(executed_type_name(payload_type)),
+                        Ok(OpKind::ClipUpdate)
+                    )
+                })
+                .collect();
+
+            assert!(
+                !advertised.is_empty(),
+                "no supported command type maps to OpKind::ClipUpdate any more — this guard is \
+                 no longer guarding anything, so either the op kind moved or the filter is wrong"
+            );
+
+            let uncovered: Vec<&str> = advertised
+                .iter()
+                .copied()
+                .filter(|payload_type| !HARNESS_COVERED_CLIP_UPDATE_TYPES.contains(payload_type))
+                .collect();
+            assert!(
+                uncovered.is_empty(),
+                "these commands map to OpKind::ClipUpdate but the replay harness never drives \
+                 them: {uncovered:?}. Add each to HARNESS_COVERED_CLIP_UPDATE_TYPES and give it a \
+                 case in clip_update_replay_cases, or its fields can be dropped on reopen without \
+                 a single test going red."
+            );
+
+            let stale: Vec<&str> = HARNESS_COVERED_CLIP_UPDATE_TYPES
+                .iter()
+                .copied()
+                .filter(|covered_type| !advertised.contains(covered_type))
+                .collect();
+            assert!(
+                stale.is_empty(),
+                "these types are listed as covered but are no longer advertised ClipUpdate \
+                 commands: {stale:?}. Drop them from HARNESS_COVERED_CLIP_UPDATE_TYPES."
+            );
+        }
+
+        /// Keeps the coverage list and the case table from drifting apart.
+        #[test]
+        fn the_harness_runs_a_case_for_every_type_it_claims_to_cover() {
+            let cases = clip_update_replay_cases();
+            let case_types: Vec<&str> = cases.iter().map(|case| case.type_name).collect();
+
+            let mut seen: HashSet<&str> = HashSet::new();
+            for case_type in &case_types {
+                assert!(
+                    seen.insert(case_type),
+                    "'{case_type}' has more than one case in clip_update_replay_cases"
+                );
+            }
+
+            for covered_type in HARNESS_COVERED_CLIP_UPDATE_TYPES {
+                assert!(
+                    case_types.contains(covered_type),
+                    "'{covered_type}' is listed as covered but has no case in \
+                     clip_update_replay_cases"
+                );
+            }
+
+            for case_type in &case_types {
+                assert!(
+                    HARNESS_COVERED_CLIP_UPDATE_TYPES.contains(case_type),
+                    "'{case_type}' has a case but is missing from \
+                     HARNESS_COVERED_CLIP_UPDATE_TYPES"
+                );
+            }
+        }
+
+        #[test]
+        fn set_clip_mute_survives_a_reopen() {
+            assert_named_clip_update_replays("SetClipMute");
+        }
+
+        #[test]
+        fn set_clip_transform_survives_a_reopen() {
+            assert_named_clip_update_replays("SetClipTransform");
+        }
+
+        #[test]
+        fn set_clip_motion_keyframes_survives_a_reopen() {
+            assert_named_clip_update_replays("SetClipMotionKeyframes");
+        }
+
+        #[test]
+        fn set_clip_audio_survives_a_reopen() {
+            assert_named_clip_update_replays("SetClipAudio");
+        }
+
+        #[test]
+        fn set_clip_speed_survives_a_reopen() {
+            assert_named_clip_update_replays("SetClipSpeed");
+        }
+
+        #[test]
+        fn set_clip_slow_motion_interpolation_survives_a_reopen() {
+            assert_named_clip_update_replays("SetClipSlowMotionInterpolation");
+        }
+
+        #[test]
+        fn set_clip_blend_mode_survives_a_reopen() {
+            assert_named_clip_update_replays("SetClipBlendMode");
+        }
+
+        #[test]
+        fn add_audio_keyframe_survives_a_reopen() {
+            assert_named_clip_update_replays("AddAudioKeyframe");
+        }
+
+        #[test]
+        fn remove_audio_keyframe_survives_a_reopen() {
+            assert_named_clip_update_replays("RemoveAudioKeyframe");
+        }
+
+        #[test]
+        fn move_audio_keyframe_survives_a_reopen() {
+            assert_named_clip_update_replays("MoveAudioKeyframe");
+        }
+
+        #[test]
+        fn set_audio_keyframe_value_survives_a_reopen() {
+            assert_named_clip_update_replays("SetAudioKeyframeValue");
+        }
+
+        #[test]
+        fn set_audio_fade_in_survives_a_reopen() {
+            assert_named_clip_update_replays("SetAudioFadeIn");
+        }
+
+        #[test]
+        fn set_audio_fade_out_survives_a_reopen() {
+            assert_named_clip_update_replays("SetAudioFadeOut");
+        }
+
+        #[test]
+        fn set_clip_opacity_survives_a_reopen() {
+            assert_named_clip_update_replays("SetClipOpacity");
+        }
+
+        #[test]
+        fn set_clip_enabled_survives_a_reopen() {
+            assert_named_clip_update_replays("SetClipEnabled");
+        }
+
+        #[test]
+        fn reverse_clip_survives_a_reopen() {
+            assert_named_clip_update_replays("ReverseClip");
+        }
+    }
 }
