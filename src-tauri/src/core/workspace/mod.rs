@@ -7,6 +7,7 @@
 pub mod ignore;
 pub mod index;
 pub mod path_resolver;
+pub mod project_sync;
 pub mod scanner;
 pub mod service;
 pub mod watcher;
