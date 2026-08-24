@@ -18,8 +18,8 @@ use crate::core::{
     masks::MaskGroup,
     project::{OpKind, Operation, OpsLog},
     timeline::{
-        AudioSettings, BlendMode, Clip, Marker, Sequence, SequenceHdrSettings, Track,
-        TransformKeyframe,
+        AudioSettings, BlendMode, Clip, Marker, Sequence, SequenceHdrSettings,
+        SlowMotionInterpolation, Track, TransformKeyframe,
     },
     AssetId, CoreError, CoreResult, EffectId, SequenceId,
 };
@@ -29,13 +29,16 @@ use crate::core::{
 /// An [`Operation`] carries an [`OpKind`] and no record of the command behind
 /// it, and `ClipUpdate` is shared by sixteen commands whose payload roots
 /// overlap — `SetClipSpeed` writes a root-level `reverse`, exactly like
-/// `ReverseClip`. Nesting the replayable flags under a key that only
-/// `SetClipOpacity`, `SetClipEnabled` and `ReverseClip` write is what lets
+/// `ReverseClip`. Nesting the replayable fields under a key that only the
+/// commands which own them write (`SetClipOpacity`, `SetClipEnabled`,
+/// `ReverseClip`, `SetClipSpeed`, `SetClipSlowMotionInterpolation`) is what lets
 /// replay tell "this command owns this field" from "this field happens to be
-/// here", so no command is ever half-applied.
+/// here", so no command is ever half-applied. `SetClipSpeed` writes both its
+/// `speed` and `reverse` here so replay applies the whole command at once.
 ///
-/// The three commands became executable in this same change, so no operation
-/// written by a released build carries these flags at the payload root.
+/// Operations written by builds before this key existed carry none of these
+/// fields under it, so their flag-only commands replay as no-ops rather than
+/// incorrectly — a clean skip, never a half-applied mutation.
 pub(crate) const CLIP_FLAGS_PAYLOAD_KEY: &str = "clipFlags";
 
 // =============================================================================
@@ -1255,10 +1258,13 @@ impl ProjectState {
     ///
     /// The flags are read only from [`CLIP_FLAGS_PAYLOAD_KEY`], never from the
     /// payload root. An [`Operation`] records an [`OpKind`] and nothing about
-    /// the command that produced it, and `ClipUpdate` covers sixteen commands:
-    /// `SetClipSpeed` logs a root-level `reverse` of its own, so reading the
-    /// root would replay half of that command — its reverse without its speed —
-    /// which is worse than replaying none of it.
+    /// the command that produced it, and `ClipUpdate` covers sixteen commands
+    /// whose payload roots overlap — `SetClipSpeed` writes a root-level `reverse`
+    /// exactly like `ReverseClip`. Reading only this namespace lets replay tell
+    /// "this command owns this field" from "this field happens to be at the
+    /// root," so no command is ever half-applied. `SetClipSpeed` logs both its
+    /// `speed` and `reverse` here, and its timeline duration is recomputed from
+    /// the clip's source range and speed exactly as live execution does.
     fn apply_replayed_clip_flags(clip: &mut Clip, payload: &serde_json::Value) -> CoreResult<()> {
         let Some(flags) = payload.get(CLIP_FLAGS_PAYLOAD_KEY) else {
             return Ok(());
@@ -1272,8 +1278,13 @@ impl ProjectState {
             )));
         }
 
-        if let Some(value) = flags.get("opacity") {
-            if !value.is_null() {
+        // ── Phase 1: parse and validate every field; mutate nothing. ──
+        // A malformed value in any field must abort the whole op cleanly rather
+        // than leave earlier fields half-applied — a corrupted or hand-edited
+        // log is untrusted input, and this namespace exists precisely so a
+        // `ClipUpdate` op replays whole or not at all.
+        let opacity = match flags.get("opacity") {
+            Some(value) if !value.is_null() => {
                 let opacity = value.as_f64().ok_or_else(|| {
                     CoreError::InvalidCommand("Invalid opacity value (expected number)".to_string())
                 })?;
@@ -1282,28 +1293,84 @@ impl ProjectState {
                         "Invalid opacity value (expected finite number)".to_string(),
                     ));
                 }
-                clip.opacity = (opacity as f32).clamp(0.0, 1.0);
+                Some((opacity as f32).clamp(0.0, 1.0))
             }
-        }
+            _ => None,
+        };
 
-        if let Some(value) = flags.get("enabled") {
-            if !value.is_null() {
-                clip.enabled = value.as_bool().ok_or_else(|| {
-                    CoreError::InvalidCommand(
-                        "Invalid enabled value (expected boolean)".to_string(),
-                    )
-                })?;
-            }
-        }
+        let enabled = match flags.get("enabled") {
+            Some(value) if !value.is_null() => Some(value.as_bool().ok_or_else(|| {
+                CoreError::InvalidCommand("Invalid enabled value (expected boolean)".to_string())
+            })?),
+            _ => None,
+        };
 
-        if let Some(value) = flags.get("reverse") {
-            if !value.is_null() {
-                clip.reverse = value.as_bool().ok_or_else(|| {
-                    CoreError::InvalidCommand(
-                        "Invalid reverse value (expected boolean)".to_string(),
-                    )
+        let reverse = match flags.get("reverse") {
+            Some(value) if !value.is_null() => Some(value.as_bool().ok_or_else(|| {
+                CoreError::InvalidCommand("Invalid reverse value (expected boolean)".to_string())
+            })?),
+            _ => None,
+        };
+
+        let slow_motion_interpolation = match flags.get("slowMotionInterpolation") {
+            Some(value) if !value.is_null() => Some(
+                serde_json::from_value::<SlowMotionInterpolation>(value.clone()).map_err(|e| {
+                    CoreError::InvalidCommand(format!("Invalid slowMotionInterpolation value: {e}"))
+                })?,
+            ),
+            _ => None,
+        };
+
+        // Speed also drives the clip's timeline duration, derived from the source
+        // range and the realized f32 speed with the same formula live execution
+        // uses (`SetClipSpeedCommand::execute`) — dividing by the f32 promoted to
+        // f64 makes replay bit-identical to live. Validating the f32 cast (not
+        // just the f64) closes the hole where a huge finite f64 overflows to
+        // infinity. Deriving rather than logging the duration keeps replay
+        // identical to live even if an earlier op changed the source range.
+        let speed_change = match flags.get("speed") {
+            Some(value) if !value.is_null() => {
+                let speed = value.as_f64().ok_or_else(|| {
+                    CoreError::InvalidCommand("Invalid speed value (expected number)".to_string())
                 })?;
+                if !speed.is_finite() || speed <= 0.0 {
+                    return Err(CoreError::InvalidCommand(
+                        "Invalid speed value (expected finite number > 0)".to_string(),
+                    ));
+                }
+                let speed_f32 = speed as f32;
+                if !speed_f32.is_finite() || speed_f32 <= 0.0 {
+                    return Err(CoreError::InvalidCommand(
+                        "Invalid speed value (out of range for a clip speed)".to_string(),
+                    ));
+                }
+                let duration_sec = clip.range.duration() / speed_f32 as f64;
+                if !duration_sec.is_finite() || duration_sec <= 0.0 {
+                    return Err(CoreError::InvalidCommand(
+                        "Clip duration must be finite and > 0 after speed change".to_string(),
+                    ));
+                }
+                Some((speed_f32, duration_sec))
             }
+            _ => None,
+        };
+
+        // ── Phase 2: every field parsed and validated — apply them all. ──
+        if let Some(opacity) = opacity {
+            clip.opacity = opacity;
+        }
+        if let Some(enabled) = enabled {
+            clip.enabled = enabled;
+        }
+        if let Some(reverse) = reverse {
+            clip.reverse = reverse;
+        }
+        if let Some(slow_motion_interpolation) = slow_motion_interpolation {
+            clip.slow_motion_interpolation = slow_motion_interpolation;
+        }
+        if let Some((speed, duration_sec)) = speed_change {
+            clip.speed = speed;
+            clip.place.duration_sec = duration_sec;
         }
 
         Ok(())
@@ -2880,6 +2947,66 @@ mod tests {
             .tracks
             .iter()
             .any(|track| track.name.contains("Recovered")));
+    }
+
+    #[test]
+    fn clip_flags_replay_is_atomic_when_a_later_field_is_invalid() {
+        // A corrupted or hand-edited log is untrusted input. A `clipFlags`
+        // object whose `speed` is invalid must abort the whole op cleanly, never
+        // half-apply the `reverse` that parsed before it.
+        let mut sequence = Sequence::new("Seq", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        let track = Track::new("Video 1", TrackKind::Video);
+        let track_id = track.id.clone();
+        sequence.add_track(track);
+
+        let clip = Clip::new("asset_a")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let clip_id = clip.id.clone();
+
+        let mut state = ProjectState::new_empty("Test Project");
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": clip,
+                }),
+            ))
+            .unwrap();
+
+        let err = state
+            .apply_operation(&Operation::new(
+                OpKind::ClipUpdate,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "clipFlags": { "reverse": true, "speed": 0.0 },
+                }),
+            ))
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidCommand(_)));
+
+        let clip = state
+            .get_sequence(&seq_id)
+            .unwrap()
+            .tracks
+            .iter()
+            .find_map(|t| t.get_clip(&clip_id))
+            .unwrap();
+        assert!(
+            !clip.reverse,
+            "reverse must not be applied when the op is rejected"
+        );
+        assert_eq!(clip.speed, 1.0, "speed must be unchanged when rejected");
     }
 
     #[test]

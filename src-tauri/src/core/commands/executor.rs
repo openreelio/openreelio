@@ -1448,14 +1448,25 @@ impl CommandExecutor {
                 // holds keeps replay idempotent.
                 //
                 // They go under `CLIP_FLAGS_PAYLOAD_KEY` rather than at the
-                // payload root because the root is shared: `SetClipSpeed` also
-                // writes `reverse` there, and replay — which sees only the
-                // `ClipUpdate` op kind — would otherwise apply that command's
-                // reverse without its speed.
+                // payload root because the root is shared: sixteen commands emit
+                // `ClipUpdate`, and replay sees only the op kind, never the
+                // command behind it. Nesting each command's owned fields under a
+                // namespace only that command writes is what lets replay apply
+                // "this command's speed and reverse together" without an unrelated
+                // command's root `reverse` leaking in. `SetClipSpeed` writes both
+                // `speed` and `reverse` here so replay applies the whole command
+                // or none of it.
                 let clip_flags = match type_name {
                     "SetClipOpacity" => Some(serde_json::json!({ "opacity": clip.opacity })),
                     "SetClipEnabled" => Some(serde_json::json!({ "enabled": clip.enabled })),
                     "ReverseClip" => Some(serde_json::json!({ "reverse": clip.reverse })),
+                    "SetClipSpeed" => Some(serde_json::json!({
+                        "speed": clip.speed,
+                        "reverse": clip.reverse,
+                    })),
+                    "SetClipSlowMotionInterpolation" => Some(serde_json::json!({
+                        "slowMotionInterpolation": clip.slow_motion_interpolation,
+                    })),
                     _ => None,
                 };
                 if let Some(clip_flags) = clip_flags {
@@ -2314,13 +2325,14 @@ mod tests {
         LinkClipsCommand, MoveClipCommand, OverwriteEditCommand, ReverseClipCommand,
         RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
         SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMotionKeyframesCommand,
-        SetClipOpacityCommand, SetClipSpeedCommand, SetMasterVolumeCommand,
-        SetTrackBlendModeCommand, SplitClipCommand, StateChange, TrimClipCommand,
-        UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
+        SetClipOpacityCommand, SetClipSlowMotionInterpolationCommand, SetClipSpeedCommand,
+        SetMasterVolumeCommand, SetTrackBlendModeCommand, SplitClipCommand, StateChange,
+        TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::masks::{MaskShape, RectMask};
     use crate::core::project::{OpKind, Operation, OpsLog, ProjectMeta, ProjectState};
+    use crate::core::timeline::SlowMotionInterpolation;
     use crate::core::timeline::{
         BlendMode, Clip, FadeType, KeyframeInterpolation, Sequence, SequenceFormat, Track,
         TrackKind, Transform, TransformKeyframe,
@@ -4029,15 +4041,15 @@ mod tests {
         assert_eq!(replayed_clip.reverse, live_clip.reverse);
     }
 
-    /// Replay must never apply part of a command it does not replay in full.
+    /// `SetClipSpeed` must replay in full — speed, reverse, and the derived
+    /// timeline duration — so a project reopened from its op log matches the
+    /// live session that produced it.
     ///
-    /// `SetClipSpeed` shares the `ClipUpdate` op kind with `ReverseClip` and
-    /// logs its own root-level `reverse`. Replaying that field on its own would
-    /// leave the clip reversed at the wrong speed — a half-applied command,
-    /// strictly worse than the skipped one. Full `SetClipSpeed` replay is a
-    /// separate gap; the invariant here is all-or-nothing.
+    /// It shares the `ClipUpdate` op kind with fifteen other commands, so its
+    /// owned fields ride under `CLIP_FLAGS_PAYLOAD_KEY`; replay applies both
+    /// `speed` and `reverse` together, never one without the other.
     #[test]
-    fn test_replay_does_not_half_apply_a_speed_change_as_a_reverse() {
+    fn test_replay_applies_a_speed_change_in_full() {
         let temp_dir = TempDir::new().unwrap();
         let ops_path = temp_dir.path().join("ops.jsonl");
 
@@ -4081,6 +4093,13 @@ mod tests {
             )
             .unwrap();
 
+        let live_clip = state.sequences[&seq_id]
+            .get_track(&track_id)
+            .unwrap()
+            .get_clip(&clip_id)
+            .unwrap();
+        let live_duration = live_clip.place.duration_sec;
+
         let replayed =
             ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
                 .unwrap();
@@ -4092,8 +4111,85 @@ mod tests {
 
         assert_eq!(
             (replayed_clip.speed, replayed_clip.reverse),
-            (1.0, false),
-            "SetClipSpeed replays neither field or both, never just reverse"
+            (2.0, true),
+            "SetClipSpeed replays both its speed and its reverse"
+        );
+        assert_eq!(
+            replayed_clip.place.duration_sec, live_duration,
+            "replayed timeline duration matches the live-derived duration"
+        );
+        // 5 s of source at 2x plays back in 2.5 s.
+        assert!(
+            (replayed_clip.place.duration_sec - 2.5).abs() < 1e-9,
+            "duration derives from source range and speed: got {}",
+            replayed_clip.place.duration_sec
+        );
+    }
+
+    /// `SetClipSlowMotionInterpolation` shares the `ClipUpdate` op kind and its
+    /// interpolation mode was silently dropped on reopen before it rode under
+    /// `CLIP_FLAGS_PAYLOAD_KEY`. Replay must now restore it.
+    #[test]
+    fn test_replay_applies_a_slow_motion_interpolation_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+
+        let insert_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, import_cmd.asset_id(), 0.0)
+                        .with_source_range(0.0, 5.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let clip_id = insert_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(SetClipSlowMotionInterpolationCommand::new(
+                    &seq_id,
+                    &track_id,
+                    &clip_id,
+                    SlowMotionInterpolation::FrameBlend,
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_clip = replayed.sequences[&seq_id]
+            .get_track(&track_id)
+            .unwrap()
+            .get_clip(&clip_id)
+            .unwrap();
+
+        assert_eq!(
+            replayed_clip.slow_motion_interpolation,
+            SlowMotionInterpolation::FrameBlend,
+            "SetClipSlowMotionInterpolation replays its interpolation mode"
         );
     }
 
