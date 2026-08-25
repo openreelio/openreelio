@@ -1642,6 +1642,7 @@ mod tauri_app {
                 $crate::ipc::cancel_job,
                 $crate::ipc::get_job_stats,
                 // Render commands
+                $crate::ipc::validate_export,
                 $crate::ipc::start_render,
                 $crate::ipc::render_range,
                 $crate::ipc::batch_render,
@@ -2173,6 +2174,7 @@ mod tauri_app {
             ipc::cancel_job,
             ipc::get_job_stats,
             // Render commands
+            ipc::validate_export,
             ipc::start_render,
             ipc::render_range,
             ipc::batch_render,

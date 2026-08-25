@@ -3,7 +3,12 @@
  */
 
 export { ExportDialog } from './ExportDialog';
-export type { ExportDialogProps, ExportPreset, ExportStatus } from './types';
+export type { ExportDialogProps, ExportFinding, ExportPreset, ExportStatus } from './types';
+
+// Export preflight
+export { ExportValidationNotice } from './ExportValidationNotice';
+export type { ExportValidationNoticeProps } from './ExportValidationNotice';
+export { useExportFindingNavigation } from './useExportFindingNavigation';
 
 // Helper components
 export { PresetOption, ProgressDisplay } from './ExportHelpers';

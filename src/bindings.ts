@@ -537,6 +537,24 @@ async getJobStats() : Promise<Result<JsonValue, string>> {
 }
 },
 /**
+ * Runs the export's validation passes without starting a render.
+ * 
+ * The dialog calls this first so a project that would be refused — or silently
+ * degraded — is reported against the clips that caused it, before any encoding
+ * work begins. It takes the same inputs `start_render`/`render_range` use to
+ * build their settings, and runs them through the same helper those commands
+ * enforce with, so a clean preflight means a render that will not be refused.
+ * 
+ * Pass `in_point`/`out_point` for the range case; omit both for a full export.
+ */
+async validateExport(sequenceId: string, outputPath: string, preset: string, settings: VideoExportRequest | null, inPoint: number | null, outPoint: number | null) : Promise<Result<ExportValidationDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("validate_export", { sequenceId, outputPath, preset, settings, inPoint, outPoint }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Starts final render export
  * 
  * This command validates the export settings before starting the render,
@@ -5342,6 +5360,38 @@ name: string;
  */
 extensions: string[] }
 /**
+ * One preflight finding, carrying the ids needed to navigate to its cause.
+ */
+export type ExportFindingDto = { 
+/**
+ * Whether this blocks the export or only degrades it.
+ */
+severity: ExportFindingSeverityDto; 
+/**
+ * Human-readable description of the problem.
+ */
+message: string; 
+/**
+ * Clip the finding is about, when it is about one clip.
+ */
+clipId: string | null; 
+/**
+ * Sequence the finding belongs to.
+ */
+sequenceId: string | null }
+/**
+ * How badly a preflight finding affects the export (IPC DTO).
+ */
+export type ExportFindingSeverityDto = 
+/**
+ * The export is blocked until this is fixed.
+ */
+"error" | 
+/**
+ * The export runs, but the file differs from the timeline.
+ */
+"warning"
+/**
  * User-facing quality tier that maps to concrete encoder settings.
  */
 export type ExportQualityTier =
@@ -5366,6 +5416,18 @@ export type ExportQualityTier =
  */
 "custom"
 export type ExportSettingsDto = { defaultFormat: string; defaultVideoCodec: string; defaultAudioCodec: string; defaultExportLocation: string | null; openFolderAfterExport: boolean }
+/**
+ * Result of an export preflight (IPC DTO).
+ */
+export type ExportValidationDto = { 
+/**
+ * Whether a render started with these settings would be allowed to run.
+ */
+isValid: boolean; 
+/**
+ * Every finding from both validation passes, errors and warnings alike.
+ */
+findings: ExportFindingDto[] }
 export type ExternalAgentApprovalTokenGrant = { token: string; tokenId: string; sessionId: string; runId: string | null; planId: string | null; projectId: string; runtimeId: string; scopes: string[]; createdAt: number; expiresAt: number }
 export type ExternalAgentApprovalTokenInfo = { tokenId: string; sessionId: string; runId: string | null; planId: string | null; projectId: string; runtimeId: string; scopes: string[]; createdAt: number; expiresAt: number }
 export type ExternalAgentApprovalTokenValidation = { valid: boolean; reason: string | null; grant: ExternalAgentApprovalTokenInfo | null }

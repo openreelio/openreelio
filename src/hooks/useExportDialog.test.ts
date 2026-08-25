@@ -11,6 +11,24 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useExportDialog } from './useExportDialog';
 
+/** What the preflight returns for a project with nothing worth reporting. */
+const CLEAN_PREFLIGHT = { isValid: true, findings: [] };
+
+/**
+ * Answers the preflight with a clean result and every other command with
+ * `result`, so a test only has to describe the call it cares about.
+ */
+function mockBackend(result: unknown): void {
+  vi.mocked(invoke).mockImplementation(async (command) =>
+    command === 'validate_export' ? CLEAN_PREFLIGHT : result,
+  );
+}
+
+/** Builds one preflight finding. */
+function finding(severity: 'error' | 'warning', message: string, clipId: string | null) {
+  return { severity, message, clipId, sequenceId: 'sequence-1' };
+}
+
 describe('useExportDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -45,7 +63,7 @@ describe('useExportDialog', () => {
   });
 
   it('should call render_range when range export is enabled', async () => {
-    vi.mocked(invoke).mockResolvedValue({
+    mockBackend({
       jobId: 'job-1',
       outputPath: '/tmp/out.mp4',
       status: 'started',
@@ -152,7 +170,7 @@ describe('useExportDialog', () => {
   });
 
   it('should call start_render with structured video settings for video export', async () => {
-    vi.mocked(invoke).mockResolvedValue({
+    mockBackend({
       jobId: 'job-1',
       outputPath: '/tmp/out.mp4',
       status: 'started',
@@ -190,6 +208,9 @@ describe('useExportDialog', () => {
 
   it('should merge sequence HDR settings into video export requests', async () => {
     vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'validate_export') {
+        return CLEAN_PREFLIGHT;
+      }
       if (command === 'get_sequence_hdr_settings') {
         return {
           hdrMode: 'hdr10',
@@ -346,6 +367,124 @@ describe('useExportDialog', () => {
       type: 'completed',
       outputPath: '/tmp/sequence.fcpxml',
       duration: 0,
+    });
+  });
+
+  describe('export preflight', () => {
+    const renderVideoDialog = () =>
+      renderHook(() =>
+        useExportDialog({
+          isOpen: true,
+          sequenceId: 'sequence-1',
+          sequenceName: 'Sequence',
+        }),
+      );
+
+    const configureVideoExport = (result: ReturnType<typeof renderVideoDialog>['result']) => {
+      act(() => {
+        result.current.setOutputPath('/tmp/out.mp4');
+        result.current.setSelectedPreset('mp4_high');
+      });
+    };
+
+    it('should start the render without a prompt when the preflight finds nothing', async () => {
+      mockBackend({ jobId: 'job-1', outputPath: '/tmp/out.mp4', status: 'started' });
+
+      const { result } = renderVideoDialog();
+      configureVideoExport(result);
+
+      await act(async () => {
+        await result.current.handleExport();
+      });
+
+      expect(invoke).toHaveBeenCalledWith('start_render', expect.anything());
+      expect(result.current.status.type).toBe('exporting');
+    });
+
+    it('should block the export and never render when the preflight reports an error', async () => {
+      vi.mocked(invoke).mockImplementation(async (command) => {
+        if (command === 'validate_export') {
+          return {
+            isValid: false,
+            findings: [finding('error', 'Layered video is not supported', 'pip-clip')],
+          };
+        }
+        return { jobId: 'job-1', outputPath: '/tmp/out.mp4', status: 'started' };
+      });
+
+      const { result } = renderVideoDialog();
+      configureVideoExport(result);
+
+      await act(async () => {
+        await result.current.handleExport();
+      });
+
+      expect(result.current.status).toEqual({
+        type: 'validation',
+        blocked: true,
+        findings: [finding('error', 'Layered video is not supported', 'pip-clip')],
+      });
+      expect(invoke).not.toHaveBeenCalledWith('start_render', expect.anything());
+    });
+
+    it('should render only after the user confirms a warning-only preflight', async () => {
+      vi.mocked(invoke).mockImplementation(async (command) => {
+        if (command === 'validate_export') {
+          return {
+            isValid: true,
+            findings: [finding('warning', 'Motion keyframes render static', 'moving-clip')],
+          };
+        }
+        return { jobId: 'job-1', outputPath: '/tmp/out.mp4', status: 'started' };
+      });
+
+      const { result } = renderVideoDialog();
+      configureVideoExport(result);
+
+      await act(async () => {
+        await result.current.handleExport();
+      });
+
+      expect(result.current.status).toEqual({
+        type: 'validation',
+        blocked: false,
+        findings: [finding('warning', 'Motion keyframes render static', 'moving-clip')],
+      });
+      expect(invoke).not.toHaveBeenCalledWith('start_render', expect.anything());
+
+      await act(async () => {
+        await result.current.confirmExport();
+      });
+
+      expect(invoke).toHaveBeenCalledWith('start_render', expect.anything());
+      expect(result.current.status.type).toBe('exporting');
+    });
+
+    it('should return to the settings without rendering when the preflight is cancelled', async () => {
+      vi.mocked(invoke).mockImplementation(async (command) => {
+        if (command === 'validate_export') {
+          return {
+            isValid: true,
+            findings: [finding('warning', 'Motion keyframes render static', 'moving-clip')],
+          };
+        }
+        return { jobId: 'job-1', outputPath: '/tmp/out.mp4', status: 'started' };
+      });
+
+      const { result } = renderVideoDialog();
+      configureVideoExport(result);
+
+      await act(async () => {
+        await result.current.handleExport();
+      });
+
+      act(() => {
+        result.current.cancelValidation();
+      });
+
+      expect(result.current.status).toEqual({ type: 'idle' });
+      expect(result.current.showSettings).toBe(true);
+      expect(invoke).not.toHaveBeenCalledWith('start_render', expect.anything());
     });
   });
 

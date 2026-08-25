@@ -43,9 +43,167 @@ async fn validate_export_settings_off_runtime(
     .map_err(|error| format!("Export validation task failed: {}", error))
 }
 
+/// Everything an export checks before it is allowed to start.
+///
+/// An export runs two independent validation passes — the settings pass and the
+/// render-plan pass — and refuses on either. Keeping them together in one type
+/// is what lets the preflight command report exactly the set of problems the
+/// render enforces, instead of a second opinion that can drift from it.
+pub(crate) struct ExportPreflight {
+    settings: crate::core::render::ExportValidation,
+    plan: crate::core::render::RenderPlan,
+}
+
+impl ExportPreflight {
+    /// Whether a render started right now would be allowed to proceed.
+    fn is_valid(&self) -> bool {
+        self.settings.is_valid && self.plan.validation.is_valid
+    }
+
+    /// Refuses the export exactly as the render commands always have.
+    ///
+    /// The settings pass is reported before the plan pass, and each keeps its
+    /// own message prefix, so an existing caller reading the error string sees
+    /// the same text it saw before.
+    fn enforce(&self) -> Result<(), String> {
+        if !self.settings.is_valid {
+            return Err(format!(
+                "Export validation failed: {}",
+                self.settings.errors.join("; ")
+            ));
+        }
+        if !self.plan.validation.is_valid {
+            return Err(format!(
+                "Render plan validation failed: {}",
+                self.plan.validation.errors.join("; ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// Logs the non-blocking findings; `scope` names the export that produced them.
+    fn log_warnings(&self, scope: &str) {
+        for warning in &self.settings.warnings {
+            tracing::warn!("{} warning: {}", scope, warning);
+        }
+        for warning in &self.plan.validation.warnings {
+            tracing::warn!("Render plan warning: {}", warning);
+        }
+    }
+
+    /// Flattens both passes into one navigable list for the UI.
+    fn findings(&self) -> Vec<ExportFindingDto> {
+        use crate::core::render::ExportFindingSeverity;
+
+        let mut findings: Vec<ExportFindingDto> = self
+            .settings
+            .findings
+            .iter()
+            .map(|finding| ExportFindingDto {
+                severity: match finding.severity {
+                    ExportFindingSeverity::Error => ExportFindingSeverityDto::Error,
+                    ExportFindingSeverity::Warning => ExportFindingSeverityDto::Warning,
+                },
+                message: finding.message.clone(),
+                clip_id: finding.clip_id.clone(),
+                sequence_id: finding.sequence_id.clone(),
+            })
+            .collect();
+
+        // The render-plan pass reports findings as plain strings, so even the
+        // ones that name a clip carry no structured id to point at yet; these
+        // rows render as (clip-named) plain text rather than jump-to-clip
+        // buttons. Threading structured clip ids through RenderPlanValidation
+        // the way ExportValidation now does is a follow-up.
+        let plan_sequence_id = Some(self.plan.sequence_id.clone());
+        findings.extend(
+            self.plan
+                .validation
+                .errors
+                .iter()
+                .map(|message| ExportFindingDto {
+                    severity: ExportFindingSeverityDto::Error,
+                    message: message.clone(),
+                    clip_id: None,
+                    sequence_id: plan_sequence_id.clone(),
+                }),
+        );
+        findings.extend(
+            self.plan
+                .validation
+                .warnings
+                .iter()
+                .map(|message| ExportFindingDto {
+                    severity: ExportFindingSeverityDto::Warning,
+                    message: message.clone(),
+                    clip_id: None,
+                    sequence_id: plan_sequence_id.clone(),
+                }),
+        );
+
+        findings
+    }
+}
+
+/// Runs both validation passes an export performs, without starting one.
+///
+/// `start_render`, `render_range` and the `validate_export` preflight all go
+/// through here so the dialog can never warn about something the render does
+/// not enforce, or stay silent about something it does.
+pub(crate) async fn run_export_preflight(
+    sequence: &crate::core::timeline::Sequence,
+    assets: &std::collections::HashMap<String, crate::core::assets::Asset>,
+    effects: &std::collections::HashMap<String, crate::core::effects::Effect>,
+    render_graph: &crate::core::render::RenderGraph,
+    settings: &crate::core::render::ExportSettings,
+) -> Result<ExportPreflight, String> {
+    let settings_validation =
+        validate_export_settings_off_runtime(sequence, assets, effects, settings).await?;
+    let plan = crate::core::render::build_render_plan(render_graph, assets, effects, settings);
+
+    Ok(ExportPreflight {
+        settings: settings_validation,
+        plan,
+    })
+}
+
 // =============================================================================
 // DTOs
 // =============================================================================
+
+/// How badly a preflight finding affects the export (IPC DTO).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFindingSeverityDto {
+    /// The export is blocked until this is fixed.
+    Error,
+    /// The export runs, but the file differs from the timeline.
+    Warning,
+}
+
+/// One preflight finding, carrying the ids needed to navigate to its cause.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportFindingDto {
+    /// Whether this blocks the export or only degrades it.
+    pub severity: ExportFindingSeverityDto,
+    /// Human-readable description of the problem.
+    pub message: String,
+    /// Clip the finding is about, when it is about one clip.
+    pub clip_id: Option<String>,
+    /// Sequence the finding belongs to.
+    pub sequence_id: Option<String>,
+}
+
+/// Result of an export preflight (IPC DTO).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportValidationDto {
+    /// Whether a render started with these settings would be allowed to run.
+    pub is_valid: bool,
+    /// Every finding from both validation passes, errors and warnings alike.
+    pub findings: Vec<ExportFindingDto>,
+}
 
 /// Result of starting a render export job.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
@@ -346,6 +504,112 @@ async fn resolve_export_hardware_preferences(
 // Commands
 // =============================================================================
 
+/// Runs the export's validation passes without starting a render.
+///
+/// The dialog calls this first so a project that would be refused — or silently
+/// degraded — is reported against the clips that caused it, before any encoding
+/// work begins. It takes the same inputs `start_render`/`render_range` use to
+/// build their settings, and runs them through the same helper those commands
+/// enforce with, so a clean preflight means a render that will not be refused.
+///
+/// Pass `in_point`/`out_point` for the range case; omit both for a full export.
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip(state), fields(sequence_id = %sequence_id, preset = %preset))]
+pub async fn validate_export(
+    sequence_id: String,
+    output_path: String,
+    preset: String,
+    settings: Option<VideoExportRequest>,
+    in_point: Option<f64>,
+    out_point: Option<f64>,
+    state: State<'_, AppState>,
+) -> Result<ExportValidationDto, String> {
+    if let (Some(in_pt), Some(out_pt)) = (in_point, out_point) {
+        if in_pt >= out_pt {
+            return Err("In point must be before Out point".to_string());
+        }
+        if in_pt < 0.0 {
+            return Err("In point must be non-negative".to_string());
+        }
+    }
+
+    let (sequence, assets, effects, render_graph, project_path) = {
+        let guard = state.project.lock().await;
+
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let sequence = project
+            .state
+            .sequences
+            .get(&sequence_id)
+            .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
+            .clone();
+
+        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
+            .map_err(|e| e.to_ipc_error())?;
+
+        let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
+            .state
+            .assets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let effects: std::collections::HashMap<String, crate::core::effects::Effect> = project
+            .state
+            .effects
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        (
+            sequence,
+            assets,
+            effects,
+            render_graph,
+            project.path.clone(),
+        )
+    };
+
+    // The output path decides the container, which the settings pass validates,
+    // so the preflight has to resolve it exactly the way the render does.
+    let approved_dirs = state.approved_export_dirs_snapshot().await;
+    let roots = export_allowed_roots(&project_path, &approved_dirs);
+    let root_refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
+    let validated_output_path =
+        validate_scoped_output_path(&output_path, "Output path", &root_refs)?;
+
+    // Hardware preferences are deliberately not resolved here: they only pick an
+    // encoder and a GPU device, neither of which any validator inspects, and
+    // resolving them would spawn two FFmpeg probes for a check that is supposed
+    // to be cheap enough to run on every Export click.
+    let export_settings = build_export_settings(
+        validated_output_path,
+        &preset,
+        settings.as_ref(),
+        in_point,
+        out_point,
+    )?;
+
+    let preflight = run_export_preflight(
+        &sequence,
+        &assets,
+        &effects,
+        &render_graph,
+        &export_settings,
+    )
+    .await?;
+
+    Ok(ExportValidationDto {
+        is_valid: preflight.is_valid(),
+        findings: preflight.findings(),
+    })
+}
+
 /// Starts final render export
 ///
 /// This command validates the export settings before starting the render,
@@ -440,28 +704,15 @@ pub async fn start_render(
     resolve_export_hardware_preferences(&app_handle, &ffmpeg.info().ffmpeg_path, &mut settings)
         .await?;
 
-    // Validate export settings before starting
-    let validation =
-        validate_export_settings_off_runtime(&sequence, &assets, &effects, &settings).await?;
-    if !validation.is_valid {
-        let error_msg = validation.errors.join("; ");
-        return Err(format!("Export validation failed: {}", error_msg));
-    }
+    // Validate export settings and the render plan before starting. This is the
+    // same helper the `validate_export` preflight calls, so the dialog's warning
+    // list and this refusal can never disagree.
+    let preflight =
+        run_export_preflight(&sequence, &assets, &effects, &render_graph, &settings).await?;
+    preflight.enforce()?;
+    preflight.log_warnings("Export");
 
-    // Log warnings but continue
-    for warning in &validation.warnings {
-        tracing::warn!("Export warning: {}", warning);
-    }
-
-    let render_plan =
-        crate::core::render::build_render_plan(&render_graph, &assets, &effects, &settings);
-    if !render_plan.validation.is_valid {
-        let error_msg = render_plan.validation.errors.join("; ");
-        return Err(format!("Render plan validation failed: {}", error_msg));
-    }
-    for warning in &render_plan.validation.warnings {
-        tracing::warn!("Render plan warning: {}", warning);
-    }
+    let render_plan = preflight.plan;
     let plan_hash = render_plan.plan_hash.clone();
 
     // Create export engine
@@ -697,33 +948,16 @@ pub async fn render_range(
     resolve_export_hardware_preferences(&app_handle, &ffmpeg.info().ffmpeg_path, &mut settings)
         .await?;
 
-    let validation =
-        validate_export_settings_off_runtime(&sequence, &assets, &effects, &settings).await?;
-    if !validation.is_valid {
-        return Err(format!(
-            "Export validation failed: {}",
-            validation.errors.join("; ")
-        ));
-    }
+    let preflight =
+        run_export_preflight(&sequence, &assets, &effects, &render_graph, &settings).await?;
+    preflight.enforce()?;
 
     // Same warnings `start_render` logs: motion keyframes and the rest describe
     // ways the file will differ from the preview, and a range export differs the
     // same way.
-    for warning in &validation.warnings {
-        tracing::warn!("Range export warning: {}", warning);
-    }
+    preflight.log_warnings("Range export");
 
-    let render_plan =
-        crate::core::render::build_render_plan(&render_graph, &assets, &effects, &settings);
-    if !render_plan.validation.is_valid {
-        return Err(format!(
-            "Render plan validation failed: {}",
-            render_plan.validation.errors.join("; ")
-        ));
-    }
-    for warning in &render_plan.validation.warnings {
-        tracing::warn!("Render plan warning: {}", warning);
-    }
+    let render_plan = preflight.plan;
     let plan_hash = render_plan.plan_hash.clone();
 
     let engine = ExportEngine::new(ffmpeg.clone());
