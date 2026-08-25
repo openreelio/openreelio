@@ -16,8 +16,9 @@ use crate::core::{
 
 use super::{
     export::{
-        append_ass_text_overlay, append_black_video_gap, append_drawtext_text_overlays,
-        append_master_audio_output, append_output_time_range_args, append_timeline_video_output,
+        append_animated_video_transform_composition, append_ass_text_overlay,
+        append_black_video_gap, append_drawtext_text_overlays, append_master_audio_output,
+        append_output_time_range_args, append_timeline_video_output,
         append_video_stream_normalization, append_video_transform_composition,
         apply_audio_mix_settings, asset_has_playable_audio, build_audio_trim_filter,
         build_video_trim_filter, clip_audio_is_suppressed_by_companion,
@@ -30,7 +31,10 @@ use super::{
         AssetAudioInfo, ExportEngine, ExportError, ExportSettings, SourceFrameCountCache,
         VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
-    transform_layout::compute_clip_transform_layout,
+    transform_layout::{
+        clip_motion_renders_animated, compute_clip_transform_layout, render_opacity,
+        resolve_clip_motion_track,
+    },
     transition_stitch::{
         clip_stream_frames, plan_sequence_transitions, stitch_transition_groups, ClipHandles,
     },
@@ -276,26 +280,55 @@ pub(super) fn build_sequence_ffmpeg_args(
                                     ))
                                 })?;
 
-                        let layout = compute_clip_transform_layout(
+                        // Keyframed motion animates the composite; everything
+                        // else — including motion that turns the picture, which
+                        // FFmpeg cannot animate alongside a changing frame size
+                        // — composites once at the clip's base transform.
+                        let motion_track = resolve_clip_motion_track(
                             source_width,
                             source_height,
                             output_width,
                             output_height,
-                            &clip.transform,
-                            clip.opacity,
-                        );
+                            clip,
+                            handles.head_sec,
+                        )
+                        .filter(|_| clip_motion_renders_animated(clip));
 
-                        append_video_transform_composition(
-                            &mut filter_complex,
-                            &video_out_label,
-                            &normalized_video_label,
-                            &layout,
-                            segment_duration_sec,
-                            output_width,
-                            output_height,
-                            output_fps,
-                            output_pixel_format,
-                        );
+                        if let Some(motion_track) = motion_track {
+                            append_animated_video_transform_composition(
+                                &mut filter_complex,
+                                &video_out_label,
+                                &normalized_video_label,
+                                &motion_track,
+                                render_opacity(clip.opacity),
+                                segment_duration_sec,
+                                output_width,
+                                output_height,
+                                output_fps,
+                                output_pixel_format,
+                            );
+                        } else {
+                            let layout = compute_clip_transform_layout(
+                                source_width,
+                                source_height,
+                                output_width,
+                                output_height,
+                                &clip.transform,
+                                clip.opacity,
+                            );
+
+                            append_video_transform_composition(
+                                &mut filter_complex,
+                                &video_out_label,
+                                &normalized_video_label,
+                                &layout,
+                                segment_duration_sec,
+                                output_width,
+                                output_height,
+                                output_fps,
+                                output_pixel_format,
+                            );
+                        }
                     } else {
                         append_video_stream_normalization(
                             &mut filter_complex,
