@@ -34,7 +34,8 @@
 //! R(t) * (x, y) = (x*cos(t) - y*sin(t), x*sin(t) + y*cos(t))
 //! ```
 
-use crate::core::timeline::Transform;
+use crate::core::timeline::{Clip, KeyframeInterpolation, Transform};
+use crate::core::Point2D;
 
 /// Smallest scale factor a clip may render at.
 ///
@@ -142,29 +143,20 @@ pub(super) fn compute_clip_transform_layout(
 
     // The preview fits the source inside the canvas before applying the clip's
     // own scale, so an identity transform is a letterboxed fit and nothing else.
-    let base_scale = (canvas_width / source_width).min(canvas_height / source_height);
-    let base_scale = if base_scale.is_finite() && base_scale > 0.0 {
-        base_scale
-    } else {
-        warn_fallback("base scale", base_scale);
-        1.0
-    };
+    let base_scale = contain_fit_scale(source_width, source_height, canvas_width, canvas_height);
 
     let scale_x = sanitize_scale(transform.scale.x, "scale.x");
     let scale_y = sanitize_scale(transform.scale.y, "scale.y");
 
-    // Both axes shrink by the same factor when the frame is too big to render,
-    // because clamping them independently would silently restretch the picture:
-    // a 100x scale on 16:9 would come out square.
-    let ideal_width = source_width * base_scale * scale_x;
-    let ideal_height = source_height * base_scale * scale_y;
-    let shrink = uniform_shrink(
-        ideal_width,
-        ideal_height,
-        frame_dimension_limit(canvas_width, canvas_height),
+    let (scaled_width, scaled_height) = scaled_frame_dimensions(
+        source_width,
+        source_height,
+        canvas_width,
+        canvas_height,
+        base_scale,
+        scale_x,
+        scale_y,
     );
-    let scaled_width = align_dimension(ideal_width * shrink);
-    let scaled_height = align_dimension(ideal_height * shrink);
 
     let rotation_deg = sanitize_finite(transform.rotation_deg, 0.0, "rotation");
     let rotation_rad = rotation_deg.to_radians();
@@ -222,6 +214,52 @@ pub(super) fn compute_clip_transform_layout(
         overlay_y,
         opacity: sanitize_opacity(opacity),
     }
+}
+
+/// The contain-fit factor that maps the source onto the canvas at scale 1.
+///
+/// Shared by the static layout and the animated one so an identity transform is
+/// a letterboxed fit in both.
+fn contain_fit_scale(
+    source_width: f64,
+    source_height: f64,
+    canvas_width: f64,
+    canvas_height: f64,
+) -> f64 {
+    let base_scale = (canvas_width / source_width).min(canvas_height / source_height);
+    if base_scale.is_finite() && base_scale > 0.0 {
+        base_scale
+    } else {
+        warn_fallback("base scale", base_scale);
+        1.0
+    }
+}
+
+/// The even pixel dimensions a clip's picture is scaled to before rotation.
+///
+/// Both axes shrink by the same factor when the frame is too big to render,
+/// because clamping them independently would silently restretch the picture: a
+/// 100x scale on 16:9 would come out square.
+fn scaled_frame_dimensions(
+    source_width: f64,
+    source_height: f64,
+    canvas_width: f64,
+    canvas_height: f64,
+    base_scale: f64,
+    scale_x: f64,
+    scale_y: f64,
+) -> (u32, u32) {
+    let ideal_width = source_width * base_scale * scale_x;
+    let ideal_height = source_height * base_scale * scale_y;
+    let shrink = uniform_shrink(
+        ideal_width,
+        ideal_height,
+        frame_dimension_limit(canvas_width, canvas_height),
+    );
+    (
+        align_dimension(ideal_width * shrink),
+        align_dimension(ideal_height * shrink),
+    )
 }
 
 fn sanitize_scale(value: f64, field: &str) -> f64 {
@@ -324,6 +362,300 @@ fn round_to_even_i32(value: f64) -> i32 {
     }
     let even = (value / DIMENSION_ALIGNMENT).round() * DIMENSION_ALIGNMENT;
     even.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+}
+
+// =============================================================================
+// Animated motion
+// =============================================================================
+
+/// One motion keyframe resolved to the geometry the graph animates through.
+///
+/// The frame dimensions are the *same* numbers [`compute_clip_transform_layout`]
+/// would emit for this keyframe's transform, so an animated clip and a clip
+/// pinned at one of its keyframes agree exactly at that instant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct MotionKeyframeLayout {
+    /// Seconds from the start of the clip's *branch*, head handle included.
+    pub time_sec: f64,
+    /// Width the source is scaled to at this keyframe (even, >= 2).
+    pub scaled_width: u32,
+    /// Height the source is scaled to at this keyframe (even, >= 2).
+    pub scaled_height: u32,
+    /// Sanitised normalised position the anchor is pinned to.
+    pub position_x: f64,
+    pub position_y: f64,
+    /// Sanitised normalised anchor point.
+    pub anchor_x: f64,
+    pub anchor_y: f64,
+    /// Clockwise rotation in radians at this keyframe.
+    pub rotation_rad: f64,
+    /// Whether the segment that *starts* here holds instead of interpolating.
+    pub hold: bool,
+}
+
+/// A clip's motion keyframes resolved against one canvas.
+///
+/// Empty-keyframe clips never produce one of these: they are static by
+/// definition and take the ordinary layout path.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ClipMotionTrack {
+    pub keyframes: Vec<MotionKeyframeLayout>,
+}
+
+/// Whether a clip's motion keyframes are motion this render can animate.
+///
+/// This is the single predicate behind all three decisions that have to agree:
+/// whether the clip is composited at all, whether the composite is the animated
+/// one, and whether the export warns that the motion is not rendered. It reads
+/// only the stored transforms, so it needs no canvas or source dimensions and
+/// validation can ask it as cheaply as the graph builder can.
+///
+/// Motion qualifies when it has at least two usable keyframes, those keyframes
+/// actually move the picture, and none of them turns it. Rotation is excluded
+/// because `rotate` never re-configures when its input size changes: an animated
+/// `scale` feeding it freezes the picture at its first frame's size, silently.
+/// Such a clip keeps the static composite and the warning that goes with it.
+pub(super) fn clip_motion_renders_animated(clip: &Clip) -> bool {
+    let keyframes = sorted_valid_motion_keyframes(clip);
+    let Some((_, first, _)) = keyframes.first() else {
+        return false;
+    };
+    if keyframes.len() < 2 {
+        return false;
+    }
+    if keyframes
+        .iter()
+        .any(|(_, transform, _)| transform.rotation_deg.abs() > f64::EPSILON)
+    {
+        return false;
+    }
+    keyframes.iter().any(|(_, transform, _)| {
+        (transform.position.x - first.position.x).abs() > f64::EPSILON
+            || (transform.position.y - first.position.y).abs() > f64::EPSILON
+            || (transform.scale.x - first.scale.x).abs() > f64::EPSILON
+            || (transform.scale.y - first.scale.y).abs() > f64::EPSILON
+            || (transform.anchor.x - first.anchor.x).abs() > f64::EPSILON
+            || (transform.anchor.y - first.anchor.y).abs() > f64::EPSILON
+    })
+}
+
+/// The alpha a clip composites with, sanitised the way the static layout does.
+///
+/// The animated path has no [`ClipTransformLayout`] to read `opacity` off, but it
+/// still has to attenuate on exactly the same terms, so both go through this.
+pub(super) fn render_opacity(opacity: f32) -> f64 {
+    sanitize_opacity(opacity)
+}
+
+/// Whether that alpha is far enough from opaque to be worth a filter.
+pub(super) fn opacity_needs_alpha_filter(opacity: f64) -> bool {
+    opacity < 1.0 - OPACITY_EPSILON
+}
+
+/// Normalises a keyframe transform the way the preview does.
+///
+/// Mirrors `normalizeTransform` in `src/utils/clipMotion.ts`: every component
+/// falls back to its identity when it is not finite, and scale additionally has
+/// a lower clamp. Deliberately *not* the export's own sanitiser — this is the
+/// transform the preview shows, and the export's clamps are applied afterwards
+/// by the layout stage, exactly as they are for a static `clip.transform`.
+fn normalize_motion_transform(transform: &Transform) -> Transform {
+    Transform {
+        position: Point2D {
+            x: finite_or(transform.position.x, 0.5),
+            y: finite_or(transform.position.y, 0.5),
+        },
+        scale: Point2D {
+            x: finite_or(transform.scale.x, 1.0).max(MIN_SCALE),
+            y: finite_or(transform.scale.y, 1.0).max(MIN_SCALE),
+        },
+        rotation_deg: finite_or(transform.rotation_deg, 0.0),
+        anchor: Point2D {
+            x: finite_or(transform.anchor.x, 0.5),
+            y: finite_or(transform.anchor.y, 0.5),
+        },
+    }
+}
+
+fn finite_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
+/// A clip's motion keyframes, filtered and ordered the way the preview reads them.
+///
+/// Mirrors `sortedValidKeyframes` in `src/utils/clipMotion.ts`: a keyframe with a
+/// non-finite or negative `timeOffset` is dropped, and the rest are sorted by
+/// time. The sort is stable, so keyframes sharing a time keep their stored order
+/// just as `Array.prototype.sort` keeps it.
+fn sorted_valid_motion_keyframes(clip: &Clip) -> Vec<(f64, Transform, bool)> {
+    let mut keyframes: Vec<(f64, Transform, bool)> = clip
+        .motion_keyframes
+        .iter()
+        .filter(|keyframe| keyframe.time_offset.is_finite() && keyframe.time_offset >= 0.0)
+        .map(|keyframe| {
+            (
+                keyframe.time_offset,
+                normalize_motion_transform(&keyframe.transform),
+                matches!(keyframe.interpolation, KeyframeInterpolation::Hold),
+            )
+        })
+        .collect();
+    keyframes.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    keyframes
+}
+
+/// The transform the preview shows for a clip at `clip_time_sec` into it.
+///
+/// This is the executable specification the emitted FFmpeg expression is checked
+/// against, not a step the render itself takes: the graph carries a closed-form
+/// piecewise-linear expression instead of sampling per frame. It exists so the
+/// two can be compared at arbitrary times — see
+/// `the_emitted_curve_tracks_the_preview_sampler`.
+///
+/// The Rust twin of `getClipMotionTransformAtTime` in `src/utils/clipMotion.ts`,
+/// down to the clamp-hold outside the keyframe range and the linear blend
+/// between them. `clip_time_sec` is clip-relative *timeline* seconds — the
+/// preview computes it as `max(0, timelineTime - clip.place.timelineInSec)`.
+///
+/// Note that only `Hold` short-circuits: a `Bezier` keyframe interpolates
+/// linearly, because the preview compares against the literal string `'hold'`
+/// and lets every other interpolation fall through to `interpolateTransform`.
+#[cfg(test)]
+pub(super) fn clip_motion_transform_at(clip: &Clip, clip_time_sec: f64) -> Transform {
+    let keyframes = sorted_valid_motion_keyframes(clip);
+    let Some((first_time, first_transform, _)) = keyframes.first() else {
+        return normalize_motion_transform(&clip.transform);
+    };
+
+    let clip_time = clip_time_sec.max(0.0);
+    if clip_time <= *first_time {
+        return first_transform.clone();
+    }
+
+    let (last_time, last_transform, _) = &keyframes[keyframes.len() - 1];
+    if clip_time >= *last_time {
+        return last_transform.clone();
+    }
+
+    for window in keyframes.windows(2) {
+        let (start_time, start_transform, hold) = &window[0];
+        let (end_time, end_transform, _) = &window[1];
+        if clip_time < *start_time || clip_time > *end_time {
+            continue;
+        }
+        if *hold {
+            return start_transform.clone();
+        }
+        let duration = end_time - start_time;
+        let progress = if duration > 0.0 {
+            (clip_time - start_time) / duration
+        } else {
+            0.0
+        };
+        return interpolate_transform(start_transform, end_transform, progress);
+    }
+
+    normalize_motion_transform(&clip.transform)
+}
+
+/// Blends two transforms component-wise.
+///
+/// Mirrors `interpolateTransform`: every scalar is a plain linear blend and the
+/// progress is clamped to `0..=1`. Rotation blends in degrees without taking the
+/// shortest way round, so 350 -> 10 sweeps backwards through zero in the export
+/// exactly as it does in the preview.
+#[cfg(test)]
+fn interpolate_transform(start: &Transform, end: &Transform, progress: f64) -> Transform {
+    let progress = progress.clamp(0.0, 1.0);
+    let lerp = |from: f64, to: f64| from + (to - from) * progress;
+    Transform {
+        position: Point2D {
+            x: lerp(start.position.x, end.position.x),
+            y: lerp(start.position.y, end.position.y),
+        },
+        scale: Point2D {
+            x: lerp(start.scale.x, end.scale.x),
+            y: lerp(start.scale.y, end.scale.y),
+        },
+        rotation_deg: lerp(start.rotation_deg, end.rotation_deg),
+        anchor: Point2D {
+            x: lerp(start.anchor.x, end.anchor.x),
+            y: lerp(start.anchor.y, end.anchor.y),
+        },
+    }
+}
+
+/// Resolves a clip's motion keyframes into per-keyframe render geometry.
+///
+/// `head_sec` is the transition handle in front of the clip. The graph measures
+/// time from the start of the *branch* — `build_video_trim_filter` ends every
+/// branch with `setpts=PTS-STARTPTS` — and the branch starts `head_sec` before
+/// the clip does, so every keyframe time shifts by it. This is the same move
+/// `anchor_auto_reframe_keyframes` makes for the auto-reframe crop expression.
+///
+/// Returns `None` for a clip with no usable keyframes, which is the signal to
+/// take the ordinary static layout path.
+pub(super) fn resolve_clip_motion_track(
+    source_width: u32,
+    source_height: u32,
+    canvas_width: u32,
+    canvas_height: u32,
+    clip: &Clip,
+    head_sec: f64,
+) -> Option<ClipMotionTrack> {
+    let keyframes = sorted_valid_motion_keyframes(clip);
+    if keyframes.is_empty() {
+        return None;
+    }
+
+    let source_width = f64::from(source_width.max(1));
+    let source_height = f64::from(source_height.max(1));
+    let canvas_width = f64::from(canvas_width.max(1));
+    let canvas_height = f64::from(canvas_height.max(1));
+    let base_scale = contain_fit_scale(source_width, source_height, canvas_width, canvas_height);
+    let head_sec = if head_sec.is_finite() && head_sec > 0.0 {
+        head_sec
+    } else {
+        0.0
+    };
+
+    let resolved = keyframes
+        .into_iter()
+        .map(|(time_offset, transform, hold)| {
+            let (scaled_width, scaled_height) = scaled_frame_dimensions(
+                source_width,
+                source_height,
+                canvas_width,
+                canvas_height,
+                base_scale,
+                sanitize_scale(transform.scale.x, "scale.x"),
+                sanitize_scale(transform.scale.y, "scale.y"),
+            );
+            MotionKeyframeLayout {
+                time_sec: time_offset + head_sec,
+                scaled_width,
+                scaled_height,
+                position_x: sanitize_normalized(transform.position.x, "position.x"),
+                position_y: sanitize_normalized(transform.position.y, "position.y"),
+                anchor_x: sanitize_normalized(transform.anchor.x, "anchor.x"),
+                anchor_y: sanitize_normalized(transform.anchor.y, "anchor.y"),
+                rotation_rad: sanitize_finite(transform.rotation_deg, 0.0, "rotation").to_radians(),
+                hold,
+            }
+        })
+        .collect();
+
+    Some(ClipMotionTrack {
+        keyframes: resolved,
+    })
 }
 
 #[cfg(test)]
@@ -648,5 +980,299 @@ mod tests {
 
         assert_eq!(result.scaled_width, 20); // 1920 * 0.01, the command's floor
         assert_eq!(result.scaled_height, 10); // 1080 * 0.01 = 10.8 -> nearest even
+    }
+
+    // -------------------------------------------------------------------------
+    // Motion keyframes: parity with the preview's sampler
+    // -------------------------------------------------------------------------
+
+    fn keyframe(
+        time_offset: f64,
+        transform: Transform,
+        interpolation: KeyframeInterpolation,
+    ) -> crate::core::timeline::TransformKeyframe {
+        crate::core::timeline::TransformKeyframe {
+            time_offset,
+            transform,
+            interpolation,
+        }
+    }
+
+    fn moved(position: (f64, f64), scale: (f64, f64), rotation_deg: f64) -> Transform {
+        Transform {
+            position: Point2D::new(position.0, position.1),
+            scale: Point2D::new(scale.0, scale.1),
+            rotation_deg,
+            anchor: Point2D::center(),
+        }
+    }
+
+    fn clip_with_motion(keyframes: Vec<crate::core::timeline::TransformKeyframe>) -> Clip {
+        let mut clip = Clip::new("asset").with_source_range(0.0, 4.0).place_at(0.0);
+        clip.motion_keyframes = keyframes;
+        clip
+    }
+
+    /// Feature: Keyframed motion semantics
+    /// Scenario: the export samples the curve the preview drew
+    ///
+    /// `getClipMotionTransformAtTime` holds the first value before the first
+    /// keyframe and the last value after the last, blends linearly in between,
+    /// and short-circuits a `hold` segment to its start value. Diverging on any
+    /// of those would export a move the editor never watched.
+    #[test]
+    fn motion_sampling_matches_the_preview_semantics() {
+        let clip = clip_with_motion(vec![
+            keyframe(
+                1.0,
+                moved((0.2, 0.5), (0.5, 0.5), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+            keyframe(
+                3.0,
+                moved((0.6, 0.5), (1.5, 1.5), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+        ]);
+
+        // Clamp-hold before the first keyframe, including at negative times.
+        for time in [-5.0, 0.0, 0.999, 1.0] {
+            let sampled = clip_motion_transform_at(&clip, time);
+            assert!(
+                (sampled.position.x - 0.2).abs() < 1e-12 && (sampled.scale.x - 0.5).abs() < 1e-12,
+                "before the first keyframe the first value holds, at t={time}"
+            );
+        }
+
+        // Clamp-hold after the last keyframe.
+        for time in [3.0, 9.0] {
+            let sampled = clip_motion_transform_at(&clip, time);
+            assert!(
+                (sampled.position.x - 0.6).abs() < 1e-12 && (sampled.scale.x - 1.5).abs() < 1e-12,
+                "after the last keyframe the last value holds, at t={time}"
+            );
+        }
+
+        // Linear in between: halfway is the midpoint of both components.
+        let middle = clip_motion_transform_at(&clip, 2.0);
+        assert!(
+            (middle.position.x - 0.4).abs() < 1e-12,
+            "position must blend linearly: {}",
+            middle.position.x
+        );
+        assert!(
+            (middle.scale.x - 1.0).abs() < 1e-12,
+            "scale must blend linearly: {}",
+            middle.scale.x
+        );
+    }
+
+    /// Feature: Keyframed motion semantics
+    /// Scenario: only `hold` short-circuits; bezier still blends linearly
+    ///
+    /// The preview compares the interpolation against the literal `'hold'` and
+    /// lets everything else fall through to `interpolateTransform`, so a bezier
+    /// keyframe blends linearly there. The export has to agree, or a project
+    /// carrying bezier motion would render a curve the preview never showed.
+    #[test]
+    fn only_hold_interpolation_freezes_a_motion_segment() {
+        let held = clip_with_motion(vec![
+            keyframe(
+                0.0,
+                moved((0.2, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Hold,
+            ),
+            keyframe(
+                2.0,
+                moved((0.8, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+        ]);
+        assert!(
+            (clip_motion_transform_at(&held, 1.0).position.x - 0.2).abs() < 1e-12,
+            "a hold segment must stay at its start value"
+        );
+
+        let bezier = clip_with_motion(vec![
+            keyframe(
+                0.0,
+                moved((0.2, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Bezier {
+                    cp1x: 0.4,
+                    cp1y: 0.0,
+                    cp2x: 0.6,
+                    cp2y: 1.0,
+                },
+            ),
+            keyframe(
+                2.0,
+                moved((0.8, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+        ]);
+        assert!(
+            (clip_motion_transform_at(&bezier, 1.0).position.x - 0.5).abs() < 1e-12,
+            "a bezier segment blends linearly, exactly as the preview does"
+        );
+    }
+
+    /// Feature: Keyframed motion semantics
+    /// Scenario: unusable keyframes are dropped and the rest are ordered
+    ///
+    /// Mirrors `sortedValidKeyframes`: a non-finite or negative `timeOffset` is
+    /// not a keyframe, and stored order is not sort order.
+    #[test]
+    fn motion_keyframes_are_filtered_and_sorted_like_the_preview() {
+        let clip = clip_with_motion(vec![
+            keyframe(
+                3.0,
+                moved((0.9, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+            keyframe(
+                -1.0,
+                moved((0.0, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+            keyframe(
+                f64::NAN,
+                moved((0.1, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+            keyframe(
+                1.0,
+                moved((0.1, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+        ]);
+
+        let track = resolve_clip_motion_track(1280, 720, 1920, 1080, &clip, 0.0).expect("track");
+        assert_eq!(
+            track.keyframes.len(),
+            2,
+            "the negative and non-finite keyframes must be dropped"
+        );
+        assert!(
+            track.keyframes[0].time_sec < track.keyframes[1].time_sec,
+            "the surviving keyframes must be in time order"
+        );
+        assert!(
+            (clip_motion_transform_at(&clip, 0.0).position.x - 0.1).abs() < 1e-12,
+            "the earliest surviving keyframe is what holds before the curve starts"
+        );
+    }
+
+    /// Feature: Keyframed motion in the export
+    /// Scenario: the emitted curve tracks the preview's sampler
+    ///
+    /// The graph carries a closed-form piecewise-linear expression, while the
+    /// preview samples per frame. This pins the two together: at a spread of
+    /// times, linearly interpolating the *keyframe frame sizes* the graph
+    /// animates through must land on the size the static layout would give the
+    /// transform the preview shows at that instant.
+    #[test]
+    fn the_emitted_curve_tracks_the_preview_sampler() {
+        const SOURCE: (u32, u32) = (1280, 720);
+        const CANVAS: (u32, u32) = (1920, 1080);
+
+        let clip = clip_with_motion(vec![
+            keyframe(
+                0.0,
+                moved((0.3, 0.4), (0.5, 0.5), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+            keyframe(
+                2.0,
+                moved((0.5, 0.5), (1.2, 0.9), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+            keyframe(
+                4.0,
+                moved((0.8, 0.6), (0.7, 1.4), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+        ]);
+        let track = resolve_clip_motion_track(SOURCE.0, SOURCE.1, CANVAS.0, CANVAS.1, &clip, 0.0)
+            .expect("track");
+
+        for step in 0..=40 {
+            let time = f64::from(step) * 0.1;
+
+            // What the graph computes: a linear blend of the keyframe sizes.
+            let curve = track
+                .keyframes
+                .windows(2)
+                .find(|pair| time >= pair[0].time_sec && time <= pair[1].time_sec)
+                .map(|pair| {
+                    let span = pair[1].time_sec - pair[0].time_sec;
+                    let progress = if span > 0.0 {
+                        (time - pair[0].time_sec) / span
+                    } else {
+                        0.0
+                    };
+                    let blend = |from: u32, to: u32| {
+                        f64::from(from) + (f64::from(to) - f64::from(from)) * progress
+                    };
+                    (
+                        blend(pair[0].scaled_width, pair[1].scaled_width),
+                        blend(pair[0].scaled_height, pair[1].scaled_height),
+                    )
+                })
+                .expect("a segment covers every sampled time");
+
+            // What the preview shows, put through the ordinary static layout.
+            let sampled = clip_motion_transform_at(&clip, time);
+            let layout = compute_clip_transform_layout(
+                SOURCE.0, SOURCE.1, CANVAS.0, CANVAS.1, &sampled, 1.0,
+            );
+
+            // The only gap is the static layout's even-pixel alignment, which
+            // rounds each endpoint before the blend rather than after it.
+            assert!(
+                (curve.0 - f64::from(layout.scaled_width)).abs() <= 2.0,
+                "width diverges from the preview at t={time}: curve {} vs preview {}",
+                curve.0,
+                layout.scaled_width
+            );
+            assert!(
+                (curve.1 - f64::from(layout.scaled_height)).abs() <= 2.0,
+                "height diverges from the preview at t={time}: curve {} vs preview {}",
+                curve.1,
+                layout.scaled_height
+            );
+        }
+    }
+
+    /// Feature: Keyframed motion across a transition handle
+    /// Scenario: the head handle shifts every keyframe into branch time
+    #[test]
+    fn a_head_handle_shifts_every_motion_keyframe() {
+        let clip = clip_with_motion(vec![
+            keyframe(
+                0.0,
+                moved((0.3, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+            keyframe(
+                2.0,
+                moved((0.7, 0.5), (1.0, 1.0), 0.0),
+                KeyframeInterpolation::Linear,
+            ),
+        ]);
+
+        let bare = resolve_clip_motion_track(1280, 720, 1920, 1080, &clip, 0.0).expect("track");
+        assert_eq!(bare.keyframes[0].time_sec, 0.0);
+        assert_eq!(bare.keyframes[1].time_sec, 2.0);
+
+        let handled = resolve_clip_motion_track(1280, 720, 1920, 1080, &clip, 0.75).expect("track");
+        assert_eq!(handled.keyframes[0].time_sec, 0.75);
+        assert_eq!(handled.keyframes[1].time_sec, 2.75);
+
+        let negative =
+            resolve_clip_motion_track(1280, 720, 1920, 1080, &clip, -1.0).expect("track");
+        assert_eq!(
+            negative.keyframes[0].time_sec, 0.0,
+            "a nonsensical handle must not drag the curve backwards"
+        );
     }
 }
