@@ -22,10 +22,10 @@ use super::{
         append_video_stream_normalization, append_video_transform_composition,
         apply_audio_mix_settings, asset_has_playable_audio, build_audio_trim_filter,
         build_video_trim_filter, clip_audio_is_suppressed_by_companion,
-        clip_needs_transform_composition, collect_audio_companion_keys,
-        collect_drawtext_text_overlays, collect_enabled_clips_sorted, effective_source_dimensions,
-        generated_text_visual_end_sec, hdr_metadata_for_asset, is_text_clip,
-        output_video_dimensions, output_video_fps, output_video_pixel_format,
+        clip_composition_is_motion_only, clip_needs_transform_composition,
+        collect_audio_companion_keys, collect_drawtext_text_overlays, collect_enabled_clips_sorted,
+        effective_source_dimensions, generated_text_visual_end_sec, hdr_metadata_for_asset,
+        is_text_clip, output_video_dimensions, output_video_fps, output_video_pixel_format,
         resolve_asset_source_dimensions, resolve_asset_source_duration, resolve_trim_source_kind,
         seed_source_dimension_cache, seed_source_duration_cache, unmeasurable_effect_message,
         AssetAudioInfo, ExportEngine, ExportError, ExportSettings, SourceFrameCountCache,
@@ -254,32 +254,46 @@ pub(super) fn build_sequence_ffmpeg_args(
                         ));
                     }
 
-                    if clip_needs_transform_composition(clip) {
-                        // A moved, scaled, rotated or translucent clip has to be
-                        // drawn onto the canvas rather than fitted to it. The
-                        // placement follows the source's real pixel dimensions,
-                        // which is also what the preview measures.
-                        let probed_dimensions =
-                            resolve_asset_source_dimensions(asset, &mut source_dimensions)
-                                .ok_or_else(|| {
-                                    ExportError::InvalidSettings(format!(
+                    // A moved, scaled, rotated or translucent clip has to be
+                    // drawn onto the canvas rather than fitted to it. The
+                    // placement follows the source's real pixel dimensions,
+                    // which is also what the preview measures.
+                    //
+                    // A clip composited *only* for its motion is the exception:
+                    // it rendered as a plain canvas fit before motion animated,
+                    // so an unmeasurable source degrades it back to that fit
+                    // instead of failing the export over it. Validation raises
+                    // the matching warning.
+                    let composite_dimensions = if clip_needs_transform_composition(clip) {
+                        let motion_only = clip_composition_is_motion_only(clip);
+                        match resolve_asset_source_dimensions(asset, &mut source_dimensions) {
+                            // The transform scales to an absolute size, so it has
+                            // to be measured against the frame the effect chain
+                            // hands it rather than against the file on disk.
+                            Some(probed) => {
+                                match effective_source_dimensions(probed, &clip_filter_graph) {
+                                    Ok(dimensions) => Some(dimensions),
+                                    Err(_) if motion_only => None,
+                                    Err(effect_label) => {
+                                        return Err(ExportError::InvalidSettings(
+                                            unmeasurable_effect_message(&effect_label, &clip.id),
+                                        ))
+                                    }
+                                }
+                            }
+                            None if motion_only => None,
+                            None => {
+                                return Err(ExportError::InvalidSettings(format!(
                                     "Could not determine source dimensions of asset '{}' needed to place transformed clip '{}'",
                                     asset.id, clip.id
-                                ))
-                                })?;
+                                )))
+                            }
+                        }
+                    } else {
+                        None
+                    };
 
-                        // The transform scales to an absolute size, so it has to
-                        // be measured against the frame the effect chain hands
-                        // it rather than against the file on disk.
-                        let (source_width, source_height) =
-                            effective_source_dimensions(probed_dimensions, &clip_filter_graph)
-                                .map_err(|effect_label| {
-                                    ExportError::InvalidSettings(unmeasurable_effect_message(
-                                        &effect_label,
-                                        &clip.id,
-                                    ))
-                                })?;
-
+                    if let Some((source_width, source_height)) = composite_dimensions {
                         // Keyframed motion animates the composite; everything
                         // else — including motion that turns the picture, which
                         // FFmpeg cannot animate alongside a changing frame size

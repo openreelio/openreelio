@@ -2258,24 +2258,20 @@ fn test_render_transform_fills_the_slot_from_a_single_frame_source() {
     }
 }
 
-/// Feature: Truthful degradation
-/// Scenario: motion keyframes are reported as unrendered
+/// Renders a clip carrying two motion keyframes and returns the render warnings.
 ///
-/// Motion animates in the preview and does not animate in the export. Saying so
-/// is the difference between a known limitation and a silent one.
-#[test]
-fn test_render_reports_motion_keyframes_as_unrendered() {
-    if available_ffmpeg_path().is_none() {
-        return;
-    }
-
-    let dir = create_temp_project("render_motion_warning");
-    let path = project_path(&dir, "render_motion_warning");
-
+/// `rotation_deg` is applied to the second keyframe: zero gives a pure pan, which
+/// the export animates, and anything else gives a move that turns the picture,
+/// which it still cannot. `None` means the fixture could not be built.
+fn render_warnings_for_motion(name: &str, rotation_deg: f64) -> Option<Vec<String>> {
     const FIXTURE_SEC: f64 = 2.0;
+
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
     let source_path = dir.path().join("motion_source.mp4");
     if !create_solid_colour_video(&source_path, "red", "640x360", FIXTURE_SEC as u32) {
-        return;
+        return None;
     }
 
     let ids = place_trimmed_clip(&path, &source_path, FIXTURE_SEC);
@@ -2287,7 +2283,7 @@ fn test_render_reports_motion_keyframes_as_unrendered() {
 
     // Two keyframes that actually move the clip. A lone keyframe equal to the
     // base transform describes exactly the picture the export already produces
-    // and must not warn.
+    // and must not warn either way.
     run_cli_ok(&[
         "command",
         "execute",
@@ -2315,7 +2311,7 @@ fn test_render_reports_motion_keyframes_as_unrendered() {
                     "transform": {
                         "position": { "x": 0.75, "y": 0.5 },
                         "scale": { "x": 1.0, "y": 1.0 },
-                        "rotationDeg": 0.0,
+                        "rotationDeg": rotation_deg,
                         "anchor": { "x": 0.5, "y": 0.5 },
                     },
                 },
@@ -2339,18 +2335,48 @@ fn test_render_reports_motion_keyframes_as_unrendered() {
     );
 
     let rendered: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let warnings: Vec<&str> = rendered["warnings"]
-        .as_array()
-        .expect("warnings")
-        .iter()
-        .filter_map(|warning| warning.as_str())
-        .collect();
-    assert!(
-        warnings
+    Some(
+        rendered["warnings"]
+            .as_array()
+            .expect("warnings")
             .iter()
-            .any(|warning| warning.contains("Motion keyframes")
-                && warning.contains("not yet rendered")),
-        "unrendered motion must be reported: {warnings:?}"
+            .filter_map(|warning| warning.as_str())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Feature: Truthful degradation
+/// Scenario: only the motion that really does not render is reported
+///
+/// Pan, zoom and anchor moves now animate in the export, so warning about them
+/// would train users to ignore the warning that still matters. A move that turns
+/// the picture is the one the export still cannot follow, and it has to keep
+/// saying so — a known limitation beats a silent one.
+#[test]
+fn test_render_reports_only_unrenderable_motion_as_unrendered() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    fn is_motion_warning(warning: &String) -> bool {
+        warning.contains("Motion keyframes") && warning.contains("not yet rendered")
+    }
+
+    let Some(panning) = render_warnings_for_motion("render_motion_pan", 0.0) else {
+        return;
+    };
+    assert!(
+        !panning.iter().any(is_motion_warning),
+        "a pan renders, so it must not be reported as unrendered: {panning:?}"
+    );
+
+    let Some(rotating) = render_warnings_for_motion("render_motion_rotate", 30.0) else {
+        return;
+    };
+    assert!(
+        rotating.iter().any(is_motion_warning),
+        "motion that turns the picture is still unrendered and must be reported: {rotating:?}"
     );
 }
 

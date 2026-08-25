@@ -3068,6 +3068,32 @@ pub fn clip_needs_transform_composition(clip: &Clip) -> bool {
             || clip_motion_renders_animated(clip))
 }
 
+/// Whether a clip is composited *only* because of its motion keyframes.
+///
+/// Compositing needs the source's real pixel size, and an asset whose size
+/// cannot be measured fails that requirement. For a clip whose own transform
+/// places it, that is a genuine error: there is no honest picture to draw.
+///
+/// A clip carrying nothing but motion is different. Before motion animated, such
+/// a clip was fitted to the canvas like any other and the export succeeded — so
+/// refusing it now would turn a working export into a blocked one over a feature
+/// the user never asked for. These degrade back to that fit, with a warning, and
+/// keep exporting.
+pub(super) fn clip_composition_is_motion_only(clip: &Clip) -> bool {
+    clip_has_identity_transform(clip)
+        && (f64::from(clip.opacity) - 1.0).abs() <= TRANSFORM_EPSILON
+        && clip_motion_renders_animated(clip)
+}
+
+/// The warning for a motion clip the render had to fall back to a canvas fit.
+pub(super) fn unmeasurable_motion_message(clip_id: &str, track_name: &str, reason: &str) -> String {
+    format!(
+        "Motion keyframes on clip '{}' on track '{}' are not rendered because {}; \
+         the clip renders fitted to the canvas",
+        clip_id, track_name, reason
+    )
+}
+
 /// Pixel dimensions of the media a clip decodes, cached for one export run.
 ///
 /// Keyed by asset id. A `None` entry records that the asset was already looked at
@@ -3635,7 +3661,7 @@ pub(super) fn append_video_transform_composition(
 /// same shape — `setsar=1,fps=,trim=,format=` on a full-canvas frame — so the
 /// downstream concat cannot tell an animated segment from a static one.
 ///
-/// Three things differ from the static chain, and each is load-bearing:
+/// Four things differ from the static chain, and each is load-bearing:
 ///
 /// 1. `scale` carries per-frame expressions under `eval=frame`. This is the only
 ///    stock filter that resizes per frame while keeping a usable output link.
@@ -3646,7 +3672,10 @@ pub(super) fn append_video_transform_composition(
 ///    also mandatory here — `rgba` staging re-freezes the same way once
 ///    `overlay`'s own `format` is a `yuv420` mode, so the static path's cheaper
 ///    `rgba` shortcut for opacity-only clips cannot be reused.
-/// 3. `overlay` positions by expression, likewise under `eval=frame`.
+/// 3. The animated `scale` is the **last** filter of the staged chain. Ordering
+///    is a correctness constraint here, not a style choice — see the comment on
+///    the emitted chain below.
+/// 4. `overlay` positions by expression, likewise under `eval=frame`.
 ///
 /// Rotation is absent by construction: the caller only routes a clip here when
 /// its motion never turns the picture. `rotate` does not re-configure when its
@@ -3675,10 +3704,19 @@ pub(super) fn append_animated_video_transform_composition(
     let height_expr =
         build_motion_lerp_expression(keyframes, |keyframe| f64::from(keyframe.scaled_height));
 
-    filter_complex.push_str(&format!(
-        "[{}]scale=w='{}':h='{}':eval=frame,setsar=1,format={}",
-        input_label, width_expr, height_expr, alpha_format
-    ));
+    // Everything that converts pixel format runs *before* the animated `scale`,
+    // and nothing runs after it. A filter placed downstream of `scale` that needs
+    // a format conversion gets an auto-inserted converter, and that converter is
+    // configured once — it keeps rescaling every later frame back to the first
+    // frame's dimensions, so the picture pans but stops resizing.
+    //
+    // `colorchannelmixer` is the filter that trips this: it works in RGB, so in a
+    // `yuva*` graph FFmpeg wraps it in a yuva -> argb -> yuva round trip. Left
+    // after `scale` it froze a translucent clip's zoom outright (measured on
+    // FFmpeg 9.0.1: a 0.4x -> 0.9x zoom held one single frame size for all 60
+    // frames). Attenuating alpha does not depend on the frame's size, so hoisting
+    // it above `scale` costs nothing and the animation survives.
+    filter_complex.push_str(&format!("[{}]format={}", input_label, alpha_format));
 
     if opacity_needs_alpha_filter(opacity) {
         filter_complex.push_str(&format!(
@@ -3687,7 +3725,10 @@ pub(super) fn append_animated_video_transform_composition(
         ));
     }
 
-    filter_complex.push_str(&format!("[{}];", staged_label));
+    filter_complex.push_str(&format!(
+        ",scale=w='{}':h='{}':eval=frame,setsar=1[{}];",
+        width_expr, height_expr, staged_label
+    ));
 
     // Canvas sizing, padding and frame pinning are the static path's, unchanged
     // — see `append_video_transform_composition` for why each is shaped this way.
@@ -3780,12 +3821,21 @@ fn build_motion_lerp_expression(
             depth += 1;
         }
 
-        let span = end.time_sec - start.time_sec;
+        // The guard has to test the span FFmpeg will actually divide by, not the
+        // one Rust computed. Times are emitted through `format_speed_number`, so
+        // a span of, say, 1e-7 s survives `span > 0.0` here and then formats to a
+        // literal `0` in the graph — a divide-by-zero FFmpeg would meet at run
+        // time. Rounding first means the emitted denominator is the tested one.
+        let span_text = format_speed_number(end.time_sec - start.time_sec);
+        let span_is_usable = span_text
+            .parse::<f64>()
+            .is_ok_and(|span| span.is_finite() && span > 0.0);
+
         // A zero-length span is unreachable — the previous branch already
         // consumed every `t` below this one — but `hold` and a degenerate span
         // both resolve to the segment's *start* value, which is what the preview
         // returns when it divides by a zero duration.
-        if start.hold || span <= 0.0 {
+        if start.hold || !span_is_usable {
             expression.push_str(&format!(
                 ",if(lt(t,{}),{}",
                 format_speed_number(end.time_sec),
@@ -3799,7 +3849,7 @@ fn build_motion_lerp_expression(
                 if end_value >= start_value { "+" } else { "-" },
                 format_speed_number((end_value - start_value).abs()),
                 format_speed_number(start.time_sec),
-                format_speed_number(span)
+                span_text
             ));
         }
         depth += 1;
@@ -7540,7 +7590,22 @@ pub fn validate_export_settings_with_dimensions(
             // identity clip is only fitted to the canvas, so it never pays for
             // this and never fails on it.
             if track.kind == TrackKind::Video && clip_needs_transform_composition(clip) {
+                // A clip composited only for its motion has somewhere to fall
+                // back to — the plain canvas fit it rendered as before motion
+                // animated — so an unmeasurable source costs it the animation
+                // rather than the whole export. The render degrades to the same
+                // fit, so the two passes agree on what the file will contain.
+                let motion_only = clip_composition_is_motion_only(clip);
                 match resolve_asset_source_dimensions(asset, &mut source_dimensions) {
+                    None if motion_only => validation.add_clip_warning(
+                        &sequence.id,
+                        &clip.id,
+                        unmeasurable_motion_message(
+                            &clip.id,
+                            &track.name,
+                            &format!("the source dimensions of asset '{}' are unknown", asset.id),
+                        ),
+                    ),
                     None => validation.add_clip_error(
                         &sequence.id,
                         &clip.id,
@@ -7567,11 +7632,26 @@ pub fn validate_export_settings_with_dimensions(
                         if let Err(effect_label) =
                             effective_source_dimensions(probed_dimensions, &graph)
                         {
-                            validation.add_clip_error(
-                                &sequence.id,
-                                &clip.id,
-                                unmeasurable_effect_message(&effect_label, &clip.id),
-                            );
+                            if motion_only {
+                                validation.add_clip_warning(
+                                    &sequence.id,
+                                    &clip.id,
+                                    unmeasurable_motion_message(
+                                        &clip.id,
+                                        &track.name,
+                                        &format!(
+                                            "effect '{}' changes the picture size unpredictably",
+                                            effect_label
+                                        ),
+                                    ),
+                                );
+                            } else {
+                                validation.add_clip_error(
+                                    &sequence.id,
+                                    &clip.id,
+                                    unmeasurable_effect_message(&effect_label, &clip.id),
+                                );
+                            }
                         }
                     }
                 }
@@ -18147,9 +18227,21 @@ mod tests {
 
             let video_path = create_temp_media_file(name);
             let mut assets = HashMap::new();
-            let mut video_asset = Asset::new_video(name, &video_path, VideoInfo::default())
-                .with_duration(3.0)
-                .with_file_size(3_000_000);
+            // Real stored dimensions, not the `VideoInfo::default()` placeholder:
+            // the placeholder means "nobody measured this", which sends the clip
+            // down the unmeasurable-source fallback and would have this test
+            // asserting about a warning it never meant to provoke.
+            let mut video_asset = Asset::new_video(
+                name,
+                &video_path,
+                VideoInfo {
+                    width: 1280,
+                    height: 720,
+                    ..VideoInfo::default()
+                },
+            )
+            .with_duration(3.0)
+            .with_file_size(3_000_000);
             video_asset.id = "video_asset".to_string();
             assets.insert("video_asset".to_string(), video_asset);
 
@@ -18266,12 +18358,20 @@ mod tests {
             .collect()
     }
 
-    /// Lit-pixel count and centroid of one luma frame.
+    /// White-pixel count and centroid of one luma frame.
     fn motion_white_region(frame: &[u8], width: u32) -> Option<(usize, f64, f64)> {
+        motion_lit_region(frame, width, 127)
+    }
+
+    /// Count and centroid of the pixels of one luma frame above `threshold`.
+    ///
+    /// A translucent clip composites to a mid grey, so it has to be measured
+    /// against "not black" rather than against white.
+    fn motion_lit_region(frame: &[u8], width: u32, threshold: u8) -> Option<(usize, f64, f64)> {
         let lit: Vec<(usize, usize)> = frame
             .iter()
             .enumerate()
-            .filter(|(_, luma)| **luma > 127)
+            .filter(|(_, luma)| **luma > threshold)
             .map(|(index, _)| (index % width as usize, index / width as usize))
             .collect();
         if lit.is_empty() {
@@ -18507,6 +18607,389 @@ mod tests {
         assert!(
             !plain.contains(":eval=frame") && !plain.contains("overlay=x='"),
             "a clip without motion must build exactly as it always did: {plain}"
+        );
+    }
+
+    /// The animated composition a clip's keyframes produce, at a given opacity.
+    fn animated_motion_graph_with_opacity(
+        clip: &Clip,
+        source: (u32, u32),
+        canvas: (u32, u32),
+        fps: f64,
+        slot_sec: f64,
+        head_sec: f64,
+        opacity: f64,
+    ) -> String {
+        let track = super::super::transform_layout::resolve_clip_motion_track(
+            source.0, source.1, canvas.0, canvas.1, clip, head_sec,
+        )
+        .expect("clip has motion keyframes");
+
+        let mut graph = String::new();
+        append_animated_video_transform_composition(
+            &mut graph, "0:v", "out", &track, opacity, slot_sec, canvas.0, canvas.1, fps, "yuv420p",
+        );
+        graph
+    }
+
+    /// Feature: Keyframed motion in the export
+    /// Scenario: alpha attenuation runs before the animated scale
+    ///
+    /// `colorchannelmixer` works in RGB, so in a `yuva*` graph FFmpeg wraps it in
+    /// a yuva -> argb -> yuva conversion. Placed after the animated `scale` that
+    /// conversion is configured once and keeps rescaling every later frame back to
+    /// the first frame's size, freezing the animation outright. Attenuating alpha
+    /// does not depend on the frame's size, so it belongs above `scale`.
+    #[test]
+    fn a_translucent_animated_clip_attenuates_before_it_scales() {
+        let clip = motion_clip(&[
+            (0.0, motion_transform((0.5, 0.5), (0.4, 0.4), 0.0), false),
+            (2.0, motion_transform((0.5, 0.5), (0.9, 0.9), 0.0), false),
+        ]);
+
+        let graph =
+            animated_motion_graph_with_opacity(&clip, (640, 360), (1280, 720), 30.0, 2.0, 0.0, 0.5);
+
+        let mixer = graph
+            .find("colorchannelmixer")
+            .expect("a translucent clip must attenuate its alpha");
+        let scale = graph
+            .find("scale=w='")
+            .expect("an animated clip must scale by expression");
+        assert!(
+            mixer < scale,
+            "the alpha filter must precede the animated scale or the size freezes: {graph}"
+        );
+
+        // Nothing may sit between the animated scale and the staged label but
+        // `setsar`, which converts no formats and so inserts no converter.
+        let staged = &graph[scale..graph.find("[out_tx]").expect("staged label")];
+        assert!(
+            staged.ends_with("eval=frame,setsar=1"),
+            "no format-converting filter may follow the animated scale: {staged}"
+        );
+
+        // An opaque clip emits no attenuation at all, and still stages in yuva.
+        let opaque =
+            animated_motion_graph_with_opacity(&clip, (640, 360), (1280, 720), 30.0, 2.0, 0.0, 1.0);
+        assert!(
+            !opaque.contains("colorchannelmixer"),
+            "an opaque clip must not pay for an alpha filter: {opaque}"
+        );
+        assert!(
+            opaque.starts_with("[0:v]format=yuva420p,scale=w='"),
+            "the staged chain must convert format before it scales: {opaque}"
+        );
+    }
+
+    /// Feature: Keyframed motion in the export
+    /// Scenario: a sub-microsecond keyframe span cannot divide by zero
+    ///
+    /// Times are emitted through `format_speed_number`, which rounds to six
+    /// decimals. A raw span of 1e-7 is comfortably greater than zero in Rust and
+    /// formats to a literal `0` in the graph, so guarding on the raw value would
+    /// hand FFmpeg `…*(t-0)/0`.
+    #[test]
+    fn a_sub_microsecond_keyframe_span_never_emits_a_zero_divisor() {
+        let clip = motion_clip(&[
+            (0.0, motion_transform((0.3, 0.5), (0.4, 0.4), 0.0), false),
+            (1e-7, motion_transform((0.7, 0.5), (0.9, 0.9), 0.0), false),
+            (2.0, motion_transform((0.7, 0.5), (0.9, 0.9), 0.0), false),
+        ]);
+
+        let graph = animated_motion_graph(&clip, (640, 360), (1280, 720), 30.0, 2.0, 0.0);
+
+        assert!(
+            !graph.contains("/0)") && !graph.contains("/0,"),
+            "a span that rounds to zero must not become a divisor: {graph}"
+        );
+        assert!(
+            graph.contains(":eval=frame"),
+            "the rest of the move must still animate: {graph}"
+        );
+    }
+
+    /// Feature: Keyframed motion in the export
+    /// Scenario: motion the render cannot animate leaves the graph untouched
+    ///
+    /// The byte-for-byte guarantee, driven through the real argument builder
+    /// rather than the composer alone: a clip whose keyframes cannot be animated
+    /// must produce exactly the graph it produced before motion rendered at all.
+    #[test]
+    fn unanimatable_motion_builds_the_same_graph_as_no_motion_at_all() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{SequenceFormat, TransformKeyframe};
+
+        let build = |keyframes: Vec<TransformKeyframe>| {
+            let mut sequence = Sequence::new("Motion", SequenceFormat::youtube_1080());
+            let mut track = Track::new_video("Video 1");
+            let mut clip = Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0);
+            clip.transform = motion_transform((0.4, 0.6), (0.5, 0.5), 0.0);
+            clip.motion_keyframes = keyframes;
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let video_path = create_temp_media_file("no_regression.mp4");
+            let mut video_asset = Asset::new_video(
+                "no_regression.mp4",
+                &video_path,
+                VideoInfo {
+                    width: 1280,
+                    height: 720,
+                    ..VideoInfo::default()
+                },
+            )
+            .with_duration(3.0)
+            .with_file_size(3_000_000);
+            video_asset.id = "video_asset".to_string();
+            let mut assets = HashMap::new();
+            assets.insert(video_asset.id.clone(), video_asset);
+
+            let args = build_complex_filter_args_with_audio_info(
+                &sequence,
+                &assets,
+                &HashMap::new(),
+                &HashMap::new(),
+                &ExportSettings::default(),
+            )
+            .expect("the clip should build a filtergraph");
+            filter_complex_of(&args).to_string()
+        };
+
+        let keyframe_at = |time_offset: f64, transform: Transform| TransformKeyframe {
+            time_offset,
+            transform,
+            interpolation: Default::default(),
+        };
+
+        let baseline = build(Vec::new());
+
+        // One keyframe describes a still picture.
+        let single = build(vec![keyframe_at(
+            0.0,
+            motion_transform((0.2, 0.2), (0.9, 0.9), 0.0),
+        )]);
+        assert_eq!(
+            single, baseline,
+            "a lone keyframe must not change the emitted graph"
+        );
+
+        // Keyframes that agree describe a still picture too.
+        let unmoving = build(vec![
+            keyframe_at(0.0, motion_transform((0.2, 0.2), (0.9, 0.9), 0.0)),
+            keyframe_at(3.0, motion_transform((0.2, 0.2), (0.9, 0.9), 0.0)),
+        ]);
+        assert_eq!(
+            unmoving, baseline,
+            "keyframes that agree must not change the emitted graph"
+        );
+
+        // And motion that turns the picture stays on the static path.
+        let rotating = build(vec![
+            keyframe_at(0.0, motion_transform((0.2, 0.2), (0.9, 0.9), 0.0)),
+            keyframe_at(3.0, motion_transform((0.6, 0.6), (1.2, 1.2), 25.0)),
+        ]);
+        assert_eq!(
+            rotating, baseline,
+            "rotating motion must not change the emitted graph"
+        );
+
+        // The control: motion the render *can* animate must differ, or the three
+        // assertions above would pass for the wrong reason.
+        let panning = build(vec![
+            keyframe_at(0.0, motion_transform((0.2, 0.2), (0.9, 0.9), 0.0)),
+            keyframe_at(3.0, motion_transform((0.6, 0.6), (1.2, 1.2), 0.0)),
+        ]);
+        assert_ne!(
+            panning, baseline,
+            "animatable motion must actually change the emitted graph"
+        );
+    }
+
+    /// Feature: Keyframed motion in the export
+    /// Scenario: an unmeasurable source costs the animation, not the export
+    ///
+    /// Compositing needs the source's real pixel size. Widening the composition
+    /// gate to cover motion meant an identity-transform clip that merely carried
+    /// keyframes started demanding that size — and an asset whose size cannot be
+    /// measured turned a previously working export into a blocked one. Such a
+    /// clip has somewhere to fall back to: the plain canvas fit it always had.
+    #[test]
+    fn a_motion_clip_with_an_unmeasurable_source_still_exports() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{SequenceFormat, TransformKeyframe};
+
+        // `VideoInfo::default()` is the 1920x1080 placeholder an unenriched
+        // import stores, which `stored_asset_source_dimensions` refuses, and the
+        // file does not exist so the probe cannot rescue it either.
+        let build = |transform: Transform, opacity: f32| {
+            let mut sequence = Sequence::new("Motion", SequenceFormat::youtube_1080());
+            let mut track = Track::new_video("Video 1");
+            let mut clip = Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0);
+            clip.id = "motion-clip".to_string();
+            clip.transform = transform;
+            clip.opacity = opacity;
+            clip.motion_keyframes = vec![
+                TransformKeyframe {
+                    time_offset: 0.0,
+                    transform: motion_transform((0.3, 0.5), (0.5, 0.5), 0.0),
+                    interpolation: Default::default(),
+                },
+                TransformKeyframe {
+                    time_offset: 3.0,
+                    transform: motion_transform((0.7, 0.5), (1.0, 1.0), 0.0),
+                    interpolation: Default::default(),
+                },
+            ];
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let video_path = create_temp_media_file("unmeasurable.mp4");
+            let mut video_asset =
+                Asset::new_video("unmeasurable.mp4", &video_path, VideoInfo::default())
+                    .with_duration(3.0)
+                    .with_file_size(3_000_000);
+            video_asset.id = "video_asset".to_string();
+            let mut assets = HashMap::new();
+            assets.insert(video_asset.id.clone(), video_asset);
+
+            (sequence, assets)
+        };
+
+        // Motion alone: the export survives, fitted to the canvas, and says so.
+        let (sequence, assets) = build(Transform::default(), 1.0);
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+        assert!(
+            validation.is_valid,
+            "motion alone must not block an export over an unmeasurable source: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Motion keyframes")
+                    && warning.contains("fitted to the canvas")),
+            "the lost animation has to be reported: {:?}",
+            validation.warnings
+        );
+
+        let graph = filter_complex_of(
+            &build_complex_filter_args_with_audio_info(
+                &sequence,
+                &assets,
+                &HashMap::new(),
+                &HashMap::new(),
+                &ExportSettings::default(),
+            )
+            .expect("an unmeasurable motion clip must still build a graph"),
+        )
+        .to_string();
+        assert!(
+            !graph.contains(":eval=frame"),
+            "the degraded clip must not animate: {graph}"
+        );
+
+        // A clip whose own transform places it still needs the size, and still
+        // fails loudly without it — that error is not a regression, it is the
+        // point of the check.
+        let (placed, placed_assets) = build(motion_transform((0.25, 0.25), (0.5, 0.5), 0.0), 1.0);
+        let placed_validation = validate_export_settings(
+            &placed,
+            &placed_assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+        assert!(
+            !placed_validation.is_valid,
+            "a clip whose own transform needs placing must still fail without a size"
+        );
+    }
+
+    /// Feature: Keyframed motion in the export
+    /// Scenario: a translucent clip animates as readily as an opaque one
+    ///
+    /// Alpha attenuation is the one filter in the staged chain that converts pixel
+    /// format, and a converter downstream of the animated `scale` is configured
+    /// once and then rescales every later frame back to the first frame's size.
+    /// With `colorchannelmixer` left after `scale` this measured 3676 lit pixels
+    /// on frame 0 and 3676 on frame 59 of a 0.4x -> 0.9x zoom — seven distinct
+    /// sizes across sixty frames, i.e. frozen. Hoisting it above `scale` gives
+    /// 3676 -> 14306 across sixty distinct sizes.
+    ///
+    /// This is a silent wrong render rather than a loud one: the clip still pans,
+    /// FFmpeg prints no warning, and the motion warning is suppressed because the
+    /// export believes it animated the clip. Only the pixels tell.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib --features dev-full -- --ignored translucent
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_translucent_animated_clip_still_moves_its_pixels() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        const CANVAS: (u32, u32) = (320, 180);
+        const SOURCE: (u32, u32) = (320, 180);
+        const FPS: f64 = 30.0;
+        const SLOT_SEC: f64 = 2.0;
+        // Half-opaque white over black lands near luma 128, right on the white
+        // threshold, so the region is measured against "not black" instead.
+        const LIT: u8 = 40;
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = motion_white_box_clip(&ffmpeg, dir.path(), SOURCE, (160, 90), SLOT_SEC)
+        else {
+            skip_without_ffmpeg("the white-box fixture could not be encoded");
+            return;
+        };
+
+        let zooming = motion_clip(&[
+            (0.0, motion_transform((0.5, 0.5), (0.4, 0.4), 0.0), false),
+            (2.0, motion_transform((0.5, 0.5), (0.9, 0.9), 0.0), false),
+        ]);
+        let graph =
+            animated_motion_graph_with_opacity(&zooming, SOURCE, CANVAS, FPS, SLOT_SEC, 0.0, 0.5);
+        let frames = motion_luma_frames(&ffmpeg, &input, &graph, CANVAS);
+        assert_eq!(frames.len(), 60, "the slot must render every frame");
+
+        let areas: Vec<usize> = frames
+            .iter()
+            .map(|frame| {
+                motion_lit_region(frame, CANVAS.0, LIT)
+                    .expect("a translucent clip is still visible")
+                    .0
+            })
+            .collect();
+
+        assert!(
+            areas.last().unwrap() > &(areas[0] * 3),
+            "a translucent 0.4x -> 0.9x zoom must still grow several fold: {} -> {}",
+            areas[0],
+            areas.last().unwrap()
+        );
+        assert!(
+            areas.iter().collect::<std::collections::HashSet<_>>().len() > 20,
+            "a translucent clip must resize continuously, not freeze at frame one: {areas:?}"
+        );
+
+        // And it really is translucent: half-opaque white over black must land
+        // well below the full-white the opaque path produces.
+        let centre = frames[frames.len() - 1][(CANVAS.1 / 2 * CANVAS.0 + CANVAS.0 / 2) as usize];
+        assert!(
+            (LIT..200).contains(&centre),
+            "the clip must be dimmed by its opacity, got luma {centre}"
         );
     }
 }

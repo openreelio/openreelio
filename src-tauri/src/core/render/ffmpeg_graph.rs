@@ -49,27 +49,50 @@ const FILTER_SCRIPT_MINIMUM_MAJOR: u32 = 7;
 /// Whether a reported FFmpeg version can read a filtergraph from a file.
 ///
 /// [`crate::core::ffmpeg::FFmpegInfo::version`] is whatever `get_ffmpeg_version`
-/// scraped off the banner, which is only loosely a version number: releases give
-/// `8.0.1` or `8.0.1-essentials_build-www.gyan.dev`, distributions give `n6.1`,
-/// git builds give `N-109421-g1b2c3d4`, and a banner that did not parse at all
-/// yields the whole first line.
+/// scraped off the banner, which is only loosely a version number. Three shapes
+/// turn up in practice:
 ///
-/// So this reads a major version only from the unambiguous shape — leading ASCII
-/// digits terminated by `.`, `-`, or the end of the string — and answers `false`
-/// for everything else. That conservative default is the point: a `false` here
-/// routes the graph inline, which is what every FFmpeg has always accepted, so an
+/// * Releases: `8.0.1`, or `8.0.1-essentials_build-www.gyan.dev` from the Gyan
+///   builds this project downloads first.
+/// * Distribution builds, which prefix the git tag: `n6.1`, `n7.1`.
+/// * Master builds, which report git-describe against no tag at all:
+///   `N-119421-g1b2c3d4`. This one matters because
+///   `ffmpeg-master-latest-*-gpl` from BtbN is the project's own configured
+///   fallback download (`scripts/ffmpeg-sources.json`), so the binary most
+///   likely to be handed a huge graph is also the one with no readable major
+///   version. BtbN publishes only recent masters, all well past 7.0.
+///
+/// Anything else — including a banner line that never parsed into a version at
+/// all — answers `false`, which routes the graph inline. That conservative
+/// default is the point: inline is what every FFmpeg has always accepted, so an
 /// unrecognised version keeps behaving exactly as it did before the script-file
-/// path existed. Guessing the other way would break every export on that binary.
+/// path existed. Guessing the other way breaks every export on that binary.
+///
+/// Note there is deliberately no `-filter_complex_script` fallback for older
+/// builds: that option was removed in FFmpeg 9, so it trades one broken set of
+/// versions for another. A major-version gate is the only shape that holds.
 pub fn ffmpeg_supports_filter_script(version: &str) -> bool {
     let version = version.trim();
-    let digits: String = version.chars().take_while(char::is_ascii_digit).collect();
+
+    if is_git_master_build(version) {
+        return true;
+    }
+
+    // A distribution build prefixes the git tag with `n`, and `v` shows up in
+    // hand-rolled builds; neither changes the number that follows.
+    let number = version
+        .strip_prefix(['n', 'v', 'N', 'V'])
+        .filter(|rest| rest.starts_with(|first: char| first.is_ascii_digit()))
+        .unwrap_or(version);
+
+    let digits: String = number.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() {
         return false;
     }
 
     // Anything other than a version separator after the digits means this was
     // never a version number, so it is not evidence of anything.
-    match version[digits.len()..].chars().next() {
+    match number[digits.len()..].chars().next() {
         None | Some('.') | Some('-') => {}
         Some(_) => return false,
     }
@@ -77,6 +100,35 @@ pub fn ffmpeg_supports_filter_script(version: &str) -> bool {
     digits
         .parse::<u32>()
         .is_ok_and(|major| major >= FILTER_SCRIPT_MINIMUM_MAJOR)
+}
+
+/// Whether a version string is FFmpeg's untagged git-describe form.
+///
+/// `N-<build>-g<hash>`, optionally with a trailing date or flavour suffix. The
+/// build counter is not a version, so it is checked for shape only.
+fn is_git_master_build(version: &str) -> bool {
+    let Some(rest) = version
+        .strip_prefix("N-")
+        .or_else(|| version.strip_prefix("n-"))
+    else {
+        return false;
+    };
+
+    let build: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if build.is_empty() {
+        return false;
+    }
+
+    let Some(hash) = rest[build.len()..]
+        .strip_prefix("-g")
+        .or_else(|| rest[build.len()..].strip_prefix("-G"))
+    else {
+        return false;
+    };
+
+    // At least one hex digit of commit hash, then anything (a date suffix, a
+    // flavour tag) may follow.
+    hash.starts_with(|first: char| first.is_ascii_hexdigit())
 }
 
 /// Moves an argument list's filtergraph out of the argv and into a script file.
@@ -325,6 +377,66 @@ mod tests {
     }
 
     /// Feature: Filtergraph delivery
+    /// Scenario: tagged distribution builds are read through their prefix
+    ///
+    /// Distributions report the git tag, `n7.1` rather than `7.1`. Reading the
+    /// `n` as "unparseable" would push a perfectly capable binary onto the inline
+    /// path — while still, correctly, rejecting `n6.1`.
+    #[test]
+    fn a_tag_prefixed_version_is_read_through_its_prefix() {
+        for version in ["n7.1", "n8.0.1", "v7.0", "N7.1"] {
+            assert!(
+                ffmpeg_supports_filter_script(version),
+                "{version} is a tagged 7.0-or-later build"
+            );
+        }
+
+        for version in ["n6.1", "n6.1.1", "v6.0", "n0.11"] {
+            assert!(
+                !ffmpeg_supports_filter_script(version),
+                "{version} is a tagged build that still predates the -/option form"
+            );
+        }
+    }
+
+    /// Feature: Filtergraph delivery
+    /// Scenario: an untagged master build is trusted
+    ///
+    /// `ffmpeg-master-latest-*-gpl` from BtbN is this project's own fallback
+    /// download, and it reports git-describe against no tag: `N-119421-g1b2c3d4`.
+    /// There is no major version to read, so the shape itself is the evidence —
+    /// BtbN publishes only recent masters. Without this the binary most likely to
+    /// be handed a motion-heavy graph is the one denied the script file.
+    #[test]
+    fn an_untagged_master_build_is_treated_as_current() {
+        for version in [
+            "N-119421-g1b2c3d4",
+            "N-6-gabc",
+            "N-119421-g1b2c3d4c3-20250101",
+            "n-119421-gdeadbeef",
+        ] {
+            assert!(
+                ffmpeg_supports_filter_script(version),
+                "{version} is a git master build and reads a filtergraph from a file"
+            );
+        }
+
+        // The shape has to be the whole shape; a lookalike is not evidence.
+        for version in [
+            "N-",
+            "N-abc-g1b2",
+            "N-119421",
+            "N-119421-x1b2",
+            "N-119421-g",
+        ] {
+            assert!(
+                !ffmpeg_supports_filter_script(version),
+                "{version:?} only resembles a git-describe build, so it must stay inline"
+            );
+        }
+    }
+
+    /// Feature: Filtergraph delivery
     /// Scenario: a version string nobody can read means inline
     ///
     /// `get_ffmpeg_version` hands back whatever it scraped off the banner, and
@@ -337,13 +449,11 @@ mod tests {
         for version in [
             "",
             "   ",
-            "n6.1",
-            "n7.1",
-            "N-109421-g1b2c3d4",
             "unknown",
             "ffmpeg version 8.0.1 Copyright (c) 2000-2025",
             "7x",
-            "v7.0",
+            "nightly",
+            "next",
             "-7.0",
             "99999999999999999999.0",
         ] {
