@@ -166,7 +166,11 @@ pub(super) fn clip_audio_is_suppressed_by_companion(
         && audio_companion_keys.contains(&create_audio_companion_key(clip))
 }
 
-fn has_layered_visual_overlap(sequence: &Sequence) -> bool {
+/// Returns the id of the first clip that starts before an earlier one ended.
+///
+/// Reported as an id rather than a bare `bool` so the caller can point at the
+/// clip the user has to move, instead of leaving them to find it themselves.
+fn first_layered_visual_overlap(sequence: &Sequence) -> Option<&str> {
     let mut intervals = Vec::new();
 
     for track in &sequence.tracks {
@@ -179,17 +183,21 @@ fn has_layered_visual_overlap(sequence: &Sequence) -> bool {
                 continue;
             }
 
-            intervals.push((clip.place.timeline_in_sec, clip.place.timeline_out_sec()));
+            intervals.push((
+                clip.place.timeline_in_sec,
+                clip.place.timeline_out_sec(),
+                clip.id.as_str(),
+            ));
         }
     }
 
     intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut latest_end: Option<f64> = None;
-    for (start, end) in intervals {
+    for (start, end, clip_id) in intervals {
         if let Some(current_end) = latest_end {
             if start < current_end - 0.001 {
-                return true;
+                return Some(clip_id);
             }
             latest_end = Some(current_end.max(end));
         } else {
@@ -197,7 +205,7 @@ fn has_layered_visual_overlap(sequence: &Sequence) -> bool {
         }
     }
 
-    false
+    None
 }
 
 fn sequence_has_exportable_audio(
@@ -6593,6 +6601,32 @@ pub fn calculate_export_progress(
 // Export Validation
 // =============================================================================
 
+/// How badly a validation finding affects the export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFindingSeverity {
+    /// The export cannot run until the caller fixes this.
+    Error,
+    /// The export runs, but the file differs from what the timeline shows.
+    Warning,
+}
+
+/// A single validation finding, addressed at the thing that caused it.
+///
+/// The flat `errors`/`warnings` string lists say only *what* is wrong; a caller
+/// that wants to take the user to the offending clip needs the id too, and every
+/// clip-specific validator already has it in scope when it formats the message.
+#[derive(Debug, Clone)]
+pub struct ExportFinding {
+    /// Whether this blocks the export or only degrades it.
+    pub severity: ExportFindingSeverity,
+    /// Human-readable description, identical to the `errors`/`warnings` entry.
+    pub message: String,
+    /// Sequence the finding belongs to, when the validator knows it.
+    pub sequence_id: Option<String>,
+    /// Clip the finding is about, when the finding is about one clip.
+    pub clip_id: Option<String>,
+}
+
 /// Validation result for export settings
 #[derive(Debug, Clone)]
 pub struct ExportValidation {
@@ -6602,6 +6636,11 @@ pub struct ExportValidation {
     pub errors: Vec<String>,
     /// List of warnings (non-blocking)
     pub warnings: Vec<String>,
+    /// Structured view of the same findings, carrying the ids of what caused them.
+    ///
+    /// This is the source of truth; `is_valid`, `errors` and `warnings` are kept
+    /// in sync with it so existing consumers keep working unchanged.
+    pub findings: Vec<ExportFinding>,
 }
 
 impl ExportValidation {
@@ -6611,32 +6650,85 @@ impl ExportValidation {
             is_valid: true,
             errors: Vec::new(),
             warnings: Vec::new(),
+            findings: Vec::new(),
         }
     }
 
     /// Create an invalid result with errors
     pub fn invalid(errors: Vec<String>) -> Self {
-        Self {
-            is_valid: false,
-            errors,
-            warnings: Vec::new(),
+        let mut validation = Self::valid();
+        for error in errors {
+            validation.add_error(error);
         }
+        validation
     }
 
     /// Add an error
     pub fn add_error(&mut self, error: impl Into<String>) {
-        self.errors.push(error.into());
-        self.is_valid = false;
+        self.push(ExportFindingSeverity::Error, error.into(), None, None);
     }
 
     /// Add a warning
     pub fn add_warning(&mut self, warning: impl Into<String>) {
-        self.warnings.push(warning.into());
+        self.push(ExportFindingSeverity::Warning, warning.into(), None, None);
+    }
+
+    /// Add an error a caller can navigate to.
+    pub fn add_clip_error(
+        &mut self,
+        sequence_id: impl Into<String>,
+        clip_id: impl Into<String>,
+        error: impl Into<String>,
+    ) {
+        self.push(
+            ExportFindingSeverity::Error,
+            error.into(),
+            Some(sequence_id.into()),
+            Some(clip_id.into()),
+        );
+    }
+
+    /// Add a warning a caller can navigate to.
+    pub fn add_clip_warning(
+        &mut self,
+        sequence_id: impl Into<String>,
+        clip_id: impl Into<String>,
+        warning: impl Into<String>,
+    ) {
+        self.push(
+            ExportFindingSeverity::Warning,
+            warning.into(),
+            Some(sequence_id.into()),
+            Some(clip_id.into()),
+        );
+    }
+
+    fn push(
+        &mut self,
+        severity: ExportFindingSeverity,
+        message: String,
+        sequence_id: Option<String>,
+        clip_id: Option<String>,
+    ) {
+        match severity {
+            ExportFindingSeverity::Error => {
+                self.errors.push(message.clone());
+                self.is_valid = false;
+            }
+            ExportFindingSeverity::Warning => self.warnings.push(message.clone()),
+        }
+        self.findings.push(ExportFinding {
+            severity,
+            message,
+            sequence_id,
+            clip_id,
+        });
     }
 }
 
 fn validate_clip_effect_contract(
     validation: &mut ExportValidation,
+    sequence_id: &str,
     clip: &Clip,
     track: &Track,
     effects: &std::collections::HashMap<String, Effect>,
@@ -6648,10 +6740,14 @@ fn validate_clip_effect_contract(
 
     for effect_id in &clip.effects {
         let Some(effect) = effects.get(effect_id) else {
-            validation.add_error(format!(
-                "Clip '{}' on track '{}' references missing effect '{}'",
-                clip.id, track.name, effect_id
-            ));
+            validation.add_clip_error(
+                sequence_id,
+                &clip.id,
+                format!(
+                    "Clip '{}' on track '{}' references missing effect '{}'",
+                    clip.id, track.name, effect_id
+                ),
+            );
             continue;
         };
 
@@ -6679,12 +6775,12 @@ fn validate_clip_effect_contract(
         if effect.effect_type.is_two_input_transition() {
             for refusal in transition_plan.refusals() {
                 if refusal.clip_id == clip.id && refusal.effect_id == *effect_id {
-                    validation.add_warning(refusal.warning());
+                    validation.add_clip_warning(sequence_id, &clip.id, refusal.warning());
                 }
             }
             for advisory in transition_plan.advisories() {
                 if advisory.clip_id == clip.id && advisory.effect_id == *effect_id {
-                    validation.add_warning(advisory.warning());
+                    validation.add_clip_warning(sequence_id, &clip.id, advisory.warning());
                 }
             }
         }
@@ -6693,23 +6789,32 @@ fn validate_clip_effect_contract(
             let reason = capability
                 .export_reason
                 .unwrap_or("This effect is not implemented by final export.");
-            validation.add_error(format!(
-                "Effect '{}' on clip '{}' is not supported in final export: {}",
-                label, clip.id, reason
-            ));
+            validation.add_clip_error(
+                sequence_id,
+                &clip.id,
+                format!(
+                    "Effect '{}' on clip '{}' is not supported in final export: {}",
+                    label, clip.id, reason
+                ),
+            );
         }
 
         if !effect.keyframes.is_empty() {
-            validation.add_error(format!(
-                "Keyframed effect '{}' on clip '{}' is not supported in final export yet; export would otherwise render a static sampled value",
-                label, clip.id
-            ));
+            validation.add_clip_error(
+                sequence_id,
+                &clip.id,
+                format!(
+                    "Keyframed effect '{}' on clip '{}' is not supported in final export yet; export would otherwise render a static sampled value",
+                    label, clip.id
+                ),
+            );
         }
     }
 }
 
 fn validate_clip_frame_alignment(
     validation: &mut ExportValidation,
+    sequence_id: &str,
     clock: &TimelineClock,
     clip: &Clip,
     track: &Track,
@@ -6718,13 +6823,17 @@ fn validate_clip_frame_alignment(
     let end = clip.place.timeline_out_sec();
 
     if !clock.is_frame_aligned(start) || !clock.is_frame_aligned(end) {
-        validation.add_warning(format!(
-            "Clip '{}' on track '{}' is not aligned to sequence frame boundaries at {}/{} fps",
-            clip.id,
-            track.name,
-            clock.fps().num,
-            clock.fps().den
-        ));
+        validation.add_clip_warning(
+            sequence_id,
+            &clip.id,
+            format!(
+                "Clip '{}' on track '{}' is not aligned to sequence frame boundaries at {}/{} fps",
+                clip.id,
+                track.name,
+                clock.fps().num,
+                clock.fps().den
+            ),
+        );
     }
 }
 
@@ -6764,18 +6873,26 @@ fn validate_clip_asset_qc(
     settings: &ExportSettings,
 ) {
     if asset.missing {
-        validation.add_error(format!(
-            "Asset '{}' is marked missing/offline for clip '{}'",
-            asset.id, clip.id
-        ));
+        validation.add_clip_error(
+            &sequence.id,
+            &clip.id,
+            format!(
+                "Asset '{}' is marked missing/offline for clip '{}'",
+                asset.id, clip.id
+            ),
+        );
     }
 
     if let Some(video) = asset.video.as_ref() {
         if video.is_hdr && !settings.is_hdr() && !has_active_tonemap(settings) {
-            validation.add_warning(format!(
-                "HDR source asset '{}' on clip '{}' is exporting to SDR without tonemapping; verify gamut/clipping in scopes or enable HDR export/tonemap",
-                asset.id, clip.id
-            ));
+            validation.add_clip_warning(
+                &sequence.id,
+                &clip.id,
+                format!(
+                    "HDR source asset '{}' on clip '{}' is exporting to SDR without tonemapping; verify gamut/clipping in scopes or enable HDR export/tonemap",
+                    asset.id, clip.id
+                ),
+            );
         }
     }
 
@@ -6788,10 +6905,14 @@ fn validate_clip_asset_qc(
             + sequence.master_volume_db as f64;
 
         if combined_gain_db > 3.0 {
-            validation.add_warning(format!(
-                "Clip '{}' on track '{}' has {:.1} dB combined gain; verify loudness and clipping before export",
-                clip.id, track.name, combined_gain_db
-            ));
+            validation.add_clip_warning(
+                &sequence.id,
+                &clip.id,
+                format!(
+                    "Clip '{}' on track '{}' has {:.1} dB combined gain; verify loudness and clipping before export",
+                    clip.id, track.name, combined_gain_db
+                ),
+            );
         }
     }
 }
@@ -6843,10 +6964,14 @@ fn validate_text_render_fidelity(
 
             let line_height = effect_float_param(&effect, "line_height", ASS_DEFAULT_LINE_HEIGHT);
             if (line_height - ASS_DEFAULT_LINE_HEIGHT).abs() > ASS_LINE_HEIGHT_WARNING_TOLERANCE {
-                validation.add_warning(format!(
-                    "Line height {line_height:.2} on clip '{}' on track '{}' is honored only by the drawtext fallback; the libass burn-in path an export normally takes follows the font's own line metrics",
-                    clip.id, track.name
-                ));
+                validation.add_clip_warning(
+                    &sequence.id,
+                    &clip.id,
+                    format!(
+                        "Line height {line_height:.2} on clip '{}' on track '{}' is honored only by the drawtext fallback; the libass burn-in path an export normally takes follows the font's own line metrics",
+                        clip.id, track.name
+                    ),
+                );
             }
 
             let requested_family = ass_sanitize_style_field(
@@ -6856,10 +6981,14 @@ fn validate_text_render_fidelity(
             if let FontResolution::Substituted(replacement) =
                 resolve_text_font_family(&requested_family)
             {
-                validation.add_warning(format!(
-                    "Font '{requested_family}' on clip '{}' on track '{}' is neither bundled nor installed; the clip renders in the bundled '{replacement}' instead",
-                    clip.id, track.name
-                ));
+                validation.add_clip_warning(
+                    &sequence.id,
+                    &clip.id,
+                    format!(
+                        "Font '{requested_family}' on clip '{}' on track '{}' is neither bundled nor installed; the clip renders in the bundled '{replacement}' instead",
+                        clip.id, track.name
+                    ),
+                );
             }
         }
     }
@@ -6867,6 +6996,7 @@ fn validate_text_render_fidelity(
 
 fn validate_caption_track_qc(
     validation: &mut ExportValidation,
+    sequence_id: &str,
     clock: &TimelineClock,
     track: &Track,
 ) {
@@ -6874,27 +7004,39 @@ fn validate_caption_track_qc(
         track.clips.iter().filter(|clip| clip.enabled).collect();
 
     for clip in &enabled_caption_clips {
-        validate_clip_frame_alignment(validation, clock, clip, track);
+        validate_clip_frame_alignment(validation, sequence_id, clock, clip, track);
 
         let caption_text = clip.label.as_deref().unwrap_or("").trim();
         if caption_text.is_empty() {
-            validation.add_warning(format!(
-                "Caption clip '{}' on track '{}' has empty text",
-                clip.id, track.name
-            ));
+            validation.add_clip_warning(
+                sequence_id,
+                &clip.id,
+                format!(
+                    "Caption clip '{}' on track '{}' has empty text",
+                    clip.id, track.name
+                ),
+            );
         }
 
         let duration = clip.place.duration_sec;
         if duration <= 0.0 {
-            validation.add_warning(format!(
-                "Caption clip '{}' on track '{}' has no visible duration",
-                clip.id, track.name
-            ));
+            validation.add_clip_warning(
+                sequence_id,
+                &clip.id,
+                format!(
+                    "Caption clip '{}' on track '{}' has no visible duration",
+                    clip.id, track.name
+                ),
+            );
         } else if duration < 0.5 {
-            validation.add_warning(format!(
-                "Caption clip '{}' on track '{}' is shorter than 0.5 seconds",
-                clip.id, track.name
-            ));
+            validation.add_clip_warning(
+                sequence_id,
+                &clip.id,
+                format!(
+                    "Caption clip '{}' on track '{}' is shorter than 0.5 seconds",
+                    clip.id, track.name
+                ),
+            );
         }
     }
 
@@ -6909,10 +7051,14 @@ fn validate_caption_track_qc(
         let previous = pair[0];
         let next = pair[1];
         if previous.place.overlaps(&next.place) {
-            validation.add_warning(format!(
-                "Caption clips '{}' and '{}' overlap on track '{}'",
-                previous.id, next.id, track.name
-            ));
+            validation.add_clip_warning(
+                sequence_id,
+                &next.id,
+                format!(
+                    "Caption clips '{}' and '{}' overlap on track '{}'",
+                    previous.id, next.id, track.name
+                ),
+            );
         }
     }
 }
@@ -6999,16 +7145,22 @@ pub fn validate_export_settings_with_dimensions(
         return validation;
     }
 
-    let has_enabled_unsupported_overlay_clips = sequence.tracks.iter().any(|track| {
-        track.kind == TrackKind::Overlay
-            && track_included_in_export(track)
-            && track
-                .clips
-                .iter()
-                .any(|clip| clip.enabled && !is_text_clip(clip))
-    });
-    if has_enabled_unsupported_overlay_clips {
-        validation.add_error("Overlay tracks are not supported in final render export yet");
+    // Kept as one message rather than one per clip, but addressed at the first
+    // offending clip so the caller has somewhere to jump to.
+    let first_unsupported_overlay_clip = sequence
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Overlay && track_included_in_export(track))
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.enabled && !is_text_clip(clip))
+        .map(|clip| clip.id.clone());
+    let has_enabled_unsupported_overlay_clips = first_unsupported_overlay_clip.is_some();
+    if let Some(clip_id) = first_unsupported_overlay_clip {
+        validation.add_clip_error(
+            &sequence.id,
+            clip_id,
+            "Overlay tracks are not supported in final render export yet",
+        );
     }
 
     let visual_clip_count: usize = sequence
@@ -7046,7 +7198,7 @@ pub fn validate_export_settings_with_dimensions(
 
         if track.kind == TrackKind::Caption {
             // Caption tracks are burned in separately and do not use file-backed assets.
-            validate_caption_track_qc(&mut validation, &timeline_clock, track);
+            validate_caption_track_qc(&mut validation, &sequence.id, &timeline_clock, track);
             continue;
         }
 
@@ -7059,14 +7211,31 @@ pub fn validate_export_settings_with_dimensions(
                 continue;
             }
 
-            validate_clip_frame_alignment(&mut validation, &timeline_clock, clip, track);
-            validate_clip_effect_contract(&mut validation, clip, track, effects, &transition_plan);
+            validate_clip_frame_alignment(
+                &mut validation,
+                &sequence.id,
+                &timeline_clock,
+                clip,
+                track,
+            );
+            validate_clip_effect_contract(
+                &mut validation,
+                &sequence.id,
+                clip,
+                track,
+                effects,
+                &transition_plan,
+            );
 
             if track.kind == TrackKind::Video && uses_non_normal_blend_mode(clip, track) {
-                validation.add_error(format!(
-                    "Blend mode export is not supported yet for clip '{}' on track '{}'",
-                    clip.id, track.name
-                ));
+                validation.add_clip_error(
+                    &sequence.id,
+                    &clip.id,
+                    format!(
+                        "Blend mode export is not supported yet for clip '{}' on track '{}'",
+                        clip.id, track.name
+                    ),
+                );
             }
 
             // Motion is stored, round-trips through the project, and animates in
@@ -7078,10 +7247,14 @@ pub fn validate_export_settings_with_dimensions(
                 && !clip.is_adjustment_layer()
                 && !is_text_clip(clip)
             {
-                validation.add_warning(format!(
-                    "Motion keyframes on clip '{}' on track '{}' are not yet rendered; the clip renders with its base transform",
-                    clip.id, track.name
-                ));
+                validation.add_clip_warning(
+                    &sequence.id,
+                    &clip.id,
+                    format!(
+                        "Motion keyframes on clip '{}' on track '{}' are not yet rendered; the clip renders with its base transform",
+                        clip.id, track.name
+                    ),
+                );
             }
 
             if is_text_clip(clip) {
@@ -7092,10 +7265,14 @@ pub fn validate_export_settings_with_dimensions(
                         .is_some_and(|e| e.effect_type == EffectType::TextOverlay && e.enabled)
                 });
                 if !has_text_overlay {
-                    validation.add_error(format!(
-                        "Text clip '{}' is missing an enabled TextOverlay effect",
-                        clip.id
-                    ));
+                    validation.add_clip_error(
+                        &sequence.id,
+                        &clip.id,
+                        format!(
+                            "Text clip '{}' is missing an enabled TextOverlay effect",
+                            clip.id
+                        ),
+                    );
                 }
                 continue;
             }
@@ -7107,31 +7284,37 @@ pub fn validate_export_settings_with_dimensions(
                         && effect.is_video()
                         && !effect_type_supports_timeline_enable(&effect.effect_type)
                     {
-                        validation.add_error(untimeable_adjustment_effect_message(
-                            &effect_type_label(&effect.effect_type),
+                        validation.add_clip_error(
+                            &sequence.id,
                             &clip.id,
-                            &track.name,
-                        ));
+                            untimeable_adjustment_effect_message(
+                                &effect_type_label(&effect.effect_type),
+                                &clip.id,
+                                &track.name,
+                            ),
+                        );
                     }
                 }
                 continue;
             }
 
             let Some(asset) = assets.get(&clip.asset_id) else {
-                validation.add_error(format!(
-                    "Asset '{}' not found for clip '{}'",
-                    clip.asset_id, clip.id
-                ));
+                validation.add_clip_error(
+                    &sequence.id,
+                    &clip.id,
+                    format!("Asset '{}' not found for clip '{}'", clip.asset_id, clip.id),
+                );
                 continue;
             };
 
             // Defense-in-depth: validate local file path early to avoid starting an export
             // that will certainly fail (or could be abused if the state is compromised).
             if let Err(err) = validate_local_input_path(&asset.uri, "Asset file") {
-                validation.add_error(format!(
-                    "Invalid asset path for asset '{}': {}",
-                    asset.id, err
-                ));
+                validation.add_clip_error(
+                    &sequence.id,
+                    &clip.id,
+                    format!("Invalid asset path for asset '{}': {}", asset.id, err),
+                );
             }
 
             // Placing a transformed clip needs the source's real pixel size. An
@@ -7139,10 +7322,14 @@ pub fn validate_export_settings_with_dimensions(
             // this and never fails on it.
             if track.kind == TrackKind::Video && clip_needs_transform_composition(clip) {
                 match resolve_asset_source_dimensions(asset, &mut source_dimensions) {
-                    None => validation.add_error(format!(
-                        "Could not determine source dimensions of asset '{}' needed to place transformed clip '{}'",
-                        asset.id, clip.id
-                    )),
+                    None => validation.add_clip_error(
+                        &sequence.id,
+                        &clip.id,
+                        format!(
+                            "Could not determine source dimensions of asset '{}' needed to place transformed clip '{}'",
+                            asset.id, clip.id
+                        ),
+                    ),
                     Some(probed_dimensions) => {
                         // The clip's own effects can resize the picture before
                         // the transform sees it. Failing loudly beats scaling
@@ -7161,8 +7348,11 @@ pub fn validate_export_settings_with_dimensions(
                         if let Err(effect_label) =
                             effective_source_dimensions(probed_dimensions, &graph)
                         {
-                            validation
-                                .add_error(unmeasurable_effect_message(&effect_label, &clip.id));
+                            validation.add_clip_error(
+                                &sequence.id,
+                                &clip.id,
+                                unmeasurable_effect_message(&effect_label, &clip.id),
+                            );
                         }
                     }
                 }
@@ -7172,8 +7362,10 @@ pub fn validate_export_settings_with_dimensions(
         }
     }
 
-    if has_layered_visual_overlap(sequence) {
-        validation.add_error(
+    if let Some(clip_id) = first_layered_visual_overlap(sequence) {
+        validation.add_clip_error(
+            sequence.id.clone(),
+            clip_id.to_string(),
             "Final render export does not support simultaneous layered video clips yet".to_string(),
         );
     }
@@ -9547,6 +9739,165 @@ mod tests {
         assert!(
             warning.contains("base transform"),
             "the warning must say what happens instead: {warning}"
+        );
+    }
+
+    /// Feature: Export preflight
+    /// Scenario: a degrading clip is reported with somewhere to go
+    ///
+    /// The export dialog turns each finding into a row the user can click to
+    /// land on the offending clip. A warning that carries only prose leaves the
+    /// user to hunt for the clip themselves, which is the whole failure mode the
+    /// preflight exists to avoid.
+    #[test]
+    fn test_findings_carry_clip_id_for_motion_keyframe_warning() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track, TransformKeyframe};
+        use crate::core::Point2D;
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.id = "moving-clip".to_string();
+        clip.motion_keyframes = vec![
+            TransformKeyframe {
+                time_offset: 0.0,
+                transform: Transform::default(),
+                interpolation: Default::default(),
+            },
+            TransformKeyframe {
+                time_offset: 3.0,
+                transform: Transform {
+                    position: Point2D::new(0.75, 0.5),
+                    ..Transform::default()
+                },
+                interpolation: Default::default(),
+            },
+        ];
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("findings_motion.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset =
+            Asset::new_video("findings_motion.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation.is_valid,
+            "a degrading clip must not block the export: {:?}",
+            validation.errors
+        );
+
+        let finding = validation
+            .findings
+            .iter()
+            .find(|finding| finding.message.contains("Motion keyframes"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "keyframed motion must produce a finding: {:?}",
+                    validation.findings
+                )
+            });
+
+        assert_eq!(finding.severity, ExportFindingSeverity::Warning);
+        assert_eq!(finding.clip_id.as_deref(), Some("moving-clip"));
+        assert_eq!(finding.sequence_id.as_deref(), Some(sequence.id.as_str()));
+        assert!(
+            validation.warnings.contains(&finding.message),
+            "the flat warning list must stay in sync with the findings"
+        );
+    }
+
+    /// Feature: Export preflight
+    /// Scenario: a blocking overlap names the clip that has to move
+    #[test]
+    fn test_findings_carry_clip_id_for_layered_overlap_error() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut top_track = Track::new_video("Video 1");
+        let mut top_clip = Clip::new("asset_top")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        top_clip.id = "base-clip".to_string();
+        top_track.add_clip(top_clip);
+        sequence.add_track(top_track);
+
+        let mut bottom_track = Track::new_video("Video 2");
+        let mut bottom_clip = Clip::new("asset_bottom")
+            .with_source_range(0.0, 5.0)
+            .place_at(2.0);
+        bottom_clip.id = "pip-clip".to_string();
+        bottom_track.add_clip(bottom_clip);
+        sequence.add_track(bottom_track);
+
+        let top_path = create_temp_media_file("findings_layered_top.mp4");
+        let mut top_asset =
+            Asset::new_video("findings_layered_top.mp4", &top_path, VideoInfo::default())
+                .with_duration(5.0)
+                .with_file_size(5_000_000);
+        top_asset.id = "asset_top".to_string();
+
+        let bottom_path = create_temp_media_file("findings_layered_bottom.mp4");
+        let mut bottom_asset = Asset::new_video(
+            "findings_layered_bottom.mp4",
+            &bottom_path,
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        bottom_asset.id = "asset_bottom".to_string();
+
+        let mut assets = HashMap::new();
+        assets.insert(top_asset.id.clone(), top_asset);
+        assets.insert(bottom_asset.id.clone(), bottom_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(!validation.is_valid, "layered video must block the export");
+
+        let finding = validation
+            .findings
+            .iter()
+            .find(|finding| finding.message.contains("simultaneous layered video clips"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "layered video must produce a finding: {:?}",
+                    validation.findings
+                )
+            });
+
+        assert_eq!(finding.severity, ExportFindingSeverity::Error);
+        assert_eq!(
+            finding.clip_id.as_deref(),
+            Some("pip-clip"),
+            "the finding must name the clip that starts the overlap"
+        );
+        assert_eq!(finding.sequence_id.as_deref(), Some(sequence.id.as_str()));
+        assert!(
+            validation.errors.contains(&finding.message),
+            "the flat error list must stay in sync with the findings"
         );
     }
 

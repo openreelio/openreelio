@@ -8,7 +8,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { pickExportDestination } from '@/services/exportDestination';
-import { commands } from '@/bindings';
+import { commands, type VideoExportRequest } from '@/bindings';
 import type {
   AudioExportFormat,
   ExportKind,
@@ -99,8 +99,12 @@ export interface UseExportDialogResult {
   canExport: boolean;
   /** Browse for output file location */
   handleBrowse: () => Promise<void>;
-  /** Start the export */
+  /** Run the preflight and, if the project is clean, start the export */
   handleExport: () => Promise<void>;
+  /** Start the export the preflight warned about, after the user chose to proceed */
+  confirmExport: () => Promise<void>;
+  /** Dismiss the preflight findings without exporting */
+  cancelValidation: () => void;
   /** Retry after failure */
   handleRetry: () => void;
 }
@@ -138,6 +142,8 @@ export function useExportDialog({
   // ===========================================================================
   const unlistenRefs = useRef<UnlistenFn[]>([]);
   const currentJobIdRef = useRef<string | null>(null);
+  /** Request the preflight validated, held so "Export anyway" reuses it verbatim. */
+  const pendingVideoRequestRef = useRef<VideoExportRequest | null>(null);
 
   // ===========================================================================
   // Reset on Dialog Open
@@ -152,6 +158,7 @@ export function useExportDialog({
       setStatus({ type: 'idle' });
       setCurrentJobId(null);
       currentJobIdRef.current = null;
+      pendingVideoRequestRef.current = null;
     }
   }, [initialExportKind, isOpen]);
 
@@ -308,8 +315,135 @@ export function useExportDialog({
     }
   }, [exportKind, selectedAudioFormat, selectedPreset, selectedTimelineFormat, sequenceName]);
 
+  const failWith = useCallback((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    setStatus({ type: 'failed', error: message });
+    currentJobIdRef.current = null;
+    setCurrentJobId(null);
+  }, []);
+
   /**
-   * Start the export process.
+   * Resolve the video request the backend renders, HDR settings included.
+   *
+   * The preflight and the render must be handed the identical request, or the
+   * preflight would be validating settings the render never uses.
+   */
+  const resolveVideoExportRequest = useCallback(async (): Promise<VideoExportRequest> => {
+    if (!sequenceId) {
+      throw new Error('No sequence selected.');
+    }
+    const request = getVideoExportRequest(selectedPreset);
+    const hdrResult = await commands.getSequenceHdrSettings(sequenceId);
+    if (hdrResult.status === 'error') {
+      throw new Error(String(hdrResult.error));
+    }
+    return applyHdrSettingsToVideoExportRequest(request, hdrResult.data);
+  }, [selectedPreset, sequenceId]);
+
+  /**
+   * Hand the export to the backend. Assumes the caller already decided it may run.
+   */
+  const startExport = useCallback(
+    async (videoRequest: VideoExportRequest | null) => {
+      if (!sequenceId || !outputPath) return;
+
+      setStatus({
+        type: 'exporting',
+        progress: 0,
+        message:
+          exportKind === 'audio'
+            ? 'Starting audio export...'
+            : exportKind === 'timeline'
+              ? 'Exporting editable timeline...'
+              : 'Starting export...',
+      });
+
+      try {
+        if (exportKind === 'timeline') {
+          const res =
+            selectedTimelineFormat === 'edl'
+              ? await commands.exportEdl(sequenceId, outputPath)
+              : await commands.exportFcpxml(sequenceId, outputPath);
+
+          if (res.status === 'error') {
+            failWith(String(res.error));
+            return;
+          }
+
+          setStatus({
+            type: 'completed',
+            outputPath: res.data.outputPath,
+            duration: 0,
+          });
+          currentJobIdRef.current = null;
+          setCurrentJobId(null);
+          return;
+        }
+
+        const res =
+          exportKind === 'audio'
+            ? await commands.exportAudioOnly(
+                sequenceId,
+                selectedAudioFormat,
+                outputPath,
+                null,
+                null,
+                useRange ? inPoint : null,
+                useRange ? outPoint : null,
+              )
+            : useRange
+              ? await commands.renderRange(
+                  sequenceId,
+                  outputPath,
+                  selectedPreset,
+                  videoRequest,
+                  inPoint,
+                  outPoint,
+                )
+              : await commands.startRender(sequenceId, outputPath, selectedPreset, videoRequest);
+
+        if (res.status === 'error') {
+          failWith(String(res.error));
+          return;
+        }
+
+        const result = res.data;
+        currentJobIdRef.current = result.jobId;
+        setCurrentJobId(result.jobId);
+
+        if (result.status === 'completed') {
+          setStatus({
+            type: 'completed',
+            outputPath: result.outputPath,
+            duration: 0,
+          });
+          currentJobIdRef.current = null;
+          setCurrentJobId(null);
+        }
+      } catch (error) {
+        failWith(error);
+      }
+    },
+    [
+      exportKind,
+      failWith,
+      inPoint,
+      outPoint,
+      outputPath,
+      selectedAudioFormat,
+      selectedPreset,
+      selectedTimelineFormat,
+      sequenceId,
+      useRange,
+    ],
+  );
+
+  /**
+   * Validate first, then export.
+   *
+   * A clean project never sees a dialog: the preflight returns no findings and
+   * the export starts exactly as it did before. Anything the render would refuse
+   * is reported before a single frame is encoded, against the clip that caused it.
    */
   const handleExport = useCallback(async () => {
     if (!sequenceId || !outputPath) return;
@@ -318,114 +452,98 @@ export function useExportDialog({
       return;
     }
 
-    setStatus({
-      type: 'exporting',
-      progress: 0,
-      message:
-        exportKind === 'audio'
-          ? 'Starting audio export...'
-          : exportKind === 'timeline'
-            ? 'Exporting editable timeline...'
-            : 'Starting export...',
-    });
+    // Audio-only and editable-timeline exports do not go through the video
+    // render path the preflight validates, so there is nothing for it to check.
+    if (exportKind !== 'video') {
+      await startExport(null);
+      return;
+    }
+
+    let videoRequest: VideoExportRequest;
+    try {
+      videoRequest = await resolveVideoExportRequest();
+    } catch (error) {
+      failWith(error);
+      return;
+    }
 
     try {
-      if (exportKind === 'timeline') {
-        const res =
-          selectedTimelineFormat === 'edl'
-            ? await commands.exportEdl(sequenceId, outputPath)
-            : await commands.exportFcpxml(sequenceId, outputPath);
-
-        if (res.status === 'error') {
-          setStatus({ type: 'failed', error: String(res.error) });
-          currentJobIdRef.current = null;
-          setCurrentJobId(null);
-          return;
-        }
-
-        setStatus({
-          type: 'completed',
-          outputPath: res.data.outputPath,
-          duration: 0,
-        });
-        currentJobIdRef.current = null;
-        setCurrentJobId(null);
-        return;
-      }
-
-      const resolveVideoExportRequest = async () => {
-        const request = getVideoExportRequest(selectedPreset);
-        const hdrResult = await commands.getSequenceHdrSettings(sequenceId);
-        if (hdrResult.status === 'error') {
-          throw new Error(String(hdrResult.error));
-        }
-        return applyHdrSettingsToVideoExportRequest(request, hdrResult.data);
-      };
-
-      const res =
-        exportKind === 'audio'
-          ? await commands.exportAudioOnly(
-              sequenceId,
-              selectedAudioFormat,
-              outputPath,
-              null,
-              null,
-              useRange ? inPoint : null,
-              useRange ? outPoint : null,
-            )
-          : useRange
-            ? await commands.renderRange(
-                sequenceId,
-                outputPath,
-                selectedPreset,
-                await resolveVideoExportRequest(),
-                inPoint,
-                outPoint,
-              )
-            : await commands.startRender(
-                sequenceId,
-                outputPath,
-                selectedPreset,
-                await resolveVideoExportRequest(),
-              );
+      const res = await commands.validateExport(
+        sequenceId,
+        outputPath,
+        selectedPreset,
+        videoRequest,
+        useRange ? inPoint : null,
+        useRange ? outPoint : null,
+      );
 
       if (res.status === 'error') {
-        setStatus({ type: 'failed', error: String(res.error) });
-        currentJobIdRef.current = null;
-        setCurrentJobId(null);
+        failWith(String(res.error));
         return;
       }
 
-      const result = res.data;
-      currentJobIdRef.current = result.jobId;
-      setCurrentJobId(result.jobId);
-
-      if (result.status === 'completed') {
+      const { findings } = res.data;
+      if (findings.length > 0) {
+        pendingVideoRequestRef.current = videoRequest;
         setStatus({
-          type: 'completed',
-          outputPath: result.outputPath,
-          duration: 0,
+          type: 'validation',
+          findings,
+          blocked: findings.some((finding) => finding.severity === 'error'),
         });
-        currentJobIdRef.current = null;
-        setCurrentJobId(null);
+        return;
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      setStatus({ type: 'failed', error: errorMessage });
-      currentJobIdRef.current = null;
-      setCurrentJobId(null);
+      failWith(error);
+      return;
     }
+
+    pendingVideoRequestRef.current = null;
+    await startExport(videoRequest);
   }, [
     exportKind,
+    failWith,
     inPoint,
     outPoint,
     outputPath,
-    selectedAudioFormat,
+    resolveVideoExportRequest,
     selectedPreset,
-    selectedTimelineFormat,
     sequenceId,
+    startExport,
     useRange,
   ]);
+
+  /**
+   * Export past the preflight's warnings, at the user's explicit request.
+   */
+  const confirmExport = useCallback(async () => {
+    if (status.type !== 'validation' || status.blocked) {
+      return;
+    }
+
+    // Reuse the request the preflight validated. Re-resolving is only a
+    // safety net: rendering a different request than the one that was
+    // validated is exactly the drift the preflight exists to prevent.
+    let videoRequest = pendingVideoRequestRef.current;
+    if (!videoRequest) {
+      try {
+        videoRequest = await resolveVideoExportRequest();
+      } catch (error) {
+        failWith(error);
+        return;
+      }
+    }
+
+    pendingVideoRequestRef.current = null;
+    await startExport(videoRequest);
+  }, [failWith, resolveVideoExportRequest, startExport, status]);
+
+  /**
+   * Dismiss the preflight findings and return to the export settings.
+   */
+  const cancelValidation = useCallback(() => {
+    pendingVideoRequestRef.current = null;
+    setStatus({ type: 'idle' });
+  }, []);
 
   /**
    * Reset to idle state for retry.
@@ -433,6 +551,7 @@ export function useExportDialog({
   const handleRetry = useCallback(() => {
     currentJobIdRef.current = null;
     setCurrentJobId(null);
+    pendingVideoRequestRef.current = null;
     setStatus({ type: 'idle' });
   }, []);
 
@@ -466,6 +585,8 @@ export function useExportDialog({
     canExport,
     handleBrowse,
     handleExport,
+    confirmExport,
+    cancelValidation,
     handleRetry,
   };
 }

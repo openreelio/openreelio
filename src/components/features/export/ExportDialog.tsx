@@ -13,6 +13,8 @@ import {
   RangeControls,
   RenderQueuePanel,
 } from './ExportHelpers';
+import { ExportValidationNotice } from './ExportValidationNotice';
+import { useExportFindingNavigation } from './useExportFindingNavigation';
 import { AUDIO_EXPORT_FORMATS, EXPORT_PRESETS, TIMELINE_EXPORT_FORMATS } from './constants';
 import type { ExportDialogProps } from './types';
 import { commands } from '@/bindings';
@@ -51,6 +53,8 @@ export function ExportDialog({
     canExport,
     handleBrowse,
     handleExport,
+    confirmExport,
+    cancelValidation,
     handleRetry,
   } = useExportDialog({
     isOpen,
@@ -61,6 +65,7 @@ export function ExportDialog({
     outPoint: renderQueue.outPoint,
     initialExportKind,
   });
+  const jumpToClip = useExportFindingNavigation();
   const dialogRef = useRef<HTMLDivElement>(null);
   const wasOpenRef = useRef(isOpen);
   const wasBatchRenderingRef = useRef(isBatchRendering);
@@ -106,11 +111,20 @@ export function ExportDialog({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === 'Escape' && status.type === 'idle' && !isBatchRendering) {
+      if (e.key !== 'Escape' || isBatchRendering) {
+        return;
+      }
+      // Escaping out of the preflight returns to the settings rather than
+      // closing the dialog, so the user keeps the export they configured.
+      if (status.type === 'validation') {
+        cancelValidation();
+        return;
+      }
+      if (status.type === 'idle') {
         handleClose();
       }
     },
-    [handleClose, isBatchRendering, status.type],
+    [cancelValidation, handleClose, isBatchRendering, status.type],
   );
 
   if (!isOpen) return null;
@@ -385,6 +399,14 @@ export function ExportDialog({
             batchProgress={renderQueue.batchProgress}
             onCancelJob={(jobId) => void renderQueue.cancelJob(jobId)}
             onRemoveItem={renderQueue.removeFromQueue}
+          />
+        ) : status.type === 'validation' ? (
+          <ExportValidationNotice
+            findings={status.findings}
+            blocked={status.blocked}
+            onJumpToClip={jumpToClip}
+            onExportAnyway={() => void confirmExport()}
+            onCancel={cancelValidation}
           />
         ) : (
           <ProgressDisplay status={status} onClose={handleClose} onRetry={handleRetry} />

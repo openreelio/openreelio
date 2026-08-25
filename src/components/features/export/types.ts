@@ -4,7 +4,13 @@
  * Type definitions for the ExportDialog component and related sub-components.
  */
 
-import type { VideoExportRequest } from '@/bindings';
+import type { ExportFindingDto, VideoExportRequest } from '@/bindings';
+
+/**
+ * A single problem the export preflight found, with the ids needed to navigate
+ * to whatever caused it.
+ */
+export type ExportFinding = ExportFindingDto;
 
 // =============================================================================
 // Export Preset Types
@@ -86,12 +92,27 @@ export interface ExportStatusFailed {
   error: string;
 }
 
+/**
+ * Validation state - the preflight found something worth showing.
+ *
+ * Only reached when there is at least one finding; a clean project goes
+ * straight from `idle` to `exporting` without ever entering this state.
+ */
+export interface ExportStatusValidation {
+  type: 'validation';
+  /** Findings in the order the validators produced them */
+  findings: ExportFinding[];
+  /** Whether at least one finding is an error, which blocks the export */
+  blocked: boolean;
+}
+
 /** Export status union type */
 export type ExportStatus =
   | ExportStatusIdle
   | ExportStatusExporting
   | ExportStatusCompleted
-  | ExportStatusFailed;
+  | ExportStatusFailed
+  | ExportStatusValidation;
 
 // =============================================================================
 // Component Props Types
