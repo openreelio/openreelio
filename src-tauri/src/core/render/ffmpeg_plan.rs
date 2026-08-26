@@ -31,6 +31,7 @@ use super::{
         AssetAudioInfo, ExportEngine, ExportError, ExportSettings, SourceFrameCountCache,
         VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
+    pip_stitch::{fold_pip_groups, plan_pip_groups},
     transform_layout::{
         clip_motion_renders_animated, compute_clip_transform_layout, render_opacity,
         resolve_clip_motion_track,
@@ -114,6 +115,16 @@ pub(super) fn build_sequence_ffmpeg_args(
         plan_sequence_transitions(ctx.sequence, ctx.assets, ctx.effects, output_fps, |asset| {
             resolve_asset_source_duration(asset, &mut source_durations)
         });
+
+    // Which clips share seconds with which, decided before a single filter is
+    // emitted — because the answer changes how each clip's own chain is built. A
+    // layer of a composite stages onto a transparent canvas instead of an opaque
+    // black one, and that cannot be retrofitted once the chain is written.
+    //
+    // It reads the transition plan too: a transition folds its two sides into
+    // one stream, so both sides have to be staged the same way or the opaque one
+    // would black out the layers beneath it for its half of the boundary.
+    let pip_plan = plan_pip_groups(ctx.sequence, &transition_plan)?;
 
     // Which image assets are photos and which are animations. An extension says
     // nothing about that, so the answer has to be measured; caching it keeps a
@@ -218,6 +229,8 @@ pub(super) fn build_sequence_ffmpeg_args(
         match track.kind {
             TrackKind::Video => {
                 if track.visible {
+                    let pip_layer = pip_plan.layer(&clip.id);
+                    let transparent_canvas = pip_layer.is_some();
                     let trim_label = format!("trim{}", input_index);
                     let video_out_label = format!("v{}", input_index);
                     let normalized_video_label = format!("vnorm{}", input_index);
@@ -320,6 +333,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                                 output_height,
                                 output_fps,
                                 output_pixel_format,
+                                transparent_canvas,
                             );
                         } else {
                             let layout = compute_clip_transform_layout(
@@ -341,6 +355,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                                 output_height,
                                 output_fps,
                                 output_pixel_format,
+                                transparent_canvas,
                             );
                         }
                     } else {
@@ -353,6 +368,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                             output_fps,
                             output_pixel_format,
                             pinned_frames,
+                            transparent_canvas,
                         );
                     }
 
@@ -362,7 +378,8 @@ pub(super) fn build_sequence_ffmpeg_args(
                             clip.place.timeline_in_sec,
                             clip.place.timeline_out_sec(),
                         )
-                        .with_clip(clip.id.clone()),
+                        .with_clip(clip.id.clone())
+                        .with_layer(pip_layer),
                     );
                 }
 
@@ -489,6 +506,20 @@ pub(super) fn build_sequence_ffmpeg_args(
         video_segments,
         &transition_plan,
         output_fps,
+    )?;
+
+    // Then every run of layers is stacked into one picture, likewise before the
+    // timeline stitch sees the list. Order is forced: the transition stitch pairs
+    // segments by adjacency after sorting, so folding overlaps first would leave
+    // a planned boundary with nothing next to it and the transition stitch would
+    // refuse the render outright.
+    let video_segments = fold_pip_groups(
+        &mut filter_complex,
+        video_segments,
+        output_fps,
+        output_width,
+        output_height,
+        output_pixel_format,
     )?;
 
     if filter_complex.ends_with(';') {
