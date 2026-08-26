@@ -59,7 +59,7 @@ pub(super) fn hdr_metadata_for_asset(asset: &Asset) -> HdrMetadata {
     }
 }
 
-fn effective_blend_mode_for_clip(clip: &Clip, track: &Track) -> BlendMode {
+pub(super) fn effective_blend_mode_for_clip(clip: &Clip, track: &Track) -> BlendMode {
     if clip.blend_mode != BlendMode::Normal {
         return clip.blend_mode.clone();
     }
@@ -167,48 +167,6 @@ pub(super) fn clip_audio_is_suppressed_by_companion(
     track.kind != TrackKind::Audio
         && asset.kind == AssetKind::Video
         && audio_companion_keys.contains(&create_audio_companion_key(clip))
-}
-
-/// Returns the id of the first clip that starts before an earlier one ended.
-///
-/// Reported as an id rather than a bare `bool` so the caller can point at the
-/// clip the user has to move, instead of leaving them to find it themselves.
-fn first_layered_visual_overlap(sequence: &Sequence) -> Option<&str> {
-    let mut intervals = Vec::new();
-
-    for track in &sequence.tracks {
-        if track.kind != TrackKind::Video || !track_included_in_export(track) {
-            continue;
-        }
-
-        for clip in &track.clips {
-            if !clip.enabled || clip.is_adjustment_layer() || is_text_clip(clip) {
-                continue;
-            }
-
-            intervals.push((
-                clip.place.timeline_in_sec,
-                clip.place.timeline_out_sec(),
-                clip.id.as_str(),
-            ));
-        }
-    }
-
-    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut latest_end: Option<f64> = None;
-    for (start, end, clip_id) in intervals {
-        if let Some(current_end) = latest_end {
-            if start < current_end - 0.001 {
-                return Some(clip_id);
-            }
-            latest_end = Some(current_end.max(end));
-        } else {
-            latest_end = Some(end);
-        }
-    }
-
-    None
 }
 
 fn sequence_has_exportable_audio(
@@ -2162,7 +2120,7 @@ fn build_atempo_chain(speed: f64) -> Option<String> {
 }
 
 /// Format a speed value without unnecessary trailing zeros.
-fn format_speed_number(value: f64) -> String {
+pub(super) fn format_speed_number(value: f64) -> String {
     let mut s = format!("{:.6}", value);
     let trimmed_len = s.trim_end_matches('0').trim_end_matches('.').len();
     s.truncate(trimmed_len);
@@ -2902,6 +2860,28 @@ pub(super) struct VideoTimelineSegment {
     /// boundary. Black gap fillers and the blank canvas a text-only sequence
     /// draws on have no clip, and can never take part in a transition.
     pub clip_id: Option<String>,
+    /// The composite this stretch of picture is one layer of, when it is one.
+    ///
+    /// Set by the builder from the plan
+    /// [`plan_pip_groups`](super::pip_stitch::plan_pip_groups) produced before
+    /// any chain was emitted, and read by
+    /// [`fold_pip_groups`](super::pip_stitch::fold_pip_groups) to stack the
+    /// layers. `None` for an ordinary clip that shares its seconds with nothing,
+    /// for black gap fillers, and for the blank canvas a text-only sequence
+    /// draws on.
+    pub layer: Option<PipLayerInfo>,
+}
+
+/// Where one segment sits in a composite: which stack, and how deep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PipLayerInfo {
+    /// Which composite this layer belongs to. Assigned once, by the plan.
+    pub group_index: usize,
+    /// The clip's track index, in which **0 is the topmost track**.
+    ///
+    /// The composite stacks the highest index first so that track 0 is drawn
+    /// last and lands on top, which is the order the preview draws in.
+    pub track_index: usize,
 }
 
 impl VideoTimelineSegment {
@@ -2912,12 +2892,19 @@ impl VideoTimelineSegment {
             start_sec,
             end_sec,
             clip_id: None,
+            layer: None,
         }
     }
 
     /// Records which clip this stretch of picture came from.
     pub(super) fn with_clip(mut self, clip_id: impl Into<String>) -> Self {
         self.clip_id = Some(clip_id.into());
+        self
+    }
+
+    /// Records the composite this stretch of picture is a layer of.
+    pub(super) fn with_layer(mut self, layer: Option<PipLayerInfo>) -> Self {
+        self.layer = layer;
         self
     }
 }
@@ -3000,6 +2987,7 @@ pub(super) fn append_video_stream_normalization(
     fps: f64,
     pixel_format: &str,
     pinned_frames: Option<u32>,
+    transparent_canvas: bool,
 ) {
     let pin = match pinned_frames {
         Some(frames) if fps.is_finite() && fps > 0.0 => format!(
@@ -3010,19 +2998,41 @@ pub(super) fn append_video_stream_normalization(
         _ => String::new(),
     };
 
+    // A layer of a composite must letterbox into *transparency*, not into black.
+    // The preview draws only the picture, so whatever sits under a layer shows
+    // through its bars; baking opaque black there would hide it in the export
+    // alone. The format conversion has to precede `pad` so that the pad colour
+    // has an alpha channel to be transparent in.
+    let (fit_format, pad_color, output_format) = if transparent_canvas {
+        (",format=gbrap", ":color=black@0", COMPOSITE_LAYER_FORMAT)
+    } else {
+        ("", "", pixel_format)
+    };
+
     filter_complex.push_str(&format!(
-        "[{}]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={},format={}{}[{}];",
+        "[{}]scale={}:{}:force_original_aspect_ratio=decrease{},pad={}:{}:(ow-iw)/2:(oh-ih)/2{},setsar=1,fps={},format={}{}[{}];",
         input_label,
         width,
         height,
+        fit_format,
         width,
         height,
+        pad_color,
         format_speed_number(fps),
-        pixel_format,
+        output_format,
         pin,
         output_label
     ));
 }
+
+/// The working format every layer of a composite is handed to the stack in.
+///
+/// Planar sRGB with straight alpha: gamma encoded, full chroma, and able to
+/// carry the transparency that lets lower layers show through. Measured against
+/// the alternative — staging in `yuva420p` and compositing in `yuv444` — which
+/// came out 1-2 LSB off on flat regions with chroma fringing at every layer
+/// edge, because each layer paid an RGB round trip and a 4:2:0 chroma pass.
+pub(super) const COMPOSITE_LAYER_FORMAT: &str = "gbrap";
 
 /// Frames of cloned tail `tpad` adds behind a pinned segment.
 ///
@@ -3566,10 +3576,22 @@ pub(super) fn append_video_transform_composition(
     height: u32,
     fps: f64,
     pixel_format: &str,
+    transparent_canvas: bool,
 ) {
     let staged_label = format!("{}_tx", output_label);
     let canvas_label = format!("{}_bg", output_label);
     let (alpha_format, overlay_format) = transform_composition_formats(pixel_format);
+    // A layer of a composite works in `gbrap` throughout and hands the stack a
+    // `gbrap` frame; `overlay` then negotiates `auto` down to a full-chroma mode
+    // with alpha, because both of its inputs already carry one. In the ordinary
+    // opaque path `auto` cannot be trusted — it resolves to the least
+    // chroma-capable input, which loses odd overlay offsets — so that path names
+    // its mode explicitly.
+    let (alpha_format, overlay_format, output_format) = if transparent_canvas {
+        (COMPOSITE_LAYER_FORMAT, "auto", COMPOSITE_LAYER_FORMAT)
+    } else {
+        (alpha_format, overlay_format, pixel_format)
+    };
 
     filter_complex.push_str(&format!(
         "[{}]scale={}:{},setsar=1",
@@ -3582,7 +3604,11 @@ pub(super) fn append_video_transform_composition(
     // the working format; plain opacity is cheaper in RGBA, which is the format
     // `colorchannelmixer` works in natively — asking for `yuva` there makes
     // FFmpeg insert a yuva -> argb -> yuva round trip on every frame.
-    let staged_alpha_format = if layout.is_rotated() {
+    //
+    // A layer of a composite always needs one, whether or not it is rotated or
+    // faded: it is drawn onto a transparent canvas, and everything outside its
+    // own picture has to stay transparent for the layers beneath to show.
+    let staged_alpha_format = if transparent_canvas || layout.is_rotated() {
         Some(alpha_format)
     } else if layout.is_translucent() {
         Some(opacity_only_alpha_format(alpha_format))
@@ -3622,7 +3648,7 @@ pub(super) fn append_video_transform_composition(
     // final frame on a PTS boundary that older FFmpeg releases (6.x) round the
     // other way, coming up one frame short. The frame-indexed trim below caps
     // the segment at the exact count either way.
-    append_black_video_gap(
+    append_composition_canvas(
         filter_complex,
         &canvas_label,
         slot_duration_sec + minimum_duration_sec,
@@ -3630,6 +3656,7 @@ pub(super) fn append_video_transform_composition(
         height,
         fps,
         pixel_format,
+        transparent_canvas,
     );
 
     // No `shortest=1`: it ends the composite at whichever input runs out first,
@@ -3650,7 +3677,7 @@ pub(super) fn append_video_transform_composition(
         overlay_format,
         format_speed_number(fps),
         slot_frame_count,
-        pixel_format,
+        output_format,
         output_label
     ));
 }
@@ -3693,10 +3720,20 @@ pub(super) fn append_animated_video_transform_composition(
     height: u32,
     fps: f64,
     pixel_format: &str,
+    transparent_canvas: bool,
 ) {
     let staged_label = format!("{}_tx", output_label);
     let canvas_label = format!("{}_bg", output_label);
     let (alpha_format, overlay_format) = transform_composition_formats(pixel_format);
+    // See the static twin: a composite layer works in `gbrap` end to end, and
+    // `overlay`'s `auto` is safe only because both its inputs carry alpha there.
+    // Measured: a `gbrap`-staged animated layer keeps resizing per frame, so the
+    // freeze this path guards against does not return with the format change.
+    let (alpha_format, overlay_format, output_format) = if transparent_canvas {
+        (COMPOSITE_LAYER_FORMAT, "auto", COMPOSITE_LAYER_FORMAT)
+    } else {
+        (alpha_format, overlay_format, pixel_format)
+    };
     let keyframes = track.keyframes.as_slice();
 
     let width_expr =
@@ -3738,7 +3775,7 @@ pub(super) fn append_animated_video_transform_composition(
         TIMELINE_EPSILON_SEC
     };
     let slot_duration_sec = duration_sec.max(minimum_duration_sec);
-    append_black_video_gap(
+    append_composition_canvas(
         filter_complex,
         &canvas_label,
         slot_duration_sec + minimum_duration_sec,
@@ -3746,6 +3783,7 @@ pub(super) fn append_animated_video_transform_composition(
         height,
         fps,
         pixel_format,
+        transparent_canvas,
     );
 
     // With rotation ruled out, the static layout's placement collapses to
@@ -3773,7 +3811,7 @@ pub(super) fn append_animated_video_transform_composition(
         overlay_format,
         format_speed_number(fps),
         slot_frame_count,
-        pixel_format,
+        output_format,
         output_label
     ));
 }
@@ -3912,6 +3950,51 @@ fn transform_composition_formats(pixel_format: &str) -> (&'static str, &'static 
         "yuv420p10le" => ("yuva420p10le", "yuv444p10"),
         _ => ("yuva420p", "yuv444"),
     }
+}
+
+/// The canvas a transformed clip is drawn onto.
+///
+/// Opaque black for a clip that owns its seconds outright — which is what the
+/// preview clears to. Transparent for a layer of a composite, because whatever
+/// its picture does not cover has to let the layers beneath show through; an
+/// opaque canvas there would black them out, and only in the export.
+#[allow(clippy::too_many_arguments)]
+fn append_composition_canvas(
+    filter_complex: &mut String,
+    output_label: &str,
+    duration_sec: f64,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+    transparent: bool,
+) {
+    if !transparent {
+        append_black_video_gap(
+            filter_complex,
+            output_label,
+            duration_sec,
+            width,
+            height,
+            fps,
+            pixel_format,
+        );
+        return;
+    }
+
+    // `colorchannelmixer=aa=0` rather than `color=black@0`: the colour source
+    // negotiates its own format, and an alpha given in the colour alone is lost
+    // the moment that format has no alpha channel. Converting first and clearing
+    // alpha afterwards cannot be negotiated away.
+    filter_complex.push_str(&format!(
+        "color=c=black:s={}x{}:r={}:d={},format={},colorchannelmixer=aa=0,setsar=1[{}];",
+        width,
+        height,
+        format_speed_number(fps),
+        format_speed_number(duration_sec),
+        COMPOSITE_LAYER_FORMAT,
+        output_label
+    ));
 }
 
 pub(super) fn append_black_video_gap(
@@ -7684,11 +7767,14 @@ pub fn validate_export_settings_with_dimensions(
         }
     }
 
-    if let Some(clip_id) = first_layered_visual_overlap(sequence) {
+    if let Some(clip_id) =
+        super::pip_stitch::first_unsupported_composite_blend(sequence, &transition_plan)
+    {
         validation.add_clip_error(
             sequence.id.clone(),
             clip_id.to_string(),
-            "Final render export does not support simultaneous layered video clips yet".to_string(),
+            "Layered video clips can only be composited in Normal blend mode; this clip asks              for another one, which the final render cannot do yet"
+                .to_string(),
         );
     }
 
@@ -10172,6 +10258,9 @@ mod tests {
             .with_source_range(0.0, 5.0)
             .place_at(2.0);
         bottom_clip.id = "pip-clip".to_string();
+        // Overlapping clips composite now; what is still refused is a blend mode
+        // `overlay` cannot perform.
+        bottom_clip.blend_mode = BlendMode::Multiply;
         bottom_track.add_clip(bottom_clip);
         sequence.add_track(bottom_track);
 
@@ -10208,7 +10297,7 @@ mod tests {
         let finding = validation
             .findings
             .iter()
-            .find(|finding| finding.message.contains("simultaneous layered video clips"))
+            .find(|finding| finding.message.contains("Normal blend mode"))
             .unwrap_or_else(|| {
                 panic!(
                     "layered video must produce a finding: {:?}",
@@ -10220,7 +10309,7 @@ mod tests {
         assert_eq!(
             finding.clip_id.as_deref(),
             Some("pip-clip"),
-            "the finding must name the clip that starts the overlap"
+            "the finding must name the clip whose blend mode cannot be rendered"
         );
         assert_eq!(finding.sequence_id.as_deref(), Some(sequence.id.as_str()));
         assert!(
@@ -10445,8 +10534,14 @@ mod tests {
         );
     }
 
+    /// Feature: Export preflight
+    /// Scenario: layered clips are refused only for a blend the stack cannot do
+    ///
+    /// Overlapping video composites now. `overlay` performs source-over and
+    /// nothing else, so a layer asking for any other blend mode would render a
+    /// picture the preview never drew, and the export says so instead.
     #[test]
-    fn test_validation_rejects_simultaneous_layered_video_clips() {
+    fn test_validation_rejects_layered_video_clips_with_a_non_normal_blend_mode() {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{Clip, SequenceFormat, Track};
 
@@ -10461,11 +10556,11 @@ mod tests {
         sequence.add_track(top_track);
 
         let mut bottom_track = Track::new_video("Video 2");
-        bottom_track.add_clip(
-            Clip::new("asset_bottom")
-                .with_source_range(0.0, 5.0)
-                .place_at(2.0),
-        );
+        let mut bottom_clip = Clip::new("asset_bottom")
+            .with_source_range(0.0, 5.0)
+            .place_at(2.0);
+        bottom_clip.blend_mode = BlendMode::Screen;
+        bottom_track.add_clip(bottom_clip);
         sequence.add_track(bottom_track);
 
         let top_path = create_temp_media_file("validation_layered_top.mp4");
@@ -10503,8 +10598,8 @@ mod tests {
             validation
                 .errors
                 .iter()
-                .any(|error| error.to_lowercase().contains("simultaneous layered video")),
-            "Expected layered video validation error. Got: {:?}",
+                .any(|error| error.contains("Normal blend mode")),
+            "Expected a blend-mode validation error. Got: {:?}",
             validation.errors
         );
     }
@@ -12963,6 +13058,566 @@ mod tests {
         assert!(
             !filter_complex.contains("overlay="),
             "an identity clip must not be composited. Got: {filter_complex}"
+        );
+    }
+
+    /// A sequence of one-clip video tracks. The first placement becomes track 0,
+    /// which is the topmost track.
+    fn sequence_of_layers(
+        placements: &[(f64, f64)],
+    ) -> (Sequence, std::collections::HashMap<String, Asset>) {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat};
+
+        let mut sequence = Sequence::new("Layers", SequenceFormat::youtube_1080());
+        let mut assets = std::collections::HashMap::new();
+
+        for (index, (start_sec, duration_sec)) in placements.iter().enumerate() {
+            let asset_id = format!("layer_asset{index}");
+            let mut clip = Clip::new(&asset_id)
+                .with_source_range(0.0, *duration_sec)
+                .place_at(*start_sec);
+            clip.id = format!("layer{index}");
+
+            let mut track = Track::new_video(&format!("Video {}", index + 1));
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let path = create_temp_media_file(&format!("layer{index}.mp4"));
+            let mut asset = Asset::new_video(
+                &format!("layer{index}.mp4"),
+                &path,
+                VideoInfo {
+                    width: 1920,
+                    height: 1080,
+                    ..VideoInfo::default()
+                },
+            )
+            .with_duration(*duration_sec)
+            .with_file_size(3_000_000);
+            asset.id = asset_id.clone();
+            assets.insert(asset_id, asset);
+        }
+
+        (sequence, assets)
+    }
+
+    fn layer_filter_complex(placements: &[(f64, f64)]) -> String {
+        let (sequence, assets) = sequence_of_layers(placements);
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        )
+        .expect("layered clips should build a filtergraph");
+        filter_complex_of(&args).to_string()
+    }
+
+    /// Feature: Layered video in the final render
+    /// Scenario: overlapping clips are composited, not played one after another
+    ///
+    /// The timeline stitch concatenates whatever it is handed, so two clips
+    /// sharing seconds used to be refused outright — the alternative was a render
+    /// that played them in turn and finished longer than the timeline. They are
+    /// stacked into one picture now.
+    #[test]
+    fn two_overlapping_clips_are_composited_instead_of_played_in_turn() {
+        // Track 0 (the top layer) sits over the second half of track 1.
+        let filter_complex = layer_filter_complex(&[(1.0, 3.0), (0.0, 3.0)]);
+
+        assert!(
+            filter_complex.contains("format=gbrap"),
+            "every layer must be staged with transparency: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains(":color=black@0"),
+            "a layer must letterbox into transparency, not into black: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("format=gbrp,setsar=1,trim=end_frame=120,"),
+            "the composite needs an opaque black backdrop pinned to the group: \
+             {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains(
+                "overlay=x=0:y=0:format=auto:alpha=straight:eof_action=pass:repeatlast=0"
+            ),
+            "the stack must not freeze a layer that ends early: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("[vpip0]"),
+            "the group must fold into one composited segment: {filter_complex}"
+        );
+        assert!(
+            !filter_complex.contains("concat="),
+            "a composite covering the whole timeline leaves nothing to concatenate: \
+             {filter_complex}"
+        );
+    }
+
+    /// Feature: Layered video in the final render
+    /// Scenario: a timeline whose clips take turns is untouched
+    ///
+    /// The composite costs a backdrop and an overlay per layer, and every
+    /// existing graph-shape test is written against the unfolded chain. A
+    /// sequential timeline must come out exactly as it always did.
+    #[test]
+    fn a_timeline_without_overlap_emits_no_composite_at_all() {
+        let filter_complex = layer_filter_complex(&[(0.0, 3.0), (3.0, 3.0)]);
+
+        for absent in ["gbrap", "vpip", "pipbd", "pipk", "color=black@0"] {
+            assert!(
+                !filter_complex.contains(absent),
+                "clips that take turns must not pay for compositing ({absent}): \
+                 {filter_complex}"
+            );
+        }
+        assert!(
+            filter_complex.contains("concat="),
+            "back-to-back clips are still concatenated: {filter_complex}"
+        );
+    }
+
+    /// Feature: Layered video in the final render
+    /// Scenario: a clip can be in a transition and in a composite at once
+    ///
+    /// The two folds run in a forced order — transitions first, because their
+    /// stitch pairs segments by adjacency after sorting and folding overlaps
+    /// first would leave a planned boundary with nothing beside it. What makes
+    /// the combination work is that the composite plan pulls *whole* transition
+    /// chains into the group it touches: if one side of an `xfade` were staged
+    /// opaquely and the other transparently, the opaque one would black out the
+    /// layers beneath for its half of the boundary.
+    #[test]
+    fn a_clip_in_both_a_transition_and_a_composite_renders_as_both() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::Clip;
+
+        let (mut sequence, mut assets, effects, audio_info) = build_transition_fixture(
+            &[
+                TransitionClipSpec::new(5.0, Some(one_second_dissolve("pip-dissolve"))),
+                TransitionClipSpec::new(5.0, None),
+            ],
+            false,
+        );
+
+        // A picture-in-picture on a lower track, straddling the blended boundary.
+        let mut pip_track = Track::new_video("Video 2");
+        let mut pip_clip = Clip::new("pip_asset")
+            .with_source_range(0.0, 4.0)
+            .place_at(3.0);
+        pip_clip.id = "pip-clip".to_string();
+        pip_track.add_clip(pip_clip);
+        sequence.add_track(pip_track);
+
+        let pip_path = create_temp_media_file("pip_layer.mp4");
+        let mut pip_asset = Asset::new_video(
+            "pip_layer.mp4",
+            &pip_path,
+            VideoInfo {
+                width: 1920,
+                height: 1080,
+                ..VideoInfo::default()
+            },
+        )
+        .with_duration(4.0)
+        .with_file_size(3_000_000);
+        pip_asset.id = "pip_asset".to_string();
+        assets.insert(pip_asset.id.clone(), pip_asset);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info,
+            &ExportSettings::default(),
+        )
+        .expect("a transition inside a composite must still build");
+        let filter_complex = filter_complex_of(&args).to_string();
+
+        assert!(
+            filter_complex.contains("xfade"),
+            "the boundary must still blend: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("[vpip0]"),
+            "the layers must still composite: {filter_complex}"
+        );
+        // Both sides of the blend are staged the same way, or the opaque one
+        // would black out the PiP for its half of the boundary. One transparent
+        // pad each: the two transition sides and the PiP.
+        assert_eq!(
+            filter_complex.matches(":color=black@0,").count(),
+            3,
+            "both transition sides and the PiP must all be staged transparently: \
+             {filter_complex}"
+        );
+        // The blended pair is on track 0, so it composites last and lands on top
+        // of the picture-in-picture rather than under it.
+        assert!(
+            filter_complex.contains("[pipbd0][pipL0_0]overlay=")
+                && filter_complex.contains("[pipk0_0][vxf0_1]overlay="),
+            "the blended pair must be stacked above the lower track: {filter_complex}"
+        );
+    }
+
+    /// A transition fixture: the sequence and the three maps the builder reads.
+    type TransitionFixture = (
+        Sequence,
+        std::collections::HashMap<String, Asset>,
+        std::collections::HashMap<String, Effect>,
+        std::collections::HashMap<String, AssetAudioInfo>,
+    );
+
+    /// Builds the fixture's transition pair with an extra track above it.
+    ///
+    /// The added track becomes track 0 — the topmost — and the transition pair
+    /// drops to track 1, which is the arrangement both scenarios below need.
+    fn transition_pair_under_a_top_layer(
+        top_clip: Clip,
+        top_duration_sec: f64,
+        dissolve_id: &str,
+    ) -> TransitionFixture {
+        use crate::core::assets::VideoInfo;
+
+        let (mut sequence, mut assets, effects, audio_info) = build_transition_fixture(
+            &[
+                TransitionClipSpec::new(5.0, Some(one_second_dissolve(dissolve_id))),
+                TransitionClipSpec::new(5.0, None),
+            ],
+            false,
+        );
+
+        let asset_id = top_clip.asset_id.clone();
+        let mut top_track = Track::new_video("Top");
+        top_track.add_clip(top_clip);
+        sequence.tracks.insert(0, top_track);
+
+        let path = create_temp_media_file("top_layer.mp4");
+        let mut asset = Asset::new_video(
+            "top_layer.mp4",
+            &path,
+            VideoInfo {
+                width: 1920,
+                height: 1080,
+                ..VideoInfo::default()
+            },
+        )
+        .with_duration(top_duration_sec)
+        .with_file_size(3_000_000);
+        asset.id = asset_id.clone();
+        assets.insert(asset_id, asset);
+
+        (sequence, assets, effects, audio_info)
+    }
+
+    /// Feature: Layered video in the final render
+    /// Scenario: a full-screen clip over a blended boundary still exports
+    ///
+    /// An earlier draft dropped the layers beneath an opaque, canvas-filling top
+    /// layer as an optimisation. Dropping them took the transition planner's own
+    /// clips with them, so the boundary it had already planned could never be
+    /// folded and the export died on
+    /// "Transition on clip 'clip0' was planned but its boundary was never
+    /// folded" — an outright failure on a timeline the preflight permits.
+    ///
+    /// Every layer is composited now, so the covering clip simply covers the
+    /// ones beneath through `overlay`, and the boundary underneath still blends.
+    #[test]
+    fn a_full_screen_clip_over_a_blended_boundary_still_exports() {
+        use crate::core::timeline::Clip;
+
+        let mut top_clip = Clip::new("top_asset")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        top_clip.id = "cover-clip".to_string();
+
+        let (sequence, assets, effects, audio_info) =
+            transition_pair_under_a_top_layer(top_clip, 10.0, "covered-dissolve");
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info,
+            &ExportSettings::default(),
+        )
+        .expect("a full-canvas clip over a transition must not fail the export");
+        let filter_complex = filter_complex_of(&args).to_string();
+
+        assert!(
+            filter_complex.contains("xfade"),
+            "the boundary underneath must still blend: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("[vpip0]"),
+            "the covering clip and the pair beneath it must composite: {filter_complex}"
+        );
+        // Three layers staged transparently: the covering clip and both sides of
+        // the boundary. None of them is dropped.
+        assert_eq!(
+            filter_complex.matches(":color=black@0,").count(),
+            3,
+            "no layer may be discarded: {filter_complex}"
+        );
+    }
+
+    /// Feature: Layered video in the final render
+    /// Scenario: a blend pulled into a composite by a transition is refused
+    ///
+    /// The composite planner merges whole transition chains into whatever group
+    /// they touch, so a clip can join a composite without ever overlapping
+    /// anything. A preflight that looked only at overlap runs never examined such
+    /// a clip, and its blend mode was silently dropped: the render composited it
+    /// as plain source-over and differed from the preview with no diagnostic.
+    ///
+    /// Here the picture-in-picture overlaps only the *outgoing* clip, and it is
+    /// the *incoming* one — reached through the dissolve — that asks for
+    /// Multiply.
+    #[test]
+    fn a_blend_reached_only_through_a_transition_is_still_refused() {
+        use crate::core::timeline::{BlendMode, Clip};
+
+        let mut pip_clip = Clip::new("top_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        pip_clip.id = "pip-clip".to_string();
+
+        let (mut sequence, assets, effects, audio_info) =
+            transition_pair_under_a_top_layer(pip_clip, 3.0, "reached-dissolve");
+        // Track 1 is the transition pair; its second clip starts at 5.0 and so
+        // never shares a second with the picture-in-picture above.
+        sequence.tracks[1].clips[1].blend_mode = BlendMode::Multiply;
+
+        let error = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info,
+            &ExportSettings::default(),
+        )
+        .expect_err("a blend the stack cannot perform must refuse the render");
+        assert!(
+            format!("{error:?}").contains("clip1"),
+            "the refusal must name the clip whose blend cannot be rendered: {error:?}"
+        );
+
+        // The preflight has to refuse exactly what the builder refuses, or the
+        // GUI would offer an export that then fails.
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+        let finding = validation
+            .findings
+            .iter()
+            .find(|finding| finding.message.contains("Normal blend mode"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the preflight must refuse it too: {:?}",
+                    validation.findings
+                )
+            });
+        assert_eq!(
+            finding.clip_id.as_deref(),
+            Some("clip1"),
+            "the preflight must name the same clip the builder does"
+        );
+    }
+
+    /// Feature: Layered video in the final render
+    /// Scenario: a real export of a picture-in-picture renders and stays in time
+    ///
+    /// The string assertions above describe the graph the builder writes. This
+    /// one hands that graph — the builder's own argument list, unedited but for
+    /// the output path — to a real FFmpeg and measures the file that comes out.
+    ///
+    /// Length is the point. Before compositing, two clips sharing seconds were
+    /// concatenated, so a four-second timeline rendered as seven seconds of video
+    /// with the layers playing one after the other. That is why the export used
+    /// to refuse them outright.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored exports_a_picture_in_picture
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_real_export_of_a_picture_in_picture_renders_and_stays_in_time() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+        use crate::core::timeline::{Clip, SequenceFormat};
+        use crate::core::Point2D;
+
+        const CANVAS: (u32, u32) = (320, 180);
+        const BASE: (u8, u8, u8) = (255, 0, 0);
+        const PIP: (u8, u8, u8) = (0, 255, 0);
+        // The base runs 0-4s, the PiP 1-3s, so the timeline is four seconds.
+        const EXPECTED_FRAMES: usize = 120;
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let make =
+            |name: &str, colour: (u8, u8, u8), duration: f64| -> Option<std::path::PathBuf> {
+                let path = dir.path().join(name);
+                let mut command = std::process::Command::new(&ffmpeg);
+                crate::core::process::configure_std_command(&mut command);
+                let built = command
+                    .args([
+                        "-y",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        &format!(
+                            "color=c=black:s={}x{}:r=30:d={duration}",
+                            CANVAS.0, CANVAS.1
+                        ),
+                        "-vf",
+                        &format!("geq=r={}:g={}:b={}", colour.0, colour.1, colour.2),
+                        "-pix_fmt",
+                        "yuv420p",
+                    ])
+                    .arg(&path)
+                    .output()
+                    .ok()?;
+                (built.status.success() && path.exists()).then_some(path)
+            };
+
+        let (Some(base_path), Some(pip_path)) =
+            (make("base.mp4", BASE, 4.0), make("pip.mp4", PIP, 2.0))
+        else {
+            skip_without_ffmpeg("ffmpeg could not build the fixtures");
+            return;
+        };
+
+        let mut sequence = Sequence::new("PiP", SequenceFormat::youtube_1080());
+        sequence.format.canvas.width = CANVAS.0;
+        sequence.format.canvas.height = CANVAS.1;
+
+        // Track 0 is the topmost track: a half-size picture-in-picture, offset
+        // from the centre so its rectangle is unmistakable.
+        let mut pip_track = Track::new_video("Video 1");
+        let mut pip_clip = Clip::new("pip_asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(1.0);
+        pip_clip.id = "pip-clip".to_string();
+        pip_clip.transform.scale = Point2D::new(0.5, 0.5);
+        pip_clip.transform.position = Point2D::new(0.25, 0.25);
+        pip_track.add_clip(pip_clip);
+        sequence.add_track(pip_track);
+
+        let mut base_track = Track::new_video("Video 2");
+        let mut base_clip = Clip::new("base_asset")
+            .with_source_range(0.0, 4.0)
+            .place_at(0.0);
+        base_clip.id = "base-clip".to_string();
+        base_track.add_clip(base_clip);
+        sequence.add_track(base_track);
+
+        let mut assets = HashMap::new();
+        for (id, path, duration) in [
+            ("pip_asset", &pip_path, 2.0),
+            ("base_asset", &base_path, 4.0),
+        ] {
+            let mut asset = Asset::new_video(
+                id,
+                &path.to_string_lossy(),
+                VideoInfo {
+                    width: CANVAS.0,
+                    height: CANVAS.1,
+                    ..VideoInfo::default()
+                },
+            )
+            .with_duration(duration)
+            .with_file_size(1_000_000);
+            asset.id = id.to_string();
+            assets.insert(asset.id.clone(), asset);
+        }
+
+        let mut args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings {
+                width: Some(CANVAS.0),
+                height: Some(CANVAS.1),
+                ..ExportSettings::default()
+            },
+        )
+        .expect("a layered sequence must build a filtergraph");
+
+        // The builder's own arguments, unedited but for where the file lands.
+        let output = dir.path().join("render.mp4");
+        let last = args.len() - 1;
+        args[last] = output.to_string_lossy().to_string();
+
+        let mut render = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut render);
+        let result = render
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+            .args(&args)
+            .output()
+            .expect("run ffmpeg");
+        assert!(
+            result.status.success(),
+            "ffmpeg refused the builder's own composite graph: {}\n{args:?}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        // Decode the render back as raw RGB and measure it.
+        let mut decode = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut decode);
+        let decoded = decode
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(&output)
+            .args(["-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+            .output()
+            .expect("decode the render");
+        assert!(decoded.status.success(), "the render must decode");
+
+        let frame_bytes = CANVAS.0 as usize * CANVAS.1 as usize * 3;
+        let frames: Vec<&[u8]> = decoded.stdout.chunks_exact(frame_bytes).collect();
+        assert_eq!(
+            frames.len(),
+            EXPECTED_FRAMES,
+            "a four-second timeline must render four seconds; concatenating the layers \
+             instead would have produced {} seconds",
+            frames.len() as f64 / 30.0
+        );
+
+        // Lossy encoding, so the colours are near rather than exact.
+        let near = |frame: &[u8], x: u32, y: u32, want: (u8, u8, u8)| -> bool {
+            let offset = ((y * CANVAS.0 + x) * 3) as usize;
+            let got = (frame[offset], frame[offset + 1], frame[offset + 2]);
+            (i16::from(got.0) - i16::from(want.0)).abs() < 40
+                && (i16::from(got.1) - i16::from(want.1)).abs() < 40
+                && (i16::from(got.2) - i16::from(want.2)).abs() < 40
+        };
+
+        // Frame 0: the PiP has not started, so the base layer owns the canvas.
+        assert!(
+            near(frames[0], 80, 45, BASE) && near(frames[0], 300, 170, BASE),
+            "before the PiP starts the base layer must fill the canvas"
+        );
+        // Frame 45 is inside the PiP's second: its picture is centred on
+        // (0.25, 0.25) of the canvas at half size, so (80, 45) is inside it.
+        assert!(
+            near(frames[45], 80, 45, PIP),
+            "the picture-in-picture must be on screen while it plays"
+        );
+        assert!(
+            near(frames[45], 300, 170, BASE),
+            "the base layer must still show around the picture-in-picture"
+        );
+        // Frame 100 is past the PiP: it must have left, not frozen on screen.
+        assert!(
+            near(frames[100], 80, 45, BASE),
+            "the picture-in-picture must leave when it ends, not freeze on screen"
         );
     }
 
@@ -16755,6 +17410,7 @@ mod tests {
                 FPS,
                 "yuv420p",
                 None,
+                false,
             );
 
             let graph_file = dir.path().join("graph.txt");
@@ -16902,6 +17558,7 @@ mod tests {
             FPS,
             "yuv420p",
             None,
+            false,
         );
 
         let graph_file = dir.path().join("graph.txt");
@@ -18039,6 +18696,7 @@ mod tests {
         let mut graph = String::new();
         append_animated_video_transform_composition(
             &mut graph, "0:v", "out", &track, 1.0, slot_sec, canvas.0, canvas.1, fps, "yuv420p",
+            false,
         );
         graph
     }
@@ -18201,7 +18859,7 @@ mod tests {
 
         let mut graph = String::new();
         append_video_transform_composition(
-            &mut graph, "0:v", "out", &layout, 3.0, 1280, 720, 30.0, "yuv420p",
+            &mut graph, "0:v", "out", &layout, 3.0, 1280, 720, 30.0, "yuv420p", false,
         );
 
         assert_eq!(
@@ -18349,6 +19007,7 @@ mod tests {
                 180,
                 30.0,
                 pixel_format,
+                false,
             );
 
             assert!(
@@ -18417,7 +19076,7 @@ mod tests {
 
         let mut graph = String::new();
         append_video_transform_composition(
-            &mut graph, "0:v", "out", &layout, 0.5, CANVAS.0, CANVAS.1, 30.0, "yuv420p",
+            &mut graph, "0:v", "out", &layout, 0.5, CANVAS.0, CANVAS.1, 30.0, "yuv420p", false,
         );
 
         let frames = render_composite_luma_frames(&ffmpeg, dir.path(), &input, &graph, CANVAS);
@@ -18957,7 +19616,8 @@ mod tests {
 
         let mut graph = String::new();
         append_animated_video_transform_composition(
-            &mut graph, "0:v", "out", &track, opacity, slot_sec, canvas.0, canvas.1, fps, "yuv420p",
+            &mut graph, "0:v", "out", &track, opacity, slot_sec, canvas.0, canvas.1, fps,
+            "yuv420p", false,
         );
         graph
     }

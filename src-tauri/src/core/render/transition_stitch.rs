@@ -763,11 +763,34 @@ pub(super) fn stitch_transition_groups(
         return Ok(segments);
     }
 
+    // Sorted by track first, then by time. A boundary is only recognised when
+    // its two sides are *adjacent* in this list, and both sides of a transition
+    // always sit on the same track — so a clip on another track whose slot falls
+    // between them must not be allowed to come between them here. That is not
+    // hypothetical: a picture-in-picture straddling a cross dissolve starts after
+    // the outgoing clip and before the incoming one, and sorting by time alone
+    // dropped it right into the middle of the pair. The boundary then went
+    // unfolded and the whole render was refused.
+    //
+    // Only a clip that shares seconds with something can interleave a pair, and
+    // any such clip is in a composite group and therefore carries a track index.
+    // Segments with none share their seconds with nothing, so they cannot come
+    // between two sides of a boundary at all; they sort together at the end and
+    // keep exactly the time order they had. On a timeline with no layering that
+    // is every segment, and this sort is the old one.
     let mut ordered = segments;
     ordered.sort_by(|a, b| {
-        a.start_sec
-            .partial_cmp(&b.start_sec)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let depth = |segment: &VideoTimelineSegment| {
+            segment
+                .layer
+                .map(|layer| layer.track_index)
+                .unwrap_or(usize::MAX)
+        };
+        depth(a).cmp(&depth(b)).then(
+            a.start_sec
+                .partial_cmp(&b.start_sec)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
 
     let mut stitched: Vec<VideoTimelineSegment> = Vec::with_capacity(ordered.len());
@@ -945,11 +968,11 @@ fn fold_group(
         "a transition group must occupy exactly its timeline span"
     );
 
-    Ok(VideoTimelineSegment::new(
-        accumulated_label,
-        start_sec,
-        end_sec,
-    ))
+    // The fold's output is one layer of whatever composite its inputs belonged
+    // to. Every clip in a transition chain sits on the same track, and the
+    // composite plan pulls whole chains into the same group precisely so that
+    // this inheritance is unambiguous.
+    Ok(VideoTimelineSegment::new(accumulated_label, start_sec, end_sec).with_layer(group[0].layer))
 }
 
 #[cfg(test)]

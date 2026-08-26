@@ -15,6 +15,7 @@ mod ffmpeg_plan;
 pub mod graph;
 pub mod hardware;
 pub mod hdr;
+mod pip_stitch;
 pub mod plan;
 pub mod smart;
 mod transform_layout;
