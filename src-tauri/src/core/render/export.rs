@@ -3879,15 +3879,38 @@ fn opacity_only_alpha_format(alpha_format: &'static str) -> &'static str {
 }
 
 /// The working format and `overlay` mode that keep a composite at the output's
-/// bit depth.
+/// bit depth and on the pixel the layout asked for.
 ///
-/// `overlay` defaults to 8-bit `yuv420`, so a 10-bit export whose clip happened
-/// to be transformed would quietly lose two bits per channel on the way through.
+/// Two separate losses are being avoided here, and the `overlay` mode is what
+/// avoids both:
+///
+/// 1. **Bit depth.** `overlay` defaults to 8-bit, so a 10-bit export whose clip
+///    happened to be transformed would quietly lose two bits per channel on the
+///    way through.
+/// 2. **Placement.** `overlay` composites in whatever mode it is given, and a
+///    chroma-subsampled mode cannot address an odd column or row: it rounds the
+///    corner down to the nearest chroma sample. A clip the layout placed at an
+///    odd `overlay_x`/`overlay_y` therefore rendered a whole pixel up and to the
+///    left of where the preview drew it, and picked up chroma bleed along the
+///    edge on the way. Measured against the bundled FFmpeg 8.0.1 with a clip
+///    placed at (201, 101) on a 1280x720 canvas: `yuv420` landed the picture at
+///    (200, 100), `yuv422p10` at (200, 101) — 4:2:2 subsamples horizontally
+///    only, so it loses the column and keeps the row — and the 4:4:4 modes below
+///    landed it at (201, 101) exactly. The static layout pre-rounds its corner
+///    to an even pixel, so it is the *animated* path — whose corner is an
+///    expression FFmpeg evaluates per frame, unrounded — that this silently
+///    broke: a slow pan stalled every second frame.
+///
+/// The *staging* format stays chroma-subsampled: it describes a standalone frame
+/// whose own origin is aligned, so `overlay` upsamples it to the 4:4:4 working
+/// mode before placing it and the corner lands exactly. Staging in RGB instead
+/// would add an RGB round trip that shifts the interior colour, which measured
+/// as a 1-2 LSB change on flat regions; `yuv444` leaves the interior untouched.
 fn transform_composition_formats(pixel_format: &str) -> (&'static str, &'static str) {
     match pixel_format {
-        "yuv422p10le" => ("yuva422p10le", "yuv422p10"),
-        "yuv420p10le" => ("yuva420p10le", "yuv420p10"),
-        _ => ("yuva420p", "yuv420"),
+        "yuv422p10le" => ("yuva422p10le", "yuv444p10"),
+        "yuv420p10le" => ("yuva420p10le", "yuv444p10"),
+        _ => ("yuva420p", "yuv444"),
     }
 }
 
@@ -12827,7 +12850,7 @@ mod tests {
             "the alpha stage must keep the output's bit depth. Got: {filter_complex}"
         );
         assert!(
-            filter_complex.contains("format=yuv420p10,setsar=1,fps=30,trim=end_frame=90,"),
+            filter_complex.contains("format=yuv444p10,setsar=1,fps=30,trim=end_frame=90,"),
             "the composite must not downconvert the canvas. Got: {filter_complex}"
         );
     }
@@ -12862,7 +12885,7 @@ mod tests {
         );
         assert!(
             filter_complex.contains(
-                "[vnorm0_bg][vnorm0_tx]overlay=x=96:y=540:format=yuv420,setsar=1,fps=30,trim=end_frame=90,setpts=PTS-STARTPTS,format=yuv420p[vnorm0];"
+                "[vnorm0_bg][vnorm0_tx]overlay=x=96:y=540:format=yuv444,setsar=1,fps=30,trim=end_frame=90,setpts=PTS-STARTPTS,format=yuv420p[vnorm0];"
             ),
             "the clip must be placed at the transformed corner. Got: {filter_complex}"
         );
@@ -12885,7 +12908,7 @@ mod tests {
             "a faded clip must be attenuated before compositing. Got: {filter_complex}"
         );
         assert!(
-            filter_complex.contains("overlay=x=0:y=0:format=yuv420,"),
+            filter_complex.contains("overlay=x=0:y=0:format=yuv444,"),
             "an untransformed faded clip still fills the canvas. Got: {filter_complex}"
         );
     }
@@ -12916,7 +12939,7 @@ mod tests {
             "the rotation must be given a box that fits the turned frame. Got: {filter_complex}"
         );
         assert!(
-            filter_complex.contains("overlay=x=690:y=60:format=yuv420,"),
+            filter_complex.contains("overlay=x=690:y=60:format=yuv444,"),
             "the rotated frame must stay centred on its anchor. Got: {filter_complex}"
         );
     }
@@ -18043,7 +18066,7 @@ mod tests {
             "the overlay corner must be an expression reading the staged size: {graph}"
         );
         assert!(
-            graph.contains(":eval=frame:format=yuv420,"),
+            graph.contains(":eval=frame:format=yuv444,"),
             "the overlay must re-read its expressions per frame: {graph}"
         );
         assert!(
@@ -18186,7 +18209,7 @@ mod tests {
             concat!(
                 "[0:v]scale=640:360,setsar=1[out_tx];",
                 "color=c=black:s=1280x720:r=30:d=3.033333,format=yuv420p[out_bg];",
-                "[out_bg][out_tx]overlay=x=320:y=180:format=yuv420,setsar=1,fps=30,",
+                "[out_bg][out_tx]overlay=x=320:y=180:format=yuv444,setsar=1,fps=30,",
                 "trim=end_frame=90,setpts=PTS-STARTPTS,format=yuv420p[out];"
             ),
             "the static composition must be untouched by the animated path"
@@ -18196,6 +18219,313 @@ mod tests {
         assert!(
             !clip_motion_renders_animated(&still),
             "a clip with no keyframes has no motion to render"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Composite chroma placement
+    // -------------------------------------------------------------------------
+
+    /// Builds a solid-white clip of `size`, encoded to a real file.
+    ///
+    /// Solid rather than a box on black so the lit region of a rendered frame is
+    /// exactly the rectangle `overlay` placed — its corner is the measurement.
+    fn solid_white_clip(
+        ffmpeg: &std::path::Path,
+        dir: &std::path::Path,
+        name: &str,
+        size: (u32, u32),
+        duration_sec: f64,
+    ) -> Option<std::path::PathBuf> {
+        let path = dir.join(name);
+        let mut built_cmd = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut built_cmd);
+        let built = built_cmd
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!(
+                    "color=c=white:s={}x{}:r=30:d={duration_sec}",
+                    size.0, size.1
+                ),
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&path)
+            .output()
+            .ok()?;
+
+        (built.status.success() && path.exists()).then_some(path)
+    }
+
+    /// Renders `graph` over `input` and hands back its frames as single-plane luma.
+    fn render_composite_luma_frames(
+        ffmpeg: &std::path::Path,
+        dir: &std::path::Path,
+        input: &std::path::Path,
+        graph: &str,
+        size: (u32, u32),
+    ) -> Vec<Vec<u8>> {
+        let graph_file = dir.join("graph.txt");
+        std::fs::write(&graph_file, graph.trim_end_matches(';')).expect("write filtergraph");
+
+        let mut render_cmd = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut render_cmd);
+        let render = render_cmd
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(input)
+            .arg("-/filter_complex")
+            .arg(&graph_file)
+            .args(["-map", "[out]", "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+            .output()
+            .expect("run ffmpeg");
+
+        assert!(
+            render.status.success(),
+            "ffmpeg refused the composite graph: {}\n{graph}",
+            String::from_utf8_lossy(&render.stderr)
+        );
+
+        render
+            .stdout
+            .chunks_exact(size.0 as usize * size.1 as usize)
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
+
+    /// The top-left corner of the lit region of one luma frame, if it has one.
+    fn lit_corner(frame: &[u8], width: u32) -> Option<(u32, u32)> {
+        let width = width as usize;
+        frame
+            .iter()
+            .enumerate()
+            .filter(|(_, luma)| **luma > 127)
+            .map(|(index, _)| ((index % width) as u32, (index / width) as u32))
+            .fold(None, |corner, (x, y)| match corner {
+                None => Some((x, y)),
+                Some((min_x, min_y)) => Some((min_x.min(x), min_y.min(y))),
+            })
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: the composite can address every pixel, not every other one
+    ///
+    /// `overlay` composites in whatever mode it is given, and a chroma-subsampled
+    /// mode cannot address an odd column or row — it floors the corner to the
+    /// nearest chroma sample. So the mode has to be 4:4:4 whatever depth the
+    /// output itself is written at. 4:2:2 is not enough: it subsamples
+    /// horizontally, so it loses the column and keeps the row.
+    #[test]
+    fn the_composite_overlay_runs_in_full_chroma_at_every_output_depth() {
+        let layout = ClipTransformLayout {
+            scaled_width: 160,
+            scaled_height: 90,
+            rotation_rad: 0.0,
+            bounding_width: 160,
+            bounding_height: 90,
+            overlay_x: 41,
+            overlay_y: 27,
+            opacity: 1.0,
+        };
+
+        for (pixel_format, expected_overlay) in [
+            ("yuv420p", "yuv444"),
+            ("yuv420p10le", "yuv444p10"),
+            ("yuv422p10le", "yuv444p10"),
+        ] {
+            let mut graph = String::new();
+            append_video_transform_composition(
+                &mut graph,
+                "0:v",
+                "vnorm0",
+                &layout,
+                1.0,
+                320,
+                180,
+                30.0,
+                pixel_format,
+            );
+
+            assert!(
+                graph.contains(&format!("overlay=x=41:y=27:format={expected_overlay},")),
+                "a {pixel_format} export must composite in {expected_overlay}: {graph}"
+            );
+            for subsampled in ["format=yuv420,", "format=yuv420p10,", "format=yuv422p10,"] {
+                assert!(
+                    !graph.contains(subsampled),
+                    "a {pixel_format} export must not composite in a subsampled mode \
+                     ({subsampled}): {graph}"
+                );
+            }
+        }
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a clip placed on an odd pixel renders on that pixel
+    ///
+    /// The string assertion above encodes a belief about what `overlay`'s
+    /// `format` does to an odd corner. This one hands the real FFmpeg the graph
+    /// the export builds and measures where the picture actually landed.
+    ///
+    /// Measured negative control (bundled FFmpeg 8.0.1, reproduced identically on
+    /// 9.0.1; 320x180 canvas, a 160x90 clip placed at (41, 27)): the `yuv420`
+    /// mode this replaced rendered the picture at (40, 26) — a whole pixel up and
+    /// to the left of where the preview draws it. On a 1280x720 canvas the 10-bit
+    /// `yuv422p10` mode put a clip placed at (201, 101) at (200, 101), losing the
+    /// column and keeping the row, because 4:2:2 subsamples horizontally only.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored odd_pixel
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_composited_clip_lands_on_the_odd_pixel_it_was_placed_on() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        const CANVAS: (u32, u32) = (320, 180);
+        const CLIP: (u32, u32) = (160, 90);
+        const CORNER: (u32, u32) = (41, 27);
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = solid_white_clip(&ffmpeg, dir.path(), "white.mp4", CLIP, 0.6) else {
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
+            return;
+        };
+
+        let layout = ClipTransformLayout {
+            scaled_width: CLIP.0,
+            scaled_height: CLIP.1,
+            rotation_rad: 0.0,
+            bounding_width: CLIP.0,
+            bounding_height: CLIP.1,
+            overlay_x: CORNER.0 as i32,
+            overlay_y: CORNER.1 as i32,
+            opacity: 1.0,
+        };
+        assert!(
+            layout.overlay_x % 2 != 0 && layout.overlay_y % 2 != 0,
+            "this fixture only measures anything if the corner is odd"
+        );
+
+        let mut graph = String::new();
+        append_video_transform_composition(
+            &mut graph, "0:v", "out", &layout, 0.5, CANVAS.0, CANVAS.1, 30.0, "yuv420p",
+        );
+
+        let frames = render_composite_luma_frames(&ffmpeg, dir.path(), &input, &graph, CANVAS);
+        assert!(!frames.is_empty(), "the composite must render frames");
+
+        for (index, frame) in frames.iter().enumerate() {
+            let corner = lit_corner(frame, CANVAS.0)
+                .unwrap_or_else(|| panic!("frame {index} rendered no picture at all"));
+            assert_eq!(
+                corner, CORNER,
+                "frame {index} must composite at the odd pixel it was placed on, \
+                 not the nearest chroma sample"
+            );
+        }
+    }
+
+    /// Feature: Keyframed motion in the export
+    /// Scenario: a slow pan advances every frame instead of stalling in pairs
+    ///
+    /// The animated path positions `overlay` by expression, and FFmpeg evaluates
+    /// those expressions per frame with no rounding of its own — so unlike the
+    /// static path, whose layout pre-snaps its corner, a pan really does ask
+    /// `overlay` for odd columns. In a chroma-subsampled mode it cannot give them:
+    /// every second frame floors back onto the frame before it, and a move slower
+    /// than two pixels a frame comes out visibly juddering.
+    ///
+    /// A pan of 64 pixels across 60 frames is ~1.08 px a frame, which is the
+    /// regime that exposes it. Measured negative control (bundled FFmpeg 8.0.1,
+    /// reproduced identically on 9.0.1): the `yuv420` mode this replaced stalled
+    /// on 28 of the 59 frame transitions and reached only 32 distinct positions
+    /// across 60 frames, never once landing on an odd column — the picture
+    /// advanced 0, 2, 0, 2 pixels instead of one a frame. In 4:4:4 the same pan
+    /// reaches all 60.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored pan_advances
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn an_animated_pan_advances_every_frame_instead_of_stalling_in_pairs() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        const CANVAS: (u32, u32) = (320, 180);
+        const SOURCE: (u32, u32) = (160, 90);
+        const SLOT_SEC: f64 = 2.0;
+        const EXPECTED_FRAMES: usize = 60;
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(input) = solid_white_clip(&ffmpeg, dir.path(), "white.mp4", SOURCE, 2.2) else {
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
+            return;
+        };
+
+        // Half scale keeps the staged frame at the source's own 160x90, so the
+        // pan is the only thing moving and the lit corner is the overlay corner.
+        let clip = motion_clip(&[
+            (0.0, motion_transform((0.4, 0.5), (0.5, 0.5), 0.0), false),
+            (
+                SLOT_SEC,
+                motion_transform((0.6, 0.5), (0.5, 0.5), 0.0),
+                false,
+            ),
+        ]);
+        let graph = animated_motion_graph(&clip, SOURCE, CANVAS, 30.0, SLOT_SEC, 0.0);
+
+        let frames = render_composite_luma_frames(&ffmpeg, dir.path(), &input, &graph, CANVAS);
+        assert_eq!(
+            frames.len(),
+            EXPECTED_FRAMES,
+            "the pan must fill its slot without changing the frame count"
+        );
+
+        let corners: Vec<u32> = frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                lit_corner(frame, CANVAS.0)
+                    .unwrap_or_else(|| panic!("frame {index} rendered no picture at all"))
+                    .0
+            })
+            .collect();
+
+        let stalled = corners.windows(2).filter(|pair| pair[0] == pair[1]).count();
+        assert_eq!(
+            stalled,
+            0,
+            "a pan of ~1.08 px a frame must advance on every frame; it stalled on \
+             {stalled} of {} transitions, which is the subsampled-mode judder: {corners:?}",
+            corners.len() - 1
+        );
+
+        let distinct: std::collections::HashSet<u32> = corners.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            EXPECTED_FRAMES,
+            "every frame of the pan must occupy its own column, got {} across {EXPECTED_FRAMES} \
+             frames: {corners:?}",
+            distinct.len()
+        );
+
+        let odd = corners.iter().filter(|x| *x % 2 == 1).count();
+        assert!(
+            odd > 0,
+            "a pan that never lands on an odd column is still snapped to the chroma \
+             grid: {corners:?}"
         );
     }
 
