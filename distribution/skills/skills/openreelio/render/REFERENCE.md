@@ -66,12 +66,12 @@ Some things still do not, and the render says so rather than pretending:
 | Feature | In `render start` |
 | ------- | ----------------- |
 | Clip transform and opacity | **Yes.** Composited at the clip's base values. |
-| Motion keyframes (`SetClipMotionKeyframes`) | **No.** The clip renders static at its base transform; the result carries a `warnings` entry naming the clip. |
+| Motion keyframes (`SetClipMotionKeyframes`) | **Yes for pan, zoom and anchor moves.** The composite animates them straight from the keyframes. Motion that turns the picture keeps the static fallback and the result carries a `warnings` entry naming the clip. |
 | `lineHeight` on text and captions | **No.** Text is burned in by libass, which has no line-spacing control and follows the font's own metrics; the result carries a `warnings` entry naming the clip. Only the `drawtext` fallback honors it. |
 | Two-input transitions (`dissolve-*`, `wipe-*`, `slide-*`) | **Yes, given unused source media on both sides of the cut.** The picture and the sound crossfade together and the file stays exactly as long as the timeline. A boundary that cannot be blended renders as a hard cut and the result carries a `warnings` entry naming the clip, the effect and the reason — see the editing reference for the full list of reasons. |
 | Audio on a separate track under a blended boundary | **Not crossfaded.** Only the sound travelling with the two blended clips is faded; detached audio, a music bed or a separate narration take keeps whatever fades it was authored with, so a hard edit there is heard under a dissolving picture. |
-| Simultaneous layered video clips (picture-in-picture) | **No.** Validation refuses the render. |
-| Blend modes | **No.** Validation refuses the render. |
+| Simultaneous layered video clips (picture-in-picture) | **Yes.** Overlapping clips are composited into one picture rather than played in turn, stacked so the topmost track is drawn last, each layer at its own transform and opacity. |
+| Blend modes | **Ten of them.** Normal, Multiply, Screen, Overlay, Darken, Lighten, Color Burn, Color Dodge, Hard Light, Difference and Exclusion render, each blended against the picture already drawn beneath it — so a blended clip with nothing under it blends against the black canvas, and Multiply over nothing is black. Soft Light, Add, Subtract, Linear Burn, Linear Dodge, Vivid Light, Linear Light and Pin Light are refused by validation, naming the clip. A clip carrying both a blend mode and a transition is refused the same way. |
 
 A font that is neither bundled nor installed on the machine is reported the same
 way: the render substitutes a bundled family and names it in `warnings` rather

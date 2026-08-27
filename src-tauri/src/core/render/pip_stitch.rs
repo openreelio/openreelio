@@ -104,6 +104,82 @@ struct PlannedClip<'a> {
     blend_mode: BlendMode,
 }
 
+/// W3C `color-dodge`, written out because FFmpeg's own `dodge` is not it.
+///
+/// `blend`'s `dodge` is `min(max, B*(max+1)/(max-A))`, which differs from the
+/// specification in two ways. The scale factor is `max+1` rather than `max`, and
+/// — the one that matters — it returns `max` whenever the *source* is `max`,
+/// where the specification returns 0 if the backdrop is 0. Measured over all
+/// 65536 8-bit backdrop/source pairs, that is one pixel wrong by the full range:
+/// pure white over pure black rendered white where the canvas draws black.
+/// Writing the specification out costs one expression and measures 1/255.
+///
+/// Operands follow the same convention as every other mode here: `blend`'s first
+/// input is the backdrop and its second is the layer, so in the expression `A`
+/// is the backdrop `Cb` and `B` is the source `Cs`. Nothing is reversed —
+/// the reversal FFmpeg's own `dodge` and `burn` would need is precisely what
+/// writing the formula out avoids.
+///
+/// The literal `255` ties this to an 8-bit working format; it is
+/// [`COMPOSITE_LAYER_FORMAT`](super::export::COMPOSITE_LAYER_FORMAT) that makes
+/// that true, and the two have to move together.
+const COLOR_DODGE_BLEND: &str =
+    "all_expr='if(lte(A,0),0,if(gte(B,255),255,min(255,A*255/(255-B))))'";
+
+/// W3C `color-burn`, written out for the same reason as [`COLOR_DODGE_BLEND`].
+///
+/// FFmpeg's `burn` returns 0 whenever the source is 0, where the specification
+/// returns 1 if the backdrop is 1 — again one pixel wrong by the full range,
+/// pure black over pure white.
+const COLOR_BURN_BLEND: &str =
+    "all_expr='if(gte(A,255),255,if(lte(B,0),0,255-min(255,(255-A)*255/B)))'";
+
+/// The `blend` options that reproduce one canvas blend mode, if any do.
+///
+/// `None` covers two different things, and callers that care must tell them
+/// apart with [`composite_blend_is_supported`]: `Normal` needs no blend at all
+/// (it is plain source-over, which `overlay` already does), and the modes the
+/// stack cannot reproduce faithfully are refused before they reach here.
+///
+/// Every mode below is measured against the W3C separable blend functions over
+/// all 65536 8-bit backdrop/source pairs, at full opacity and at half: worst
+/// error 1.99/255, and not one pair over 2/255. The **operand order is uniform**
+/// — backdrop first — which is worth stating because it is a trap: fed the other
+/// way round `overlay` silently computes `hard-light` (and vice versa), which is
+/// a plausible-looking picture rather than an error. Measured, that mistake is
+/// 255/255 wrong.
+///
+/// `soft-light` is absent on purpose. FFmpeg implements the Pegtop formula, not
+/// the specification's, and no operand order fixes that.
+fn blend_filter_spec(mode: &BlendMode) -> Option<&'static str> {
+    match mode {
+        BlendMode::Multiply => Some("all_mode=multiply"),
+        BlendMode::Screen => Some("all_mode=screen"),
+        BlendMode::Overlay => Some("all_mode=overlay"),
+        BlendMode::Darken => Some("all_mode=darken"),
+        BlendMode::Lighten => Some("all_mode=lighten"),
+        BlendMode::HardLight => Some("all_mode=hardlight"),
+        BlendMode::Difference => Some("all_mode=difference"),
+        BlendMode::Exclusion => Some("all_mode=exclusion"),
+        BlendMode::ColorDodge => Some(COLOR_DODGE_BLEND),
+        BlendMode::ColorBurn => Some(COLOR_BURN_BLEND),
+        _ => None,
+    }
+}
+
+/// Whether the render can composite a layer asking for this blend mode.
+///
+/// The single predicate behind both the preflight's refusal and the builder's,
+/// so what the GUI offers and what the render accepts cannot drift apart.
+pub(super) fn composite_blend_is_supported(mode: &BlendMode) -> bool {
+    matches!(mode, BlendMode::Normal) || blend_filter_spec(mode).is_some()
+}
+
+/// The blend modes a layered render can perform, for the refusal message.
+pub(super) const SUPPORTED_BLEND_MODES: &str =
+    "Normal, Multiply, Screen, Overlay, Darken, Lighten, Color Burn, Color Dodge, \
+     Hard Light, Difference and Exclusion";
+
 /// Collects the clips that paint into the picture, with their track depth.
 ///
 /// The filter has to match the builder's own exactly. A clip the builder skips
@@ -198,7 +274,7 @@ struct CompositeGrouping<'a> {
 /// that is the ordinary sequential timeline, and it keeps the cheaper graph.
 ///
 /// Shared by [`plan_pip_groups`] and
-/// [`first_unsupported_composite_blend`] so that what the export refuses and
+/// [`composite_refusal`] so that what the export refuses and
 /// what the export composites are decided by one piece of code. They disagreed
 /// once: the preflight looked at overlap runs alone, so a clip pulled into a
 /// group by relation 2 could carry a blend mode nobody checked, and the render
@@ -208,12 +284,21 @@ fn composite_grouping<'a>(
     transition_plan: &TransitionPlan,
 ) -> CompositeGrouping<'a> {
     let clips = planned_clips(sequence);
-    if clips.len() < 2 {
+    if clips.is_empty() {
         return CompositeGrouping {
             clips,
             groups: Vec::new(),
         };
     }
+
+    // A clip asking for a blend mode composites whether or not anything overlaps
+    // it: the preview blends it against whatever it has already drawn, and for a
+    // lone clip that is the opaque black canvas. Multiply over nothing really is
+    // black, and the export has to say so too.
+    let blended: Vec<bool> = clips
+        .iter()
+        .map(|planned| blend_filter_spec(&planned.blend_mode).is_some())
+        .collect();
 
     // Sweep for connected runs under overlap. Sorting by start means a run
     // extends exactly while the next clip begins before the furthest end so far.
@@ -244,7 +329,7 @@ fn composite_grouping<'a>(
         }
     }
 
-    if !overlapped.iter().any(|shares| *shares) {
+    if !overlapped.iter().any(|shares| *shares) && !blended.iter().any(|asks| *asks) {
         return CompositeGrouping {
             clips,
             groups: Vec::new(),
@@ -269,12 +354,13 @@ fn composite_grouping<'a>(
     // Resolving the roots only now is deliberate: a union performed after a clip
     // was marked may have moved it under a different representative.
     let mut composite_roots: HashSet<usize> = HashSet::new();
-    let shares_time: Vec<usize> = overlapped
+    let composites: Vec<usize> = overlapped
         .iter()
+        .zip(blended.iter())
         .enumerate()
-        .filter_map(|(index, shares)| shares.then_some(index))
+        .filter_map(|(index, (shares, asks))| (*shares || *asks).then_some(index))
         .collect();
-    for index in shares_time {
+    for index in composites {
         let root = sets.find(index);
         composite_roots.insert(root);
     }
@@ -289,7 +375,7 @@ fn composite_grouping<'a>(
 
     let mut groups: Vec<Vec<usize>> = members
         .into_values()
-        .filter(|group| group.len() > 1)
+        .filter(|group| group.len() > 1 || group.iter().any(|index| blended[*index]))
         .map(|mut group| {
             group.sort_by(|left, right| {
                 clips[*left]
@@ -323,23 +409,88 @@ fn composite_grouping<'a>(
     CompositeGrouping { clips, groups }
 }
 
-/// The first clip in a composite asking for a blend the stack cannot perform.
+/// A composite the render cannot perform, and the clip responsible for it.
+pub(super) struct CompositeRefusal<'a> {
+    /// The clip the user has to change.
+    pub clip_id: &'a str,
+    /// What to tell them, phrased for someone looking at a timeline.
+    pub message: String,
+}
+
+/// Why this sequence's composites cannot be rendered, if they cannot.
 ///
-/// The stack is `overlay`, which does source-over and nothing else. Reported so
-/// the preflight can refuse the render *before* it starts, naming the clip whose
-/// blend mode has to change.
-pub(super) fn first_unsupported_composite_blend<'a>(
+/// The single source of both the preflight's refusal and the builder's, so that
+/// what the GUI offers and what the render accepts cannot drift apart — down to
+/// the wording, which is produced here once.
+pub(super) fn composite_refusal<'a>(
     sequence: &'a Sequence,
     transition_plan: &TransitionPlan,
-) -> Option<&'a str> {
+) -> Option<CompositeRefusal<'a>> {
     let grouping = composite_grouping(sequence, transition_plan);
-    grouping
-        .groups
+    let layers = || {
+        grouping
+            .groups
+            .iter()
+            .flatten()
+            .map(|index| &grouping.clips[*index])
+    };
+
+    // A mode the stack cannot perform is refused wherever it appears, not only
+    // where clips overlap. Only *supported* modes pull a clip into a group, so a
+    // lone clip asking for an unsupported one belongs to no group at all —
+    // checking the groups alone would let it render as plain source-over with
+    // nothing said. The scope here is deliberately the one the blanket refusal
+    // this replaced used: every enabled clip on a video track that reaches the
+    // file, text and adjustment layers included, so nothing that used to be
+    // refused quietly starts exporting instead.
+    if let Some((_, clip)) = sequence
+        .tracks
         .iter()
-        .flatten()
-        .map(|index| &grouping.clips[*index])
-        .find(|planned| planned.blend_mode != BlendMode::Normal)
-        .map(|planned| planned.clip.id.as_str())
+        .filter(|track| track.contributes_to_output() && matches!(track.kind, TrackKind::Video))
+        .flat_map(|track| {
+            track
+                .clips
+                .iter()
+                .filter(|clip| clip.enabled)
+                .map(move |clip| (track, clip))
+        })
+        .find(|(track, clip)| {
+            !composite_blend_is_supported(&effective_blend_mode_for_clip(clip, track))
+        })
+    {
+        return Some(CompositeRefusal {
+            clip_id: clip.id.as_str(),
+            message: format!(
+                "This clip asks for a blend mode the final render cannot perform yet; \
+                 supported modes are {SUPPORTED_BLEND_MODES}"
+            ),
+        });
+    }
+
+    // A transition folds its two clips into a single stream *before* the stack
+    // runs, so a blend on either side would be applied to the already-blended
+    // pair rather than to each clip against the backdrop — which is not what the
+    // preview draws. Getting it right would mean compositing each side against
+    // the backdrop first and cross-fading the two finished pictures, which
+    // inverts the order the two folds run in. Refuse rather than render
+    // something plausible and wrong.
+    if let Some(planned) = layers().find(|planned| {
+        planned.blend_mode != BlendMode::Normal
+            && (transition_plan.transition_after(&planned.clip.id).is_some()
+                || transition_plan
+                    .transition_before(&planned.clip.id)
+                    .is_some())
+    }) {
+        return Some(CompositeRefusal {
+            clip_id: planned.clip.id.as_str(),
+            message: "This clip has both a transition and a blend mode. The transition blends \
+                      it into its neighbour before the layers are stacked, so the blend mode \
+                      would apply to the pair rather than to the clip; remove one of the two"
+                .to_string(),
+        });
+    }
+
+    None
 }
 
 /// Decides which clips composite together.
@@ -383,23 +534,13 @@ pub(super) fn plan_pip_groups(
         )));
     }
 
-    // `overlay` performs source-over and nothing else. A layer asking for
-    // another blend would be composited as if it had asked for this one, so the
-    // render would quietly differ from the preview. The preflight reports the
-    // same clip through `first_unsupported_composite_blend`; this is the
-    // backstop for every caller that does not run the preflight first.
-    if let Some(planned) = grouping
-        .groups
-        .iter()
-        .flatten()
-        .map(|index| &grouping.clips[*index])
-        .find(|planned| planned.blend_mode != BlendMode::Normal)
-    {
+    // Both refusals, and their wording, come from the one predicate the
+    // preflight reads. This is the backstop for every caller that does not run
+    // the preflight first.
+    if let Some(refusal) = composite_refusal(sequence, transition_plan) {
         return Err(ExportError::InvalidSettings(format!(
-            "Clip '{}' is layered over other clips and asks for a blend mode the final \
-             render cannot perform yet; layered clips can only be composited in Normal \
-             blend mode",
-            planned.clip.id
+            "Clip '{}': {}",
+            refusal.clip_id, refusal.message
         )));
     }
 
@@ -412,6 +553,7 @@ pub(super) fn plan_pip_groups(
                 PipLayerInfo {
                     group_index,
                     track_index: planned.track_index,
+                    blend_spec: blend_filter_spec(&planned.blend_mode),
                 },
             );
         }
@@ -468,7 +610,21 @@ pub(super) fn fold_pip_groups(
         // it for a composite, so it carries transparency and the output pixel
         // format of a *layer*, and handing it to the timeline stitch would push
         // a `gbrap` stream into a concat of `yuv420p` ones. Refuse instead.
-        if group.len() < 2 {
+        // One layer is a real composite when that layer asks for a blend mode:
+        // it blends against the opaque black backdrop, which is what the preview
+        // shows for a lone blended clip (multiply over nothing is black). One
+        // layer with no blend is not a composite at all, and means the builder
+        // dropped a segment the plan expected. Passing it through would look
+        // like a graceful degradation and is not one: the plan staged it as a
+        // *layer*, so it carries transparency and a layer's pixel format, and
+        // the timeline stitch would push a `gbrap` stream into a concat of
+        // `yuv420p` ones.
+        let blends = group.iter().any(|segment| {
+            segment
+                .layer
+                .is_some_and(|layer| layer.blend_spec.is_some())
+        });
+        if group.len() < 2 && !blends {
             return Err(ExportError::InvalidSettings(format!(
                 "Composite group {group_index} was planned with more layers than the render \
                  produced, so a layer staged for compositing would reach the timeline on its \
@@ -525,6 +681,71 @@ pub(super) fn fold_pip_groups(
 /// [`clip_stream_frames`](super::transition_stitch::clip_stream_frames).
 fn span_frames(start_sec: f64, end_sec: f64, fps: f64) -> i64 {
     (end_sec * fps).round() as i64 - (start_sec * fps).round() as i64
+}
+
+/// Blends one layer against the accumulated picture, ready to be composited.
+///
+/// Returns the backdrop branch the caller's `overlay` should use, and the label
+/// of the blended layer.
+///
+/// The W3C compositing model separates the two halves of what a blend mode does:
+///
+/// ```text
+/// Co = as·B(Cb, Cs) + (1 - as)·Cb          (with an opaque backdrop)
+/// ```
+///
+/// `B` is the blend function, and it applies to **colour only**. The `as` term
+/// is ordinary source-over compositing. So the chain here computes `B` with
+/// `blend` on colour-only streams, puts the layer's own alpha back onto the
+/// result, and lets the caller's `overlay` do the `as` arithmetic — which is
+/// exactly the formula above.
+///
+/// Three details are load-bearing, each measured:
+///
+/// 1. **`blend` runs on `gbrp`, never `gbrap`.** Handed a stream with alpha it
+///    blends the alpha plane as if it were colour. Measured with a half-opaque
+///    layer in `screen`, that produced the *full-opacity* answer: the clip's
+///    opacity was silently discarded.
+/// 2. **The backdrop is `blend`'s first input.** Fed the other way round,
+///    `overlay` computes `hard-light` and `hard-light` computes `overlay` — a
+///    plausible picture rather than an error, and 255/255 wrong.
+/// 3. **`repeatlast=0`.** Without it a layer that ends before the group does has
+///    its last blended frame frozen onto every remaining frame. Measured: 30 of
+///    90 frames wrong.
+///
+/// Opacity deliberately does not go through `blend`'s own `all_opacity`, whose
+/// semantics are inconsistent between modes; it is already baked into the
+/// layer's alpha channel by the composition emitter, and this chain carries that
+/// alpha through untouched.
+fn append_blended_layer(
+    filter_complex: &mut String,
+    backdrop_label: &str,
+    layer_label: &str,
+    blend_spec: &str,
+    group_index: usize,
+    depth: usize,
+) -> (String, String) {
+    let blend_backdrop = format!("[pipbb{group_index}_{depth}]");
+    let blend_backdrop_colour = format!("[pipbc{group_index}_{depth}]");
+    let overlay_backdrop = format!("[pipob{group_index}_{depth}]");
+    let layer_colour_source = format!("[pipcs{group_index}_{depth}]");
+    let layer_alpha_source = format!("[pipas{group_index}_{depth}]");
+    let layer_colour = format!("[pipsc{group_index}_{depth}]");
+    let layer_alpha = format!("[pipsa{group_index}_{depth}]");
+    let blended = format!("[pipbl{group_index}_{depth}]");
+    let blended_with_alpha = format!("[pipbm{group_index}_{depth}]");
+
+    filter_complex.push_str(&format!(
+        "{backdrop_label}split{blend_backdrop}{overlay_backdrop};\
+         {blend_backdrop}format=gbrp{blend_backdrop_colour};\
+         {layer_label}split{layer_colour_source}{layer_alpha_source};\
+         {layer_colour_source}format=gbrp{layer_colour};\
+         {layer_alpha_source}alphaextract{layer_alpha};\
+         {blend_backdrop_colour}{layer_colour}blend={blend_spec}:repeatlast=0{blended};\
+         {blended}{layer_alpha}alphamerge{blended_with_alpha};"
+    ));
+
+    (overlay_backdrop, blended_with_alpha)
 }
 
 /// Stacks one run of layers, back to front, onto an opaque black backdrop.
@@ -603,9 +824,27 @@ fn fold_group(
         // group does. FFmpeg's defaults freeze its last frame onto every
         // remaining frame instead. `shortest` is deliberately absent: it would
         // end the composite at whichever layer runs out first.
+        //
+        // A layer asking for a blend mode reaches `overlay` already blended
+        // against the accumulated picture; see `append_blended_layer`. It needs
+        // the backdrop twice — once to blend against, once to composite onto —
+        // so the blend hands back the branch the overlay should use.
+        let (backdrop_label, composited_label) =
+            match segment.layer.and_then(|layer| layer.blend_spec) {
+                Some(blend_spec) => append_blended_layer(
+                    filter_complex,
+                    &accumulated,
+                    &layer_label,
+                    blend_spec,
+                    group_index,
+                    depth,
+                ),
+                None => (accumulated.clone(), layer_label),
+            };
+
         filter_complex.push_str(&format!(
             "{}{}overlay=x=0:y=0:format=auto:alpha=straight:eof_action=pass:repeatlast=0{};",
-            accumulated, layer_label, output_label
+            backdrop_label, composited_label, output_label
         ));
         accumulated = output_label;
     }
@@ -788,19 +1027,19 @@ mod tests {
     /// another blend would be composited as if it had asked for this one and the
     /// render would quietly differ from the preview.
     #[test]
-    fn a_non_normal_blend_inside_an_overlap_is_refused() {
+    fn an_unsupported_blend_inside_an_overlap_is_refused() {
         let sequence = sequence_of(vec![
-            ClipSpec::at(1.0, 3.0).blended(BlendMode::Multiply),
+            ClipSpec::at(1.0, 3.0).blended(BlendMode::SoftLight),
             ClipSpec::at(0.0, 3.0),
         ]);
 
-        let error = plan_for(&sequence).expect_err("a non-Normal layer must be refused");
+        let error = plan_for(&sequence).expect_err("an unsupported layer must be refused");
         assert!(
             format!("{error:?}").contains("clip0"),
             "the refusal must name the clip whose blend cannot be rendered: {error:?}"
         );
         assert_eq!(
-            first_unsupported_composite_blend(&sequence, &TransitionPlan::default()),
+            composite_refusal(&sequence, &TransitionPlan::default()).map(|refusal| refusal.clip_id),
             Some("clip0"),
             "the preflight must refuse exactly what the planner refuses"
         );
@@ -814,14 +1053,14 @@ mod tests {
     #[test]
     fn a_tracks_blend_mode_is_refused_the_same_way_a_clips_is() {
         let mut sequence = sequence_of(vec![ClipSpec::at(1.0, 3.0), ClipSpec::at(0.0, 3.0)]);
-        sequence.tracks[0].blend_mode = BlendMode::Screen;
+        sequence.tracks[0].blend_mode = BlendMode::SoftLight;
 
         assert!(
             plan_for(&sequence).is_err(),
             "a blended track must be refused as surely as a blended clip"
         );
         assert_eq!(
-            first_unsupported_composite_blend(&sequence, &TransitionPlan::default()),
+            composite_refusal(&sequence, &TransitionPlan::default()).map(|refusal| refusal.clip_id),
             Some("clip0"),
         );
     }
@@ -892,6 +1131,7 @@ mod tests {
         VideoTimelineSegment::new(label, start, end).with_layer(Some(PipLayerInfo {
             group_index,
             track_index,
+            blend_spec: None,
         }))
     }
 
@@ -1058,6 +1298,244 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Blend modes
+    // -------------------------------------------------------------------------
+
+    /// The W3C separable blend functions, on gamma-encoded sRGB in 0..1.
+    ///
+    /// Written out here rather than derived from the emitter so the tests check
+    /// the render against the specification, not against itself.
+    fn w3c_blend(mode: &BlendMode, cb: f64, cs: f64) -> f64 {
+        let screen = |cb: f64, cs: f64| cb + cs - cb * cs;
+        let hard_light = |cb: f64, cs: f64| {
+            if cs <= 0.5 {
+                cb * (2.0 * cs)
+            } else {
+                screen(cb, 2.0 * cs - 1.0)
+            }
+        };
+        match mode {
+            BlendMode::Multiply => cb * cs,
+            BlendMode::Screen => screen(cb, cs),
+            BlendMode::Overlay => hard_light(cs, cb),
+            BlendMode::Darken => cb.min(cs),
+            BlendMode::Lighten => cb.max(cs),
+            BlendMode::HardLight => hard_light(cb, cs),
+            BlendMode::Difference => (cb - cs).abs(),
+            BlendMode::Exclusion => cb + cs - 2.0 * cb * cs,
+            BlendMode::ColorDodge => {
+                if cb == 0.0 {
+                    0.0
+                } else if cs == 1.0 {
+                    1.0
+                } else {
+                    1.0_f64.min(cb / (1.0 - cs))
+                }
+            }
+            BlendMode::ColorBurn => {
+                if cb == 1.0 {
+                    1.0
+                } else if cs == 0.0 {
+                    0.0
+                } else {
+                    1.0 - 1.0_f64.min((1.0 - cb) / cs)
+                }
+            }
+            _ => cs,
+        }
+    }
+
+    /// The W3C composite of one layer over an opaque backdrop, in 0..255.
+    ///
+    /// `Co = as * B(Cb, Cs) + (1 - as) * Cb`, which is the model with `ab = 1` —
+    /// true here because the bottom of every composite is opaque black.
+    fn w3c_composite(mode: &BlendMode, cb: u8, cs: u8, alpha: f64) -> u8 {
+        let (cb, cs) = (f64::from(cb) / 255.0, f64::from(cs) / 255.0);
+        let blended = w3c_blend(mode, cb, cs);
+        ((alpha * blended + (1.0 - alpha) * cb) * 255.0).round() as u8
+    }
+
+    fn blend_graph_for(mode: BlendMode) -> String {
+        let mut graph = String::new();
+        let segments = vec![
+            VideoTimelineSegment::new("[base]", 0.0, 2.0).with_layer(Some(PipLayerInfo {
+                group_index: 0,
+                track_index: 1,
+                blend_spec: None,
+            })),
+            VideoTimelineSegment::new("[top]", 0.0, 2.0).with_layer(Some(PipLayerInfo {
+                group_index: 0,
+                track_index: 0,
+                blend_spec: blend_filter_spec(&mode),
+            })),
+        ];
+        fold_pip_groups(&mut graph, segments, FPS, 320, 180, "yuv420p").expect("must fold");
+        graph
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: a blended layer is blended against what is already drawn
+    ///
+    /// The W3C model splits a blend mode in two: the blend function applies to
+    /// colour, and the layer's alpha then composites the result source-over. So
+    /// the graph has to blend colour-only streams and put the alpha back
+    /// afterwards — never hand `blend` a stream that still carries alpha.
+    #[test]
+    fn a_blended_layer_blends_against_the_accumulated_picture() {
+        let graph = blend_graph_for(BlendMode::Multiply);
+
+        assert!(
+            graph.contains("blend=all_mode=multiply:repeatlast=0"),
+            "the layer must be blended, and must not freeze when it ends: {graph}"
+        );
+        assert!(
+            graph.contains("alphaextract") && graph.contains("alphamerge"),
+            "the layer's own alpha must be carried around the blend: {graph}"
+        );
+        assert!(
+            graph.contains("format=gbrp[pipbc0_1]") && graph.contains("format=gbrp[pipsc0_1]"),
+            "both sides of the blend must be colour-only: {graph}"
+        );
+        // Operand order is the trap: fed the other way round `overlay` computes
+        // `hard-light`, which looks plausible and is 255/255 wrong.
+        let blend_call = graph
+            .split("blend=all_mode=multiply")
+            .next()
+            .expect("blend call")
+            .rsplit(';')
+            .next()
+            .expect("operands");
+        assert_eq!(
+            blend_call, "[pipbc0_1][pipsc0_1]",
+            "the backdrop must be the blend's first input: {graph}"
+        );
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: colour-dodge and colour-burn are written out, not borrowed
+    ///
+    /// FFmpeg's own `dodge` and `burn` are not the specification's. Each gets one
+    /// pixel of the 8-bit domain wrong by the full range — pure white over pure
+    /// black renders white under `dodge` where the canvas draws black — and flat
+    /// black and white are exactly what letterbox bars and blown highlights are
+    /// made of.
+    #[test]
+    fn colour_dodge_and_burn_are_written_out_rather_than_borrowed() {
+        for mode in [BlendMode::ColorDodge, BlendMode::ColorBurn] {
+            let graph = blend_graph_for(mode.clone());
+            assert!(
+                graph.contains("blend=all_expr="),
+                "{mode:?} must use the written-out formula: {graph}"
+            );
+            assert!(
+                !graph.contains("all_mode=dodge") && !graph.contains("all_mode=burn"),
+                "{mode:?} must not use FFmpeg's own mode: {graph}"
+            );
+        }
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: a blend mode alone makes a clip a composite
+    ///
+    /// The preview blends every clip against what it has already drawn, and for a
+    /// clip with nothing under it that is the opaque black canvas. So a blended
+    /// clip composites whether or not anything overlaps it.
+    #[test]
+    fn a_lone_blended_clip_is_a_one_layer_composite() {
+        let mut sequence = sequence_of(vec![ClipSpec::at(0.0, 3.0)]);
+        sequence.tracks[0].clips[0].blend_mode = BlendMode::Multiply;
+        let plan = plan_for(&sequence).expect("a lone blended clip must plan");
+
+        assert!(
+            plan.layer("clip0").is_some(),
+            "a blended clip composites even with nothing to overlap"
+        );
+
+        let mut plain = sequence_of(vec![ClipSpec::at(0.0, 3.0)]);
+        plain.tracks[0].clips[0].blend_mode = BlendMode::Normal;
+        assert!(
+            plan_for(&plain).expect("plain").layer("clip0").is_none(),
+            "a clip with no blend and nothing to overlap must keep the cheaper graph"
+        );
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: an unsupported mode is refused even with nothing to overlap
+    ///
+    /// Only *supported* modes pull a clip into a composite, so a lone clip
+    /// asking for an unsupported one is in no group. Refusing by walking the
+    /// groups alone would therefore let it through, and it would render as plain
+    /// source-over with nothing said — refused when it overlaps something,
+    /// silent when it does not.
+    #[test]
+    fn an_unsupported_blend_is_refused_even_with_nothing_to_overlap() {
+        let mut lone = sequence_of(vec![ClipSpec::at(0.0, 3.0)]);
+        lone.tracks[0].clips[0].blend_mode = BlendMode::SoftLight;
+        assert_eq!(
+            composite_refusal(&lone, &TransitionPlan::default()).map(|refusal| refusal.clip_id),
+            Some("clip0"),
+            "a lone unsupported blend must be refused, not quietly ignored"
+        );
+
+        let mut supported = sequence_of(vec![ClipSpec::at(0.0, 3.0)]);
+        supported.tracks[0].clips[0].blend_mode = BlendMode::Multiply;
+        assert!(
+            composite_refusal(&supported, &TransitionPlan::default()).is_none(),
+            "a lone supported blend must render, not be refused"
+        );
+        assert!(
+            plan_for(&supported)
+                .expect("a lone supported blend must plan")
+                .layer("clip0")
+                .is_some(),
+            "and it must actually composite"
+        );
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: every supported mode is emitted, and no other one is
+    #[test]
+    fn exactly_the_measured_modes_are_supported() {
+        for mode in [
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::ColorBurn,
+            BlendMode::ColorDodge,
+            BlendMode::HardLight,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+        ] {
+            assert!(
+                blend_filter_spec(&mode).is_some() && composite_blend_is_supported(&mode),
+                "{mode:?} was measured against the specification and must render"
+            );
+        }
+        assert!(
+            composite_blend_is_supported(&BlendMode::Normal)
+                && blend_filter_spec(&BlendMode::Normal).is_none(),
+            "Normal is source-over, which needs no blend filter at all"
+        );
+        for mode in [
+            BlendMode::SoftLight,
+            BlendMode::Add,
+            BlendMode::Subtract,
+            BlendMode::LinearBurn,
+            BlendMode::LinearDodge,
+            BlendMode::VividLight,
+            BlendMode::LinearLight,
+            BlendMode::PinLight,
+        ] {
+            assert!(
+                !composite_blend_is_supported(&mode),
+                "{mode:?} cannot be rendered faithfully and must stay refused"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Rendered pixels
     // -------------------------------------------------------------------------
     //
@@ -1079,6 +1557,39 @@ mod tests {
         opacity: f64,
         start_sec: f64,
         end_sec: f64,
+        /// The blend this layer composites through. `Normal` is source-over.
+        blend: BlendMode,
+    }
+
+    impl LayerSpec {
+        fn plain(input: usize, track_index: usize, size: (u32, u32), canvas: (u32, u32)) -> Self {
+            let _ = canvas;
+            Self {
+                input,
+                track_index,
+                corner: (0, 0),
+                size,
+                opacity: 1.0,
+                start_sec: 0.0,
+                end_sec: 2.0,
+                blend: BlendMode::Normal,
+            }
+        }
+
+        fn blended(mut self, blend: BlendMode) -> Self {
+            self.blend = blend;
+            self
+        }
+
+        fn faded(mut self, opacity: f64) -> Self {
+            self.opacity = opacity;
+            self
+        }
+
+        fn placed(mut self, corner: (i32, i32)) -> Self {
+            self.corner = corner;
+            self
+        }
     }
 
     /// A solid-colour clip, encoded losslessly so the measured colour is exact.
@@ -1161,6 +1672,7 @@ mod tests {
                     .with_layer(Some(PipLayerInfo {
                         group_index: 0,
                         track_index: spec.track_index,
+                        blend_spec: blend_filter_spec(&spec.blend),
                     })),
             );
         }
@@ -1284,6 +1796,7 @@ mod tests {
                     opacity: 1.0,
                     start_sec: 0.0,
                     end_sec: 2.0,
+                    blend: BlendMode::Normal,
                 },
                 LayerSpec {
                     input: 1,
@@ -1293,6 +1806,7 @@ mod tests {
                     opacity: 0.5,
                     start_sec: 0.0,
                     end_sec: 2.0,
+                    blend: BlendMode::Normal,
                 },
             ],
             CANVAS,
@@ -1383,6 +1897,7 @@ mod tests {
                     opacity: 1.0,
                     start_sec: 0.0,
                     end_sec: 2.0,
+                    blend: BlendMode::Normal,
                 },
                 LayerSpec {
                     input: 1,
@@ -1392,6 +1907,7 @@ mod tests {
                     opacity: 1.0,
                     start_sec: 0.0,
                     end_sec: 2.0,
+                    blend: BlendMode::Normal,
                 },
                 LayerSpec {
                     input: 2,
@@ -1401,6 +1917,7 @@ mod tests {
                     opacity: 0.5,
                     start_sec: 0.0,
                     end_sec: 2.0,
+                    blend: BlendMode::Normal,
                 },
             ],
             CANVAS,
@@ -1475,6 +1992,7 @@ mod tests {
                     opacity: 1.0,
                     start_sec: 0.0,
                     end_sec: 3.0,
+                    blend: BlendMode::Normal,
                 },
                 LayerSpec {
                     input: 1,
@@ -1484,6 +2002,7 @@ mod tests {
                     opacity: 1.0,
                     start_sec: 1.0,
                     end_sec: 2.0,
+                    blend: BlendMode::Normal,
                 },
             ],
             CANVAS,
@@ -1568,6 +2087,7 @@ mod tests {
             VideoTimelineSegment::new("[vnorm0]", 0.0, 2.0).with_layer(Some(PipLayerInfo {
                 group_index: 0,
                 track_index: 1,
+                blend_spec: None,
             })),
         );
 
@@ -1580,6 +2100,7 @@ mod tests {
             VideoTimelineSegment::new("[vnorm1]", 0.0, 2.0).with_layer(Some(PipLayerInfo {
                 group_index: 0,
                 track_index: 0,
+                blend_spec: None,
             })),
         );
 
@@ -1694,6 +2215,7 @@ mod tests {
             VideoTimelineSegment::new("[vnorm0]", 0.0, SLOT_SEC).with_layer(Some(PipLayerInfo {
                 group_index: 0,
                 track_index: 1,
+                blend_spec: None,
             })),
         );
 
@@ -1705,6 +2227,7 @@ mod tests {
             VideoTimelineSegment::new("[vnorm1]", 0.0, SLOT_SEC).with_layer(Some(PipLayerInfo {
                 group_index: 0,
                 track_index: 0,
+                blend_spec: None,
             })),
         );
 
@@ -1741,5 +2264,384 @@ mod tests {
             BASE,
             "the layer beneath must show around the moving one"
         );
+    }
+
+    /// Largest deviation from the specification any supported mode is allowed.
+    ///
+    /// Measured over all 65536 8-bit backdrop/source pairs for every mode, at
+    /// full opacity and at half: the worst was 1.99/255 (`overlay` and
+    /// `hard-light`, both at the 0.5 hinge), and no pair anywhere exceeded 2.
+    const BLEND_TOLERANCE: i16 = 2;
+
+    fn assert_near(got: (u8, u8, u8), want: (u8, u8, u8), what: &str) {
+        let delta = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs();
+        assert!(
+            delta(got.0, want.0) <= BLEND_TOLERANCE
+                && delta(got.1, want.1) <= BLEND_TOLERANCE
+                && delta(got.2, want.2) <= BLEND_TOLERANCE,
+            "{what}: rendered {got:?}, specification says {want:?}"
+        );
+    }
+
+    /// Renders one blended layer over one plain layer and returns the middle pixel.
+    fn blended_pair(
+        ffmpeg: &std::path::Path,
+        dir: &std::path::Path,
+        canvas: (u32, u32),
+        base: (u8, u8, u8),
+        top: (u8, u8, u8),
+        mode: BlendMode,
+        opacity: f64,
+    ) -> (u8, u8, u8) {
+        let base_clip =
+            solid_clip(ffmpeg, dir, "bbase.mkv", canvas, base, 2.0).expect("base fixture");
+        let top_clip = solid_clip(ffmpeg, dir, "btop.mkv", canvas, top, 2.0).expect("top fixture");
+        let graph = composite_graph(
+            &[
+                LayerSpec::plain(0, 1, canvas, canvas),
+                LayerSpec::plain(1, 0, canvas, canvas)
+                    .blended(mode)
+                    .faded(opacity),
+            ],
+            canvas,
+        );
+        let frames = render_rgb_frames(ffmpeg, dir, &[base_clip, top_clip], &graph, canvas);
+        pixel(&frames[0], canvas.0, canvas.0 / 2, canvas.1 / 2)
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: every supported mode renders what the specification says
+    ///
+    /// One flat colour over another, measured against the W3C separable blend
+    /// functions computed here. The spike swept all 65536 8-bit backdrop/source
+    /// pairs per mode; this pins one representative pair per mode so a wiring
+    /// mistake — the operand order especially — cannot pass unnoticed.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored every_supported_blend
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn every_supported_blend_mode_matches_the_specification() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        const CANVAS: (u32, u32) = (64, 64);
+        const BASE: (u8, u8, u8) = (100, 150, 200);
+        const TOP: (u8, u8, u8) = (200, 50, 25);
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        if solid_clip(&ffmpeg, dir.path(), "probe.mkv", CANVAS, BASE, 0.1).is_none() {
+            skip_without_ffmpeg("ffmpeg could not build the fixtures");
+            return;
+        }
+
+        for mode in [
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::ColorBurn,
+            BlendMode::ColorDodge,
+            BlendMode::HardLight,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+        ] {
+            let got = blended_pair(&ffmpeg, dir.path(), CANVAS, BASE, TOP, mode.clone(), 1.0);
+            let want = (
+                w3c_composite(&mode, BASE.0, TOP.0, 1.0),
+                w3c_composite(&mode, BASE.1, TOP.1, 1.0),
+                w3c_composite(&mode, BASE.2, TOP.2, 1.0),
+            );
+            assert_near(got, want, &format!("{mode:?}"));
+        }
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: colour-dodge keeps a black backdrop black
+    ///
+    /// This is the pixel FFmpeg's own `dodge` gets wrong, and it is not an
+    /// exotic one: pure white over pure black. The specification returns the
+    /// backdrop's own 0; `dodge` returns white. Flat black and white are what
+    /// letterbox bars, titles and blown highlights are made of.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored dodge_keeps
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn colour_dodge_keeps_a_black_backdrop_black() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        const CANVAS: (u32, u32) = (64, 64);
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        if solid_clip(&ffmpeg, dir.path(), "probe.mkv", CANVAS, (0, 0, 0), 0.1).is_none() {
+            skip_without_ffmpeg("ffmpeg could not build the fixtures");
+            return;
+        }
+
+        let got = blended_pair(
+            &ffmpeg,
+            dir.path(),
+            CANVAS,
+            (0, 0, 0),
+            (255, 255, 255),
+            BlendMode::ColorDodge,
+            1.0,
+        );
+        assert_near(
+            got,
+            (0, 0, 0),
+            "pure white colour-dodged onto pure black (FFmpeg's own dodge renders white)",
+        );
+
+        let burned = blended_pair(
+            &ffmpeg,
+            dir.path(),
+            CANVAS,
+            (255, 255, 255),
+            (0, 0, 0),
+            BlendMode::ColorBurn,
+            1.0,
+        );
+        assert_near(
+            burned,
+            (255, 255, 255),
+            "pure black colour-burned onto pure white (FFmpeg's own burn renders black)",
+        );
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: opacity scales the blend, it does not bypass it
+    ///
+    /// The W3C model composites the blended colour source-over at the layer's
+    /// alpha, so half opacity lands halfway between the backdrop and the fully
+    /// blended result. `blend`'s own `all_opacity` does not mean that — its
+    /// semantics differ between modes — so the opacity rides on the layer's alpha
+    /// channel and the final `overlay` does the arithmetic.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored half_opacity
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_blended_layer_at_half_opacity_lands_halfway() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        const CANVAS: (u32, u32) = (64, 64);
+        const BASE: (u8, u8, u8) = (100, 150, 200);
+        const TOP: (u8, u8, u8) = (200, 50, 25);
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        if solid_clip(&ffmpeg, dir.path(), "probe.mkv", CANVAS, BASE, 0.1).is_none() {
+            skip_without_ffmpeg("ffmpeg could not build the fixtures");
+            return;
+        }
+
+        // 8-bit alpha quantises 0.5 to 128/255.
+        let alpha = 128.0 / 255.0;
+        for mode in [BlendMode::Multiply, BlendMode::ColorDodge] {
+            let got = blended_pair(&ffmpeg, dir.path(), CANVAS, BASE, TOP, mode.clone(), 0.5);
+            let want = (
+                w3c_composite(&mode, BASE.0, TOP.0, alpha),
+                w3c_composite(&mode, BASE.1, TOP.1, alpha),
+                w3c_composite(&mode, BASE.2, TOP.2, alpha),
+            );
+            assert_near(got, want, &format!("{mode:?} at half opacity"));
+            let full = (
+                w3c_composite(&mode, BASE.0, TOP.0, 1.0),
+                w3c_composite(&mode, BASE.1, TOP.1, 1.0),
+                w3c_composite(&mode, BASE.2, TOP.2, 1.0),
+            );
+            assert_ne!(
+                want, full,
+                "the fixture must distinguish half opacity from full, or it proves nothing"
+            );
+        }
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: a blended layer leaves the backdrop alone outside its picture
+    ///
+    /// A layer smaller than the canvas is transparent around its picture, and a
+    /// blend applies only where the layer actually is. Blending the alpha plane
+    /// along with the colour — which is what happens if `blend` is handed a
+    /// stream that still carries alpha — spreads the blend across the whole
+    /// canvas.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored outside_its_picture
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_blended_layer_changes_nothing_outside_its_picture() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        const CANVAS: (u32, u32) = (128, 128);
+        const BASE: (u8, u8, u8) = (100, 150, 200);
+        const TOP: (u8, u8, u8) = (200, 50, 25);
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (Some(base), Some(top)) = (
+            solid_clip(&ffmpeg, dir.path(), "lbase.mkv", CANVAS, BASE, 2.0),
+            solid_clip(&ffmpeg, dir.path(), "ltop.mkv", (64, 64), TOP, 2.0),
+        ) else {
+            skip_without_ffmpeg("ffmpeg could not build the fixtures");
+            return;
+        };
+
+        let graph = composite_graph(
+            &[
+                LayerSpec::plain(0, 1, CANVAS, CANVAS),
+                LayerSpec::plain(1, 0, (64, 64), CANVAS)
+                    .blended(BlendMode::Multiply)
+                    .placed((33, 33)),
+            ],
+            CANVAS,
+        );
+        let frames = render_rgb_frames(&ffmpeg, dir.path(), &[base, top], &graph, CANVAS);
+        let frame = &frames[0];
+
+        assert_eq!(
+            pixel(frame, CANVAS.0, 5, 5),
+            BASE,
+            "outside the layer's picture the backdrop must be untouched"
+        );
+        assert_eq!(
+            pixel(frame, CANVAS.0, 120, 120),
+            BASE,
+            "and untouched on the other side of it too"
+        );
+        assert_near(
+            pixel(frame, CANVAS.0, 64, 64),
+            (
+                w3c_composite(&BlendMode::Multiply, BASE.0, TOP.0, 1.0),
+                w3c_composite(&BlendMode::Multiply, BASE.1, TOP.1, 1.0),
+                w3c_composite(&BlendMode::Multiply, BASE.2, TOP.2, 1.0),
+            ),
+            "inside the layer's picture it must be blended",
+        );
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: each layer blends against everything already drawn
+    ///
+    /// Three layers, two different modes. The top layer's blend must see the
+    /// picture the middle layer produced, not the bottom layer — that is what
+    /// "accumulated backdrop" means, and a stack that blended every layer against
+    /// the original backdrop would give a different answer here.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored accumulated
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn blended_layers_stack_against_the_accumulated_picture() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        const CANVAS: (u32, u32) = (64, 64);
+        const BASE: (u8, u8, u8) = (100, 150, 200);
+        const MID: (u8, u8, u8) = (128, 128, 128);
+        const TOP: (u8, u8, u8) = (200, 50, 25);
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (Some(base), Some(mid), Some(top)) = (
+            solid_clip(&ffmpeg, dir.path(), "sbase.mkv", CANVAS, BASE, 2.0),
+            solid_clip(&ffmpeg, dir.path(), "smid.mkv", CANVAS, MID, 2.0),
+            solid_clip(&ffmpeg, dir.path(), "stop.mkv", CANVAS, TOP, 2.0),
+        ) else {
+            skip_without_ffmpeg("ffmpeg could not build the fixtures");
+            return;
+        };
+
+        let graph = composite_graph(
+            &[
+                LayerSpec::plain(0, 2, CANVAS, CANVAS),
+                LayerSpec::plain(1, 1, CANVAS, CANVAS).blended(BlendMode::Multiply),
+                LayerSpec::plain(2, 0, CANVAS, CANVAS)
+                    .blended(BlendMode::Screen)
+                    .faded(0.5),
+            ],
+            CANVAS,
+        );
+        let frames = render_rgb_frames(&ffmpeg, dir.path(), &[base, mid, top], &graph, CANVAS);
+        let got = pixel(&frames[0], CANVAS.0, 32, 32);
+
+        let alpha = 128.0 / 255.0;
+        let chain = |base: u8, mid: u8, top: u8| {
+            let after_mid = w3c_composite(&BlendMode::Multiply, base, mid, 1.0);
+            w3c_composite(&BlendMode::Screen, after_mid, top, alpha)
+        };
+        assert_near(
+            got,
+            (
+                chain(BASE.0, MID.0, TOP.0),
+                chain(BASE.1, MID.1, TOP.1),
+                chain(BASE.2, MID.2, TOP.2),
+            ),
+            "a multiply then a half-opacity screen, each against what came before",
+        );
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: a lone blended clip blends against the black canvas
+    ///
+    /// The preview blends every clip against what it has already drawn, and for a
+    /// clip with nothing beneath it that is the opaque black canvas. Multiply
+    /// over nothing really is black, and the export has to agree — this is the
+    /// case where "blend modes only matter when clips overlap" would be wrong.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored lone_blended
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_lone_blended_clip_blends_against_the_black_canvas() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        const CANVAS: (u32, u32) = (64, 64);
+        const COLOUR: (u8, u8, u8) = (200, 50, 25);
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let Some(clip) = solid_clip(&ffmpeg, dir.path(), "lone.mkv", CANVAS, COLOUR, 2.0) else {
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
+            return;
+        };
+
+        for (mode, want) in [
+            // Multiply against black is black; screen against black is the clip.
+            (BlendMode::Multiply, (0, 0, 0)),
+            (BlendMode::Screen, COLOUR),
+        ] {
+            let graph = composite_graph(
+                &[LayerSpec::plain(0, 0, CANVAS, CANVAS).blended(mode.clone())],
+                CANVAS,
+            );
+            let frames = render_rgb_frames(
+                &ffmpeg,
+                dir.path(),
+                std::slice::from_ref(&clip),
+                &graph,
+                CANVAS,
+            );
+            assert_near(
+                pixel(&frames[0], CANVAS.0, 32, 32),
+                want,
+                &format!("a lone {mode:?} clip over the black canvas"),
+            );
+        }
     }
 }
