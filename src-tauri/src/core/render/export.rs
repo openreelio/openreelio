@@ -67,10 +67,6 @@ pub(super) fn effective_blend_mode_for_clip(clip: &Clip, track: &Track) -> Blend
     track.blend_mode.clone()
 }
 
-fn uses_non_normal_blend_mode(clip: &Clip, track: &Track) -> bool {
-    effective_blend_mode_for_clip(clip, track) != BlendMode::Normal
-}
-
 fn track_included_in_export(track: &Track) -> bool {
     match track.kind {
         TrackKind::Video | TrackKind::Overlay | TrackKind::Caption => track.visible && !track.muted,
@@ -2882,6 +2878,12 @@ pub(super) struct PipLayerInfo {
     /// The composite stacks the highest index first so that track 0 is drawn
     /// last and lands on top, which is the order the preview draws in.
     pub track_index: usize,
+    /// The `blend` filter options this layer is composited through, if any.
+    ///
+    /// `None` is plain source-over, which `overlay` performs by itself. Resolved
+    /// by the plan rather than carried as a blend mode so that the fold needs to
+    /// know nothing about blending beyond where to put the string.
+    pub blend_spec: Option<&'static str>,
 }
 
 impl VideoTimelineSegment {
@@ -7598,17 +7600,6 @@ pub fn validate_export_settings_with_dimensions(
                 &transition_plan,
             );
 
-            if track.kind == TrackKind::Video && uses_non_normal_blend_mode(clip, track) {
-                validation.add_clip_error(
-                    &sequence.id,
-                    &clip.id,
-                    format!(
-                        "Blend mode export is not supported yet for clip '{}' on track '{}'",
-                        clip.id, track.name
-                    ),
-                );
-            }
-
             // Pan, zoom and anchor moves now render: the composite animates them
             // straight from the keyframes. What still does not render is motion
             // that turns the picture — FFmpeg cannot resize a frame per-frame and
@@ -7767,14 +7758,11 @@ pub fn validate_export_settings_with_dimensions(
         }
     }
 
-    if let Some(clip_id) =
-        super::pip_stitch::first_unsupported_composite_blend(sequence, &transition_plan)
-    {
+    if let Some(refusal) = super::pip_stitch::composite_refusal(sequence, &transition_plan) {
         validation.add_clip_error(
             sequence.id.clone(),
-            clip_id.to_string(),
-            "Layered video clips can only be composited in Normal blend mode; this clip asks              for another one, which the final render cannot do yet"
-                .to_string(),
+            refusal.clip_id.to_string(),
+            refusal.message,
         );
     }
 
@@ -9874,45 +9862,77 @@ mod tests {
         );
     }
 
+    /// Feature: Blend modes in the final render
+    /// Scenario: the validator refuses the modes the render cannot do, and only those
+    ///
+    /// Both halves matter, and the second one is why this test is written against
+    /// `validate_export_settings` rather than against the builder. Every surface
+    /// that can start a render — the export job, the preview job and the CLI —
+    /// gates on `is_valid`, so a stale refusal here makes a working feature
+    /// unreachable no matter what the builder can do. A blanket "blend mode
+    /// export is not supported yet" outlived the support for ten of the modes
+    /// and kept them blocked everywhere, while the builder-level tests passed.
     #[test]
-    fn test_validation_rejects_non_normal_clip_blend_modes() {
+    fn test_validation_refuses_unsupported_blend_modes_and_admits_supported_ones() {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{BlendMode, Clip, SequenceFormat, Track};
 
-        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
-        let mut track = Track::new_video("Video 1");
+        let validate_with = |blend_mode: BlendMode| {
+            let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+            let mut track = Track::new_video("Video 1");
+            let mut clip = Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0);
+            clip.id = "blended".to_string();
+            clip.blend_mode = blend_mode;
+            track.add_clip(clip);
+            sequence.add_track(track);
 
-        let mut clip = Clip::new("video_asset")
-            .with_source_range(0.0, 3.0)
-            .place_at(0.0);
-        clip.blend_mode = BlendMode::Multiply;
-        track.add_clip(clip);
-        sequence.add_track(track);
+            let video_path = create_temp_media_file("validation_blend_mode.mp4");
+            let mut assets = std::collections::HashMap::new();
+            let mut video_asset = Asset::new_video(
+                "validation_blend_mode.mp4",
+                &video_path,
+                VideoInfo::default(),
+            )
+            .with_duration(3.0)
+            .with_file_size(3_000_000);
+            video_asset.id = "video_asset".to_string();
+            assets.insert("video_asset".to_string(), video_asset);
 
-        let video_path = create_temp_media_file("validation_blend_mode.mp4");
-        let mut assets = std::collections::HashMap::new();
-        let mut video_asset = Asset::new_video(
-            "validation_blend_mode.mp4",
-            &video_path,
-            VideoInfo::default(),
-        )
-        .with_duration(3.0)
-        .with_file_size(3_000_000);
-        video_asset.id = "video_asset".to_string();
-        assets.insert("video_asset".to_string(), video_asset);
+            validate_export_settings(
+                &sequence,
+                &assets,
+                &std::collections::HashMap::new(),
+                &ExportSettings::default(),
+            )
+        };
 
-        let validation = validate_export_settings(
-            &sequence,
-            &assets,
-            &std::collections::HashMap::new(),
-            &ExportSettings::default(),
+        // A mode the stack reproduces has to pass the gate, or the feature is
+        // unreachable however well the builder renders it.
+        let supported = validate_with(BlendMode::Multiply);
+        assert!(
+            !supported
+                .errors
+                .iter()
+                .any(|error| error.to_lowercase().contains("blend")),
+            "Multiply renders, so validation must not refuse it. Got: {:?}",
+            supported.errors
         );
 
-        assert!(!validation.is_valid);
-        assert!(validation
-            .errors
+        // A mode it cannot reproduce is still refused, and still says which clip.
+        let refused = validate_with(BlendMode::SoftLight);
+        assert!(!refused.is_valid, "Soft Light must still block the export");
+        let finding = refused
+            .findings
             .iter()
-            .any(|error| error.to_lowercase().contains("blend mode export")));
+            .find(|finding| finding.message.contains("cannot perform yet"))
+            .unwrap_or_else(|| panic!("expected a blend refusal: {:?}", refused.findings));
+        assert_eq!(
+            finding.clip_id.as_deref(),
+            Some("blended"),
+            "the refusal must name the clip whose blend mode has to change"
+        );
     }
 
     /// Feature: Transformed clips in the final render
@@ -10260,7 +10280,7 @@ mod tests {
         bottom_clip.id = "pip-clip".to_string();
         // Overlapping clips composite now; what is still refused is a blend mode
         // `overlay` cannot perform.
-        bottom_clip.blend_mode = BlendMode::Multiply;
+        bottom_clip.blend_mode = BlendMode::SoftLight;
         bottom_track.add_clip(bottom_clip);
         sequence.add_track(bottom_track);
 
@@ -10297,7 +10317,7 @@ mod tests {
         let finding = validation
             .findings
             .iter()
-            .find(|finding| finding.message.contains("Normal blend mode"))
+            .find(|finding| finding.message.contains("cannot perform yet"))
             .unwrap_or_else(|| {
                 panic!(
                     "layered video must produce a finding: {:?}",
@@ -10541,7 +10561,7 @@ mod tests {
     /// nothing else, so a layer asking for any other blend mode would render a
     /// picture the preview never drew, and the export says so instead.
     #[test]
-    fn test_validation_rejects_layered_video_clips_with_a_non_normal_blend_mode() {
+    fn test_validation_rejects_layered_video_clips_with_an_unsupported_blend_mode() {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{Clip, SequenceFormat, Track};
 
@@ -10559,7 +10579,7 @@ mod tests {
         let mut bottom_clip = Clip::new("asset_bottom")
             .with_source_range(0.0, 5.0)
             .place_at(2.0);
-        bottom_clip.blend_mode = BlendMode::Screen;
+        bottom_clip.blend_mode = BlendMode::SoftLight;
         bottom_track.add_clip(bottom_clip);
         sequence.add_track(bottom_track);
 
@@ -10598,7 +10618,7 @@ mod tests {
             validation
                 .errors
                 .iter()
-                .any(|error| error.contains("Normal blend mode")),
+                .any(|error| error.contains("cannot perform yet")),
             "Expected a blend-mode validation error. Got: {:?}",
             validation.errors
         );
@@ -13167,7 +13187,7 @@ mod tests {
     fn a_timeline_without_overlap_emits_no_composite_at_all() {
         let filter_complex = layer_filter_complex(&[(0.0, 3.0), (3.0, 3.0)]);
 
-        for absent in ["gbrap", "vpip", "pipbd", "pipk", "color=black@0"] {
+        for absent in ["gbrap", "vpip", "pipbd", "pipk", "color=black@0", "blend="] {
             assert!(
                 !filter_complex.contains(absent),
                 "clips that take turns must not pay for compositing ({absent}): \
@@ -13177,6 +13197,261 @@ mod tests {
         assert!(
             filter_complex.contains("concat="),
             "back-to-back clips are still concatenated: {filter_complex}"
+        );
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: a blended clip composites even with nothing to overlap
+    ///
+    /// The preview blends every clip against what it has already drawn, so a
+    /// blended clip with nothing beneath it blends against the opaque black
+    /// canvas. It therefore becomes a composite of one layer, while the clip
+    /// beside it — which asks for nothing — keeps the ordinary graph.
+    #[test]
+    fn a_blended_clip_composites_while_its_plain_neighbour_does_not() {
+        use crate::core::timeline::BlendMode;
+
+        let (mut sequence, assets) = sequence_of_layers(&[(0.0, 3.0), (3.0, 3.0)]);
+        sequence.tracks[0].clips[0].blend_mode = BlendMode::Multiply;
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        )
+        .expect("a blended clip should build a filtergraph");
+        let filter_complex = filter_complex_of(&args).to_string();
+
+        assert!(
+            filter_complex.contains("blend=all_mode=multiply:repeatlast=0"),
+            "the blended clip must be blended: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("[vpip0]"),
+            "the blended clip must become a composite: {filter_complex}"
+        );
+        assert_eq!(
+            filter_complex.matches("blend=").count(),
+            1,
+            "only the blended clip pays for a blend: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("concat="),
+            "the plain neighbour is still concatenated after it: {filter_complex}"
+        );
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: a real export of a blended clip renders and stays in time
+    ///
+    /// The string assertions describe the graph; this hands the builder's own
+    /// argument list to a real FFmpeg and measures the file. A blended clip
+    /// becomes a composite of one layer, so this also covers a composite sitting
+    /// next to an ordinary concatenated clip — the arrangement the fold and the
+    /// timeline stitch have to agree about.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored exports_a_blended_clip
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_real_export_of_a_blended_clip_renders_and_stays_in_time() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+        use crate::core::timeline::{BlendMode, Clip, SequenceFormat};
+
+        const CANVAS: (u32, u32) = (64, 64);
+        const GREY: (u8, u8, u8) = (128, 128, 128);
+        const EXPECTED_FRAMES: usize = 60;
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let path = dir.path().join("grey.mp4");
+        let mut build = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut build);
+        let built = build
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("color=c=black:s={}x{}:r=30:d=2.2", CANVAS.0, CANVAS.1),
+                "-vf",
+                &format!("geq=r={}:g={}:b={}", GREY.0, GREY.1, GREY.2),
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&path)
+            .output();
+        let Ok(built) = built else {
+            skip_without_ffmpeg("ffmpeg could not be launched");
+            return;
+        };
+        if !built.status.success() || !path.exists() {
+            skip_without_ffmpeg("ffmpeg could not build the fixture");
+            return;
+        }
+
+        let mut sequence = Sequence::new("Blend", SequenceFormat::youtube_1080());
+        sequence.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        // Multiply against the black canvas, which the preview draws as black.
+        let mut blended = Clip::new("grey_asset")
+            .with_source_range(0.0, 1.0)
+            .place_at(0.0);
+        blended.id = "blended".to_string();
+        blended.blend_mode = BlendMode::Multiply;
+        track.add_clip(blended);
+        // A plain neighbour, so the composite has to sit inside a concat.
+        let mut plain = Clip::new("grey_asset")
+            .with_source_range(0.0, 1.0)
+            .place_at(1.0);
+        plain.id = "plain".to_string();
+        track.add_clip(plain);
+        sequence.add_track(track);
+
+        let mut asset = Asset::new_video(
+            "grey_asset",
+            &path.to_string_lossy(),
+            VideoInfo {
+                width: CANVAS.0,
+                height: CANVAS.1,
+                ..VideoInfo::default()
+            },
+        )
+        .with_duration(2.2)
+        .with_file_size(1_000_000);
+        asset.id = "grey_asset".to_string();
+        let mut assets = HashMap::new();
+        assets.insert(asset.id.clone(), asset);
+
+        let mut args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings {
+                width: Some(CANVAS.0),
+                height: Some(CANVAS.1),
+                ..ExportSettings::default()
+            },
+        )
+        .expect("a blended clip must build a filtergraph");
+
+        let output = dir.path().join("render.mp4");
+        let last = args.len() - 1;
+        args[last] = output.to_string_lossy().to_string();
+
+        let mut render = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut render);
+        let result = render
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+            .args(&args)
+            .output()
+            .expect("run ffmpeg");
+        assert!(
+            result.status.success(),
+            "ffmpeg refused the builder's own blend graph: {}\n{args:?}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        let mut decode = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut decode);
+        let decoded = decode
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(&output)
+            .args(["-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+            .output()
+            .expect("decode the render");
+        assert!(decoded.status.success(), "the render must decode");
+
+        let frame_bytes = CANVAS.0 as usize * CANVAS.1 as usize * 3;
+        let frames: Vec<&[u8]> = decoded.stdout.chunks_exact(frame_bytes).collect();
+        assert_eq!(
+            frames.len(),
+            EXPECTED_FRAMES,
+            "a two-second timeline must render two seconds"
+        );
+
+        let centre = |frame: &[u8]| {
+            let offset = ((32 * CANVAS.0 + 32) * 3) as usize;
+            (frame[offset], frame[offset + 1], frame[offset + 2])
+        };
+        let near = |got: (u8, u8, u8), want: u8| {
+            (i16::from(got.0) - i16::from(want)).abs() < 40
+                && (i16::from(got.1) - i16::from(want)).abs() < 40
+        };
+        assert!(
+            near(centre(frames[10]), 0),
+            "grey multiplied against the black canvas must render black, got {:?}",
+            centre(frames[10])
+        );
+        assert!(
+            near(centre(frames[45]), GREY.0),
+            "the plain neighbour must render its own grey, got {:?}",
+            centre(frames[45])
+        );
+    }
+
+    /// Feature: Blend modes in the final render
+    /// Scenario: a blend on a clip that also has a transition is refused
+    ///
+    /// The transition folds its two clips into a single stream before the layers
+    /// are stacked, so the blend would apply to the cross-faded pair rather than
+    /// to the clip against the backdrop. Rendering that would produce a plausible
+    /// picture that is not the one the preview draws, so the export says no.
+    #[test]
+    fn a_blend_on_a_transitioning_clip_is_refused_by_builder_and_preflight() {
+        use crate::core::timeline::BlendMode;
+
+        let (mut sequence, assets, effects, audio_info) = build_transition_fixture(
+            &[
+                TransitionClipSpec::new(5.0, Some(one_second_dissolve("blended-dissolve"))),
+                TransitionClipSpec::new(5.0, None),
+            ],
+            false,
+        );
+        // Multiply is a mode the stack *can* perform; what it cannot do is
+        // perform it on a clip the transition has already folded away.
+        sequence.tracks[0].clips[0].blend_mode = BlendMode::Multiply;
+
+        let error = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info,
+            &ExportSettings::default(),
+        )
+        .expect_err("a blend on a transitioning clip must refuse the render");
+        assert!(
+            format!("{error:?}").contains("clip0")
+                && format!("{error:?}").contains("transition and a blend mode"),
+            "the refusal must say which clip and why: {error:?}"
+        );
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+        let finding = validation
+            .findings
+            .iter()
+            .find(|finding| finding.message.contains("transition and a blend mode"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the preflight must refuse it too: {:?}",
+                    validation.findings
+                )
+            });
+        assert_eq!(
+            finding.clip_id.as_deref(),
+            Some("clip0"),
+            "the preflight must name the same clip the builder does"
         );
     }
 
@@ -13389,7 +13664,7 @@ mod tests {
             transition_pair_under_a_top_layer(pip_clip, 3.0, "reached-dissolve");
         // Track 1 is the transition pair; its second clip starts at 5.0 and so
         // never shares a second with the picture-in-picture above.
-        sequence.tracks[1].clips[1].blend_mode = BlendMode::Multiply;
+        sequence.tracks[1].clips[1].blend_mode = BlendMode::SoftLight;
 
         let error = build_complex_filter_args_with_audio_info(
             &sequence,
@@ -13411,7 +13686,7 @@ mod tests {
         let finding = validation
             .findings
             .iter()
-            .find(|finding| finding.message.contains("Normal blend mode"))
+            .find(|finding| finding.message.contains("cannot perform yet"))
             .unwrap_or_else(|| {
                 panic!(
                     "the preflight must refuse it too: {:?}",

@@ -278,17 +278,24 @@ openreelio-cli command execute --path ./demo --type SetClipTransform   --payload
 Placement is measured against the source's real pixel size, so a 4:3 clip in a
 16:9 sequence keeps its shape.
 
-Three limits remain, and the export is explicit about each:
+The export is explicit about what it can and cannot do:
 
 | Feature | Rendered by `render start` |
 |---------|----------------------------|
 | Clip transform and opacity | **Yes** — composited at the clip's base values |
-| Motion keyframes (`SetClipMotionKeyframes`) | **Not yet** — the clip renders static at its base transform and the result carries a `warnings` entry naming it |
-| Simultaneous layered video clips (picture-in-picture), blend modes | **Not yet** — validation refuses the render rather than dropping a layer |
+| Motion keyframes (`SetClipMotionKeyframes`) | **Yes for pan, zoom and anchor moves** — the composite animates them from the keyframes. Motion that turns the picture keeps the static fallback and the result carries a `warnings` entry naming the clip |
+| Simultaneous layered video clips (picture-in-picture) | **Yes** — overlapping clips are composited into one picture, topmost track drawn last, each layer at its own transform and opacity |
+| Blend modes | **Ten of them** — Normal, Multiply, Screen, Overlay, Darken, Lighten, Color Burn, Color Dodge, Hard Light, Difference and Exclusion. The other eight (Soft Light, Add, Subtract, Linear Burn, Linear Dodge, Vivid Light, Linear Light, Pin Light) are refused by validation, naming the clip |
 
-Motion is stored, round-trips through the project and animates in the preview;
-only the render is static. A clip whose keyframes all match its base transform
-is not warned about, because that is exactly the picture the export produces.
+Each layer blends against the picture already drawn beneath it, so a blended
+clip with nothing under it blends against the black canvas — Multiply over
+nothing is black, which is what the preview shows too. A clip carrying both a
+blend mode and a transition is refused: the transition folds it into its
+neighbour before the layers are stacked, so the blend would apply to the pair
+rather than to the clip.
+
+A clip whose keyframes all match its base transform draws no warning, because
+that is exactly the picture the export produces.
 
 ### Atomic batches: `plan execute`
 
