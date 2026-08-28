@@ -246,13 +246,27 @@ mod tests {
         preview_profile_hash, profile_cache_dir, CacheSegmentState, RenderCacheConfig,
         RenderCacheManifest,
     };
+    use crate::core::timeline::Canvas;
+
+    /// The canvas these fixtures' profile hash is derived from. The preview-cache
+    /// profile is canvas-dependent; here the hash only names a directory, so any
+    /// consistent canvas will do.
+    fn test_canvas() -> Canvas {
+        Canvas::new(1920, 1080)
+    }
 
     fn manifest(duration_sec: f64) -> RenderCacheManifest {
-        RenderCacheManifest::new("seq1", &preview_profile_hash(), duration_sec, 5.0)
+        RenderCacheManifest::new(
+            "seq1",
+            &preview_profile_hash(&test_canvas()),
+            duration_sec,
+            5.0,
+        )
     }
 
     fn segment_dir(project_dir: &Path) -> PathBuf {
-        let dir = profile_cache_dir(project_dir, "seq1", &preview_profile_hash()).unwrap();
+        let dir =
+            profile_cache_dir(project_dir, "seq1", &preview_profile_hash(&test_canvas())).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

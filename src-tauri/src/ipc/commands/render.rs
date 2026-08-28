@@ -2561,7 +2561,7 @@ pub async fn get_cache_status(
     cache_status_snapshot(
         &project.path,
         sequence,
-        &preview_profile_hash(),
+        &preview_profile_hash(&sequence.format.canvas),
         &render_graph,
         &assets,
         &effects,
@@ -2782,7 +2782,7 @@ pub async fn render_preview_cache(
     // by another profile describes files in a different directory that were encoded
     // to different settings, so it is discarded along with those files.
     let cache_job_id = ulid::Ulid::new().to_string();
-    let profile_hash = preview_profile_hash();
+    let profile_hash = preview_profile_hash(&sequence.format.canvas);
     let loaded = manifest_for_profile(
         &project_path,
         &seq_id,
@@ -3111,8 +3111,12 @@ pub async fn render_preview_cache(
                 }
             }
 
-            let seg_settings = crate::core::render::ExportSettings::preview(
+            // Built from the same `preview_cache(canvas)` profile the manifest's
+            // fingerprints were computed with, so the settings that render a
+            // segment and the profile hash that identifies it agree.
+            let seg_settings = crate::core::render::ExportSettings::preview_cache(
                 seg_output.clone(),
+                &fresh_sequence.format.canvas,
                 Some(*start_sec),
                 Some(*end_sec),
             );
