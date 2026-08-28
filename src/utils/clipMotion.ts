@@ -81,6 +81,31 @@ export function hasActiveMotionKeyframes(clip: Clip): boolean {
   return sortedValidKeyframes(clip.motionKeyframes).length > 0;
 }
 
+/**
+ * The largest scale factor a clip's transform reaches anywhere in its range.
+ *
+ * Keyframes are interpolated linearly (or held), so the extreme is always at a
+ * keyframe and this needs no sampling. Callers use it to decide how many source
+ * pixels a clip actually needs: a clip zoomed to 2x draws its frame at twice the
+ * canvas size, and decoding it at canvas size would show a soft picture.
+ *
+ * @param clip - The clip to inspect.
+ * @returns The maximum of every keyframe's horizontal and vertical scale, or the
+ *   static transform's when the clip has no keyframes.
+ */
+export function getClipMaxMotionScale(clip: Clip): number {
+  const keyframes = sortedValidKeyframes(clip.motionKeyframes);
+  const transforms =
+    keyframes.length > 0
+      ? keyframes.map((keyframe) => keyframe.transform)
+      : [normalizeTransform(clip.transform)];
+
+  return transforms.reduce(
+    (largest, transform) => Math.max(largest, transform.scale.x, transform.scale.y),
+    0,
+  );
+}
+
 export function getClipMotionTransformAtTime(clip: Clip, timelineTimeSec: number): Transform {
   const keyframes = sortedValidKeyframes(clip.motionKeyframes);
   if (keyframes.length === 0) {

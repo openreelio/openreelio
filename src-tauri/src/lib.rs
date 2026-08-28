@@ -1906,10 +1906,14 @@ mod tauri_app {
     pub fn run() {
         // Create shared FFmpeg state
         let ffmpeg_state = create_ffmpeg_state();
+        // Resident preview decoders. Built lazily on the first preview frame,
+        // because FFmpeg detection has not necessarily finished by now.
+        let preview_decoders = crate::core::preview::create_preview_decoder_state();
 
         let builder = tauri::Builder::default()
             .manage(AppState::new())
             .manage(ffmpeg_state.clone())
+            .manage(preview_decoders.clone())
             .plugin(tauri_plugin_dialog::init());
 
         // Enable updater for release builds by default. Development builds can
@@ -2287,6 +2291,11 @@ mod tauri_app {
             crate::core::ffmpeg::generate_thumbnail,
             crate::core::ffmpeg::probe_media,
             crate::core::ffmpeg::generate_waveform,
+            // Resident preview decoder. Deliberately outside `collect_commands!`:
+            // it answers with raw bytes (`tauri::ipc::Response`), which Specta
+            // cannot describe, and the frontend calls it through `invoke`.
+            crate::core::preview::get_preview_frame,
+            crate::core::preview::release_preview_decoders,
             // Performance/Memory commands
             ipc::get_memory_stats,
             ipc::trigger_memory_cleanup,
@@ -2456,11 +2465,26 @@ mod tauri_app {
                 // Defensive: ignore individual teardown errors so exit always
                 // proceeds. `block_on` is safe here — the run callback executes
                 // on the main thread, not a tokio worker.
+                let preview_decoders =
+                    app_handle.state::<crate::core::preview::SharedPreviewDecoders>();
                 tauri::async_runtime::block_on(async {
                     crate::ipc::shutdown_all_claude_headless_sessions(&state).await;
                     crate::ipc::shutdown_all_claude_login_sessions(&state).await;
                     crate::ipc::shutdown_all_codex_login_sessions(&state).await;
                     crate::ipc::shutdown_all_codex_app_servers(&state).await;
+                    // Resident FFmpeg decoders are not reaped by `std::process::exit`
+                    // either, so they are killed explicitly alongside the agents.
+                    // Bounded: a decoder wedged on a pipe read must not be able
+                    // to hold the whole application open.
+                    if tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        preview_decoders.release_all(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        tracing::warn!("Preview decoder teardown timed out during exit");
+                    }
                 });
             }
         });

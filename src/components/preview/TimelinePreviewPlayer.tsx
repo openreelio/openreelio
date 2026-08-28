@@ -23,13 +23,14 @@ import { usePlaybackLoop } from '@/hooks/usePlaybackLoop';
 import { useSequenceRenderGraph } from '@/hooks/useSequenceRenderGraph';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { videoFrameBuffer } from '@/services/videoFrameBuffer';
+import type { PreviewFrameTarget } from '@/services/videoFrameBuffer';
 import {
   applyClipTransformToRenderedTextData,
   extractTextDataFromClipWithMap,
   renderTextToCanvas,
 } from '@/utils/textRenderer';
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
-import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
+import { getClipMaxMotionScale, getClipMotionTransformAtTime } from '@/utils/clipMotion';
 import { computeContainFit, scaleFontSizeToCanvas } from '@/utils/previewCoords';
 import { getActiveVisualLayers } from '@/utils/renderGraphLayers';
 import { isCaptionLikeClip } from '@/utils/captionClip';
@@ -96,7 +97,7 @@ interface ActiveClipInfo {
   asset: Asset | undefined;
 }
 
-type DrawableVisual = HTMLImageElement | HTMLCanvasElement;
+type DrawableVisual = HTMLImageElement | HTMLCanvasElement | ImageBitmap;
 
 // =============================================================================
 // Constants
@@ -106,6 +107,44 @@ const DEFAULT_ASPECT_RATIO = 16 / 9;
 const DEFAULT_WIDTH = 640;
 const DEFAULT_HEIGHT = 360;
 const MAX_COMPOUND_RENDER_DEPTH = 6;
+
+/** How long the render pump waits before retrying a frame that threw. */
+const RENDER_RETRY_DELAY_MS = 50;
+
+/**
+ * The most a clip's zoom may enlarge its decode box beyond the canvas.
+ *
+ * A clip scaled past 1 draws its frame larger than the canvas, so decoding at
+ * canvas size would show a soft picture where the old full-resolution extraction
+ * showed a sharp one. The cap keeps an extreme zoom from asking for a frame
+ * whose pixels dwarf everything else on screen; the decoder never upscales past
+ * the source's own resolution either way.
+ */
+const MAX_PREVIEW_DECODE_SCALE = 4;
+
+/**
+ * The decode box for a clip: the canvas, enlarged by the most this clip's
+ * transform ever magnifies its frame.
+ *
+ * Uses the clip's maximum scale rather than its scale at this instant so an
+ * animated zoom keeps asking for one size, which is what lets a single resident
+ * decoder and a single set of cache entries serve the whole move.
+ */
+function frameTargetForClip(
+  clip: Clip,
+  canvasWidth: number,
+  canvasHeight: number,
+): PreviewFrameTarget {
+  const zoom = Math.min(
+    MAX_PREVIEW_DECODE_SCALE,
+    Math.max(1, getClipMaxMotionScale(clip)),
+  );
+
+  return {
+    maxWidth: Math.max(1, Math.round(canvasWidth * zoom)),
+    maxHeight: Math.max(1, Math.round(canvasHeight * zoom)),
+  };
+}
 
 /** Map BlendMode to Canvas globalCompositeOperation.
  * Canvas 2D only supports a subset of blend modes natively.
@@ -343,20 +382,21 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
   /**
    * Extract a frame for a specific asset at a given time.
-   * Uses the VideoFrameBuffer for optimized dual-frame buffering and smart seeking.
    *
-   * Features:
-   * - Dual-frame buffer (current + next frame prefetch)
-   * - Smart seeking: iterate forward for small jumps
-   * - Automatic deduplication of pending requests
+   * Frames come from the resident decoder through the VideoFrameBuffer, which
+   * handles caching and deduplication. `target` is the canvas the frame will be
+   * composited into: the decoder fits the frame inside it without changing its
+   * aspect ratio, so the contain-fit below still sees the source's own shape.
    */
   const extractFrameForAsset = useCallback(
-    async (assetId: string, assetPath: string, timeSec: number): Promise<string | null> => {
-      // Use the advanced VideoFrameBuffer for optimized frame fetching
-      // It handles caching, deduplication, and prefetching internally
+    async (
+      assetId: string,
+      assetPath: string,
+      timeSec: number,
+      target: PreviewFrameTarget,
+    ): Promise<ImageBitmap | null> => {
       try {
-        const frameUrl = await videoFrameBuffer.getFrame(assetId, assetPath, timeSec);
-        return frameUrl;
+        return await videoFrameBuffer.getFrame(assetId, assetPath, timeSec, target);
       } catch (error) {
         // Log extraction failure with structured data for debugging
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -428,26 +468,33 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
           );
         });
 
+        // Video frames arrive as drawables straight from the resident decoder;
+        // stills still go through an <img>, which is what decodes them.
+        const canvasWidth = targetCtx.canvas.width;
+        const canvasHeight = targetCtx.canvas.height;
+
         const frameResults = await Promise.all(
           mediaClips.map(async (clipInfo) => {
             if (!clipInfo.asset) {
-              return { clipInfo, imgUrl: null as string | null };
+              return { clipInfo, imgUrl: null as string | null, frame: null as DrawableVisual | null };
             }
 
             if (clipInfo.asset.kind === 'image') {
               return {
                 clipInfo,
                 imgUrl: convertFileSrc(clipInfo.asset.uri),
+                frame: null as DrawableVisual | null,
               };
             }
 
-            const frameUrl = await extractFrameForAsset(
+            const frame = await extractFrameForAsset(
               clipInfo.asset.id,
               clipInfo.asset.uri,
               clipInfo.sourceTime,
+              frameTargetForClip(clipInfo.clip, canvasWidth, canvasHeight),
             );
 
-            return { clipInfo, imgUrl: frameUrl };
+            return { clipInfo, imgUrl: null as string | null, frame: frame as DrawableVisual | null };
           }),
         );
 
@@ -456,12 +503,12 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         }
 
         const loadedFrames = await Promise.all(
-          frameResults.map(async ({ clipInfo, imgUrl }) => {
+          frameResults.map(async ({ clipInfo, imgUrl, frame }) => {
             if (!imgUrl) {
-              return { clipInfo, img: null as HTMLImageElement | null };
+              return { clipInfo, img: frame };
             }
 
-            return new Promise<{ clipInfo: ActiveClipInfo; img: HTMLImageElement | null }>(
+            return new Promise<{ clipInfo: ActiveClipInfo; img: DrawableVisual | null }>(
               (resolve) => {
                 const img = new Image();
                 img.crossOrigin = 'anonymous';
@@ -477,7 +524,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
           return false;
         }
 
-        const mediaFrameByClipId = new Map<string, HTMLImageElement>();
+        const mediaFrameByClipId = new Map<string, DrawableVisual>();
         for (const { clipInfo, img } of loadedFrames) {
           if (img) {
             mediaFrameByClipId.set(clipInfo.clip.id, img);
@@ -509,6 +556,14 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
             const nestedCtx = nestedCanvas.getContext('2d');
             if (!nestedCtx) {
               continue;
+            }
+
+            // A nested sequence issues a whole new batch of frame requests.
+            // Staleness alone does not cover an unmount: the player can be gone
+            // by the time the outer batch resolves, and its frame buffer may be
+            // midway through releasing the decoders.
+            if (!isMountedRef.current) {
+              return false;
             }
 
             const nestedTime = getClipSourceTimeAtTimelineTime(clip, timelineTime);
@@ -631,6 +686,11 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         return;
       }
 
+      // Every frame handed out from here until the next pass is protected from
+      // cache eviction, so a sequence with more clips than the cache's byte
+      // budget holds cannot have a frame closed under it mid-composite.
+      videoFrameBuffer.beginRenderPass();
+
       // Track loading state via ref to avoid re-renders during playback
       // Only update React state when transitioning between loading/not-loading
       const wasLoading = isLoadingRef.current;
@@ -699,7 +759,26 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
             }
 
             queuedRenderTimeRef.current = null;
-            await renderFrame(nextTime);
+            try {
+              await renderFrame(nextTime);
+            } catch (error) {
+              // A render can throw on a transient drawable failure — a cached
+              // frame released mid-composite, for instance. Dropping the pump
+              // here would leave the last good picture on a paused or scrubbing
+              // screen with nothing to replace it, so the time is re-queued and
+              // the next pass redraws it from a fresh frame.
+              console.error('[TimelinePreviewPlayer] Frame render failed:', {
+                timeSec: nextTime.toFixed(3),
+                error: error instanceof Error ? error.message : String(error),
+              });
+              if (queuedRenderTimeRef.current === null && isMountedRef.current) {
+                queuedRenderTimeRef.current = nextTime;
+                // Yield so a failure that repeats cannot spin the pump.
+                await new Promise((resolve) => {
+                  setTimeout(resolve, RENDER_RETRY_DELAY_MS);
+                });
+              }
+            }
           }
         } finally {
           renderPumpActiveRef.current = false;
@@ -746,6 +825,15 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       requestRenderFrame(currentTime);
     }
   }, [currentTime, requestRenderFrame]);
+
+  // Release the decoded frames and the FFmpeg processes behind them when the
+  // canvas preview goes away, so nothing keeps decoding for a player that is no
+  // longer on screen.
+  useEffect(() => {
+    return () => {
+      videoFrameBuffer.clearAll();
+    };
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;

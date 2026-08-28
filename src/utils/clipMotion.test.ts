@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Clip } from '@/types';
-import { getClipMotionTransformAtTime, hasActiveMotionKeyframes } from './clipMotion';
+import {
+  getClipMaxMotionScale,
+  getClipMotionTransformAtTime,
+  hasActiveMotionKeyframes,
+} from './clipMotion';
 
 function createClip(): Clip {
   return {
@@ -86,5 +90,64 @@ describe('clipMotion', () => {
       expect(getClipMotionTransformAtTime(clip, 7)).toEqual(clip.transform);
     });
   });
-});
+  describe('getClipMaxMotionScale', () => {
+    it('should report the static transform scale when the clip has no keyframes', () => {
+      const clip = createClip();
+      clip.transform.scale = { x: 1.75, y: 1.25 };
 
+      expect(getClipMaxMotionScale(clip)).toBe(1.75);
+    });
+
+    it('should report the widest keyframe rather than the scale at any instant', () => {
+      // Callers size a decode box off this, and a box that tracked the
+      // instantaneous scale would change on every rendered frame.
+      const clip = createClip();
+      clip.motionKeyframes = [
+        {
+          timeOffset: 0,
+          interpolation: 'linear',
+          transform: { ...clip.transform, scale: { x: 1, y: 1 } },
+        },
+        {
+          timeOffset: 5,
+          interpolation: 'linear',
+          transform: { ...clip.transform, scale: { x: 2.5, y: 2.5 } },
+        },
+        {
+          timeOffset: 10,
+          interpolation: 'linear',
+          transform: { ...clip.transform, scale: { x: 1.2, y: 1.2 } },
+        },
+      ];
+
+      expect(getClipMaxMotionScale(clip)).toBe(2.5);
+    });
+
+    it('should take the larger of the two axes', () => {
+      const clip = createClip();
+      clip.motionKeyframes = [
+        {
+          timeOffset: 0,
+          interpolation: 'linear',
+          transform: { ...clip.transform, scale: { x: 1, y: 3 } },
+        },
+      ];
+
+      expect(getClipMaxMotionScale(clip)).toBe(3);
+    });
+
+    it('should fall back to the static transform when every keyframe is discarded', () => {
+      const clip = createClip();
+      clip.transform.scale = { x: 1.5, y: 1.5 };
+      clip.motionKeyframes = [
+        {
+          timeOffset: Number.NaN,
+          interpolation: 'linear',
+          transform: { ...clip.transform, scale: { x: 9, y: 9 } },
+        },
+      ];
+
+      expect(getClipMaxMotionScale(clip)).toBe(1.5);
+    });
+  });
+});
