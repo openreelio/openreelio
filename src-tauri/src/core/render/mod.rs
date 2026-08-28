@@ -27,7 +27,12 @@ pub(crate) mod export;
 ///
 /// Starts at 2 so that caches written before this fingerprint existed — which
 /// carry no renderer version at all — cannot be mistaken for current ones.
-pub const RENDERER_SEMANTICS_VERSION: u32 = 2;
+///
+/// Bumped to 3 when a ranged render stopped being "the whole timeline's graph
+/// with an output-side `-ss`" and became a graph whose own clock starts at the
+/// window: every cached segment was rendered by the old shape, and the old shape
+/// could land a segment up to half an output frame out of phase.
+pub const RENDERER_SEMANTICS_VERSION: u32 = 3;
 pub mod ffmpeg_graph;
 mod ffmpeg_plan;
 pub mod graph;
@@ -35,6 +40,7 @@ pub mod hardware;
 pub mod hdr;
 mod pip_stitch;
 pub mod plan;
+mod render_window;
 pub mod smart;
 mod transform_layout;
 pub(crate) mod transition_stitch;

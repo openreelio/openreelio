@@ -293,6 +293,64 @@ impl TransitionPlan {
     pub(super) fn is_empty(&self) -> bool {
         self.by_outgoing.is_empty()
     }
+
+    /// Every clip on the far side of a boundary one of `clips` takes part in.
+    ///
+    /// A windowed render keeps or drops a boundary *whole*: `xfade` folds its two
+    /// sides into one stream, so rendering one side without the other would leave
+    /// the surviving side carrying the handle frames the blend was going to eat.
+    /// The builder uses this to grow the set of clips it emits chains for until
+    /// no boundary straddles the edge of that set.
+    pub(super) fn boundary_partners(&self, clips: &HashSet<String>) -> HashSet<String> {
+        let mut partners = HashSet::new();
+        for (outgoing, transition) in &self.by_outgoing {
+            if clips.contains(outgoing) || clips.contains(&transition.incoming_clip_id) {
+                partners.insert(outgoing.clone());
+                partners.insert(transition.incoming_clip_id.clone());
+            }
+        }
+        partners
+    }
+
+    /// The same plan with every boundary neither of whose sides is in `clips`.
+    ///
+    /// A windowed render emits no chain for a clip outside the window, and
+    /// [`stitch_transition_groups`] refuses the render outright when a planned
+    /// boundary is never folded — deliberately, because an unfolded boundary
+    /// bakes handle frames into the picture. So the plan has to lose the
+    /// boundaries whose clips the builder is not going to emit.
+    ///
+    /// Refusals and advisories are carried over untouched: they describe the
+    /// project, not this render's range, and the warnings a ranged preview shows
+    /// should be the ones the full export would show.
+    pub(super) fn retaining(&self, clips: &HashSet<String>) -> Self {
+        let by_outgoing: HashMap<String, PlannedTransition> = self
+            .by_outgoing
+            .iter()
+            .filter(|(outgoing, transition)| {
+                clips.contains(outgoing.as_str())
+                    && clips.contains(transition.incoming_clip_id.as_str())
+            })
+            .map(|(outgoing, transition)| (outgoing.clone(), transition.clone()))
+            .collect();
+
+        let by_incoming = by_outgoing
+            .values()
+            .map(|transition| {
+                (
+                    transition.incoming_clip_id.clone(),
+                    transition.outgoing_clip_id.clone(),
+                )
+            })
+            .collect();
+
+        Self {
+            by_outgoing,
+            by_incoming,
+            refusals: self.refusals.clone(),
+            advisories: self.advisories.clone(),
+        }
+    }
 }
 
 // =============================================================================
