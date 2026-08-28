@@ -20,12 +20,18 @@ pub fn configure_std_command(cmd: &mut std::process::Command) {
 
 /// Apply platform-specific flags to a tokio process command.
 pub fn configure_tokio_command(cmd: &mut tokio::process::Command) {
+    // Kill the child if the future awaiting it is dropped. Every caller here
+    // awaits the process's own output, so a dropped future means the result is
+    // being abandoned — leaving FFmpeg running would orphan a process that holds
+    // its output file open (blocking its later removal on Windows) and burns CPU
+    // on work nobody will read. This is the backstop that makes a superseded
+    // preview-cache render safe even if it is cancelled by dropping its task.
+    cmd.kill_on_drop(true);
+
     #[cfg(target_os = "windows")]
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    #[cfg(not(target_os = "windows"))]
-    let _ = cmd;
 }
 
 #[cfg(test)]
