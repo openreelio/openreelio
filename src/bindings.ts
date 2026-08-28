@@ -680,6 +680,10 @@ async getAvailableDecoders() : Promise<Result<AvailableDecoders, string>> {
  * Get render cache status for the active sequence.
  * 
  * Returns per-segment cache state for the timeline indicator bar.
+ * 
+ * This command is read-only. The frontend polls it on every render-cache
+ * progress event, so a persisted reconcile here would let the poll invalidate
+ * the cache the background render is filling.
  */
 async getCacheStatus() : Promise<Result<RenderCacheStatus, string>> {
     try {
