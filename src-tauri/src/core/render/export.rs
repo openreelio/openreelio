@@ -18968,13 +18968,14 @@ mod tests {
     }
 
     /// Feature: Windowed render
-    /// Scenario: a clip outside the window keeps its input and loses its chain
+    /// Scenario: a clip outside the window is never opened
     ///
-    /// PR 2a deliberately does not prune inputs — that is a later step — so the
-    /// `-i` list stays as long as it was and every `[n:v]` label keeps meaning
-    /// what it says. What a clip outside the window does lose is its filters.
+    /// A clip that shares no frame with the window gets neither an `-i` nor a
+    /// chain, so FFmpeg never opens or probes it. The one surviving clip
+    /// renumbers to input 0 — the label suffix follows the emitted-input count,
+    /// not the clip's position on the timeline.
     #[test]
-    fn a_clip_outside_the_window_keeps_its_input_but_builds_no_chain() {
+    fn a_clip_outside_the_window_gets_neither_an_input_nor_a_chain() {
         let (sequence, assets, audio_info) = windowed_audio_fixture(
             "window_pruned_chain.mp4",
             &[(0.0, 2.0), (2.0, 2.0), (4.0, 2.0)],
@@ -18985,16 +18986,16 @@ mod tests {
 
         assert_eq!(
             args.iter().filter(|arg| *arg == "-i").count(),
-            3,
-            "every clip keeps its input in PR 2a. Got: {args:?}"
+            1,
+            "only the clip inside the window is opened. Got: {args:?}"
         );
         assert!(
-            !filter_complex.contains("[0:v]") && !filter_complex.contains("[1:v]"),
-            "the two clips in front of the window must build no chain: {filter_complex}"
+            filter_complex.contains("[0:v]"),
+            "the surviving clip renumbers to input 0: {filter_complex}"
         );
         assert!(
-            filter_complex.contains("[2:v]"),
-            "the clip inside the window must still build one: {filter_complex}"
+            !filter_complex.contains("[1:v]") && !filter_complex.contains("[2:v]"),
+            "the two clips in front of the window must never be opened: {filter_complex}"
         );
     }
 
@@ -19337,6 +19338,48 @@ mod tests {
                     ("b-on-a-cut", 2.0, 4.0),
                     ("h-off-grid", 2.017, 4.004),
                 ],
+            );
+        }
+
+        // Input pruning: a window over the last of six clips opens only that one
+        // clip's file, and the result is still byte-identical to the full render.
+        {
+            let mut sequence = Sequence::new("Pruned", square_canvas());
+            sequence.tracks.clear();
+            let mut track = Track::new_video("V1");
+            for i in 0..6u32 {
+                track.add_clip(placed(&format!("prune{i}"), 0.0, 2.0, 2.0 * f64::from(i)));
+            }
+            sequence.add_track(track);
+
+            // The window sits inside the sixth clip (10.0-12.0), so the five in
+            // front of it must never be opened.
+            let probe_args = build_complex_filter_args_with_audio_info(
+                &sequence,
+                &assets,
+                &no_effects,
+                &HashMap::new(),
+                &windowed_render_settings(
+                    dir.path().join("prune-probe.mp4"),
+                    Some(10.0),
+                    Some(11.0),
+                ),
+            )
+            .expect("the pruning fixture must build");
+            assert_eq!(
+                probe_args.iter().filter(|arg| *arg == "-i").count(),
+                1,
+                "only the clip inside the window is opened: {probe_args:?}"
+            );
+
+            assert_windows_slice_the_full_render(
+                &ffmpeg,
+                dir.path(),
+                "pruned",
+                &sequence,
+                &assets,
+                &no_effects,
+                &[("last-of-six", 10.0, 11.0)],
             );
         }
 
