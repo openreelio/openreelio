@@ -37,8 +37,8 @@
 //!
 //! # Profile partitioning
 //!
-//! Encode settings are not part of a render plan, so two profiles (preview
-//! 720p vs. an export ladder, say) plan identically while producing
+//! Encode settings are not part of a render plan, so two profiles (the preview
+//! cache vs. an export ladder, say) plan identically while producing
 //! incompatible files. The profile hash therefore both feeds the fingerprint
 //! and names the directory segments live in
 //! (`renders/<sequenceId>/<profileHash>/segment_0000.mp4`), so one profile's
@@ -60,7 +60,7 @@ use crate::core::render::transition_stitch::{DEFAULT_TRANSITION_SEC, MAX_TRANSIT
 use crate::core::render::{
     build_render_plan, ExportSettings, RenderGraph, RENDERER_SEMANTICS_VERSION,
 };
-use crate::core::timeline::{Clip, Sequence, Track};
+use crate::core::timeline::{Canvas, Clip, Sequence, Track};
 use crate::core::types::SequenceId;
 
 // =============================================================================
@@ -407,13 +407,24 @@ pub fn compute_profile_hash(settings: &ExportSettings) -> String {
     format!("{:0width$x}", hasher.finish(), width = PROFILE_HASH_LEN)
 }
 
-/// Profile hash of the preview-cache encode profile.
+/// Profile hash of the preview-cache encode profile for a sequence canvas.
 ///
-/// Derived from [`ExportSettings::preview`] itself rather than restating its
-/// values, so changing the preview profile automatically retires caches written
-/// with the old one.
-pub fn preview_profile_hash() -> String {
-    compute_profile_hash(&ExportSettings::preview(PathBuf::new(), None, None))
+/// Derived from [`ExportSettings::preview_cache`] itself rather than restating
+/// its values, so changing the preview-cache profile automatically retires
+/// caches written with the old one.
+///
+/// The canvas is part of the profile because the cache renders at the sequence's
+/// own resolution: two canvases produce different hashes, so resizing a sequence
+/// partitions the cache into a fresh directory and the old segments are pruned
+/// by [`manifest_for_profile`] / [`prune_other_profile_caches`] instead of being
+/// served at the wrong resolution.
+pub fn preview_profile_hash(canvas: &Canvas) -> String {
+    compute_profile_hash(&ExportSettings::preview_cache(
+        PathBuf::new(),
+        canvas,
+        None,
+        None,
+    ))
 }
 
 /// Reports whether `value` is a profile hash this module could have produced.
@@ -509,13 +520,14 @@ pub fn refresh_manifest_plan_fingerprints(
     let sequence_id = manifest.sequence_id.clone();
     let profile_hash = manifest.profile_hash.clone();
     // Measure the transition reach at the fps the segments are actually encoded
-    // at, not the sequence fps. The stitcher quantizes the transition split at
-    // the preview encode rate (see `output_video_fps`); measuring reach at a
-    // different rate can leave the window one output frame short of the real
-    // tail when the sequence fps exceeds the encode fps.
+    // at, which is what `output_video_fps` resolves from the cache profile. The
+    // stitcher quantizes the transition split at that same rate; measuring reach
+    // at a different rate can leave the window one output frame short of the real
+    // tail. (The cache profile follows the sequence fps, so the two agree — this
+    // stays derived from the profile so a profile that pins an fps still matches.)
     let encode_fps = output_video_fps(
         sequence,
-        &ExportSettings::preview(PathBuf::new(), None, None),
+        &ExportSettings::preview_cache(PathBuf::new(), &sequence.format.canvas, None, None),
     );
     let reach_sec = transition_window_reach_sec(effects, encode_fps);
 
@@ -529,8 +541,12 @@ pub fn refresh_manifest_plan_fingerprints(
             segment_cache_file(project_path, &sequence_id, &profile_hash, segment.index)?;
         let window_start_sec = (segment.start_sec - reach_sec).max(0.0);
         let window_end_sec = segment.end_sec + reach_sec;
-        let settings =
-            ExportSettings::preview(segment_output, Some(window_start_sec), Some(window_end_sec));
+        let settings = ExportSettings::preview_cache(
+            segment_output,
+            &sequence.format.canvas,
+            Some(window_start_sec),
+            Some(window_end_sec),
+        );
         let plan = build_render_plan(graph, assets, effects, &settings);
         if !plan.validation.is_valid {
             return Err(format!(
@@ -1563,6 +1579,13 @@ mod tests {
     // Test Helpers
     // -----------------------------------------------------------------------
 
+    /// The canvas every fixture sequence in this module uses (see
+    /// [`make_test_sequence`]). The preview-cache profile is canvas-dependent,
+    /// so tests must hash against the same canvas their sequences render at.
+    fn test_canvas() -> Canvas {
+        Canvas::new(1920, 1080)
+    }
+
     fn make_test_clip(id: &str, asset_id: &str, start: f64, duration: f64) -> Clip {
         Clip {
             id: id.to_string(),
@@ -1701,8 +1724,12 @@ mod tests {
         effects: &HashMap<String, Effect>,
         duration_sec: f64,
     ) -> RenderCacheManifest {
-        let mut manifest =
-            RenderCacheManifest::new(&sequence.id, &preview_profile_hash(), duration_sec, 5.0);
+        let mut manifest = RenderCacheManifest::new(
+            &sequence.id,
+            &preview_profile_hash(&test_canvas()),
+            duration_sec,
+            5.0,
+        );
         manifest.reconcile_with_sequence(duration_sec, 5.0, InterruptedRenderPolicy::Reset);
         refresh(&mut manifest, project_dir, sequence, assets, effects);
         manifest
@@ -1736,8 +1763,12 @@ mod tests {
         start_sec: f64,
         end_sec: f64,
     ) -> String {
-        let settings =
-            ExportSettings::preview(PathBuf::from("probe.mp4"), Some(start_sec), Some(end_sec));
+        let settings = ExportSettings::preview_cache(
+            PathBuf::from("probe.mp4"),
+            &sequence.format.canvas,
+            Some(start_sec),
+            Some(end_sec),
+        );
         build_render_plan(&build_graph(sequence), assets, effects, &settings).plan_hash
     }
 
@@ -1816,7 +1847,8 @@ mod tests {
     fn should_create_correct_number_of_segments_for_30_second_timeline() {
         // Given a 30-second timeline
         // When creating a manifest with 5-second segments
-        let manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 30.0, 5.0);
+        let manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 30.0, 5.0);
 
         // Then there should be 6 segments, each 5 seconds
         assert_eq!(manifest.segments.len(), 6);
@@ -1829,7 +1861,8 @@ mod tests {
     #[test]
     fn should_create_segments_without_a_fingerprint_until_they_are_planned() {
         // Given a fresh manifest
-        let manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 10.0, 5.0);
+        let manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 10.0, 5.0);
 
         // Then no segment claims an identity it has not been planned for
         assert!(manifest
@@ -1846,7 +1879,8 @@ mod tests {
     fn should_merge_tiny_trailing_segment_into_previous() {
         // Given a 12.3-second timeline with 5-second segments
         // When generating segments (12.3 / 5.0 = 2 full + 2.3 remainder)
-        let manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 12.3, 5.0);
+        let manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 12.3, 5.0);
 
         // Then the last segment should cover the remainder (not a tiny fragment)
         assert_eq!(manifest.segments.len(), 3);
@@ -1858,7 +1892,8 @@ mod tests {
     fn should_produce_zero_segments_for_empty_timeline() {
         // Given a sequence with zero duration
         // When creating a manifest
-        let manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 0.0, 5.0);
+        let manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 0.0, 5.0);
 
         // Then there should be no segments
         assert!(manifest.segments.is_empty());
@@ -2228,12 +2263,15 @@ mod tests {
         // the project did.
         let content =
             compute_window_content_hash(&four_segment_sequence().0, &HashMap::new(), 0.0, 5.0);
-        let fingerprint =
-            compute_plan_segment_fingerprint("plan-hash", &preview_profile_hash(), content);
+        let fingerprint = compute_plan_segment_fingerprint(
+            "plan-hash",
+            &preview_profile_hash(&test_canvas()),
+            content,
+        );
 
         let mut bumped = std::collections::hash_map::DefaultHasher::new();
         "plan-hash".hash(&mut bumped);
-        preview_profile_hash().hash(&mut bumped);
+        preview_profile_hash(&test_canvas()).hash(&mut bumped);
         (RENDERER_SEMANTICS_VERSION + 1).hash(&mut bumped);
         content.hash(&mut bumped);
 
@@ -2246,7 +2284,7 @@ mod tests {
         // regression.
         let mut matching = std::collections::hash_map::DefaultHasher::new();
         "plan-hash".hash(&mut matching);
-        preview_profile_hash().hash(&mut matching);
+        preview_profile_hash(&test_canvas()).hash(&mut matching);
         RENDERER_SEMANTICS_VERSION.hash(&mut matching);
         content.hash(&mut matching);
 
@@ -2311,7 +2349,8 @@ mod tests {
     #[test]
     fn should_reconcile_segments_when_timeline_duration_changes() {
         // Given a cached 10-second manifest
-        let mut manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 10.0, 5.0);
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 10.0, 5.0);
         manifest.segments[0].fingerprint = 0xabc;
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 1024);
 
@@ -2334,7 +2373,8 @@ mod tests {
     #[test]
     fn should_drop_cached_segments_whose_range_no_longer_exists() {
         // Given a cached manifest
-        let mut manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 15.0, 5.0);
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 15.0, 5.0);
         cache_every_segment(&mut manifest);
 
         // When the timeline shrinks past the last segment
@@ -2349,7 +2389,8 @@ mod tests {
     #[test]
     fn should_reset_interrupted_rendering_segments_during_reconcile() {
         // Given a manifest persisted while a segment was rendering
-        let mut manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 10.0, 5.0);
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 10.0, 5.0);
         manifest.segments[0].state = CacheSegmentState::Rendering;
         manifest.segments[0].cached_file = Some("segment_0000.mp4".to_string());
         manifest.segments[0].file_size_bytes = 128;
@@ -2369,7 +2410,8 @@ mod tests {
     #[test]
     fn should_preserve_in_flight_rendering_segments_for_read_only_callers() {
         // Given a segment a background render currently owns
-        let mut manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 10.0, 5.0);
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 10.0, 5.0);
         manifest.segments[0].state = CacheSegmentState::Rendering;
         manifest.segments[0].cached_file = Some("segment_0000.mp4".to_string());
 
@@ -2388,7 +2430,8 @@ mod tests {
     #[test]
     fn should_report_correct_completion_percent() {
         // Given a manifest with 4 segments
-        let mut manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 20.0, 5.0);
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 20.0, 5.0);
 
         // When 2 out of 4 segments are cached
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 512);
@@ -2403,7 +2446,8 @@ mod tests {
     #[test]
     fn should_build_cache_status_dto_from_manifest() {
         // Given a manifest with mixed segment states
-        let mut manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 15.0, 5.0);
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 15.0, 5.0);
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 1000);
         manifest.segments[1].state = CacheSegmentState::Stale;
 
@@ -2448,7 +2492,7 @@ mod tests {
         let status = cache_status_snapshot(
             tmp.path(),
             &seq_ten,
-            &preview_profile_hash(),
+            &preview_profile_hash(&test_canvas()),
             &build_graph(&seq_ten),
             &assets,
             &effects,
@@ -2458,7 +2502,7 @@ mod tests {
         let grown = cache_status_snapshot(
             tmp.path(),
             &seq_twenty,
-            &preview_profile_hash(),
+            &preview_profile_hash(&test_canvas()),
             &build_graph(&seq_twenty),
             &assets,
             &effects,
@@ -2518,7 +2562,7 @@ mod tests {
         let status = cache_status_snapshot(
             tmp.path(),
             &edited,
-            &preview_profile_hash(),
+            &preview_profile_hash(&test_canvas()),
             &build_graph(&edited),
             &assets,
             &effects,
@@ -2545,7 +2589,7 @@ mod tests {
         let status = cache_status_snapshot(
             tmp.path(),
             &sequence,
-            &preview_profile_hash(),
+            &preview_profile_hash(&test_canvas()),
             &build_graph(&sequence),
             &assets,
             &effects,
@@ -2568,14 +2612,14 @@ mod tests {
         ExportSettings {
             width: Some(960),
             height: Some(540),
-            ..ExportSettings::preview(PathBuf::new(), None, None)
+            ..ExportSettings::preview_cache(PathBuf::new(), &test_canvas(), None, None)
         }
     }
 
     #[test]
     fn should_produce_a_different_fingerprint_for_each_encode_profile() {
         // Given one render plan and two encode profiles
-        let preview = preview_profile_hash();
+        let preview = preview_profile_hash(&test_canvas());
         let half = compute_profile_hash(&half_size_preview_settings());
         assert_ne!(preview, half);
 
@@ -2586,15 +2630,44 @@ mod tests {
         );
     }
 
+    /// Feature: Preview cache partitioning
+    /// Scenario: a canvas change retires the cache written at the old canvas
+    #[test]
+    fn should_partition_the_preview_cache_per_canvas() {
+        // Given the same sequence at two canvases
+        let landscape = preview_profile_hash(&Canvas::new(1920, 1080));
+        let vertical = preview_profile_hash(&Canvas::new(1080, 1920));
+        let smaller = preview_profile_hash(&Canvas::new(1280, 720));
+
+        // Then each canvas is its own encode profile
+        assert_ne!(landscape, vertical);
+        assert_ne!(landscape, smaller);
+        assert_ne!(vertical, smaller);
+
+        // And a manifest written at the old canvas is discarded rather than
+        // reused, so segments encoded at the wrong resolution are never served.
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = RenderCacheManifest::new("seq1", &landscape, 10.0, 5.0);
+        save_manifest(tmp.path(), &manifest).unwrap();
+
+        let loaded = manifest_for_profile(tmp.path(), "seq1", &vertical, 10.0, 5.0).unwrap();
+        assert_eq!(
+            loaded.discarded_profile.as_deref(),
+            Some(landscape.as_str())
+        );
+        assert_eq!(loaded.manifest.profile_hash, vertical);
+    }
+
     #[test]
     fn should_change_the_profile_hash_when_encode_settings_change() {
-        let base = ExportSettings::preview(PathBuf::new(), None, None);
+        let base = ExportSettings::preview_cache(PathBuf::new(), &test_canvas(), None, None);
         let baseline = compute_profile_hash(&base);
 
         // Time range and output path identify a segment, not a profile
         assert_eq!(
-            compute_profile_hash(&ExportSettings::preview(
+            compute_profile_hash(&ExportSettings::preview_cache(
                 PathBuf::from("elsewhere.mp4"),
+                &test_canvas(),
                 Some(5.0),
                 Some(10.0)
             )),
@@ -2636,7 +2709,7 @@ mod tests {
     fn should_store_each_profiles_segments_in_its_own_directory() {
         // Given two profiles
         let tmp = tempfile::tempdir().unwrap();
-        let preview = preview_profile_hash();
+        let preview = preview_profile_hash(&test_canvas());
         let half = compute_profile_hash(&half_size_preview_settings());
 
         // When resolving the same segment index under each
@@ -2659,7 +2732,7 @@ mod tests {
     fn should_not_hand_one_profiles_cached_segment_to_another() {
         // Given a segment cached under the preview profile
         let tmp = tempfile::tempdir().unwrap();
-        let preview = preview_profile_hash();
+        let preview = preview_profile_hash(&test_canvas());
         let half = compute_profile_hash(&half_size_preview_settings());
         let preview_dir = profile_cache_dir(tmp.path(), "seq1", &preview).unwrap();
         std::fs::create_dir_all(&preview_dir).unwrap();
@@ -2713,7 +2786,7 @@ mod tests {
         .unwrap();
 
         // When it is loaded for the current profile
-        let profile = preview_profile_hash();
+        let profile = preview_profile_hash(&test_canvas());
         let loaded = manifest_for_profile(tmp.path(), "seq1", &profile, 5.0, 5.0).unwrap();
 
         // Then it deserializes but claims no cache
@@ -2728,7 +2801,7 @@ mod tests {
         // sequence root by a build from before profile partitioning, and two
         // entries this module never wrote
         let tmp = tempfile::tempdir().unwrap();
-        let keep = preview_profile_hash();
+        let keep = preview_profile_hash(&test_canvas());
         let stale = compute_profile_hash(&half_size_preview_settings());
         for profile in [&keep, &stale] {
             let dir = profile_cache_dir(tmp.path(), "seq1", profile).unwrap();
@@ -2763,7 +2836,8 @@ mod tests {
     fn should_report_no_pruning_when_the_sequence_has_no_cache_directory() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(
-            prune_other_profile_caches(tmp.path(), "seq1", &preview_profile_hash()).unwrap(),
+            prune_other_profile_caches(tmp.path(), "seq1", &preview_profile_hash(&test_canvas()))
+                .unwrap(),
             0
         );
     }
@@ -2775,7 +2849,8 @@ mod tests {
     #[test]
     fn should_clear_all_cached_segments() {
         // Given a manifest with cached segments
-        let mut manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 10.0, 5.0);
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 10.0, 5.0);
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 1024);
         manifest.mark_segment_cached(1, "segment_0001.mp4".to_string(), 2048);
         assert_eq!(manifest.total_cached_bytes, 3072);
@@ -2796,7 +2871,7 @@ mod tests {
     fn should_build_correct_cache_directory_paths() {
         // Given a project directory and a profile
         let project_dir = Path::new("/projects/my_video");
-        let profile = preview_profile_hash();
+        let profile = preview_profile_hash(&test_canvas());
 
         // When getting cache paths
         let cache_dir = render_cache_dir(project_dir);
@@ -2840,7 +2915,7 @@ mod tests {
     #[test]
     fn should_save_and_load_manifest_roundtrip() {
         // Given a manifest
-        let profile = preview_profile_hash();
+        let profile = preview_profile_hash(&test_canvas());
         let mut manifest = RenderCacheManifest::new("seq1", &profile, 10.0, 5.0);
         manifest.segments[0].fingerprint = 4242;
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 2048);
@@ -2878,7 +2953,7 @@ mod tests {
     fn should_cleanup_stale_segment_files() {
         // Given a manifest with a stale segment that has a file
         let tmp = tempfile::tempdir().unwrap();
-        let profile = preview_profile_hash();
+        let profile = preview_profile_hash(&test_canvas());
         let mut manifest = RenderCacheManifest::new("seq1", &profile, 10.0, 5.0);
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 1024);
 
@@ -2902,7 +2977,7 @@ mod tests {
     fn should_clear_entire_sequence_cache() {
         // Given a sequence cache directory with files for a profile
         let tmp = tempfile::tempdir().unwrap();
-        let profile = preview_profile_hash();
+        let profile = preview_profile_hash(&test_canvas());
         let dir = profile_cache_dir(tmp.path(), "seq1", &profile).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("segment_0000.mp4"), b"test").unwrap();
@@ -2928,7 +3003,7 @@ mod tests {
         // `clear_sequence_cache` calls `remove_dir_all` on it without ever looking the
         // id up in `project.state.sequences`.
         let tmp = tempfile::tempdir().unwrap();
-        let profile = preview_profile_hash();
+        let profile = preview_profile_hash(&test_canvas());
         let victim = tmp.path().join("victim");
         std::fs::create_dir_all(&victim).unwrap();
         std::fs::write(victim.join("keep.txt"), b"keep").unwrap();
@@ -2980,7 +3055,9 @@ mod tests {
     fn should_only_accept_profile_hashes_the_writer_produces() {
         // Given a profile hash this module emitted
         let tmp = tempfile::tempdir().unwrap();
-        assert!(profile_cache_dir(tmp.path(), "seq1", &preview_profile_hash()).is_ok());
+        assert!(
+            profile_cache_dir(tmp.path(), "seq1", &preview_profile_hash(&test_canvas())).is_ok()
+        );
 
         // Then nothing else names a directory — a profile hash reaches path
         // construction from the on-disk manifest
@@ -3039,7 +3116,7 @@ mod tests {
     fn should_not_remove_a_manifest_named_file_outside_the_cache_dir() {
         // Given a manifest whose `cached_file` traverses out of the cache directory
         let tmp = tempfile::tempdir().unwrap();
-        let profile = preview_profile_hash();
+        let profile = preview_profile_hash(&test_canvas());
         let seg_dir = profile_cache_dir(tmp.path(), "seq1", &profile).unwrap();
         std::fs::create_dir_all(&seg_dir).unwrap();
         let victim = seg_dir.join("..").join("victim.mp4");
@@ -3063,7 +3140,7 @@ mod tests {
     fn should_not_evict_a_manifest_named_file_outside_the_cache_dir() {
         // Given an over-limit manifest whose `cached_file` traverses out of the cache dir
         let tmp = tempfile::tempdir().unwrap();
-        let profile = preview_profile_hash();
+        let profile = preview_profile_hash(&test_canvas());
         let seg_dir = profile_cache_dir(tmp.path(), "seq1", &profile).unwrap();
         std::fs::create_dir_all(&seg_dir).unwrap();
         let victim = seg_dir.join("..").join("victim.mp4");
@@ -3083,7 +3160,7 @@ mod tests {
     fn should_evict_segments_when_cache_exceeds_limit() {
         // Given a manifest where total size exceeds the limit
         let tmp = tempfile::tempdir().unwrap();
-        let profile = preview_profile_hash();
+        let profile = preview_profile_hash(&test_canvas());
         let seg_dir = profile_cache_dir(tmp.path(), "seq1", &profile).unwrap();
         std::fs::create_dir_all(&seg_dir).unwrap();
 
@@ -3114,7 +3191,8 @@ mod tests {
     fn should_not_evict_when_under_limit() {
         // Given a manifest under the size limit
         let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = RenderCacheManifest::new("seq1", &preview_profile_hash(), 10.0, 5.0);
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 10.0, 5.0);
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
 
         // When enforcing a large limit

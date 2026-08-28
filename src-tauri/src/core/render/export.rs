@@ -838,6 +838,69 @@ impl ExportSettings {
         }
     }
 
+    /// Create render-cache settings: the profile the preview render cache
+    /// pre-renders timeline segments with.
+    ///
+    /// The render cache exists to be a pixel-accurate stand-in for the export,
+    /// so this profile deliberately keeps the sequence's own frame:
+    /// - **full sequence resolution** (`canvas.width` x `canvas.height`), *not*
+    ///   the 480p-class [`proxy_frame_dimensions`] downscale. A downscaled
+    ///   preview diverges from the export because font sizes, blur radii and
+    ///   stroke widths are absolute pixels and do not scale with the frame — the
+    ///   cached picture would no longer be what export produces. Rendering at the
+    ///   canvas also means a 1080x1920 vertical sequence is never pillarboxed
+    ///   into a landscape frame, which a fixed 1280x720 profile guarantees.
+    /// - **frame rate follows the sequence** (`fps: None`), so cached segments
+    ///   carry the sequence's own cadence rather than a fixed 30 fps.
+    /// - **no target bitrate** — quality is CRF-driven. A fixed bitrate cap that
+    ///   is survivable at 720p is catastrophic at full resolution.
+    /// - `ultrafast` x264 preset — render-ahead wants encode speed.
+    ///
+    /// CRF 28 is the remaining quality/perf knob: it trades cache fidelity for
+    /// render-ahead throughput. Lowering it (or making it configurable) is a
+    /// follow-up, deliberately not bundled with the canvas fix.
+    ///
+    /// This is distinct from [`ExportSettings::preview`], which stays a fixed
+    /// 720p30 profile for the one-off preview render job and the CLI's frame
+    /// extraction.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_path` - Path where the cached segment will be written
+    /// * `canvas` - The sequence canvas the segment is rendered at
+    /// * `start_time` - Optional start time in seconds for the segment window
+    /// * `end_time` - Optional end time in seconds for the segment window
+    pub fn preview_cache(
+        output_path: PathBuf,
+        canvas: &Canvas,
+        start_time: Option<f64>,
+        end_time: Option<f64>,
+    ) -> Self {
+        Self {
+            preset: ExportPreset::Custom,
+            output_path,
+            video_codec: VideoCodec::H264,
+            audio_codec: AudioCodec::Aac,
+            width: Some(canvas.width),
+            height: Some(canvas.height),
+            video_bitrate: None,
+            audio_bitrate: Some("128k".to_string()),
+            fps: None,
+            crf: Some(28),
+            two_pass: false,
+            start_time,
+            end_time,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
+            tonemap_mode: None,
+            hardware_accel: super::hardware::HardwareAccelMode::default(),
+            resolved_encoder_name: None,
+            encoder_speed: Some("ultrafast".to_string()),
+        }
+    }
+
     /// Create proxy render settings optimized for machine inspection and fast turnaround.
     ///
     /// Proxy renders exist so an agent (or a human) can look at what the timeline
@@ -11408,6 +11471,51 @@ mod tests {
 
         assert_eq!(settings.width, Some(480));
         assert_eq!(settings.height, Some(854));
+    }
+
+    /// Feature: Preview render cache profile
+    /// Scenario: should render at the sequence canvas and fps with no bitrate cap
+    #[test]
+    fn preview_cache_settings_should_use_the_sequence_canvas_and_fps() {
+        let settings = ExportSettings::preview_cache(
+            PathBuf::from("segment_0000.mp4"),
+            &Canvas::new(1920, 1080),
+            Some(0.0),
+            Some(5.0),
+        );
+
+        // Full sequence resolution: a downscale would move absolute-pixel text,
+        // stroke and blur sizes relative to the frame and stop matching export.
+        assert_eq!(settings.width, Some(1920));
+        assert_eq!(settings.height, Some(1080));
+        // Follows the sequence fps rather than pinning 30.
+        assert_eq!(settings.fps, None);
+        // CRF-driven, no bitrate cap (a 720p-sized cap is ruinous at full res).
+        assert_eq!(settings.video_bitrate, None);
+        assert_eq!(settings.crf, Some(28));
+        assert_eq!(settings.encoder_speed.as_deref(), Some("ultrafast"));
+        assert_eq!(settings.video_codec, VideoCodec::H264);
+        assert_eq!(settings.audio_codec, AudioCodec::Aac);
+        assert_eq!(settings.audio_bitrate.as_deref(), Some("128k"));
+        assert_eq!(settings.hdr_mode, HdrMode::Sdr);
+        assert!(!settings.two_pass);
+        assert_eq!(settings.start_time, Some(0.0));
+        assert_eq!(settings.end_time, Some(5.0));
+    }
+
+    /// Feature: Preview render cache profile
+    /// Scenario: should keep a vertical sequence vertical instead of pillarboxing it
+    #[test]
+    fn preview_cache_settings_should_follow_a_vertical_canvas() {
+        let settings = ExportSettings::preview_cache(
+            PathBuf::from("segment_0000.mp4"),
+            &Canvas::new(1080, 1920),
+            None,
+            None,
+        );
+
+        assert_eq!(settings.width, Some(1080));
+        assert_eq!(settings.height, Some(1920));
     }
 
     /// Feature: Proxy frame fitting
