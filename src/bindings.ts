@@ -4213,9 +4213,14 @@ export type CacheSegmentState =
  */
 "error"
 /**
- * Minimal per-segment info for the timeline cache indicator bar
+ * Per-segment info for the timeline cache indicator bar and for a cache-first
+ * preview: which segment file backs a time, and whether it is still current.
  */
 export type CacheSegmentStatusDto = { 
+/**
+ * Segment index (0-based), so a caller can address the segment covering a time
+ */
+index: number; 
 /**
  * Start time in seconds
  */
@@ -4227,7 +4232,25 @@ endSec: number;
 /**
  * Segment state
  */
-state: CacheSegmentState }
+state: CacheSegmentState; 
+/**
+ * The segment's render+content fingerprint, as a decimal string.
+ * 
+ * A `u64` loses precision crossing JSON, so it is carried as text. A
+ * cache-first preview keys its frame cache on this: when the fingerprint
+ * changes, the picture the segment holds is stale and must not be reused.
+ */
+fingerprint: string; 
+/**
+ * Absolute path to the cached segment file — `Some` only when the segment is
+ * [`Cached`](CacheSegmentState::Cached) and its manifest-named file resolves
+ * through the segment-name allowlist, `None` otherwise.
+ * 
+ * The manifest lives inside the project directory and is therefore
+ * attacker-controlled, so the path is produced by
+ * [`resolve_cached_segment_path`] rather than by joining the raw name.
+ */
+cachedPath: string | null }
 /**
  * Cache usage statistics.
  */

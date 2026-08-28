@@ -1009,21 +1009,46 @@ pub struct RenderCacheStatus {
     pub segment_states: Vec<CacheSegmentStatusDto>,
 }
 
-/// Minimal per-segment info for the timeline cache indicator bar
+/// Per-segment info for the timeline cache indicator bar and for a cache-first
+/// preview: which segment file backs a time, and whether it is still current.
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheSegmentStatusDto {
+    /// Segment index (0-based), so a caller can address the segment covering a time
+    pub index: u32,
     /// Start time in seconds
     pub start_sec: f64,
     /// End time in seconds
     pub end_sec: f64,
     /// Segment state
     pub state: CacheSegmentState,
+    /// The segment's render+content fingerprint, as a decimal string.
+    ///
+    /// A `u64` loses precision crossing JSON, so it is carried as text. A
+    /// cache-first preview keys its frame cache on this: when the fingerprint
+    /// changes, the picture the segment holds is stale and must not be reused.
+    pub fingerprint: String,
+    /// Absolute path to the cached segment file — `Some` only when the segment is
+    /// [`Cached`](CacheSegmentState::Cached) and its manifest-named file resolves
+    /// through the segment-name allowlist, `None` otherwise.
+    ///
+    /// The manifest lives inside the project directory and is therefore
+    /// attacker-controlled, so the path is produced by
+    /// [`resolve_cached_segment_path`] rather than by joining the raw name.
+    pub cached_path: Option<String>,
 }
 
 impl RenderCacheStatus {
-    /// Builds a status DTO from a manifest and config
-    pub fn from_manifest(manifest: &RenderCacheManifest, config: &RenderCacheConfig) -> Self {
+    /// Builds a status DTO from a manifest and config.
+    ///
+    /// `project_dir` is needed to resolve each cached segment's file path safely
+    /// (through the segment-name allowlist), so a cache-first preview can decode
+    /// the segment that backs a time without trusting the manifest's raw name.
+    pub fn from_manifest(
+        manifest: &RenderCacheManifest,
+        config: &RenderCacheConfig,
+        project_dir: &Path,
+    ) -> Self {
         let total = manifest.segments.len() as u32;
         let cached = manifest
             .segments
@@ -1041,13 +1066,34 @@ impl RenderCacheStatus {
             .filter(|s| s.state == CacheSegmentState::Rendering)
             .count() as u32;
 
+        // Resolve the profile directory once; a bad sequence id or profile hash
+        // simply leaves every path `None` rather than failing the whole status.
+        let profile_dir =
+            profile_cache_dir(project_dir, &manifest.sequence_id, &manifest.profile_hash).ok();
+
         let segment_states = manifest
             .segments
             .iter()
-            .map(|s| CacheSegmentStatusDto {
-                start_sec: s.start_sec,
-                end_sec: s.end_sec,
-                state: s.state.clone(),
+            .map(|s| {
+                // A path is offered only for a segment that actually has a current
+                // file on disk, and only when the name clears the allowlist.
+                let cached_path = if s.state == CacheSegmentState::Cached {
+                    profile_dir
+                        .as_ref()
+                        .zip(s.cached_file.as_ref())
+                        .and_then(|(dir, file)| resolve_cached_segment_path(dir, file))
+                        .map(|path| path.to_string_lossy().to_string())
+                } else {
+                    None
+                };
+                CacheSegmentStatusDto {
+                    index: s.index,
+                    start_sec: s.start_sec,
+                    end_sec: s.end_sec,
+                    state: s.state.clone(),
+                    fingerprint: s.fingerprint.to_string(),
+                    cached_path,
+                }
             })
             .collect();
 
@@ -1401,7 +1447,7 @@ pub fn cache_status_snapshot(
         );
     }
 
-    Ok(RenderCacheStatus::from_manifest(&view, config))
+    Ok(RenderCacheStatus::from_manifest(&view, config, project_dir))
 }
 
 // =============================================================================
@@ -2451,8 +2497,9 @@ mod tests {
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 1000);
         manifest.segments[1].state = CacheSegmentState::Stale;
 
+        let tmp = tempfile::tempdir().unwrap();
         let config = RenderCacheConfig::default();
-        let status = RenderCacheStatus::from_manifest(&manifest, &config);
+        let status = RenderCacheStatus::from_manifest(&manifest, &config, tmp.path());
 
         // Then status should reflect the manifest
         assert_eq!(status.total_segments, 3);
@@ -2463,6 +2510,33 @@ mod tests {
         assert_eq!(status.segment_states[0].state, CacheSegmentState::Cached);
         assert_eq!(status.segment_states[1].state, CacheSegmentState::Stale);
         assert_eq!(status.segment_states[2].state, CacheSegmentState::Empty);
+
+        // The segment identity a cache-first preview needs: index, fingerprint,
+        // and a resolved path for the cached segment (but not for the others).
+        assert_eq!(status.segment_states[0].index, 0);
+        assert_eq!(status.segment_states[2].index, 2);
+        assert!(status.segment_states[0].cached_path.is_some());
+        assert!(status.segment_states[1].cached_path.is_none());
+        assert!(status.segment_states[2].cached_path.is_none());
+    }
+
+    #[test]
+    fn should_not_offer_a_path_for_a_manifest_named_file_outside_the_cache() {
+        // The manifest is inside the project directory and so attacker-controlled;
+        // a status read must never hand back a path escaping the cache directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 5.0, 5.0);
+        manifest.mark_segment_cached(0, "../../etc/passwd".to_string(), 1);
+
+        let config = RenderCacheConfig::default();
+        let status = RenderCacheStatus::from_manifest(&manifest, &config, tmp.path());
+
+        assert_eq!(status.segment_states[0].state, CacheSegmentState::Cached);
+        assert!(
+            status.segment_states[0].cached_path.is_none(),
+            "a traversing segment name must not resolve to a path"
+        );
     }
 
     #[test]
