@@ -10,6 +10,24 @@
 pub mod cache;
 pub mod executor;
 pub(crate) mod export;
+
+/// Version of the renderer's *semantics* — what the compositor and filtergraph
+/// do with a given timeline, as opposed to how that timeline is spelled.
+///
+/// **Bump this on ANY change to compositor or filtergraph math**: transform and
+/// motion-keyframe evaluation, chroma handling, picture-in-picture compositing,
+/// blend-mode formulas, transition stitching, colour conversion, audio mixing.
+/// A cached preview segment records this version in its fingerprint, so a bump
+/// invalidates every segment rendered by the previous behaviour.
+///
+/// It exists because a render cache survives app upgrades while
+/// [`graph::RENDER_GRAPH_VERSION`] does not track this: that constant versions
+/// the render-graph *schema*, and the four compositor-math changes that landed
+/// before this constant existed all left it at 1. Do not overload it for this.
+///
+/// Starts at 2 so that caches written before this fingerprint existed — which
+/// carry no renderer version at all — cannot be mistaken for current ones.
+pub const RENDERER_SEMANTICS_VERSION: u32 = 2;
 pub mod ffmpeg_graph;
 mod ffmpeg_plan;
 pub mod graph;
@@ -45,12 +63,15 @@ pub use plan::{
 
 // Render cache re-exports
 pub use cache::{
-    cleanup_stale_files, clear_sequence_cache, compute_plan_segment_fingerprint,
-    compute_segment_fingerprint, enforce_cache_limit, is_cached_segment_name, load_manifest,
-    manifest_path, refresh_manifest_plan_fingerprints, render_cache_dir,
-    resolve_cached_segment_path, save_manifest, segment_cache_file, sequence_cache_dir,
-    CacheSegmentState, CacheSegmentStatusDto, RenderCacheConfig, RenderCacheManifest,
-    RenderCacheSegment, RenderCacheStatus, SegmentFingerprint,
+    cache_status_snapshot, cleanup_stale_files, clear_sequence_cache,
+    compute_plan_segment_fingerprint, compute_profile_hash, compute_window_content_hash,
+    enforce_cache_limit, is_cached_segment_name, load_manifest, manifest_for_profile,
+    manifest_path, preview_profile_hash, profile_cache_dir, prune_other_profile_caches,
+    refresh_manifest_plan_fingerprints, render_cache_dir, resolve_cached_segment_path,
+    save_manifest, segment_cache_file, sequence_cache_dir, CacheSegmentState,
+    CacheSegmentStatusDto, InterruptedRenderPolicy, ManifestForProfile, RenderCacheConfig,
+    RenderCacheManifest, RenderCacheSegment, RenderCacheStatus, SegmentFingerprint,
+    SEGMENT_FINGERPRINT_UNSET,
 };
 
 // Smart render re-exports

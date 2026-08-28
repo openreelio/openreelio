@@ -2507,13 +2507,17 @@ pub async fn get_available_decoders(
 /// Get render cache status for the active sequence.
 ///
 /// Returns per-segment cache state for the timeline indicator bar.
+///
+/// This command is read-only. The frontend polls it on every render-cache
+/// progress event, so a persisted reconcile here would let the poll invalidate
+/// the cache the background render is filling.
 #[tauri::command]
 #[specta::specta]
 pub async fn get_cache_status(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<crate::core::render::RenderCacheStatus, String> {
-    use crate::core::render::cache::{load_manifest, RenderCacheManifest, RenderCacheStatus};
+    use crate::core::render::cache::{cache_status_snapshot, preview_profile_hash};
 
     let guard = state.project.lock().await;
     let project = guard
@@ -2532,6 +2536,19 @@ pub async fn get_cache_status(
         .get(seq_id)
         .ok_or_else(|| format!("Sequence not found: {seq_id}"))?;
 
+    // The status snapshot re-fingerprints a private copy of the manifest so the
+    // indicator reports staleness honestly (it never persists). That needs the
+    // same render graph / assets / effects the fill path builds.
+    let render_graph = crate::core::render::build_render_graph(&project.state, seq_id)
+        .map_err(|error| format!("Failed to build render graph: {error}"))?;
+
+    let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
+        .state
+        .assets
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     let effects: std::collections::HashMap<String, crate::core::effects::Effect> = project
         .state
         .effects
@@ -2541,21 +2558,16 @@ pub async fn get_cache_status(
 
     let config = resolve_cache_config(&app);
 
-    let mut manifest = load_manifest(&project.path, seq_id)
-        .map_err(|e| format!("Failed to load cache manifest: {e}"))?
-        .unwrap_or_else(|| {
-            RenderCacheManifest::new(
-                seq_id,
-                sequence.duration(),
-                config.segment_duration_sec,
-                sequence,
-                &effects,
-            )
-        });
-
-    reconcile_cache_manifest(&mut manifest, &project.path, sequence, &effects, &config)?;
-
-    Ok(RenderCacheStatus::from_manifest(&manifest, &config))
+    cache_status_snapshot(
+        &project.path,
+        sequence,
+        &preview_profile_hash(),
+        &render_graph,
+        &assets,
+        &effects,
+        &config,
+    )
+    .map_err(|error| format!("Failed to load cache manifest: {error}"))
 }
 
 /// Clear render cache for the active sequence.
@@ -2616,21 +2628,23 @@ fn resolve_cache_config(app: &tauri::AppHandle) -> crate::core::render::RenderCa
 fn cleanup_orphaned_cache_files(
     project_path: &std::path::Path,
     sequence_id: &str,
+    profile_hash: &str,
     files: &[String],
 ) {
     if files.is_empty() {
         return;
     }
 
-    // `sequence_id` and every entry in `files` originate in the on-disk manifest, so
-    // both are validated before this reaches `remove_file`.
-    let seq_dir = match crate::core::render::sequence_cache_dir(project_path, sequence_id) {
-        Ok(dir) => dir,
-        Err(error) => {
-            tracing::warn!("Skipping orphaned render cache cleanup: {error}");
-            return;
-        }
-    };
+    // `sequence_id`, `profile_hash` and every entry in `files` originate in the on-disk
+    // manifest, so all three are validated before this reaches `remove_file`.
+    let seq_dir =
+        match crate::core::render::profile_cache_dir(project_path, sequence_id, profile_hash) {
+            Ok(dir) => dir,
+            Err(error) => {
+                tracing::warn!("Skipping orphaned render cache cleanup: {error}");
+                return;
+            }
+        };
     for file in files {
         let Some(file_path) = crate::core::render::resolve_cached_segment_path(&seq_dir, file)
         else {
@@ -2648,21 +2662,31 @@ fn cleanup_orphaned_cache_files(
     }
 }
 
+/// Brings a manifest's segment layout in line with the sequence and persists it.
+///
+/// Only render commands may call this: it resets segments left in
+/// [`CacheSegmentState::Rendering`](crate::core::render::CacheSegmentState) by an
+/// interrupted run, which is correct only for the caller that is about to own the
+/// render, and it writes the manifest back to disk. Read-only callers use
+/// [`cache_status_snapshot`](crate::core::render::cache_status_snapshot).
 fn reconcile_cache_manifest(
     manifest: &mut crate::core::render::RenderCacheManifest,
     project_path: &std::path::Path,
     sequence: &crate::core::timeline::Sequence,
-    effects: &std::collections::HashMap<String, crate::core::effects::Effect>,
     config: &crate::core::render::RenderCacheConfig,
 ) -> Result<(), String> {
     let sync = manifest.reconcile_with_sequence(
         sequence.duration(),
         config.segment_duration_sec,
-        sequence,
-        effects,
+        crate::core::render::InterruptedRenderPolicy::Reset,
     );
 
-    cleanup_orphaned_cache_files(project_path, &manifest.sequence_id, &sync.orphaned_files);
+    cleanup_orphaned_cache_files(
+        project_path,
+        &manifest.sequence_id,
+        &manifest.profile_hash,
+        &sync.orphaned_files,
+    );
 
     if sync.changed {
         crate::core::render::save_manifest(project_path, manifest)
@@ -2698,7 +2722,8 @@ pub async fn render_preview_cache(
     app_handle: tauri::AppHandle,
 ) -> Result<RenderCacheJobResult, String> {
     use crate::core::render::cache::{
-        cleanup_stale_files, enforce_cache_limit, load_manifest, save_manifest, RenderCacheManifest,
+        cleanup_stale_files, enforce_cache_limit, load_manifest, manifest_for_profile,
+        preview_profile_hash, prune_other_profile_caches, save_manifest,
     };
     use crate::core::render::ExportEngine;
     use tauri::Emitter;
@@ -2753,24 +2778,35 @@ pub async fn render_preview_cache(
         )
     };
 
-    // Load or create manifest
+    // Load or create the manifest for the preview encode profile. A manifest left
+    // by another profile describes files in a different directory that were encoded
+    // to different settings, so it is discarded along with those files.
     let cache_job_id = ulid::Ulid::new().to_string();
-    let mut manifest = load_manifest(&project_path, &seq_id)
-        .map_err(|e| format!("Failed to load cache manifest: {e}"))?
-        .unwrap_or_else(|| {
-            RenderCacheManifest::new(
-                &seq_id,
-                sequence.duration(),
-                config.segment_duration_sec,
-                &sequence,
-                &effects,
-            )
-        });
+    let profile_hash = preview_profile_hash();
+    let loaded = manifest_for_profile(
+        &project_path,
+        &seq_id,
+        &profile_hash,
+        sequence.duration(),
+        config.segment_duration_sec,
+    )
+    .map_err(|e| format!("Failed to load cache manifest: {e}"))?;
+    if let Some(discarded) = loaded.discarded_profile {
+        tracing::info!(
+            "Discarding preview cache for sequence {seq_id} written with render profile \
+             {discarded:?}; current profile is {profile_hash:?}"
+        );
+        if let Err(error) = prune_other_profile_caches(&project_path, &seq_id, &profile_hash) {
+            tracing::warn!("Failed to prune stale render profile caches: {error}");
+        }
+    }
+    let mut manifest = loaded.manifest;
 
-    reconcile_cache_manifest(&mut manifest, &project_path, &sequence, &effects, &config)?;
+    reconcile_cache_manifest(&mut manifest, &project_path, &sequence, &config)?;
     if crate::core::render::refresh_manifest_plan_fingerprints(
         &mut manifest,
         &project_path,
+        &sequence,
         &render_graph,
         &assets,
         &effects,
@@ -2856,6 +2892,7 @@ pub async fn render_preview_cache(
     };
 
     let job_seq_id = seq_id.clone();
+    let job_profile_hash = profile_hash.clone();
     let cache_config = config.clone();
 
     // Cancel any in-flight cache render before starting a new one.
@@ -3055,14 +3092,18 @@ pub async fn render_preview_cache(
             let _ = save_manifest(&project_path, &current_manifest);
 
             // Build segment export settings
-            let seg_output =
-                match crate::core::render::segment_cache_file(&project_path, &job_seq_id, *idx) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        tracing::warn!("Skipping cache segment {idx}: {error}");
-                        continue;
-                    }
-                };
+            let seg_output = match crate::core::render::segment_cache_file(
+                &project_path,
+                &job_seq_id,
+                &job_profile_hash,
+                *idx,
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!("Skipping cache segment {idx}: {error}");
+                    continue;
+                }
+            };
 
             if let Some(parent) = seg_output.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {

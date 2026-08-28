@@ -58,7 +58,15 @@ use super::export::{is_text_clip, ExportError, VideoTimelineSegment, TIMELINE_EP
 ///
 /// Not a technical limit — a guard against a `duration` param that is really a
 /// millisecond value, or a typo, quietly eating a whole shot.
-const MAX_TRANSITION_SEC: f64 = 10.0;
+pub(crate) const MAX_TRANSITION_SEC: f64 = 10.0;
+
+/// Length a transition whose effect carries no `duration` param is planned at.
+///
+/// `AddEffect` leaves `params` empty by default and none of the two-input
+/// transitions declare a default duration, so an effect added by an agent or by
+/// the CLI arrives without one. The render cache sizes its invalidation window
+/// from the same constant, so the two cannot drift apart.
+pub(crate) const DEFAULT_TRANSITION_SEC: f64 = 1.0;
 
 /// Slack, in frames, required beyond the handle a transition needs.
 ///
@@ -552,7 +560,9 @@ pub(crate) fn plan_sequence_transitions(
                 continue;
             }
 
-            let requested_sec = effect.get_float("duration").unwrap_or(1.0);
+            let requested_sec = effect
+                .get_float("duration")
+                .unwrap_or(DEFAULT_TRANSITION_SEC);
             if !requested_sec.is_finite() || requested_sec <= 0.0 {
                 plan.refusals.push(refuse(format!(
                     "its duration of {requested_sec}s is not a positive length"

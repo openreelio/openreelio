@@ -2931,7 +2931,7 @@ pub(super) fn output_video_dimensions(
     (width, height)
 }
 
-pub(super) fn output_video_fps(sequence: &Sequence, settings: &ExportSettings) -> f64 {
+pub(crate) fn output_video_fps(sequence: &Sequence, settings: &ExportSettings) -> f64 {
     let fps = settings.fps.unwrap_or_else(|| sequence.format.fps.as_f64());
 
     if fps.is_finite() && fps > 0.0 {

@@ -4,12 +4,9 @@
 //! directly (stream-copy) versus which need re-encoding during export.
 //! Reduces export time by avoiding redundant encoding of unchanged segments.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::cache::{CacheSegmentState, RenderCacheConfig, RenderCacheManifest, RenderCacheSegment};
-use crate::core::effects::Effect;
-use crate::core::timeline::Sequence;
 
 // =============================================================================
 // Types
@@ -107,24 +104,24 @@ impl SmartRenderPlan {
 // Planning
 // =============================================================================
 
-/// Creates a smart render plan by analyzing the cache manifest.
-/// Refreshes fingerprints first to detect any changes since the last cache.
+/// Creates a smart render plan by reading segment state from the cache manifest.
 ///
-/// NOTE: Currently, CopyFromCache decisions are based solely on content
-/// fingerprint equality and do not verify export profile compatibility
-/// (codec, container, quality). Callers should ensure cached segments
-/// were produced with compatible export settings, or partition cache
-/// directories per export profile. This is tracked as a future enhancement.
+/// Staleness is decided before this runs, by
+/// [`refresh_manifest_plan_fingerprints`](super::cache::refresh_manifest_plan_fingerprints):
+/// segment identity is the render plan hash, and this module has neither the
+/// graph nor the assets needed to compute one. A caller that has edited the
+/// timeline since the manifest was last refreshed must refresh it again first,
+/// or it will copy a segment the edit invalidated.
+///
+/// Encode-profile compatibility needs no check here: cached segments live in a
+/// directory named after the profile hash that produced them
+/// (`manifest.profile_hash`), so a segment from another profile is not on the
+/// path this looks at.
 pub fn plan_smart_render(
-    manifest: &mut RenderCacheManifest,
-    sequence: &Sequence,
-    effects: &HashMap<String, Effect>,
+    manifest: &RenderCacheManifest,
     config: &RenderCacheConfig,
     project_dir: &Path,
 ) -> SmartRenderPlan {
-    // Refresh fingerprints to ensure we detect any changes
-    manifest.refresh_fingerprints(sequence, effects);
-
     let total_duration = manifest.segments.last().map(|s| s.end_sec).unwrap_or(0.0);
 
     if !config.smart_render_enabled || manifest.segments.is_empty() {
@@ -134,7 +131,11 @@ pub fn plan_smart_render(
 
     // Fail closed: without a usable cache directory there is nothing to copy from, so
     // re-encode rather than resolving segment paths against an unvalidated id.
-    let seq_dir = match super::cache::sequence_cache_dir(project_dir, &manifest.sequence_id) {
+    let seq_dir = match super::cache::profile_cache_dir(
+        project_dir,
+        &manifest.sequence_id,
+        &manifest.profile_hash,
+    ) {
         Ok(dir) => dir,
         Err(error) => {
             tracing::warn!("Smart render falling back to a full re-encode: {error}");
@@ -241,97 +242,30 @@ pub fn merge_reencode_ranges(plan: &SmartRenderPlan) -> Vec<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::render::cache::{CacheSegmentState, RenderCacheConfig, RenderCacheManifest};
-    use crate::core::timeline::{
-        AudioSettings, BlendMode, Canvas, Clip, ClipPlace, ClipRange, Sequence, SequenceFormat,
-        Track, TrackKind, Transform,
+    use crate::core::render::cache::{
+        preview_profile_hash, profile_cache_dir, CacheSegmentState, RenderCacheConfig,
+        RenderCacheManifest,
     };
-    use crate::core::types::Ratio;
 
-    fn make_clip(id: &str, start: f64, duration: f64) -> Clip {
-        Clip {
-            id: id.to_string(),
-            asset_id: "asset1".to_string(),
-            range: ClipRange {
-                source_in_sec: 0.0,
-                source_out_sec: duration,
-            },
-            place: ClipPlace {
-                timeline_in_sec: start,
-                duration_sec: duration,
-            },
-            transform: Transform::default(),
-            motion_keyframes: Vec::new(),
-            opacity: 1.0,
-            blend_mode: BlendMode::Normal,
-            speed: 1.0,
-            reverse: false,
-            freeze_frame: false,
-            time_remap: None,
-            slow_motion_interpolation: crate::core::timeline::SlowMotionInterpolation::Nearest,
-            effects: vec![],
-            audio: AudioSettings::default(),
-            label: None,
-            color: None,
-            caption_style: None,
-            caption_position: None,
-            enabled: true,
-            link_group_id: None,
-            group_id: None,
-            compound_sequence_id: None,
-            is_adjustment_layer: false,
-        }
+    fn manifest(duration_sec: f64) -> RenderCacheManifest {
+        RenderCacheManifest::new("seq1", &preview_profile_hash(), duration_sec, 5.0)
     }
 
-    fn make_sequence(duration: f64) -> Sequence {
-        let clip = make_clip("c1", 0.0, duration);
-        Sequence {
-            id: "seq1".to_string(),
-            name: "Test".to_string(),
-            format: SequenceFormat {
-                canvas: Canvas {
-                    width: 1920,
-                    height: 1080,
-                },
-                fps: Ratio::new(30, 1),
-                audio_sample_rate: 48000,
-                audio_channels: 2,
-            },
-            tracks: vec![Track {
-                id: "t1".to_string(),
-                kind: TrackKind::Video,
-                name: "V1".to_string(),
-                clips: vec![clip],
-                blend_mode: BlendMode::Normal,
-                is_base_track: None,
-                muted: false,
-                locked: false,
-                visible: true,
-                sync_lock: false,
-                volume: 1.0,
-                caption_language: None,
-            }],
-            markers: vec![],
-            master_volume_db: 0.0,
-            hdr_settings: Default::default(),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            modified_at: "2026-01-01T00:00:00Z".to_string(),
-        }
+    fn segment_dir(project_dir: &Path) -> PathBuf {
+        let dir = profile_cache_dir(project_dir, "seq1", &preview_profile_hash()).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
     fn should_mark_cached_segments_as_copy() {
         // Given a manifest with 2 cached segments and 1 empty
-        let seq = make_sequence(15.0);
-        let effects = HashMap::new();
         let config = RenderCacheConfig::default();
         let tmp = tempfile::tempdir().unwrap();
-
-        let mut manifest = RenderCacheManifest::new("seq1", 15.0, 5.0, &seq, &effects);
+        let mut manifest = manifest(15.0);
 
         // Create actual cache files on disk
-        let seg_dir = super::super::cache::sequence_cache_dir(tmp.path(), "seq1").unwrap();
-        std::fs::create_dir_all(&seg_dir).unwrap();
+        let seg_dir = segment_dir(tmp.path());
         std::fs::write(seg_dir.join("segment_0000.mp4"), b"cached0").unwrap();
         std::fs::write(seg_dir.join("segment_0001.mp4"), b"cached1").unwrap();
 
@@ -339,7 +273,7 @@ mod tests {
         manifest.mark_segment_cached(1, "segment_0001.mp4".to_string(), 100);
 
         // When planning smart render
-        let plan = plan_smart_render(&mut manifest, &seq, &effects, &config, tmp.path());
+        let plan = plan_smart_render(&manifest, &config, tmp.path());
 
         // Then cached segments should be copy, rest re-encode
         assert_eq!(plan.segments.len(), 3);
@@ -353,19 +287,17 @@ mod tests {
     #[test]
     fn should_reencode_all_when_smart_render_disabled() {
         // Given smart render disabled
-        let seq = make_sequence(10.0);
-        let effects = HashMap::new();
         let config = RenderCacheConfig {
             smart_render_enabled: false,
             ..Default::default()
         };
         let tmp = tempfile::tempdir().unwrap();
 
-        let mut manifest = RenderCacheManifest::new("seq1", 10.0, 5.0, &seq, &effects);
+        let mut manifest = manifest(10.0);
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
 
         // When planning
-        let plan = plan_smart_render(&mut manifest, &seq, &effects, &config, tmp.path());
+        let plan = plan_smart_render(&manifest, &config, tmp.path());
 
         // Then all segments should be re-encoded
         assert_eq!(plan.copy_count(), 0);
@@ -375,17 +307,15 @@ mod tests {
     #[test]
     fn should_reencode_when_cache_file_missing_on_disk() {
         // Given a manifest says cached, but file is missing
-        let seq = make_sequence(5.0);
-        let effects = HashMap::new();
         let config = RenderCacheConfig::default();
         let tmp = tempfile::tempdir().unwrap();
 
-        let mut manifest = RenderCacheManifest::new("seq1", 5.0, 5.0, &seq, &effects);
+        let mut manifest = manifest(5.0);
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
         // File NOT created on disk
 
         // When planning
-        let plan = plan_smart_render(&mut manifest, &seq, &effects, &config, tmp.path());
+        let plan = plan_smart_render(&manifest, &config, tmp.path());
 
         // Then it should fall back to re-encode
         assert_eq!(plan.copy_count(), 0);
@@ -393,52 +323,70 @@ mod tests {
     }
 
     #[test]
-    fn should_detect_stale_segments_after_edit() {
-        // Given a cached manifest
-        let seq = make_sequence(10.0);
-        let effects = HashMap::new();
+    fn should_reencode_segments_the_manifest_marks_stale() {
+        // Staleness is decided by the plan-fingerprint refresh before this runs;
+        // smart render only reads the state it left behind.
+
+        // Given a cached manifest whose first segment has been invalidated
         let config = RenderCacheConfig::default();
         let tmp = tempfile::tempdir().unwrap();
-
-        let seg_dir = super::super::cache::sequence_cache_dir(tmp.path(), "seq1").unwrap();
-        std::fs::create_dir_all(&seg_dir).unwrap();
+        let seg_dir = segment_dir(tmp.path());
         std::fs::write(seg_dir.join("segment_0000.mp4"), b"data").unwrap();
 
-        let mut manifest = RenderCacheManifest::new("seq1", 10.0, 5.0, &seq, &effects);
+        let mut manifest = manifest(10.0);
+        manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
+        manifest.segments[0].state = CacheSegmentState::Stale;
+
+        // When planning
+        let plan = plan_smart_render(&manifest, &config, tmp.path());
+
+        // Then the stale segment is re-encoded even though its file is on disk
+        assert!(!plan.segments[0].is_copy());
+        assert_eq!(plan.copy_count(), 0);
+    }
+
+    #[test]
+    fn should_not_copy_a_segment_cached_under_another_profile() {
+        // Given a segment file that exists only under a different profile
+        let config = RenderCacheConfig::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let other_profile = crate::core::render::compute_profile_hash(
+            &crate::core::render::ExportSettings::default(),
+        );
+        let other_dir = profile_cache_dir(tmp.path(), "seq1", &other_profile).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(other_dir.join("segment_0000.mp4"), b"other").unwrap();
+
+        let mut manifest = manifest(5.0);
+        assert_ne!(manifest.profile_hash, other_profile);
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
 
-        // When the sequence changes (different clip)
-        let mut modified_seq = make_sequence(10.0);
-        modified_seq.tracks[0].clips[0].opacity = 0.5; // changed!
+        // When planning under this manifest's own profile
+        let plan = plan_smart_render(&manifest, &config, tmp.path());
 
-        let plan = plan_smart_render(&mut manifest, &modified_seq, &effects, &config, tmp.path());
-
-        // Then the changed segment should need re-encode
-        assert!(!plan.segments[0].is_copy());
-        assert_eq!(manifest.segments[0].state, CacheSegmentState::Stale);
+        // Then the other profile's file is not reachable and the segment re-encodes
+        assert_eq!(plan.copy_count(), 0);
+        assert_eq!(plan.reencode_count(), 1);
     }
 
     #[test]
     fn should_calculate_correct_savings_ratio() {
         // Given a plan with 3 copy and 1 re-encode segments (20 sec total)
-        let seq = make_sequence(20.0);
-        let effects = HashMap::new();
         let config = RenderCacheConfig::default();
         let tmp = tempfile::tempdir().unwrap();
 
-        let seg_dir = super::super::cache::sequence_cache_dir(tmp.path(), "seq1").unwrap();
-        std::fs::create_dir_all(&seg_dir).unwrap();
+        let seg_dir = segment_dir(tmp.path());
         for i in 0..3 {
             let name = format!("segment_{i:04}.mp4");
             std::fs::write(seg_dir.join(&name), b"data").unwrap();
         }
 
-        let mut manifest = RenderCacheManifest::new("seq1", 20.0, 5.0, &seq, &effects);
+        let mut manifest = manifest(20.0);
         for i in 0..3 {
             manifest.mark_segment_cached(i, format!("segment_{i:04}.mp4"), 100);
         }
 
-        let plan = plan_smart_render(&mut manifest, &seq, &effects, &config, tmp.path());
+        let plan = plan_smart_render(&manifest, &config, tmp.path());
 
         // Then savings should be 75% (15/20 seconds from cache)
         assert_eq!(plan.copy_count(), 3);
@@ -494,34 +442,13 @@ mod tests {
 
     #[test]
     fn should_return_empty_plan_for_empty_manifest() {
-        // Given an empty sequence
-        let seq = Sequence {
-            id: "seq1".to_string(),
-            name: "Empty".to_string(),
-            format: SequenceFormat {
-                canvas: Canvas {
-                    width: 1920,
-                    height: 1080,
-                },
-                fps: Ratio::new(30, 1),
-                audio_sample_rate: 48000,
-                audio_channels: 2,
-            },
-            tracks: vec![],
-            markers: vec![],
-            master_volume_db: 0.0,
-            hdr_settings: Default::default(),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            modified_at: "2026-01-01T00:00:00Z".to_string(),
-        };
-        let effects = HashMap::new();
+        // Given an empty timeline
         let config = RenderCacheConfig::default();
         let tmp = tempfile::tempdir().unwrap();
-
-        let mut manifest = RenderCacheManifest::new("seq1", 0.0, 5.0, &seq, &effects);
+        let manifest = manifest(0.0);
 
         // When planning
-        let plan = plan_smart_render(&mut manifest, &seq, &effects, &config, tmp.path());
+        let plan = plan_smart_render(&manifest, &config, tmp.path());
 
         // Then plan should be empty
         assert!(plan.segments.is_empty());
