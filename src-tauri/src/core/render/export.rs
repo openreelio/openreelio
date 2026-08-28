@@ -26,6 +26,7 @@ use crate::core::{
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
     render::hdr::{build_tonemap_filter, HdrMetadata, TonemapMode, TonemapParams},
+    render::render_window::RenderWindow,
     render::transform_layout::{
         clip_motion_renders_animated, opacity_needs_alpha_filter, ClipMotionTrack,
         ClipTransformLayout, MotionKeyframeLayout,
@@ -1882,6 +1883,89 @@ fn insert_output_option_args(
     Ok(())
 }
 
+/// Caps a windowed timeline render at the length of its window.
+///
+/// The graph the timeline builders emit already *starts* at the window — every
+/// anchor is rebased and the segment straddling the window's first frame has the
+/// frames in front of it dropped — so the only thing left to say on the output
+/// side is how long the file runs. There is deliberately no `-ss` here: an
+/// output-side seek would ask FFmpeg to throw away the front of a graph that no
+/// longer has one, which is how a range render used to land up to half a frame
+/// out of phase with the same frames of a full render.
+///
+/// Emits nothing at all for a render with no range, so a full export keeps the
+/// argument list it has always had.
+pub(super) fn append_windowed_output_duration_arg(args: &mut Vec<String>, window: &RenderWindow) {
+    if !window.is_ranged() {
+        return;
+    }
+
+    args.push("-t".to_string());
+    args.push(window.output_duration_arg());
+}
+
+/// Pins a windowed render's picture to exactly the window's frame count.
+///
+/// `-t` alone is not quite enough. It is a *duration*, and the duration of a
+/// whole number of frames is not always representable in the six decimals the
+/// argument is formatted to — the value can round up past the next frame's
+/// presentation time and let one extra frame through. Counting frames here says
+/// the same thing in the unit the window is really measured in, and leaves `-t`
+/// to bound the sound.
+///
+/// Returns the label the output should map. Emits nothing for a render with no
+/// range, so a full export keeps the filtergraph it has always had.
+pub(super) fn append_window_frame_cap(
+    filter_complex: &mut String,
+    video_label: &str,
+    window: &RenderWindow,
+) -> String {
+    if !window.is_ranged() {
+        return video_label.to_string();
+    }
+
+    const WINDOWED_VIDEO_LABEL: &str = "[outvwin]";
+    filter_complex.push(';');
+    filter_complex.push_str(&format!(
+        "{}trim=end_frame={}{}",
+        video_label,
+        window.len_frames().max(1),
+        WINDOWED_VIDEO_LABEL
+    ));
+    WINDOWED_VIDEO_LABEL.to_string()
+}
+
+/// Emits a silent stereo branch the length of the render.
+///
+/// The master bus pads whatever it is handed out to the render's length, but it
+/// has to be handed *something*: a window that falls between every audio branch
+/// would otherwise produce a file with no audio stream at all, where the full
+/// render of the same seconds produces silence.
+pub(super) fn append_window_silence_audio(
+    filter_complex: &mut String,
+    output_label: &str,
+    duration_sec: f64,
+) {
+    // The two callers reach this from different places in the graph — one with
+    // a chain already written, one with nothing at all — so the separator is
+    // decided here rather than at each call site.
+    if !filter_complex.is_empty() && !filter_complex.ends_with(';') {
+        filter_complex.push(';');
+    }
+
+    filter_complex.push_str(&format!(
+        "anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration={},asetpts=PTS-STARTPTS[{}]",
+        format_speed_number(duration_sec.max(TIMELINE_EPSILON_SEC)),
+        output_label
+    ));
+}
+
+/// Applies a range to a *pass-through* export, which has no graph to rebase.
+///
+/// Only [`ExportEngine::build_simple_export_args`] uses this: it hands one input
+/// file straight to the encoder, so the range really is a seek into that file
+/// and there is nothing to shape. Every timeline render goes through
+/// [`append_windowed_output_duration_arg`] instead.
 pub(super) fn append_output_time_range_args(
     args: &mut Vec<String>,
     start_time: Option<f64>,
@@ -2781,6 +2865,12 @@ fn volume_db_to_linear(volume_db: f32) -> f64 {
 /// `handles.head_sec` moves the branch's first sample earlier: a transition
 /// starts the incoming clip's sound before its in point, so the delay that puts
 /// the branch at its timeline position has to shrink by exactly that much.
+///
+/// `window` is the stretch of timeline this render writes. Placement is the only
+/// stage that learns about it: the cut it makes is the last thing in the branch,
+/// after the authored fades, the automation and the transition fades, so every
+/// one of those stays anchored where the editor put it and nothing upstream has
+/// to know the render starts late.
 pub(super) fn apply_audio_mix_settings(
     clip: &Clip,
     track: &Track,
@@ -2788,6 +2878,7 @@ pub(super) fn apply_audio_mix_settings(
     current_label: &str,
     filter_complex: &mut String,
     handles: ClipHandles,
+    window: &RenderWindow,
 ) -> String {
     let mut current_label = current_label.to_string();
 
@@ -2819,7 +2910,23 @@ pub(super) fn apply_audio_mix_settings(
     }
 
     let branch_start_sec = (clip.place.timeline_in_sec - handles.head_sec.max(0.0)).max(0.0);
-    let delay_ms = (branch_start_sec * 1000.0).round() as u64;
+    // A branch that starts before the window is cut, not delayed: the samples in
+    // front of the window's first frame have to leave the mix entirely, and
+    // `adelay` can only ever push a branch later. `.max(0.0)` on the delay below
+    // would otherwise stack the whole branch onto the window's first sample.
+    let windowed_start_sec = window.rebase(branch_start_sec);
+    if windowed_start_sec < 0.0 {
+        let head_label = format!("awin{}", input_index);
+        filter_complex.push_str(&format!(
+            "[{}]atrim=start={},asetpts=PTS-STARTPTS[{}];",
+            current_label,
+            format_speed_number(-windowed_start_sec),
+            head_label
+        ));
+        current_label = head_label;
+    }
+
+    let delay_ms = (windowed_start_sec.max(0.0) * 1000.0).round() as u64;
     if delay_ms > 0 {
         let delay_label = format!("adel{}", input_index);
         filter_complex.push_str(&format!(
@@ -4019,6 +4126,101 @@ pub(super) fn append_black_video_gap(
     ));
 }
 
+/// Re-expresses a folded segment list in window-local time.
+///
+/// Runs *after* the transition and composite folds, and that order is the whole
+/// design. Both folds count frames off their inputs' absolute timeline spans, so
+/// clamping a clip's span to the window before they run would move an `xfade`
+/// offset or a composite's backdrop length and blend at the wrong frame. Folding
+/// first means every stream reaching here is bit-for-bit the stream a full
+/// render would build; all this pass does is decide where each one starts.
+///
+/// Three things happen to a segment:
+///
+/// 1. A segment sharing no frame with the window is sent to `nullsink`. It
+///    cannot simply be dropped: a filtergraph with an unconnected output is a
+///    hard error, and the builder emits chains for whole transition and
+///    composite groups even when only part of a group is inside the window.
+/// 2. A segment straddling the window's first frame has the frames in front of
+///    it dropped with a frame-indexed `trim`. That count — window start frame
+///    minus segment start frame — is exactly how many of that segment's frames
+///    a full render would have written before the window began, which is what
+///    makes the window a *slice* of the full render rather than a re-render.
+///    Dropping frames here rather than re-anchoring each clip's filters is also
+///    what keeps a Ken Burns move, an authored fade or an auto-reframe track
+///    playing from the middle: their chains never learn the window exists.
+/// 3. Every surviving span is rebased so the window's first frame is `t = 0`.
+///
+/// A window that ends up holding no picture at all — a range over the black tail
+/// past the last clip — gets a black canvas the length of the window, which is
+/// what the full render's tail padding would have put there.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn shape_video_segments_to_window(
+    filter_complex: &mut String,
+    segments: Vec<VideoTimelineSegment>,
+    window: &RenderWindow,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+) -> Vec<VideoTimelineSegment> {
+    if !window.is_ranged() {
+        return segments;
+    }
+
+    let mut shaped: Vec<VideoTimelineSegment> = Vec::with_capacity(segments.len());
+
+    for (index, segment) in segments.into_iter().enumerate() {
+        if !window.covers(segment.start_sec, segment.end_sec) {
+            filter_complex.push_str(&format!("{}nullsink;", segment.stream_label));
+            continue;
+        }
+
+        let segment_start_frame = window.frame_at(segment.start_sec);
+        let dropped_frames = window.start_frame() - segment_start_frame;
+
+        let (stream_label, start_sec) = if dropped_frames > 0 {
+            let trimmed_label = format!("[vwin{}]", index);
+            filter_complex.push_str(&format!(
+                "{}trim=start_frame={},setpts=PTS-STARTPTS{};",
+                segment.stream_label, dropped_frames, trimmed_label
+            ));
+            (trimmed_label, window.start_sec())
+        } else {
+            (segment.stream_label.clone(), segment.start_sec)
+        };
+
+        shaped.push(
+            VideoTimelineSegment::new(
+                stream_label,
+                window.rebase(start_sec),
+                window.rebase(segment.end_sec),
+            )
+            .with_layer(segment.layer),
+        );
+    }
+
+    if shaped.is_empty() {
+        let blank_label = "vwinblank";
+        append_black_video_gap(
+            filter_complex,
+            blank_label,
+            window.len_sec(),
+            width,
+            height,
+            fps,
+            pixel_format,
+        );
+        shaped.push(VideoTimelineSegment::new(
+            format!("[{}]", blank_label),
+            0.0,
+            window.len_sec(),
+        ));
+    }
+
+    shaped
+}
+
 pub(super) fn append_timeline_video_output(
     filter_complex: &mut String,
     segments: &[VideoTimelineSegment],
@@ -4816,7 +5018,25 @@ fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
 ///
 /// Exposed to the crate so the curated caption pack contract tests can assert
 /// against the real render seam instead of a re-implementation of it.
+#[cfg(test)]
 pub(crate) fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
+    build_caption_drawtext_in_window(clip, 0.0)
+}
+
+/// [`build_caption_drawtext_with_enable`], with the clip's timing rebased.
+///
+/// `window_start_sec` is where the render's own clock begins on the timeline, so
+/// a caption already on screen when a ranged render opens gets a negative start
+/// — which `.max(0.0)` below turns into "on from the first frame", exactly what
+/// the full render draws there.
+///
+/// A caption that *ended* before the window opened must not be drawn at all: its
+/// rebased end is negative, and `between` is inclusive, so clamping that end to
+/// `0.0` would paint it onto the window's first frame (`t == 0`). The full render
+/// draws nothing there, so a rebased end below zero drops the overlay. An end of
+/// exactly `0.0` is kept — the full render's frame at `window_start` carries the
+/// caption's last (inclusive) frame, so the window's first frame must too.
+fn build_caption_drawtext_in_window(clip: &Clip, window_start_sec: f64) -> Option<String> {
     let effect = build_caption_text_effect(clip)?;
 
     let start = clip.place.timeline_in_sec;
@@ -4825,12 +5045,17 @@ pub(crate) fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> 
         return None;
     }
 
+    let rebased_end = end - window_start_sec;
+    if rebased_end < 0.0 {
+        return None;
+    }
+
     let filter_body = effect.to_filter_body();
     Some(format!(
         "{}:enable='between(t,{:.6},{:.6})'",
         filter_body,
-        start.max(0.0),
-        end.max(0.0)
+        (start - window_start_sec).max(0.0),
+        rebased_end
     ))
 }
 
@@ -4922,11 +5147,16 @@ pub(super) struct DrawtextTextOverlay {
 /// Captions and text clips are collected together because they share one filter
 /// chain: keeping them in separate chains would have made every caption draw
 /// over every text clip regardless of which track was on top.
+///
+/// `window` is the stretch of timeline this render writes; every clip's `enable`
+/// gate is expressed in the render's own clock, which starts at the window.
 pub(super) fn collect_drawtext_text_overlays(
     sequence: &Sequence,
     all_clips: &[(&Clip, &Track)],
     effects: &HashMap<String, Effect>,
+    window: &RenderWindow,
 ) -> Result<Vec<DrawtextTextOverlay>, ExportError> {
+    let window_start_sec = window.start_sec();
     let stack_depths = visual_stack_depths(sequence);
     let mut overlays = Vec::new();
 
@@ -4934,7 +5164,7 @@ pub(super) fn collect_drawtext_text_overlays(
         let stack_depth = stack_depths.get(track.id.as_str()).copied().unwrap_or(0);
 
         if track.kind == TrackKind::Caption {
-            if let Some(filter) = build_caption_drawtext_with_enable(clip) {
+            if let Some(filter) = build_caption_drawtext_in_window(clip, window_start_sec) {
                 overlays.push(DrawtextTextOverlay {
                     stack_depth,
                     label_prefix: CAPTION_OVERLAY_LABEL_PREFIX,
@@ -4943,11 +5173,15 @@ pub(super) fn collect_drawtext_text_overlays(
             }
         } else if matches!(track.kind, TrackKind::Video | TrackKind::Overlay) && is_text_clip(clip)
         {
-            overlays.push(DrawtextTextOverlay {
-                stack_depth,
-                label_prefix: TEXT_CLIP_OVERLAY_LABEL_PREFIX,
-                filter: build_text_clip_drawtext_with_enable(clip, effects)?,
-            });
+            if let Some(filter) =
+                build_text_clip_drawtext_in_window(clip, effects, window_start_sec)?
+            {
+                overlays.push(DrawtextTextOverlay {
+                    stack_depth,
+                    label_prefix: TEXT_CLIP_OVERLAY_LABEL_PREFIX,
+                    filter,
+                });
+            }
         }
     }
 
@@ -4995,10 +5229,25 @@ pub(super) fn append_drawtext_text_overlays(
 ///
 /// Exposed to the crate so the curated text preset contract tests can assert a
 /// preset's typography survives all the way to the filter string.
+#[cfg(test)]
 pub(crate) fn build_text_clip_drawtext_with_enable(
     clip: &Clip,
     effects: &HashMap<String, Effect>,
 ) -> Result<String, ExportError> {
+    Ok(build_text_clip_drawtext_in_window(clip, effects, 0.0)?
+        .expect("a valid text clip rebased against window start 0 always renders"))
+}
+
+/// [`build_text_clip_drawtext_with_enable`], with the clip's timing rebased.
+///
+/// See [`build_caption_drawtext_in_window`] for what `window_start_sec` means,
+/// including why a clip that ended before the window (rebased end below zero)
+/// renders nothing — here `Ok(None)` so the caller drops the overlay.
+fn build_text_clip_drawtext_in_window(
+    clip: &Clip,
+    effects: &HashMap<String, Effect>,
+    window_start_sec: f64,
+) -> Result<Option<String>, ExportError> {
     let resolved_text_effect = build_text_clip_effect_with_transform(clip, effects)?;
 
     let start = clip.place.timeline_in_sec;
@@ -5010,12 +5259,17 @@ pub(crate) fn build_text_clip_drawtext_with_enable(
         )));
     }
 
-    Ok(format!(
+    let rebased_end = end - window_start_sec;
+    if rebased_end < 0.0 {
+        return Ok(None);
+    }
+
+    Ok(Some(format!(
         "{}:enable='between(t,{:.6},{:.6})'",
         resolved_text_effect.to_filter_body(),
-        start.max(0.0),
-        end.max(0.0)
-    ))
+        (start - window_start_sec).max(0.0),
+        rebased_end
+    )))
 }
 
 fn build_text_clip_effect_with_transform(
@@ -5371,6 +5625,9 @@ struct AssEventContext<'a> {
     /// nowhere is named explicitly rather than left to libass to guess at.
     font_family: &'a str,
     anchor: AssTextAnchor,
+    /// Where this render's own clock starts on the timeline, so the event lands
+    /// at the same picture a full render would have put it on.
+    window_start_sec: f64,
 }
 
 fn append_ass_text_style_and_event(
@@ -5385,6 +5642,7 @@ fn append_ass_text_style_and_event(
         layer,
         font_family,
         anchor,
+        window_start_sec,
     } = *context;
     let opacity = effect_float_param(effect, "opacity", 1.0).clamp(0.0, 1.0);
     let font_family = ass_sanitize_style_field(font_family, "Arial");
@@ -5478,8 +5736,8 @@ fn append_ass_text_style_and_event(
     // the block, and left every line immune to wrapping.
     let text = ass_escape_text(&effect_string_param(effect, "text", "Title"));
     let event_border_width = style_outline_width;
-    let start = ass_timecode(clip.place.timeline_in_sec);
-    let end = ass_timecode(clip.place.timeline_out_sec());
+    let start = ass_timecode(clip.place.timeline_in_sec - window_start_sec);
+    let end = ass_timecode(clip.place.timeline_out_sec() - window_start_sec);
     let position = anchor.position_override();
 
     events.push_str(&format!(
@@ -5611,6 +5869,21 @@ pub fn build_ass_text_overlay_script(
     sequence: &Sequence,
     effects: &HashMap<String, Effect>,
 ) -> Result<Option<String>, ExportError> {
+    build_ass_text_overlay_script_in_window(sequence, effects, 0.0)
+}
+
+/// [`build_ass_text_overlay_script`], with every event's timing rebased.
+///
+/// `window_start_sec` is where the render's own clock begins on the timeline.
+/// The `subtitles` filter reads the script against that clock, so a ranged
+/// render needs the events moved back by exactly as much as the graph was.
+/// [`ass_timecode`] floors a negative start at zero, which is what an overlay
+/// already on screen when the window opens should be.
+pub(crate) fn build_ass_text_overlay_script_in_window(
+    sequence: &Sequence,
+    effects: &HashMap<String, Effect>,
+    window_start_sec: f64,
+) -> Result<Option<String>, ExportError> {
     let (play_res_x, play_res_y) = ass_play_resolution(&sequence.format.canvas);
     let mut styles = String::new();
     let mut events = String::new();
@@ -5653,6 +5926,15 @@ pub fn build_ass_text_overlay_script(
                 continue;
             }
 
+            // A clip that ended before the window opened contributes no event.
+            // `ass_timecode` would clamp both its rebased bounds to zero and emit
+            // a zero-length `Dialogue` that libass never draws — harmless, but
+            // dropping it keeps this path in step with the drawtext burn-in,
+            // which likewise renders nothing for a clip in front of the window.
+            if end - window_start_sec < 0.0 {
+                continue;
+            }
+
             let requested_family = ass_sanitize_style_field(
                 &effect_string_param(&effect, "font_family", "Arial"),
                 "Arial",
@@ -5674,6 +5956,7 @@ pub fn build_ass_text_overlay_script(
                     layer: ass_dialogue_layer(stack_depth, clip_index),
                     font_family: &font_family,
                     anchor: ass_text_anchor(clip, &track.kind, &effect, play_res_x, play_res_y),
+                    window_start_sec,
                 },
                 clip,
                 &effect,
@@ -6310,7 +6593,20 @@ impl ExportEngine {
 
         let mut ass_text_overlay_dir: Option<tempfile::TempDir> = None;
         let mut ass_text_overlay_path: Option<PathBuf> = None;
-        if let Some(ass_script) = build_ass_text_overlay_script(sequence, effects)? {
+        // The script is written before the graph is built, so it has to resolve
+        // the same window the builder will: `subtitles` reads its timings
+        // against the graph's clock, and that clock now starts at the window.
+        let text_overlay_window = RenderWindow::resolve(
+            sequence.output_duration(),
+            settings.start_time,
+            settings.end_time,
+            output_video_fps(sequence, settings),
+        );
+        if let Some(ass_script) = build_ass_text_overlay_script_in_window(
+            sequence,
+            effects,
+            text_overlay_window.start_sec(),
+        )? {
             if self.ffmpeg_supports_filter("subtitles").await {
                 let temp_dir = tempfile::Builder::new()
                     .prefix("openreelio-text-overlays-")
@@ -8504,6 +8800,7 @@ mod tests {
                 style_name: "OpenReelioText0",
                 layer: 0,
                 font_family: "Arial",
+                window_start_sec: 0.0,
                 anchor: ass_text_anchor(
                     &sequence.tracks[0].clips[0],
                     &TrackKind::Caption,
@@ -8890,8 +9187,13 @@ mod tests {
         );
 
         let all_clips = collect_enabled_clips_sorted(&sequence);
-        let overlays = collect_drawtext_text_overlays(&sequence, &all_clips, &effects)
-            .expect("fallback overlays should build");
+        let overlays = collect_drawtext_text_overlays(
+            &sequence,
+            &all_clips,
+            &effects,
+            &RenderWindow::resolve(sequence.output_duration(), None, None, 30.0),
+        )
+        .expect("fallback overlays should build");
 
         let mut filter_complex = String::from("[0:v]null[outv]");
         append_drawtext_text_overlays(&mut filter_complex, "[outv]", &overlays);
@@ -8918,8 +9220,13 @@ mod tests {
             sequence_with_overlapping_overlays_on_two_tracks(TrackKind::Video, TrackKind::Caption);
 
         let all_clips = collect_enabled_clips_sorted(&sequence);
-        let overlays = collect_drawtext_text_overlays(&sequence, &all_clips, &effects)
-            .expect("fallback overlays should build");
+        let overlays = collect_drawtext_text_overlays(
+            &sequence,
+            &all_clips,
+            &effects,
+            &RenderWindow::resolve(sequence.output_duration(), None, None, 30.0),
+        )
+        .expect("fallback overlays should build");
 
         let mut filter_complex = String::from("[0:v]null[outv]");
         append_drawtext_text_overlays(&mut filter_complex, "[outv]", &overlays);
@@ -12458,6 +12765,87 @@ mod tests {
             args.get(first_map_index + 1).map(String::as_str),
             Some("[capv0]"),
             "Expected video map label to use caption-composited stream"
+        );
+    }
+
+    /// Feature: Windowed render
+    /// Scenario: a caption that ended before the window is not drawn
+    ///
+    /// `between` is inclusive, so clamping a caption's rebased end to `0.0` would
+    /// gate it as `between(t,0,0)` — true on the window's first frame. A caption
+    /// that left the screen before the window opened must carry no gate at all.
+    /// This is the fast, ffmpeg-free guard for that regression; the byte-exact
+    /// `a_windowed_render_is_byte_identical_…` suite proves the pixels too.
+    #[test]
+    fn a_caption_that_ended_before_a_windowed_render_is_not_drawn() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 8.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut caption_track = Track::new_caption("Captions");
+        let mut caption_clip = Clip::new("caption")
+            .with_source_range(0.0, 1.0)
+            .place_at(1.0);
+        caption_clip.label = Some("GONE".to_string());
+        caption_track.add_clip(caption_clip);
+        sequence.add_track(caption_track);
+
+        let video_path = create_temp_media_file("video_caption_before_window.mp4");
+        let mut video_asset = Asset::new_video(
+            "video_caption_before_window.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(8.0)
+        .with_file_size(8_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
+        );
+
+        let effects = std::collections::HashMap::new();
+        // The caption runs 1.0-2.0s; the window opens at 5.0s, long after it left.
+        let settings = ExportSettings {
+            start_time: Some(5.0),
+            end_time: Some(7.0),
+            ..ExportSettings::default()
+        };
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        )
+        .expect("the windowed caption fixture must build");
+        let args_str = args.join(" ");
+
+        assert!(
+            !args_str.contains("between(t,0.000000,0.000000)"),
+            "a caption that ended before the window must not be gated always-on: {args_str}"
+        );
+        assert!(
+            !args_str.contains("drawtext"),
+            "a caption that ended before the window must not be drawn at all: {args_str}"
         );
     }
 
@@ -18324,10 +18712,10 @@ mod tests {
         // The FFmpeg args builder uses these for -ss/-t parameters
     }
 
-    /// Feature: Range Export
-    /// Scenario: should include output range args in complex export builds
-    #[test]
-    fn complex_export_args_should_include_output_range_args() {
+    /// Builds a one-clip sequence long enough to slice a window out of.
+    fn twenty_second_range_fixture(
+        name: &str,
+    ) -> (Sequence, std::collections::HashMap<String, Asset>) {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{Clip, SequenceFormat, Track};
 
@@ -18340,14 +18728,29 @@ mod tests {
         );
         sequence.add_track(track);
 
-        let video_path = create_temp_media_file("range_args.mp4");
-        let mut asset = Asset::new_video("range_args.mp4", &video_path, VideoInfo::default())
+        let video_path = create_temp_media_file(name);
+        let mut asset = Asset::new_video(name, &video_path, VideoInfo::default())
             .with_duration(20.0)
             .with_file_size(10_000_000);
         asset.id = "asset1".to_string();
 
         let mut assets = std::collections::HashMap::new();
         assets.insert("asset1".to_string(), asset);
+
+        (sequence, assets)
+    }
+
+    /// Feature: Range Export
+    /// Scenario: a range render is a graph that starts at the range, not a seek
+    ///
+    /// The output-side `-ss` this replaced asked FFmpeg to build the whole
+    /// timeline and throw the front of it away, which is how a range render could
+    /// land half an output frame out of phase with the same frames of a full one.
+    /// What the builder emits now is a graph whose own clock starts on the
+    /// window's first frame, so there is nothing left to seek past.
+    #[test]
+    fn complex_export_args_should_render_the_range_as_a_window_shaped_graph() {
+        let (sequence, assets) = twenty_second_range_fixture("range_args.mp4");
 
         let settings = ExportSettings {
             output_path: std::path::PathBuf::from("/tmp/range.mp4"),
@@ -18366,16 +18769,988 @@ mod tests {
         .expect("range export args should build");
 
         assert!(
-            args.windows(2)
-                .any(|window| window[0] == "-ss" && window[1] == "5"),
-            "Expected output seek flag in args. Got: {:?}",
+            !args.iter().any(|arg| arg == "-ss"),
+            "a window-shaped graph must not be seeked into. Got: {:?}",
             args
         );
         assert!(
             args.windows(2)
                 .any(|window| window[0] == "-t" && window[1] == "10"),
-            "Expected output duration flag in args. Got: {:?}",
+            "Expected the window length as the output duration. Got: {:?}",
             args
+        );
+
+        let filter_complex = filter_complex_of(&args);
+        // 5s at the sequence's 30fps output rate is 150 frames of the clip that
+        // a full render would have written before the window began.
+        assert!(
+            filter_complex.contains("trim=start_frame=150,setpts=PTS-STARTPTS"),
+            "the segment straddling the window's start must drop the frames in \
+             front of it: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("trim=end_frame=300"),
+            "the picture must be pinned to the window's own frame count: \
+             {filter_complex}"
+        );
+    }
+
+    /// Feature: Range Export
+    /// Scenario: a full export emits exactly the arguments it always did
+    ///
+    /// The window machinery has one hard invariant: a render with no range must
+    /// be untouched by it, down to the argument list. A regression here would
+    /// invalidate every cached preview segment and change every full export.
+    #[test]
+    fn a_full_export_should_carry_no_range_arguments_at_all() {
+        let (sequence, assets) = twenty_second_range_fixture("full_args.mp4");
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            &ExportSettings {
+                output_path: std::path::PathBuf::from("/tmp/full.mp4"),
+                ..ExportSettings::default()
+            },
+        )
+        .expect("full export args should build");
+
+        assert!(
+            !args.iter().any(|arg| arg == "-ss" || arg == "-t"),
+            "a full export takes no range arguments. Got: {:?}",
+            args
+        );
+        let filter_complex = filter_complex_of(&args);
+        assert!(
+            !filter_complex.contains("start_frame=") && !filter_complex.contains("nullsink"),
+            "a full export must not be shaped to a window: {filter_complex}"
+        );
+    }
+
+    /// A video-with-audio timeline whose clips are placed as `(start, duration)`.
+    fn windowed_audio_fixture(
+        name: &str,
+        placements: &[(f64, f64)],
+    ) -> (
+        Sequence,
+        std::collections::HashMap<String, Asset>,
+        std::collections::HashMap<String, AssetAudioInfo>,
+    ) {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Windowed audio", SequenceFormat::youtube_1080());
+        sequence.tracks.clear();
+        let mut track = Track::new_video("V1");
+        for (index, (start_sec, duration_sec)) in placements.iter().enumerate() {
+            let mut clip = Clip::new("asset1")
+                .with_source_range(0.0, *duration_sec)
+                .place_at(*start_sec);
+            clip.id = format!("clip{index}");
+            track.add_clip(clip);
+        }
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file(name);
+        let mut asset = Asset::new_video(name, &video_path, VideoInfo::default())
+            .with_duration(60.0)
+            .with_file_size(10_000_000);
+        asset.id = "asset1".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("asset1".to_string(), asset);
+
+        let mut audio_info = std::collections::HashMap::new();
+        audio_info.insert(
+            "asset1".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                source_dimensions: None,
+                source_duration_sec: Some(60.0),
+            },
+        );
+
+        (sequence, assets, audio_info)
+    }
+
+    fn windowed_range_graph(
+        sequence: &Sequence,
+        assets: &std::collections::HashMap<String, Asset>,
+        audio_info: &std::collections::HashMap<String, AssetAudioInfo>,
+        start_time: f64,
+        end_time: f64,
+    ) -> Vec<String> {
+        build_complex_filter_args_with_audio_info(
+            sequence,
+            assets,
+            &std::collections::HashMap::new(),
+            audio_info,
+            &ExportSettings {
+                output_path: std::path::PathBuf::from("/tmp/windowed-audio.mp4"),
+                start_time: Some(start_time),
+                end_time: Some(end_time),
+                ..ExportSettings::default()
+            },
+        )
+        .expect("the windowed builder must produce a filtergraph")
+    }
+
+    /// Feature: Windowed render
+    /// Scenario: sound that started before the window is cut, not stacked on it
+    ///
+    /// `adelay` can only push a branch later, so a branch whose first sample is
+    /// in front of the window cannot be placed with one. Clamping the delay at
+    /// zero instead — which is what the absolute-time graph did — would pile the
+    /// whole branch onto the window's first sample.
+    #[test]
+    fn a_windowed_render_cuts_the_sound_that_started_before_the_window() {
+        let (sequence, assets, audio_info) =
+            windowed_audio_fixture("window_audio_head.mp4", &[(0.0, 10.0)]);
+
+        let args = windowed_range_graph(&sequence, &assets, &audio_info, 4.0, 6.0);
+        let filter_complex = filter_complex_of(&args);
+
+        assert!(
+            filter_complex.contains("atrim=start=4,asetpts=PTS-STARTPTS"),
+            "the branch must lose its first four seconds: {filter_complex}"
+        );
+        assert!(
+            !filter_complex.contains("adelay"),
+            "a branch cut to the window starts at its first sample: {filter_complex}"
+        );
+    }
+
+    /// Feature: Windowed render
+    /// Scenario: sound that starts inside the window is delayed by its own offset
+    #[test]
+    fn a_windowed_render_delays_the_sound_that_starts_inside_the_window() {
+        let (sequence, assets, audio_info) =
+            windowed_audio_fixture("window_audio_tail.mp4", &[(0.0, 4.0), (6.0, 4.0)]);
+
+        let args = windowed_range_graph(&sequence, &assets, &audio_info, 4.0, 8.0);
+        let filter_complex = filter_complex_of(&args);
+
+        assert!(
+            filter_complex.contains("adelay=delays=2000:all=1"),
+            "the second clip starts two seconds into the window: {filter_complex}"
+        );
+    }
+
+    /// Feature: Windowed render
+    /// Scenario: a window between every audio branch still carries silence
+    ///
+    /// A file with no audio stream is a different file from one holding silence:
+    /// the muxer reports a different layout, and a caller splicing rendered
+    /// windows together gets a gap it cannot join. The full render of these same
+    /// seconds pads silence there, so the window has to as well.
+    #[test]
+    fn a_window_past_every_audio_branch_still_carries_an_audio_stream() {
+        let (mut sequence, assets, audio_info) =
+            windowed_audio_fixture("window_audio_silence.mp4", &[(0.0, 2.0), (5.0, 4.0)]);
+        // Only the first clip makes a sound; the second is muted, so the window
+        // over it has nothing to mix.
+        sequence.tracks[0].clips[1].audio.muted = true;
+
+        let args = windowed_range_graph(&sequence, &assets, &audio_info, 6.0, 8.0);
+        let filter_complex = filter_complex_of(&args);
+
+        assert!(
+            filter_complex.contains("anullsrc"),
+            "the window must still carry silence: {filter_complex}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-map" && pair[1] == "[outa_base]"),
+            "the silence has to reach the output. Got: {args:?}"
+        );
+    }
+
+    /// Feature: Windowed render
+    /// Scenario: a clip outside the window keeps its input and loses its chain
+    ///
+    /// PR 2a deliberately does not prune inputs — that is a later step — so the
+    /// `-i` list stays as long as it was and every `[n:v]` label keeps meaning
+    /// what it says. What a clip outside the window does lose is its filters.
+    #[test]
+    fn a_clip_outside_the_window_keeps_its_input_but_builds_no_chain() {
+        let (sequence, assets, audio_info) = windowed_audio_fixture(
+            "window_pruned_chain.mp4",
+            &[(0.0, 2.0), (2.0, 2.0), (4.0, 2.0)],
+        );
+
+        let args = windowed_range_graph(&sequence, &assets, &audio_info, 4.0, 6.0);
+        let filter_complex = filter_complex_of(&args);
+
+        assert_eq!(
+            args.iter().filter(|arg| *arg == "-i").count(),
+            3,
+            "every clip keeps its input in PR 2a. Got: {args:?}"
+        );
+        assert!(
+            !filter_complex.contains("[0:v]") && !filter_complex.contains("[1:v]"),
+            "the two clips in front of the window must build no chain: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("[2:v]"),
+            "the clip inside the window must still build one: {filter_complex}"
+        );
+    }
+
+    // =========================================================================
+    // Windowed render: byte-exactness against a full render
+    // =========================================================================
+
+    /// Canvas the windowed-render fixtures render at.
+    ///
+    /// Deliberately the same size as the source media, so no scaler runs and the
+    /// only thing under test is *which* frames come out.
+    const WINDOW_TEST_CANVAS: (u32, u32) = (64, 64);
+    /// Output frame rate every windowed-render fixture is built and measured at.
+    const WINDOW_TEST_FPS: f64 = 30.0;
+    /// Length of the counter fixture, in seconds.
+    const WINDOW_TEST_SOURCE_SEC: f64 = 12.0;
+
+    /// Export settings for the windowed-render fixtures.
+    ///
+    /// CRF 0 with no bitrate cap is what makes the comparison meaningful: two
+    /// *lossy* encodes of the same pictures decode to different bytes, because
+    /// they carry different GOP structures. Lossless x264 decodes back to the
+    /// exact frames the graph produced, so a difference between the two renders
+    /// can only be a difference in the graph.
+    fn windowed_render_settings(
+        output: std::path::PathBuf,
+        start_time: Option<f64>,
+        end_time: Option<f64>,
+    ) -> ExportSettings {
+        ExportSettings {
+            output_path: output,
+            width: Some(WINDOW_TEST_CANVAS.0),
+            height: Some(WINDOW_TEST_CANVAS.1),
+            fps: Some(WINDOW_TEST_FPS),
+            crf: Some(0),
+            video_bitrate: None,
+            start_time,
+            end_time,
+            ..ExportSettings::default()
+        }
+    }
+
+    /// Writes a source that identifies both its frame *and* its geometry.
+    ///
+    /// Two components, and both are load-bearing:
+    ///
+    /// * `2 * (N mod 64)` is a flat, per-frame luma step. A static picture would
+    ///   be useless here — shifted by a frame it looks identical, which is
+    ///   exactly the defect this suite exists to catch — and stepping by two
+    ///   makes a one-frame slip a difference in every single pixel.
+    /// * A four-quadrant pattern at distinct levels gives the frame a *place*.
+    ///   Without it a zoom or a pan would be invisible: scaling a flat picture
+    ///   produces the same flat picture, so the Ken Burns fixture would pass even
+    ///   if the move restarted at the window instead of continuing through it.
+    ///
+    /// The two sum to at most 254, so nothing clips and every pair of frames is
+    /// distinguishable both in time and in space.
+    fn write_frame_counter_source(ffmpeg: &std::path::Path, path: &std::path::Path) -> bool {
+        let mut build = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut build);
+        let built = build
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!(
+                    "color=c=black:s={}x{}:r={}:d={}",
+                    WINDOW_TEST_CANVAS.0,
+                    WINDOW_TEST_CANVAS.1,
+                    WINDOW_TEST_FPS,
+                    WINDOW_TEST_SOURCE_SEC
+                ),
+                "-vf",
+                "geq=lum='2*(N-64*floor(N/64))+32*floor(X/32)+96*floor(Y/32)':cb=128:cr=128",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "0",
+                "-preset",
+                "ultrafast",
+            ])
+            .arg(path)
+            .output();
+
+        matches!(built, Ok(built) if built.status.success()) && path.exists()
+    }
+
+    /// The counter source as an asset the builders will accept.
+    fn frame_counter_asset(path: &std::path::Path, id: &str) -> Asset {
+        use crate::core::assets::VideoInfo;
+
+        let mut asset = Asset::new_video(
+            id,
+            &path.to_string_lossy(),
+            VideoInfo {
+                width: WINDOW_TEST_CANVAS.0,
+                height: WINDOW_TEST_CANVAS.1,
+                ..VideoInfo::default()
+            },
+        )
+        .with_duration(WINDOW_TEST_SOURCE_SEC)
+        .with_file_size(1_000_000);
+        asset.id = id.to_string();
+        asset
+    }
+
+    /// Renders one sequence through the real builder and decodes its luma.
+    ///
+    /// Gray is the Y plane verbatim for a `yuv420p` file, so nothing is converted
+    /// on the way out and a comparison of these bytes is a comparison of the
+    /// frames themselves.
+    fn render_luma_frames(
+        ffmpeg: &std::path::Path,
+        output: &std::path::Path,
+        sequence: &Sequence,
+        assets: &HashMap<String, Asset>,
+        effects: &HashMap<String, Effect>,
+        start_time: Option<f64>,
+        end_time: Option<f64>,
+    ) -> Vec<Vec<u8>> {
+        let settings = windowed_render_settings(output.to_path_buf(), start_time, end_time);
+        let args = build_complex_filter_args_with_audio_info(
+            sequence,
+            assets,
+            effects,
+            &HashMap::new(),
+            &settings,
+        )
+        .expect("the windowed builder must produce a filtergraph");
+
+        let mut render = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut render);
+        let result = render
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+            .args(&args)
+            .output()
+            .expect("run ffmpeg");
+        assert!(
+            result.status.success(),
+            "ffmpeg refused the builder's own window graph: {}\n{args:?}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        let mut decode = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut decode);
+        let decoded = decode
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(output)
+            .args(["-pix_fmt", "gray", "-f", "rawvideo", "-"])
+            .output()
+            .expect("decode the render");
+        assert!(decoded.status.success(), "the render must decode");
+
+        let frame_bytes = WINDOW_TEST_CANVAS.0 as usize * WINDOW_TEST_CANVAS.1 as usize;
+        decoded
+            .stdout
+            .chunks_exact(frame_bytes)
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
+
+    /// Asserts every window of one fixture is a verbatim slice of its full render.
+    fn assert_windows_slice_the_full_render(
+        ffmpeg: &std::path::Path,
+        dir: &std::path::Path,
+        fixture: &str,
+        sequence: &Sequence,
+        assets: &HashMap<String, Asset>,
+        effects: &HashMap<String, Effect>,
+        windows: &[(&str, f64, f64)],
+    ) {
+        let full = render_luma_frames(
+            ffmpeg,
+            &dir.join(format!("{fixture}-full.mp4")),
+            sequence,
+            assets,
+            effects,
+            None,
+            None,
+        );
+        assert!(
+            !full.is_empty(),
+            "the full render of '{fixture}' produced no frames"
+        );
+        // A fixture whose every frame is one flat colour proves nothing about
+        // geometry: a zoom, a pan or a composite offset would all be invisible
+        // in it, and the comparisons below would pass on phase alone. The black
+        // tail is the one fixture that is *supposed* to be flat.
+        assert!(
+            fixture == "tail"
+                || full
+                    .iter()
+                    .any(|frame| frame.iter().any(|pixel| *pixel != frame[0])),
+            "the full render of '{fixture}' carries no spatial detail at all"
+        );
+
+        let timeline_frames = (sequence.output_duration() * WINDOW_TEST_FPS).round() as i64;
+
+        for (case, start_sec, end_sec) in windows {
+            let started = std::time::Instant::now();
+            // The same snap the builder performs, spelled out here so the
+            // expectation is derived independently of the code under test.
+            let first_frame =
+                ((start_sec * WINDOW_TEST_FPS).round() as i64).clamp(0, timeline_frames);
+            let last_frame = ((end_sec * WINDOW_TEST_FPS).round() as i64)
+                .clamp(0, timeline_frames)
+                .max(first_frame + 1);
+
+            let windowed = render_luma_frames(
+                ffmpeg,
+                &dir.join(format!("{fixture}-{case}.mp4")),
+                sequence,
+                assets,
+                effects,
+                Some(*start_sec),
+                Some(*end_sec),
+            );
+
+            assert_eq!(
+                windowed.len() as i64,
+                last_frame - first_frame,
+                "[{fixture}/{case}] the window must hold exactly the frames it spans"
+            );
+
+            for (offset, frame) in windowed.iter().enumerate() {
+                let source_index = first_frame as usize + offset;
+                assert!(
+                    source_index < full.len(),
+                    "[{fixture}/{case}] the full render is only {} frames long, \
+                     but the window reaches frame {source_index}",
+                    full.len()
+                );
+                // Reported by hand rather than with `assert_eq!`: the frames are
+                // several thousand bytes each, and a dump of two of them buries
+                // the one number that says what went wrong.
+                let reference = &full[source_index];
+                if frame != reference {
+                    let pixel = frame
+                        .iter()
+                        .zip(reference.iter())
+                        .position(|(left, right)| left != right)
+                        .unwrap_or(0);
+                    panic!(
+                        "[{fixture}/{case}] window frame {offset} is not full-render \
+                         frame {source_index}: they first differ at pixel {pixel}, \
+                         {} against {}",
+                        frame[pixel], reference[pixel]
+                    );
+                }
+            }
+
+            eprintln!(
+                "[{fixture}/{case}] {} frames from {first_frame} matched in {:?}",
+                windowed.len(),
+                started.elapsed()
+            );
+        }
+    }
+
+    /// Feature: Windowed render
+    /// Scenario: a window is byte-for-byte the same frames as the full render
+    ///
+    /// The whole contract of a range render in one assertion: the file it writes
+    /// must be indistinguishable from the corresponding frames of a render of
+    /// the whole timeline. Every fixture below is a graph shape where "just seek
+    /// past the front of it" and "build the graph at the window" can disagree —
+    /// a cut, a cross dissolve, a composite, a gap, an animated clip, a burnt-in
+    /// caption, and a bound that does not sit on the frame grid.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary. Run with:
+    ///   cargo test -p openreelio --features gui --lib -- --ignored \
+    ///     a_windowed_render_is_byte_identical
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_windowed_render_is_byte_identical_to_the_same_frames_of_a_full_render() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+        use crate::core::timeline::{
+            Clip, KeyframeInterpolation, SequenceFormat, Track, Transform, TransformKeyframe,
+        };
+        use crate::core::Point2D;
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("counter.mp4");
+        if !write_frame_counter_source(&ffmpeg, &source) {
+            skip_without_ffmpeg("ffmpeg could not build the frame counter fixture");
+            return;
+        }
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "counter".to_string(),
+            frame_counter_asset(&source, "counter"),
+        );
+        let no_effects: HashMap<String, Effect> = HashMap::new();
+
+        let square_canvas = || {
+            let mut format = SequenceFormat::youtube_1080();
+            format.canvas.width = WINDOW_TEST_CANVAS.0;
+            format.canvas.height = WINDOW_TEST_CANVAS.1;
+            format
+        };
+
+        let placed = |id: &str, source_in: f64, source_out: f64, at: f64| {
+            let mut clip = Clip::new("counter")
+                .with_source_range(source_in, source_out)
+                .place_at(at);
+            clip.id = id.to_string();
+            clip
+        };
+
+        // (a) mid-clip, (b) exactly on a cut, (h) off the frame grid.
+        {
+            let mut sequence = Sequence::new("Cuts", square_canvas());
+            sequence.tracks.clear();
+            let mut track = Track::new_video("V1");
+            track.add_clip(placed("cut0", 0.0, 2.0, 0.0));
+            track.add_clip(placed("cut1", 3.0, 5.0, 2.0));
+            track.add_clip(placed("cut2", 6.0, 8.0, 4.0));
+            sequence.add_track(track);
+
+            assert_windows_slice_the_full_render(
+                &ffmpeg,
+                dir.path(),
+                "cuts",
+                &sequence,
+                &assets,
+                &no_effects,
+                &[
+                    ("a-mid-clip", 0.5, 1.5),
+                    ("b-on-a-cut", 2.0, 4.0),
+                    ("h-off-grid", 2.017, 4.004),
+                ],
+            );
+        }
+
+        // (e) over a black gap between two clips.
+        {
+            let mut sequence = Sequence::new("Gap", square_canvas());
+            sequence.tracks.clear();
+            let mut track = Track::new_video("V1");
+            track.add_clip(placed("gap0", 0.0, 2.0, 0.0));
+            track.add_clip(placed("gap1", 3.0, 5.0, 4.0));
+            sequence.add_track(track);
+
+            assert_windows_slice_the_full_render(
+                &ffmpeg,
+                dir.path(),
+                "gap",
+                &sequence,
+                &assets,
+                &no_effects,
+                &[("e-over-a-gap", 1.5, 4.5)],
+            );
+        }
+
+        // (c) straddling a cross dissolve.
+        {
+            let mut sequence = Sequence::new("Dissolve", square_canvas());
+            sequence.tracks.clear();
+            let mut track = Track::new_video("V1");
+            let mut outgoing = placed("xf0", 1.0, 4.0, 0.0);
+            let dissolve = one_second_dissolve("window-dissolve");
+            outgoing.effects.push(dissolve.id.clone());
+            track.add_clip(outgoing);
+            track.add_clip(placed("xf1", 5.0, 8.0, 3.0));
+            // A plain clip after the pair, so a window can sit entirely past the
+            // boundary and the plan has to lose it.
+            track.add_clip(placed("xf2", 9.0, 11.0, 6.0));
+            sequence.add_track(track);
+
+            let mut effects = HashMap::new();
+            effects.insert(dissolve.id.clone(), dissolve);
+
+            assert_windows_slice_the_full_render(
+                &ffmpeg,
+                dir.path(),
+                "dissolve",
+                &sequence,
+                &assets,
+                &effects,
+                &[
+                    ("c-through-a-blend", 2.0, 4.0),
+                    ("c-after-a-blend", 4.0, 6.0),
+                    // Both sides of the boundary are outside these windows, so
+                    // the plan entry has to go with them: an entry whose clips
+                    // never arrive fails the stitch outright.
+                    ("c-before-the-blend", 0.5, 1.5),
+                    ("c-past-the-blend", 6.5, 7.5),
+                ],
+            );
+        }
+
+        // (d) inside a picture-in-picture overlap.
+        {
+            let mut sequence = Sequence::new("Pip", square_canvas());
+            sequence.tracks.clear();
+            let mut overlay_track = Track::new_video("V2");
+            let mut overlay = placed("pip-top", 6.0, 8.0, 2.0);
+            overlay.transform.scale = Point2D::new(0.5, 0.5);
+            overlay.transform.position = Point2D::new(0.7, 0.3);
+            overlay_track.add_clip(overlay);
+            let mut base_track = Track::new_video("V1");
+            base_track.add_clip(placed("pip-base", 0.0, 6.0, 0.0));
+            // A clip after the composite, so a window can sit entirely past it.
+            base_track.add_clip(placed("pip-after", 9.0, 11.0, 6.0));
+            // Track 0 is the topmost, so the overlay track goes in first.
+            sequence.add_track(overlay_track);
+            sequence.add_track(base_track);
+
+            assert_windows_slice_the_full_render(
+                &ffmpeg,
+                dir.path(),
+                "pip",
+                &sequence,
+                &assets,
+                &no_effects,
+                &[
+                    ("d-inside-a-composite", 2.5, 4.5),
+                    // The whole composite is outside this window. A group that
+                    // arrives with fewer layers than the plan promised fails the
+                    // fold, so the plan has to lose the group whole.
+                    ("d-past-the-composite", 6.5, 7.5),
+                ],
+            );
+        }
+
+        // (f) opening partway through a Ken Burns move.
+        {
+            let mut sequence = Sequence::new("KenBurns", square_canvas());
+            sequence.tracks.clear();
+            let mut track = Track::new_video("V1");
+            let mut moved = placed("kb0", 0.0, 4.0, 0.0);
+            moved.motion_keyframes = vec![
+                TransformKeyframe {
+                    time_offset: 0.0,
+                    transform: Transform {
+                        scale: Point2D::new(1.0, 1.0),
+                        ..Transform::default()
+                    },
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+                TransformKeyframe {
+                    time_offset: 4.0,
+                    transform: Transform {
+                        scale: Point2D::new(1.8, 1.8),
+                        position: Point2D::new(0.35, 0.65),
+                        ..Transform::default()
+                    },
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+            ];
+            track.add_clip(moved);
+            sequence.add_track(track);
+
+            assert_windows_slice_the_full_render(
+                &ffmpeg,
+                dir.path(),
+                "kenburns",
+                &sequence,
+                &assets,
+                &no_effects,
+                &[("f-mid-animation", 1.0, 3.0)],
+            );
+        }
+
+        // A window over the black tail past the last picture. Nothing survives
+        // the prune, and what a full render draws there is black.
+        {
+            let mut sequence = Sequence::new("Tail", square_canvas());
+            sequence.tracks.clear();
+            let mut track = Track::new_video("V1");
+            track.add_clip(placed("tail0", 0.0, 4.0, 0.0));
+            // An adjustment layer with no effects draws nothing but still
+            // occupies the timeline, which is what puts black after the clip.
+            let mut spacer = Clip::adjustment_layer(4.0).place_at(6.0);
+            spacer.id = "tail-spacer".to_string();
+            track.add_clip(spacer);
+            sequence.add_track(track);
+
+            assert_windows_slice_the_full_render(
+                &ffmpeg,
+                dir.path(),
+                "tail",
+                &sequence,
+                &assets,
+                &no_effects,
+                &[("black-tail", 6.5, 8.5)],
+            );
+        }
+
+        // (g) over a burnt-in caption.
+        {
+            let mut sequence = Sequence::new("Caption", square_canvas());
+            sequence.tracks.clear();
+            let mut track = Track::new_video("V1");
+            track.add_clip(placed("cap-base", 0.0, 4.0, 0.0));
+            sequence.add_track(track);
+
+            let mut caption_track = Track::new_caption("Captions");
+            let mut caption = Clip::new("counter")
+                .with_source_range(0.0, 2.0)
+                .place_at(1.0);
+            caption.id = "cap0".to_string();
+            caption.label = Some("WINDOW".to_string());
+            caption_track.add_clip(caption);
+            sequence.add_track(caption_track);
+
+            // Guard against a vacuous case: if the caption never reached the
+            // graph, this fixture would just be the plain clip and would prove
+            // nothing about rebasing an `enable` gate.
+            let probe_args = build_complex_filter_args_with_audio_info(
+                &sequence,
+                &assets,
+                &no_effects,
+                &HashMap::new(),
+                &windowed_render_settings(
+                    dir.path().join("caption-probe.mp4"),
+                    Some(1.5),
+                    Some(3.5),
+                ),
+            )
+            .expect("the caption fixture must build");
+            let probe_graph = filter_complex_of(&probe_args);
+            assert!(
+                probe_graph.contains("drawtext"),
+                "the caption must be burnt in for this case to mean anything: {probe_graph}"
+            );
+            assert!(
+                // The caption runs 1.0-3.0s and the window opens at 1.5s, so
+                // it is already on screen when the render starts and leaves it
+                // 1.5s in. Both bounds are the window's clock, not the timeline's.
+                probe_graph.contains("enable='between(t,0.000000,1.500000)'"),
+                "the caption's gate must be expressed in the window's own clock: {probe_graph}"
+            );
+
+            assert_windows_slice_the_full_render(
+                &ffmpeg,
+                dir.path(),
+                "caption",
+                &sequence,
+                &assets,
+                &no_effects,
+                &[("g-over-a-caption", 1.5, 3.5)],
+            );
+        }
+
+        // A caption that ended before the window opened must not be drawn on the
+        // window's first frame. Its rebased bounds are both negative, and
+        // `between` is inclusive, so a naive `.max(0.0)` on the end would gate it
+        // as `between(t,0,0)` — true at t=0. The preview cache renders
+        // consecutive windows, so that bug flashes every earlier caption onto the
+        // first frame of every later segment.
+        {
+            let mut sequence = Sequence::new("CaptionBeforeWindow", square_canvas());
+            sequence.tracks.clear();
+            let mut track = Track::new_video("V1");
+            track.add_clip(placed("capfront-base", 0.0, 8.0, 0.0));
+            sequence.add_track(track);
+
+            let mut caption_track = Track::new_caption("Captions");
+            let mut caption = Clip::new("counter")
+                .with_source_range(0.0, 1.0)
+                .place_at(1.0);
+            caption.id = "capfront0".to_string();
+            caption.label = Some("GONE".to_string());
+            caption_track.add_clip(caption);
+            sequence.add_track(caption_track);
+
+            // The window opens at 5.0s, long after the caption left the screen at
+            // 2.0s, so the graph must carry no gate on it at all — and in
+            // particular not the always-on `between(t,0.000000,0.000000)`.
+            let probe_args = build_complex_filter_args_with_audio_info(
+                &sequence,
+                &assets,
+                &no_effects,
+                &HashMap::new(),
+                &windowed_render_settings(
+                    dir.path().join("caption-front-probe.mp4"),
+                    Some(5.0),
+                    Some(7.0),
+                ),
+            )
+            .expect("the caption fixture must build");
+            let probe_graph = filter_complex_of(&probe_args);
+            assert!(
+                !probe_graph.contains("between(t,0.000000,0.000000)"),
+                "a caption that ended before the window must not be gated on: {probe_graph}"
+            );
+            assert!(
+                !probe_graph.contains("drawtext"),
+                "a caption that ended before the window must not be drawn: {probe_graph}"
+            );
+
+            assert_windows_slice_the_full_render(
+                &ffmpeg,
+                dir.path(),
+                "caption-before-window",
+                &sequence,
+                &assets,
+                &no_effects,
+                &[("caption-in-front", 5.0, 7.0)],
+            );
+        }
+    }
+
+    /// Feature: Windowed render
+    /// Scenario: a real render of a window past every audio branch still muxes
+    ///
+    /// The string assertion elsewhere says the silence reaches the graph; this
+    /// hands the graph to a real FFmpeg, because a source spliced in at the wrong
+    /// point of a filtergraph is a syntax error rather than a wrong picture.
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn a_real_windowed_render_past_every_audio_branch_still_writes_sound() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("with-sound.mp4");
+
+        let mut build = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut build);
+        let built = build
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!(
+                    "color=c=black:s={}x{}:r={}:d=12",
+                    WINDOW_TEST_CANVAS.0, WINDOW_TEST_CANVAS.1, WINDOW_TEST_FPS
+                ),
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=12",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "0",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&source)
+            .output();
+        let Ok(built) = built else {
+            skip_without_ffmpeg("ffmpeg could not be launched");
+            return;
+        };
+        if !built.status.success() || !source.exists() {
+            skip_without_ffmpeg("ffmpeg could not build the sound fixture");
+            return;
+        }
+
+        let mut sequence = Sequence::new("Silence", SequenceFormat::youtube_1080());
+        sequence.tracks.clear();
+        let mut track = Track::new_video("V1");
+        let mut audible = Clip::new("sound").with_source_range(0.0, 2.0).place_at(0.0);
+        audible.id = "audible".to_string();
+        track.add_clip(audible);
+        // The only clip inside the window is muted, so the mix has nothing left.
+        let mut silent = Clip::new("sound").with_source_range(4.0, 8.0).place_at(5.0);
+        silent.id = "silent".to_string();
+        silent.audio.muted = true;
+        track.add_clip(silent);
+        sequence.add_track(track);
+
+        let mut asset = Asset::new_video(
+            "sound",
+            &source.to_string_lossy(),
+            VideoInfo {
+                width: WINDOW_TEST_CANVAS.0,
+                height: WINDOW_TEST_CANVAS.1,
+                ..VideoInfo::default()
+            },
+        )
+        .with_duration(12.0)
+        .with_file_size(1_000_000);
+        asset.id = "sound".to_string();
+        let mut assets = HashMap::new();
+        assets.insert("sound".to_string(), asset);
+
+        let mut audio_info = HashMap::new();
+        audio_info.insert(
+            "sound".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                source_dimensions: Some(WINDOW_TEST_CANVAS),
+                source_duration_sec: Some(12.0),
+            },
+        );
+
+        let output = dir.path().join("silence-window.mp4");
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &audio_info,
+            &windowed_render_settings(output.clone(), Some(6.0), Some(8.0)),
+        )
+        .expect("the silence fallback must build a filtergraph");
+
+        let mut render = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut render);
+        let result = render
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+            .args(&args)
+            .output()
+            .expect("run ffmpeg");
+        assert!(
+            result.status.success(),
+            "ffmpeg refused the silence fallback graph: {}\n{args:?}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        let mut decode = std::process::Command::new(&ffmpeg);
+        crate::core::process::configure_std_command(&mut decode);
+        let decoded = decode
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(&output)
+            .args(["-vn", "-f", "s16le", "-ac", "1", "-ar", "48000", "-"])
+            .output()
+            .expect("decode the render's audio");
+        assert!(
+            decoded.status.success() && !decoded.stdout.is_empty(),
+            "the window must still carry an audio stream"
+        );
+        assert!(
+            decoded
+                .stdout
+                .chunks_exact(2)
+                .all(|sample| sample == [0, 0]),
+            "the audio in this window is silence, not the clip before it"
         );
     }
 

@@ -92,6 +92,44 @@ impl PipPlan {
     pub(super) fn layer(&self, clip_id: &str) -> Option<PipLayerInfo> {
         self.layers.get(clip_id).copied()
     }
+
+    /// Every clip that shares a composite with one of `clips`.
+    ///
+    /// A windowed render keeps or drops a composite *whole*: the fold refuses a
+    /// group that arrives with fewer layers than the plan promised, because a
+    /// layer staged for compositing still carries the transparency and the layer
+    /// pixel format the stack was going to consume. The builder uses this to grow
+    /// the set of clips it emits chains for until no group straddles its edge.
+    pub(super) fn group_members(&self, clips: &HashSet<String>) -> HashSet<String> {
+        let touched: HashSet<usize> = self
+            .layers
+            .iter()
+            .filter(|(clip_id, _)| clips.contains(clip_id.as_str()))
+            .map(|(_, layer)| layer.group_index)
+            .collect();
+
+        self.layers
+            .iter()
+            .filter(|(_, layer)| touched.contains(&layer.group_index))
+            .map(|(clip_id, _)| clip_id.clone())
+            .collect()
+    }
+
+    /// The same plan with every layer whose clip is not in `clips` removed.
+    ///
+    /// Only ever called with a set closed over [`Self::group_members`], so a
+    /// group is dropped whole or kept whole and the fold never sees a
+    /// half-populated one.
+    pub(super) fn retaining(&self, clips: &HashSet<String>) -> Self {
+        Self {
+            layers: self
+                .layers
+                .iter()
+                .filter(|(clip_id, _)| clips.contains(clip_id.as_str()))
+                .map(|(clip_id, layer)| (clip_id.clone(), *layer))
+                .collect(),
+        }
+    }
 }
 
 /// One clip as the planner sees it, before any of it reaches FFmpeg.

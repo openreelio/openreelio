@@ -5,39 +5,44 @@
 //! must enter through an optional RenderPlan contract and receive plain args
 //! that are wrapped into `FfmpegInvocation` before execution.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use crate::core::{
     assets::Asset,
     effects::Effect,
     fs::validate_local_input_path,
-    timeline::{Sequence, TrackKind},
+    timeline::{Clip, Sequence, Track, TrackKind},
 };
 
 use super::{
     export::{
         append_animated_video_transform_composition, append_ass_text_overlay,
         append_black_video_gap, append_drawtext_text_overlays, append_master_audio_output,
-        append_output_time_range_args, append_timeline_video_output,
-        append_video_stream_normalization, append_video_transform_composition,
-        apply_audio_mix_settings, asset_has_playable_audio, build_audio_trim_filter,
-        build_video_trim_filter, clip_audio_is_suppressed_by_companion,
+        append_timeline_video_output, append_video_stream_normalization,
+        append_video_transform_composition, append_window_frame_cap, append_window_silence_audio,
+        append_windowed_output_duration_arg, apply_audio_mix_settings, asset_has_playable_audio,
+        build_audio_trim_filter, build_video_trim_filter, clip_audio_is_suppressed_by_companion,
         clip_composition_is_motion_only, clip_needs_transform_composition,
         collect_audio_companion_keys, collect_drawtext_text_overlays, collect_enabled_clips_sorted,
         effective_source_dimensions, generated_text_visual_end_sec, hdr_metadata_for_asset,
         is_text_clip, output_video_dimensions, output_video_fps, output_video_pixel_format,
         resolve_asset_source_dimensions, resolve_asset_source_duration, resolve_trim_source_kind,
-        seed_source_dimension_cache, seed_source_duration_cache, unmeasurable_effect_message,
-        AssetAudioInfo, ExportEngine, ExportError, ExportSettings, SourceFrameCountCache,
-        VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
+        seed_source_dimension_cache, seed_source_duration_cache, shape_video_segments_to_window,
+        unmeasurable_effect_message, AssetAudioInfo, ExportEngine, ExportError, ExportSettings,
+        SourceFrameCountCache, VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
-    pip_stitch::{fold_pip_groups, plan_pip_groups},
+    pip_stitch::{fold_pip_groups, plan_pip_groups, PipPlan},
+    render_window::RenderWindow,
     transform_layout::{
         clip_motion_renders_animated, compute_clip_transform_layout, render_opacity,
         resolve_clip_motion_track,
     },
     transition_stitch::{
         clip_stream_frames, plan_sequence_transitions, stitch_transition_groups, ClipHandles,
+        TransitionPlan,
     },
     RenderPlan,
 };
@@ -73,6 +78,12 @@ pub(super) fn build_sequence_ffmpeg_args(
     let mut filter_complex = String::new();
     let mut video_segments = Vec::new();
     let mut audio_streams = Vec::new();
+    // Whether anything in the sequence would have made a sound in a full render.
+    // A window can fall between every audio branch, and a file with no audio
+    // stream at all is a different file from one holding silence: the muxer
+    // reports a different stream layout, and a caller splicing rendered segments
+    // together gets a gap it cannot join.
+    let mut sequence_carries_audio = false;
     // Single source of truth for the output length: the video tail is padded
     // with black up to it and the audio tail with silence, so the file this
     // command writes is exactly `Sequence::output_duration()` long. Deriving it
@@ -89,16 +100,28 @@ pub(super) fn build_sequence_ffmpeg_args(
         return Err(ExportError::NoClips);
     }
 
+    let (output_width, output_height) = output_video_dimensions(ctx.sequence, ctx.settings);
+    let output_fps = output_video_fps(ctx.sequence, ctx.settings);
+    let output_pixel_format = output_video_pixel_format(ctx.settings);
+
+    // The stretch of timeline this command writes, snapped to the output frame
+    // grid before anything reads it. Every absolute anchor below is expressed
+    // through it, so the graph's own clock starts on the window's first frame
+    // and the output needs no seek. A render with no range gets a window over
+    // the whole timeline that changes nothing.
+    let window = RenderWindow::resolve(
+        timeline_end_sec,
+        ctx.settings.start_time,
+        ctx.settings.end_time,
+        output_fps,
+    );
+
     let use_ass_text_overlays = ctx.ass_text_overlay_path.is_some();
     let drawtext_text_overlays = if use_ass_text_overlays {
         Vec::new()
     } else {
-        collect_drawtext_text_overlays(ctx.sequence, &all_clips, ctx.effects)?
+        collect_drawtext_text_overlays(ctx.sequence, &all_clips, ctx.effects, &window)?
     };
-
-    let (output_width, output_height) = output_video_dimensions(ctx.sequence, ctx.settings);
-    let output_fps = output_video_fps(ctx.sequence, ctx.settings);
-    let output_pixel_format = output_video_pixel_format(ctx.settings);
 
     // The export already probed every unique asset to find out whether it has
     // audio, and that probe reports the picture size too. Seeding the cache with
@@ -126,6 +149,34 @@ pub(super) fn build_sequence_ffmpeg_args(
     // would black out the layers beneath it for its half of the boundary.
     let pip_plan = plan_pip_groups(ctx.sequence, &transition_plan)?;
 
+    // Both plans are made against the whole sequence — exactly as a full render
+    // makes them — and only then pruned to the window. Planning against the
+    // window instead would change which clips composite together, and the fold
+    // arithmetic with it.
+    //
+    // Pruning is not an optimisation. A clip outside the window gets no filter
+    // chain, and both folds refuse the render outright when the plan names a
+    // clip that never arrived: an unfolded transition would bake its handle
+    // frames into the picture, and a half-populated composite would push a
+    // transparent layer into a concat of opaque ones. Groups are therefore kept
+    // or dropped whole, which is also what keeps the folds bit-identical to the
+    // full render's.
+    let (transition_plan, pip_plan, windowed_clip_ids) = if window.is_ranged() {
+        let retained = collect_window_clip_ids(&all_clips, &window, &transition_plan, &pip_plan);
+        (
+            transition_plan.retaining(&retained),
+            pip_plan.retaining(&retained),
+            Some(retained),
+        )
+    } else {
+        (transition_plan, pip_plan, None)
+    };
+    let renders_clip = |clip_id: &str| {
+        windowed_clip_ids
+            .as_ref()
+            .is_none_or(|retained| retained.contains(clip_id))
+    };
+
     // Which image assets are photos and which are animations. An extension says
     // nothing about that, so the answer has to be measured; caching it keeps a
     // timeline that reuses one GIF to a single probe.
@@ -147,7 +198,15 @@ pub(super) fn build_sequence_ffmpeg_args(
             if graph.has_video_effects() {
                 let start = clip.place.timeline_in_sec;
                 let end = clip.place.timeline_out_sec();
-                adjustment_layer_effects.push((graph, start, end));
+                // An adjustment layer outside the window is dropped rather than
+                // rebased. `to_video_filter_complex_timed` floors both bounds at
+                // zero, so a layer entirely in front of the window would come
+                // out as `between(t,0,0)` — true on the render's first frame,
+                // which is a frame the full render draws ungraded.
+                if window.is_ranged() && !window.covers(start, end) {
+                    continue;
+                }
+                adjustment_layer_effects.push((graph, window.rebase(start), window.rebase(end)));
             }
         }
     }
@@ -177,6 +236,15 @@ pub(super) fn build_sequence_ffmpeg_args(
                     &audio_companion_keys,
                 );
 
+        // Recorded before the window has any say, because the question it
+        // answers is about the *sequence*: whether a full render of it would
+        // have carried sound. A window that falls between every audio branch
+        // still has to write a stream, and that decision has to survive the
+        // clips that produced the sound being skipped.
+        if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
+            sequence_carries_audio = true;
+        }
+
         let contributes_visual_output = matches!(track.kind, TrackKind::Video) && track.visible;
         if !contributes_visual_output && !clip_has_audio {
             // No stream to emit. The clip still occupies the timeline, and
@@ -186,6 +254,15 @@ pub(super) fn build_sequence_ffmpeg_args(
 
         args.push("-i".to_string());
         args.push(validated_path.to_string_lossy().to_string());
+
+        // A clip that shares no frame with the window contributes no picture and
+        // no sound, so it gets no filter chain. The input stays: FFmpeg reads
+        // nothing from an input no filter references, and keeping the list
+        // intact keeps every input label in the graph meaning what it says.
+        if !renders_clip(&clip.id) {
+            input_index += 1;
+            continue;
+        }
 
         // A clip in a transition renders a little more than its slot: the extra
         // comes out of unused source media, never out of the timeline. The
@@ -383,7 +460,11 @@ pub(super) fn build_sequence_ffmpeg_args(
                     );
                 }
 
-                if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
+                if clip_has_audio
+                    && !clip.freeze_frame
+                    && !clip.audio.muted
+                    && branch_reaches_window(clip, handles, &window)
+                {
                     let audio_trim_label = format!("atrim{}", input_index);
                     let audio_out_label = format!("a{}", input_index);
 
@@ -415,13 +496,18 @@ pub(super) fn build_sequence_ffmpeg_args(
                         &audio_out_label,
                         &mut filter_complex,
                         handles,
+                        &window,
                     );
 
                     audio_streams.push(format!("[{}]", mixed_audio_label));
                 }
             }
             TrackKind::Audio => {
-                if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
+                if clip_has_audio
+                    && !clip.freeze_frame
+                    && !clip.audio.muted
+                    && branch_reaches_window(clip, handles, &window)
+                {
                     let audio_trim_label = format!("atrim{}", input_index);
                     let audio_out_label = format!("a{}", input_index);
 
@@ -453,6 +539,7 @@ pub(super) fn build_sequence_ffmpeg_args(
                         &audio_out_label,
                         &mut filter_complex,
                         handles,
+                        &window,
                     );
 
                     audio_streams.push(format!("[{}]", mixed_audio_label));
@@ -491,7 +578,21 @@ pub(super) fn build_sequence_ffmpeg_args(
         }
     }
 
-    if video_segments.is_empty() {
+    // A window can legitimately fall past every picture there is — the timeline
+    // runs on beyond its last clip whenever something that draws nothing (an
+    // adjustment layer, a clip on a hidden track) sits at the tail, and a full
+    // render draws black there. Refusing that window would give those seconds a
+    // different answer from the one the full render gives them; the shaping pass
+    // below puts the same black there instead. A sequence with no pictures
+    // anywhere is still refused, range or no range.
+    let sequence_draws_pictures = all_clips.iter().any(|(clip, track)| {
+        matches!(track.kind, TrackKind::Video)
+            && track.visible
+            && !clip.is_adjustment_layer()
+            && !is_text_clip(clip)
+    });
+
+    if video_segments.is_empty() && !(window.is_ranged() && sequence_draws_pictures) {
         return Err(ExportError::InvalidSettings(
             "Sequence has no visual clips to export".to_string(),
         ));
@@ -522,15 +623,36 @@ pub(super) fn build_sequence_ffmpeg_args(
         output_pixel_format,
     )?;
 
+    // Only now, with every fold done against the timeline it was planned on, is
+    // the list re-expressed in the render's own clock.
+    let video_segments = shape_video_segments_to_window(
+        &mut filter_complex,
+        video_segments,
+        &window,
+        output_width,
+        output_height,
+        output_fps,
+        output_pixel_format,
+    );
+
     if filter_complex.ends_with(';') {
         filter_complex.pop();
     }
     filter_complex.push(';');
 
+    // The picture is padded with black, and the sound with silence, out to the
+    // end of the *window* rather than the end of the timeline: those are the
+    // only frames this command writes.
+    let output_end_sec = if window.is_ranged() {
+        window.len_sec()
+    } else {
+        timeline_end_sec
+    };
+
     append_timeline_video_output(
         &mut filter_complex,
         &video_segments,
-        timeline_end_sec,
+        output_end_sec,
         output_width,
         output_height,
         output_fps,
@@ -557,12 +679,22 @@ pub(super) fn build_sequence_ffmpeg_args(
     } else {
         append_drawtext_text_overlays(&mut filter_complex, "[outv]", &drawtext_text_overlays)
     };
+    let final_video_label =
+        append_window_frame_cap(&mut filter_complex, &final_video_label, &window);
+
+    // A window can fall between every audio branch there is. Silence keeps the
+    // file's stream layout the same as the full render's.
+    if audio_streams.is_empty() && sequence_carries_audio {
+        let silence_label = "awinsil";
+        append_window_silence_audio(&mut filter_complex, silence_label, output_end_sec);
+        audio_streams.push(format!("[{}]", silence_label));
+    }
 
     let final_audio_label = append_master_audio_output(
         &mut filter_complex,
         &audio_streams,
         ctx.sequence.master_volume_db,
-        timeline_end_sec,
+        output_end_sec,
     );
 
     args.push("-filter_complex".to_string());
@@ -608,7 +740,7 @@ pub(super) fn build_sequence_ffmpeg_args(
     args.extend(ctx.settings.encoder_speed_args(&video_encoder));
 
     args.extend(ctx.settings.hdr_args());
-    append_output_time_range_args(&mut args, ctx.settings.start_time, ctx.settings.end_time);
+    append_windowed_output_duration_arg(&mut args, &window);
     args.push("-y".to_string());
     args.push(ctx.settings.output_path.to_string_lossy().to_string());
 
@@ -646,13 +778,26 @@ pub(super) fn build_audio_only_ffmpeg_args(
     // length is quantised to whole output frames, so planning the audio against
     // the sequence rate would give an export with an fps override a different
     // set of crossfades from the picture it is supposed to accompany.
-    let transition_plan = plan_sequence_transitions(
-        ctx.sequence,
-        ctx.assets,
-        ctx.effects,
-        output_video_fps(ctx.sequence, ctx.settings),
-        |asset| resolve_asset_source_duration(asset, &mut source_durations),
+    let output_fps = output_video_fps(ctx.sequence, ctx.settings);
+    let transition_plan =
+        plan_sequence_transitions(ctx.sequence, ctx.assets, ctx.effects, output_fps, |asset| {
+            resolve_asset_source_duration(asset, &mut source_durations)
+        });
+
+    // The same window the video path builds, so an audio-only render of a range
+    // and the picture of that range start on the same sample.
+    let window = RenderWindow::resolve(
+        timeline_end_sec,
+        ctx.settings.start_time,
+        ctx.settings.end_time,
+        output_fps,
     );
+    let output_end_sec = if window.is_ranged() {
+        window.len_sec()
+    } else {
+        timeline_end_sec
+    };
+    let mut sequence_carries_audio = false;
 
     for (clip, track) in &all_clips {
         if !matches!(track.kind, TrackKind::Video | TrackKind::Audio) {
@@ -681,13 +826,22 @@ pub(super) fn build_audio_only_ffmpeg_args(
             continue;
         }
 
+        sequence_carries_audio = true;
+
+        // A branch that shares no sample with the window is left out of the mix
+        // entirely: delaying it would put it past the end of the file, and
+        // trimming its whole length away would hand `amix` an empty input.
+        let handles = transition_plan.handles(&clip.id);
+        if !branch_reaches_window(clip, handles, &window) {
+            continue;
+        }
+
         let validated_path = validate_local_input_path(&asset.uri, "Asset file")
             .map_err(ExportError::InvalidSettings)?;
 
         args.push("-i".to_string());
         args.push(validated_path.to_string_lossy().to_string());
 
-        let handles = transition_plan.handles(&clip.id);
         let clip_filter_graph =
             ctx.engine
                 .build_clip_filter_graph(clip, ctx.effects, None, None, None, handles);
@@ -721,10 +875,19 @@ pub(super) fn build_audio_only_ffmpeg_args(
             &audio_out_label,
             &mut filter_complex,
             handles,
+            &window,
         );
 
         audio_streams.push(format!("[{}]", mixed_audio_label));
         input_index += 1;
+    }
+
+    // A window can fall between every audio branch there is; the file still has
+    // to carry a stream, and silence is what the full render puts there.
+    if audio_streams.is_empty() && sequence_carries_audio {
+        let silence_label = "awinsil";
+        append_window_silence_audio(&mut filter_complex, silence_label, output_end_sec);
+        audio_streams.push(format!("[{}]", silence_label));
     }
 
     if filter_complex.ends_with(';') {
@@ -735,7 +898,7 @@ pub(super) fn build_audio_only_ffmpeg_args(
         &mut filter_complex,
         &audio_streams,
         ctx.sequence.master_volume_db,
-        timeline_end_sec,
+        output_end_sec,
     )
     .ok_or_else(|| ExportError::InvalidSettings("No audio tracks found in sequence".to_string()))?;
 
@@ -744,11 +907,65 @@ pub(super) fn build_audio_only_ffmpeg_args(
     args.push("-map".to_string());
     args.push(final_audio_label);
 
-    append_output_time_range_args(&mut args, ctx.settings.start_time, ctx.settings.end_time);
+    append_windowed_output_duration_arg(&mut args, &window);
     args.push("-y".to_string());
     args.push(ctx.settings.output_path.to_string_lossy().to_string());
 
     Ok(args)
+}
+
+/// Every clip whose chain a windowed render has to emit.
+///
+/// Seeded with the clips that share a frame with the window, then grown until
+/// no transition boundary and no composite group straddles the edge of the set.
+/// Growing is not a courtesy to the neighbour: both folds consume their whole
+/// group in one filter, count frames off the group's absolute timeline span and
+/// refuse the render when a member never arrives. Keeping groups whole is also
+/// what makes the folds emit the byte-identical streams a full render emits, so
+/// the window really is a slice of the full render rather than a re-cut of it.
+fn collect_window_clip_ids(
+    all_clips: &[(&Clip, &Track)],
+    window: &RenderWindow,
+    transition_plan: &TransitionPlan,
+    pip_plan: &PipPlan,
+) -> HashSet<String> {
+    let mut retained: HashSet<String> = all_clips
+        .iter()
+        .filter(|(clip, _)| {
+            window.covers(clip.place.timeline_in_sec, clip.place.timeline_out_sec())
+        })
+        .map(|(clip, _)| clip.id.clone())
+        .collect();
+
+    // Both relations can pull in a clip the other then pulls a further clip
+    // through — a composite touching one end of a transition chain reaches the
+    // whole chain — so this runs to a fixed point rather than once each.
+    loop {
+        let before = retained.len();
+        let mut grown = transition_plan.boundary_partners(&retained);
+        grown.extend(pip_plan.group_members(&retained));
+        retained.extend(grown);
+        if retained.len() == before {
+            break;
+        }
+    }
+
+    retained
+}
+
+/// Whether one clip's audio branch carries a sample inside the window.
+///
+/// Measured on the *branch*, not the slot: a transition starts the incoming
+/// clip's sound before its in point and runs the outgoing clip's past its out
+/// point, and those samples are audible.
+fn branch_reaches_window(clip: &Clip, handles: ClipHandles, window: &RenderWindow) -> bool {
+    if !window.is_ranged() {
+        return true;
+    }
+
+    let branch_start_sec = (clip.place.timeline_in_sec - handles.head_sec.max(0.0)).max(0.0);
+    let branch_end_sec = clip.place.timeline_out_sec() + handles.tail_sec.max(0.0);
+    branch_end_sec > window.start_sec() && branch_start_sec < window.end_sec()
 }
 
 fn validate_optional_plan_contract(
