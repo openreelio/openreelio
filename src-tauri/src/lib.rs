@@ -1656,6 +1656,7 @@ mod tauri_app {
                 $crate::ipc::get_cache_status,
                 $crate::ipc::clear_render_cache,
                 $crate::ipc::render_preview_cache,
+                $crate::ipc::ensure_preview_window,
                 // Stabilization command
                 $crate::ipc::stabilize_clip,
                 // Smart reframe command
@@ -2192,6 +2193,7 @@ mod tauri_app {
             ipc::get_cache_status,
             ipc::clear_render_cache,
             ipc::render_preview_cache,
+            ipc::ensure_preview_window,
             // Stabilization command
             ipc::stabilize_clip,
             // Smart reframe command
