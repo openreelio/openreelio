@@ -40,6 +40,7 @@ pub mod hardware;
 pub mod hdr;
 mod pip_stitch;
 pub mod plan;
+pub(crate) mod preview_cancel;
 mod render_window;
 pub mod smart;
 mod transform_layout;

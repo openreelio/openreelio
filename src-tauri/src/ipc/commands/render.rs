@@ -2696,14 +2696,16 @@ fn reconcile_cache_manifest(
     Ok(())
 }
 
-/// Abort handle and identity for the active cache render task.
+use crate::core::render::preview_cancel::PreviewCacheCancel;
+
+/// Cancellation handle and identity for the active cache render task.
 ///
-/// Starting a new cache render aborts any in-flight background task so that
+/// Starting a new cache render supersedes any in-flight background task so that
 /// only one cache render is active at a time.
 struct ActiveCacheRender {
     job_id: String,
     sequence_id: String,
-    abort_handle: tokio::task::AbortHandle,
+    cancel: std::sync::Arc<PreviewCacheCancel>,
 }
 
 static ACTIVE_CACHE_RENDER: std::sync::LazyLock<std::sync::Mutex<Option<ActiveCacheRender>>> =
@@ -2895,29 +2897,48 @@ pub async fn render_preview_cache(
     let job_profile_hash = profile_hash.clone();
     let cache_config = config.clone();
 
-    // Cancel any in-flight cache render before starting a new one.
-    if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
-        if let Some(previous) = handle.take() {
-            previous.abort_handle.abort();
-            tracing::info!("Aborted previous cache render task");
-            emit_render_lifecycle(
-                &app_handle,
-                RenderLifecycleEvent {
-                    job_id: previous.job_id,
-                    sequence_id: Some(previous.sequence_id),
-                    kind: RenderLifecycleKind::PreviewCache,
-                    state: RenderLifecycleState::Cancelled,
-                    progress: None,
-                    message: Some("Preview cache render was replaced by a newer job".to_string()),
-                    output_path: None,
-                    plan_hash: None,
-                },
-            );
+    let cache_job_id_for_task = cache_job_id.clone();
+    let cancel = std::sync::Arc::new(PreviewCacheCancel::default());
+    let task_cancel = cancel.clone();
+
+    // Supersede any in-flight fill and register this one in a single critical
+    // section, so two concurrent calls cannot both end up running: if the take
+    // and the register were separate locks, a second call could take (finding
+    // nothing yet registered) and register over this one, leaving this fill with
+    // no one able to cancel it. A supersede that lands before the task spawns is
+    // still caught by the loop-top `is_superseded()`.
+    let superseded = if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
+        let previous = handle.take();
+        if let Some(previous) = &previous {
+            previous.cancel.trigger();
         }
+        *handle = Some(ActiveCacheRender {
+            job_id: cache_job_id.clone(),
+            sequence_id: seq_id.clone(),
+            cancel,
+        });
+        previous
+    } else {
+        None
+    };
+    if let Some(previous) = superseded {
+        tracing::info!("Superseded previous cache render task");
+        emit_render_lifecycle(
+            &app_handle,
+            RenderLifecycleEvent {
+                job_id: previous.job_id,
+                sequence_id: Some(previous.sequence_id),
+                kind: RenderLifecycleKind::PreviewCache,
+                state: RenderLifecycleState::Cancelled,
+                progress: None,
+                message: Some("Preview cache render was replaced by a newer job".to_string()),
+                output_path: None,
+                plan_hash: None,
+            },
+        );
     }
 
-    let cache_job_id_for_task = cache_job_id.clone();
-    let join_handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         use tauri::Manager;
 
         let engine = ExportEngine::new(ffmpeg_runner);
@@ -2938,6 +2959,13 @@ pub async fn render_preview_cache(
         );
 
         for (completed, (idx, start_sec, end_sec)) in segment_ranges.iter().enumerate() {
+            // A newer fill has taken over: stop before starting another segment
+            // rather than render work no one will read.
+            if task_cancel.is_superseded() {
+                completed_normally = false;
+                break;
+            }
+
             // Re-load manifest to get latest state
             let mut current_manifest = match load_manifest(&project_path, &job_seq_id) {
                 Ok(Some(m)) => m,
@@ -3193,7 +3221,9 @@ pub async fn render_preview_cache(
             }
             let segment_plan_hash = render_plan.plan_hash.clone();
 
-            // Render with fresh data
+            // Render with fresh data. The segment cancel lets a superseding fill
+            // kill this FFmpeg mid-encode instead of orphaning it.
+            let segment_cancel_rx = task_cancel.arm_segment();
             let result = engine
                 .export_sequence_with_effects_for_plan(
                     &fresh_sequence,
@@ -3202,9 +3232,10 @@ pub async fn render_preview_cache(
                     &seg_settings,
                     &render_plan,
                     None,
-                    None,
+                    Some(segment_cancel_rx),
                 )
                 .await;
+            task_cancel.disarm_segment();
 
             // Update manifest
             let mut updated_manifest = match load_manifest(&project_path, &job_seq_id) {
@@ -3268,6 +3299,40 @@ pub async fn render_preview_cache(
                         &mut updated_manifest,
                         cache_config.max_cache_bytes,
                     );
+                }
+                Err(crate::core::render::ExportError::Cancelled) => {
+                    // A newer fill superseded this one mid-segment. The exporter
+                    // already killed FFmpeg and removed the partial file; leave
+                    // the segment renderable (not failed) so the timeline shows
+                    // work still to do, not a permanent error, and stop the loop.
+                    if let Some(seg) = updated_manifest
+                        .segments
+                        .iter_mut()
+                        .find(|s| s.index == *idx)
+                    {
+                        seg.state = crate::core::render::CacheSegmentState::Empty;
+                        seg.cached_file = None;
+                        seg.file_size_bytes = 0;
+                    }
+                    let _ = save_manifest(&project_path, &updated_manifest);
+                    emit_render_lifecycle(
+                        &app_handle,
+                        RenderLifecycleEvent {
+                            job_id: cache_job_id_for_task.clone(),
+                            sequence_id: Some(job_seq_id.clone()),
+                            kind: RenderLifecycleKind::PreviewCache,
+                            state: RenderLifecycleState::Cancelled,
+                            progress: None,
+                            message: Some(format!(
+                                "Preview cache segment {} superseded by a newer render",
+                                idx
+                            )),
+                            output_path: None,
+                            plan_hash: Some(segment_plan_hash.clone()),
+                        },
+                    );
+                    completed_normally = false;
+                    break;
                 }
                 Err(error) => {
                     if let Some(seg) = updated_manifest
@@ -3362,15 +3427,6 @@ pub async fn render_preview_cache(
             }
         }
     });
-
-    // Store the abort handle so the next render call can cancel this one.
-    if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
-        *handle = Some(ActiveCacheRender {
-            job_id: cache_job_id.clone(),
-            sequence_id: seq_id.clone(),
-            abort_handle: join_handle.abort_handle(),
-        });
-    }
 
     Ok(RenderCacheJobResult {
         job_id: cache_job_id,
