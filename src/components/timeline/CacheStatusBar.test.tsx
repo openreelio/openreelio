@@ -6,9 +6,12 @@ import type { CacheSegmentStatusDto } from '../../bindings';
 describe('CacheStatusBar', () => {
   const makeSegments = (states: string[]): CacheSegmentStatusDto[] =>
     states.map((state, i) => ({
+      index: i,
       startSec: i * 5,
       endSec: (i + 1) * 5,
       state: state as CacheSegmentStatusDto['state'],
+      fingerprint: '0',
+      cachedPath: null,
     }));
 
   it('should render nothing when duration is zero', () => {
