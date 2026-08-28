@@ -33,6 +33,7 @@ pub mod managed_runtime;
 pub mod masks;
 pub mod performance;
 pub mod plugin;
+pub mod preview;
 pub mod process;
 pub mod project;
 pub mod qc;

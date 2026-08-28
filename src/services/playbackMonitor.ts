@@ -13,7 +13,10 @@
  */
 
 import { SYNC_THRESHOLDS } from '@/constants/precision';
-import { frameCache } from '@/services/frameCache';
+import {
+  PREVIEW_FRAME_CACHE_MAX_ENTRIES,
+  previewFrameCache,
+} from '@/services/previewFrameCache';
 import { videoFrameBuffer } from '@/services/videoFrameBuffer';
 import { createLogger } from '@/services/logger';
 
@@ -73,6 +76,7 @@ const SAMPLE_WINDOW_SIZE = 60; // ~2 seconds at 30fps
 
 /** Memory pressure threshold (% of cache full) */
 const MEMORY_PRESSURE_THRESHOLD = 0.9;
+
 
 // =============================================================================
 // PlaybackMonitor Class
@@ -251,17 +255,19 @@ export class PlaybackMonitor {
   checkMemoryPressure(): void {
     if (!this.isActive) return;
 
-    const cacheStats = frameCache.getStats();
-    const maxEntries = 100; // Should match FRAME_EXTRACTION.MAX_CACHE_ENTRIES
+    // The preview cache holds decoded RGBA frames, whose memory lives outside
+    // the JS heap, so its occupancy is what "memory pressure" means here.
+    const bufferStats = videoFrameBuffer.getStats();
+    const maxEntries = PREVIEW_FRAME_CACHE_MAX_ENTRIES;
 
-    const fillRatio = cacheStats.entryCount / maxEntries;
+    const fillRatio = bufferStats.bufferedFrames / maxEntries;
     if (fillRatio > MEMORY_PRESSURE_THRESHOLD) {
       this.memoryPressureEvents++;
 
       logger.warn('Frame cache memory pressure', {
         fillRatio: (fillRatio * 100).toFixed(1) + '%',
-        entries: cacheStats.entryCount,
-        sizeMB: (cacheStats.totalSizeBytes / 1024 / 1024).toFixed(2),
+        entries: bufferStats.bufferedFrames,
+        sizeMB: (bufferStats.bufferedBytes / 1024 / 1024).toFixed(2),
       });
     }
   }
@@ -270,7 +276,7 @@ export class PlaybackMonitor {
    * Get current session statistics.
    */
   getStats(): SessionStats {
-    const cacheStats = frameCache.getStats();
+    const cacheStats = previewFrameCache.getStats();
     const bufferStats = videoFrameBuffer.getStats();
 
     // Calculate frame stats

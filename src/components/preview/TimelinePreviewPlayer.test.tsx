@@ -8,7 +8,15 @@ import type { Asset, Clip, Sequence, Track } from '@/types';
 
 const frameBufferMock = vi.hoisted(() => ({
   getFrame: vi.fn(),
+  beginRenderPass: vi.fn(),
+  clearAll: vi.fn().mockResolvedValue(undefined),
 }));
+
+/**
+ * The box the resident decoder fits a frame inside: the offscreen compositing
+ * canvas, which mirrors the visible canvas' backing store.
+ */
+const FRAME_TARGET = { maxWidth: 640, maxHeight: 360 };
 
 vi.mock('@/services/videoFrameBuffer', () => ({
   videoFrameBuffer: frameBufferMock,
@@ -183,7 +191,7 @@ function createSequence(): Sequence {
 describe('TimelinePreviewPlayer', () => {
   beforeEach(() => {
     installCanvasMock();
-    frameBufferMock.getFrame.mockReturnValue(new Promise<string | null>(() => {}));
+    frameBufferMock.getFrame.mockReturnValue(new Promise<ImageBitmap | null>(() => {}));
     usePlaybackStore.getState().reset();
     usePlaybackStore.setState({
       currentTime: 2,
@@ -211,7 +219,12 @@ describe('TimelinePreviewPlayer', () => {
     render(<TimelinePreviewPlayer showControls={false} />);
 
     await waitFor(() => {
-      expect(frameBufferMock.getFrame).toHaveBeenCalledWith('asset-1', '/tmp/asset-1.mp4', 2);
+      expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+        'asset-1',
+        '/tmp/asset-1.mp4',
+        2,
+        FRAME_TARGET,
+      );
     });
 
     const visibleCanvas = screen.getByTestId('preview-canvas') as HTMLCanvasElement;
@@ -221,6 +234,78 @@ describe('TimelinePreviewPlayer', () => {
     expect(visibleContext!.fillRect).not.toHaveBeenCalled();
     expect(visibleContext!.clearRect).not.toHaveBeenCalled();
     expect(visibleContext!.drawImage).not.toHaveBeenCalled();
+  });
+
+  it('asks for a larger frame when a clip is zoomed so the preview stays sharp', async () => {
+    // A clip scaled to 2x draws its frame at twice the canvas size. Decoding at
+    // canvas size would upscale it on screen, which is softer than the
+    // full-resolution extraction this path replaced.
+    const clip = createClip('clip-1', 'asset-1');
+    clip.transform.scale = { x: 2, y: 2 };
+    const sequence = createSequence();
+    sequence.tracks = [createVideoTrack('track-1', clip)];
+    useProjectStore.setState({
+      activeSequenceId: sequence.id,
+      sequences: new Map([[sequence.id, sequence]]),
+      stateVersion: 1,
+    });
+
+    render(<TimelinePreviewPlayer showControls={false} />);
+
+    await waitFor(() => {
+      expect(frameBufferMock.getFrame).toHaveBeenCalledWith('asset-1', '/tmp/asset-1.mp4', 2, {
+        maxWidth: 1280,
+        maxHeight: 720,
+      });
+    });
+  });
+
+  it('sizes a zoom animation by its widest keyframe so one decoder serves the whole move', async () => {
+    // Sizing by the instantaneous scale would ask for a different frame size
+    // every rendered frame, which thrashes both the frame cache and the pool of
+    // resident decoders behind it.
+    const clip = createClip('clip-1', 'asset-1');
+    clip.motionKeyframes = [
+      {
+        timeOffset: 0,
+        interpolation: 'linear',
+        transform: {
+          position: { x: 0.5, y: 0.5 },
+          scale: { x: 1, y: 1 },
+          rotationDeg: 0,
+          anchor: { x: 0.5, y: 0.5 },
+        },
+      },
+      {
+        timeOffset: 8,
+        interpolation: 'linear',
+        transform: {
+          position: { x: 0.5, y: 0.5 },
+          scale: { x: 1.5, y: 1.5 },
+          rotationDeg: 0,
+          anchor: { x: 0.5, y: 0.5 },
+        },
+      },
+    ];
+    const sequence = createSequence();
+    sequence.tracks = [createVideoTrack('track-1', clip)];
+    useProjectStore.setState({
+      activeSequenceId: sequence.id,
+      sequences: new Map([[sequence.id, sequence]]),
+      stateVersion: 1,
+    });
+
+    render(<TimelinePreviewPlayer showControls={false} />);
+
+    await waitFor(() => {
+      expect(frameBufferMock.getFrame).toHaveBeenCalled();
+    });
+
+    // At t=2 the interpolated scale is 1.125, but the box is the clip's widest.
+    const targets = frameBufferMock.getFrame.mock.calls.map((call) => call[3]);
+    for (const target of targets) {
+      expect(target).toEqual({ maxWidth: 960, maxHeight: 540 });
+    }
   });
 
   it('reports the visible preview canvas lifecycle for finishing tools', async () => {
@@ -254,26 +339,37 @@ describe('TimelinePreviewPlayer', () => {
     render(<TimelinePreviewPlayer showControls={false} />);
 
     await waitFor(() => {
-      expect(frameBufferMock.getFrame).toHaveBeenCalledWith('asset-1', '/tmp/asset-1.mp4', 2);
+      expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+        'asset-1',
+        '/tmp/asset-1.mp4',
+        2,
+        FRAME_TARGET,
+      );
     });
 
     expect(frameBufferMock.getFrame).not.toHaveBeenCalledWith(
       '__text__title',
       expect.anything(),
       expect.anything(),
+      expect.anything(),
     );
   });
 
   it('coalesces rapid render requests while frame extraction is pending', async () => {
-    const firstExtraction = createDeferred<string | null>();
+    const firstExtraction = createDeferred<ImageBitmap | null>();
     frameBufferMock.getFrame
       .mockImplementationOnce(() => firstExtraction.promise)
-      .mockReturnValue(new Promise<string | null>(() => {}));
+      .mockReturnValue(new Promise<ImageBitmap | null>(() => {}));
 
     render(<TimelinePreviewPlayer showControls={false} />);
 
     await waitFor(() => {
-      expect(frameBufferMock.getFrame).toHaveBeenCalledWith('asset-1', '/tmp/asset-1.mp4', 2);
+      expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+        'asset-1',
+        '/tmp/asset-1.mp4',
+        2,
+        FRAME_TARGET,
+      );
     });
 
     act(() => {
@@ -294,8 +390,18 @@ describe('TimelinePreviewPlayer', () => {
       expect(frameBufferMock.getFrame).toHaveBeenCalledTimes(2);
     });
 
-    expect(frameBufferMock.getFrame).toHaveBeenLastCalledWith('asset-1', '/tmp/asset-1.mp4', 4);
-    expect(frameBufferMock.getFrame).not.toHaveBeenCalledWith('asset-1', '/tmp/asset-1.mp4', 3);
+    expect(frameBufferMock.getFrame).toHaveBeenLastCalledWith(
+      'asset-1',
+      '/tmp/asset-1.mp4',
+      4,
+      FRAME_TARGET,
+    );
+    expect(frameBufferMock.getFrame).not.toHaveBeenCalledWith(
+      'asset-1',
+      '/tmp/asset-1.mp4',
+      3,
+      FRAME_TARGET,
+    );
   });
   it('renders the transform overlay for a single selected clip', () => {
     useTimelineStore.setState({ selectedClipIds: ['clip-1'] });
