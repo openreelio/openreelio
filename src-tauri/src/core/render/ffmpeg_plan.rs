@@ -252,17 +252,21 @@ pub(super) fn build_sequence_ffmpeg_args(
             continue;
         }
 
-        args.push("-i".to_string());
-        args.push(validated_path.to_string_lossy().to_string());
-
         // A clip that shares no frame with the window contributes no picture and
-        // no sound, so it gets no filter chain. The input stays: FFmpeg reads
-        // nothing from an input no filter references, and keeping the list
-        // intact keeps every input label in the graph meaning what it says.
+        // no sound, so FFmpeg is never told to open it: an input it opens is an
+        // input it probes, and a windowed render must not pay for the timeline it
+        // is not writing. No `-i` and no label go with it — `input_index` counts
+        // the inputs this command really has, exactly as the audio-only builder
+        // already counts them. The path is still validated above, so a windowed
+        // preview of a project with a broken far-off asset fails just as the full
+        // export would rather than passing as an honest proxy for a render it is
+        // not.
         if !renders_clip(&clip.id) {
-            input_index += 1;
             continue;
         }
+
+        args.push("-i".to_string());
+        args.push(validated_path.to_string_lossy().to_string());
 
         // A clip in a transition renders a little more than its slot: the extra
         // comes out of unused source media, never out of the timeline. The
@@ -550,6 +554,16 @@ pub(super) fn build_sequence_ffmpeg_args(
 
         input_index += 1;
     }
+
+    // Every emitted `-i` advanced `input_index` exactly once, and every filter
+    // label is `{prefix}{input_index}`, so the counter must equal the number of
+    // inputs actually on the command line. A drift here would silently point a
+    // filter at the wrong stream.
+    debug_assert_eq!(
+        input_index,
+        args.iter().filter(|arg| arg.as_str() == "-i").count(),
+        "input_index must count the -i args exactly"
+    );
 
     // Text and caption clips draw onto the composited picture instead of
     // contributing their own video segment. A sequence made only of them has no
