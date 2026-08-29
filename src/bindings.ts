@@ -719,6 +719,50 @@ async renderPreviewCache() : Promise<Result<RenderCacheJobResult, string>> {
 }
 },
 /**
+ * Ensures the preview cache covers the segments around a playhead.
+ * 
+ * This is the cache-first preview's hot path: it reports which segment file
+ * backs each time in `[playhead_sec, playhead_sec + lookahead_sec)` and, only
+ * when some of those segments are missing or stale, starts a fill for exactly
+ * those segments. Unlike [`render_preview_cache`] it never renders the whole
+ * timeline, so parking on a time costs one window, not one project.
+ * 
+ * When every window segment is already current, nothing is rendered and
+ * `job_id` is `None`. Otherwise a background fill is started (superseding any
+ * fill already running) and `job_id` names it; the returned segment states are
+ * the pre-render snapshot, so the ones being filled still read `Empty` or
+ * `Stale` — callers refresh on the `render-cache-*` events.
+ * 
+ * `lookahead_sec` defaults to twice the configured segment duration. A
+ * negative playhead is clamped to the start of the timeline.
+ * 
+ * # Not yet convergent — do not wire to per-scrub UI without the fixes below
+ * 
+ * This command is registered but has no caller yet, and it is **not** correct
+ * under its intended per-playhead call pattern. Fix these before wiring it:
+ * 1. It reconciles with [`InterruptedRenderPolicy::Reset`], which flips the
+ * segment a running fill is mid-encode on to `Error` and then supersedes and
+ * restarts it — so a window overlapping the in-flight segment kills and
+ * restarts it on every call and it never completes. The active fill's
+ * segment set must be consulted so a window already being produced is not
+ * superseded (and a live `Rendering` segment is not reset).
+ * 2. Its background fill emits the unfiltered `render-cache-*` events, which a
+ * whole-timeline cache UI reads as its own completion. The events (or the
+ * consumer) must be scoped by job.
+ * 3. On a subset window, [`cleanup_stale_files`] can delete an out-of-window
+ * stale file without persisting, and [`enforce_cache_limit`]'s
+ * highest-index-first eviction can drop the very window segment just
+ * rendered — an eviction loop on a full cache. The active window must be
+ * pinned against eviction and the cleanup persisted.
+ */
+async ensurePreviewWindow(playheadSec: number, lookaheadSec: number | null) : Promise<Result<PreviewWindowAvailability, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ensure_preview_window", { playheadSec, lookaheadSec }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Run video stabilization analysis on a clip.
  * 
  * This performs the analysis pass only:
@@ -6794,6 +6838,72 @@ startSec: number;
  * End time in seconds
  */
 endSec: number }
+/**
+ * What the preview cache holds for the segments covering a playhead window.
+ * 
+ * A cache-first preview parks on a time and needs to know two things: which
+ * segment file backs that time right now, and whether a fill was started to
+ * produce the ones that are missing. Everything here is a projection of the
+ * manifest — no filesystem work beyond resolving a cached segment's path.
+ */
+export type PreviewWindowAvailability = { 
+/**
+ * Sequence the window belongs to
+ */
+sequenceId: string; 
+/**
+ * Segment duration the manifest is laid out with, in seconds
+ */
+segmentDurationSec: number; 
+/**
+ * Segments covering the requested window, ordered by `start_sec`
+ */
+segments: PreviewWindowSegment[]; 
+/**
+ * `Some` when this call started a fill for the window's missing segments,
+ * `None` when every window segment was already current and nothing ran.
+ */
+jobId: string | null }
+/**
+ * One segment of a [`PreviewWindowAvailability`].
+ * 
+ * Mirrors [`CacheSegmentStatusDto`] — same fields, same path-resolution rules —
+ * but scoped to a window instead of the whole timeline.
+ */
+export type PreviewWindowSegment = { 
+/**
+ * Segment index (0-based)
+ */
+index: number; 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number; 
+/**
+ * Segment state at the moment the window was projected
+ */
+state: CacheSegmentState; 
+/**
+ * The segment's render+content fingerprint, as a decimal string.
+ * 
+ * Carried as text because a `u64` loses precision crossing JSON; a
+ * cache-first preview keys its frame cache on it.
+ */
+fingerprint: string; 
+/**
+ * Absolute path to the cached segment file — `Some` only when the segment is
+ * [`Cached`](CacheSegmentState::Cached) and its manifest-named file resolves
+ * through the segment-name allowlist, `None` otherwise.
+ * 
+ * The manifest is attacker-controlled whenever the project directory is, so
+ * the path comes from [`resolve_cached_segment_path`], never from joining
+ * the raw recorded name.
+ */
+cachedPath: string | null }
 /**
  * Project information returned when creating or opening a project.
  */

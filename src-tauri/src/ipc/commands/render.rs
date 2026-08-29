@@ -2711,6 +2711,131 @@ struct ActiveCacheRender {
 static ACTIVE_CACHE_RENDER: std::sync::LazyLock<std::sync::Mutex<Option<ActiveCacheRender>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
+/// Everything a preview cache command needs from the open project, copied out
+/// from under the project lock so nothing downstream holds it.
+struct CacheRenderInputs {
+    sequence: crate::core::timeline::Sequence,
+    assets: std::collections::HashMap<String, crate::core::assets::Asset>,
+    effects: std::collections::HashMap<String, crate::core::effects::Effect>,
+    render_graph: crate::core::render::RenderGraph,
+    project_path: std::path::PathBuf,
+    seq_id: String,
+}
+
+/// Copies the active sequence and its render inputs out of the open project.
+async fn gather_cache_render_inputs(
+    state: &State<'_, AppState>,
+) -> Result<CacheRenderInputs, String> {
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let seq_id = project
+        .state
+        .active_sequence_id
+        .as_ref()
+        .ok_or_else(|| "No active sequence".to_string())?
+        .clone();
+
+    let sequence = project
+        .state
+        .sequences
+        .get(&seq_id)
+        .ok_or_else(|| format!("Sequence not found: {seq_id}"))?
+        .clone();
+
+    let render_graph = crate::core::render::build_render_graph(&project.state, &seq_id)
+        .map_err(|error| format!("Failed to build render graph: {error}"))?;
+
+    let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
+        .state
+        .assets
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let effects: std::collections::HashMap<String, crate::core::effects::Effect> = project
+        .state
+        .effects
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    Ok(CacheRenderInputs {
+        sequence,
+        assets,
+        effects,
+        render_graph,
+        project_path: project.path.clone(),
+        seq_id,
+    })
+}
+
+/// Loads the preview cache manifest for a sequence and brings its freshness
+/// verdict up to date.
+///
+/// A manifest left by another encode profile describes files in a different
+/// directory that were encoded to different settings, so it is discarded along
+/// with those files. What survives is then reconciled against the sequence
+/// layout, re-fingerprinted against the current render plan, and stripped of
+/// segments whose files have gone missing.
+///
+/// This may persist the manifest — it resets segments an interrupted run left in
+/// [`CacheSegmentState::Rendering`](crate::core::render::CacheSegmentState) — so
+/// only a caller that is about to own the render may call it. Read-only callers
+/// use [`crate::core::render::cache_status_snapshot`].
+#[allow(clippy::too_many_arguments)]
+fn prepare_cache_manifest(
+    project_path: &std::path::Path,
+    seq_id: &str,
+    profile_hash: &str,
+    sequence: &crate::core::timeline::Sequence,
+    render_graph: &crate::core::render::RenderGraph,
+    assets: &std::collections::HashMap<String, crate::core::assets::Asset>,
+    effects: &std::collections::HashMap<String, crate::core::effects::Effect>,
+    config: &crate::core::render::RenderCacheConfig,
+) -> Result<crate::core::render::RenderCacheManifest, String> {
+    use crate::core::render::cache::{
+        cleanup_stale_files, manifest_for_profile, prune_other_profile_caches, save_manifest,
+    };
+
+    let loaded = manifest_for_profile(
+        project_path,
+        seq_id,
+        profile_hash,
+        sequence.duration(),
+        config.segment_duration_sec,
+    )
+    .map_err(|e| format!("Failed to load cache manifest: {e}"))?;
+    if let Some(discarded) = loaded.discarded_profile {
+        tracing::info!(
+            "Discarding preview cache for sequence {seq_id} written with render profile \
+             {discarded:?}; current profile is {profile_hash:?}"
+        );
+        if let Err(error) = prune_other_profile_caches(project_path, seq_id, profile_hash) {
+            tracing::warn!("Failed to prune stale render profile caches: {error}");
+        }
+    }
+    let mut manifest = loaded.manifest;
+
+    reconcile_cache_manifest(&mut manifest, project_path, sequence, config)?;
+    if crate::core::render::refresh_manifest_plan_fingerprints(
+        &mut manifest,
+        project_path,
+        sequence,
+        render_graph,
+        assets,
+        effects,
+    )? {
+        save_manifest(project_path, &manifest)
+            .map_err(|error| format!("Failed to save cache manifest: {error}"))?;
+    }
+    cleanup_stale_files(project_path, &mut manifest);
+
+    Ok(manifest)
+}
+
 /// Render preview cache for the active sequence.
 ///
 /// Triggers background rendering of uncached segments. Returns the cache
@@ -2723,100 +2848,31 @@ pub async fn render_preview_cache(
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
 ) -> Result<RenderCacheJobResult, String> {
-    use crate::core::render::cache::{
-        cleanup_stale_files, enforce_cache_limit, load_manifest, manifest_for_profile,
-        preview_profile_hash, prune_other_profile_caches, save_manifest,
-    };
-    use crate::core::render::ExportEngine;
-    use tauri::Emitter;
+    use crate::core::render::cache::preview_profile_hash;
 
     let config = resolve_cache_config(&app_handle);
 
     // Gather project data
-    let (sequence, assets, effects, render_graph, project_path, seq_id) = {
-        let guard = state.project.lock().await;
-        let project = guard
-            .as_ref()
-            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    let CacheRenderInputs {
+        sequence,
+        assets,
+        effects,
+        render_graph,
+        project_path,
+        seq_id,
+    } = gather_cache_render_inputs(&state).await?;
 
-        let seq_id = project
-            .state
-            .active_sequence_id
-            .as_ref()
-            .ok_or_else(|| "No active sequence".to_string())?
-            .clone();
-
-        let sequence = project
-            .state
-            .sequences
-            .get(&seq_id)
-            .ok_or_else(|| format!("Sequence not found: {seq_id}"))?
-            .clone();
-
-        let render_graph = crate::core::render::build_render_graph(&project.state, &seq_id)
-            .map_err(|error| format!("Failed to build render graph: {error}"))?;
-
-        let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
-            .state
-            .assets
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let effects: std::collections::HashMap<String, crate::core::effects::Effect> = project
-            .state
-            .effects
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        (
-            sequence,
-            assets,
-            effects,
-            render_graph,
-            project.path.clone(),
-            seq_id,
-        )
-    };
-
-    // Load or create the manifest for the preview encode profile. A manifest left
-    // by another profile describes files in a different directory that were encoded
-    // to different settings, so it is discarded along with those files.
-    let cache_job_id = ulid::Ulid::new().to_string();
     let profile_hash = preview_profile_hash(&sequence.format.canvas);
-    let loaded = manifest_for_profile(
+    let manifest = prepare_cache_manifest(
         &project_path,
         &seq_id,
         &profile_hash,
-        sequence.duration(),
-        config.segment_duration_sec,
-    )
-    .map_err(|e| format!("Failed to load cache manifest: {e}"))?;
-    if let Some(discarded) = loaded.discarded_profile {
-        tracing::info!(
-            "Discarding preview cache for sequence {seq_id} written with render profile \
-             {discarded:?}; current profile is {profile_hash:?}"
-        );
-        if let Err(error) = prune_other_profile_caches(&project_path, &seq_id, &profile_hash) {
-            tracing::warn!("Failed to prune stale render profile caches: {error}");
-        }
-    }
-    let mut manifest = loaded.manifest;
-
-    reconcile_cache_manifest(&mut manifest, &project_path, &sequence, &config)?;
-    if crate::core::render::refresh_manifest_plan_fingerprints(
-        &mut manifest,
-        &project_path,
         &sequence,
         &render_graph,
         &assets,
         &effects,
-    )? {
-        save_manifest(&project_path, &manifest)
-            .map_err(|error| format!("Failed to save cache manifest: {error}"))?;
-    }
-    cleanup_stale_files(&project_path, &mut manifest);
+        &config,
+    )?;
 
     // Find segments that need rendering
     let pending_indices: Vec<u32> = manifest
@@ -2826,6 +2882,54 @@ pub async fn render_preview_cache(
         .map(|s| s.index)
         .collect();
 
+    // `State<'_>` cannot be moved into the spawned task, so the runner is cloned
+    // out here. It stays optional so that an already-current cache still reports
+    // `AlreadyCached` when FFmpeg is missing, exactly as it did while the fill
+    // was inlined: the "FFmpeg not initialized" error is only raised on the path
+    // that actually spawns.
+    let ffmpeg_runner = ffmpeg_state.read().await.runner().cloned();
+
+    spawn_cache_fill(
+        app_handle,
+        ffmpeg_runner,
+        project_path,
+        seq_id,
+        profile_hash,
+        config,
+        manifest,
+        pending_indices,
+    )
+}
+
+/// Fills the named segments of a sequence's preview cache in the background.
+///
+/// Shared by every command that wants cache segments produced: the caller
+/// decides *which* segments (the whole timeline for
+/// [`render_preview_cache`], just the playhead window for
+/// [`ensure_preview_window`]) and this owns the rest — the already-current
+/// early return, persisting the manifest, and the background fill task.
+///
+/// `manifest` must already be reconciled and re-fingerprinted; this function
+/// trusts `pending_indices` and does not recompute freshness.
+///
+/// Starting a fill supersedes any fill already in flight, so at most one cache
+/// render is running at a time.
+#[allow(clippy::too_many_arguments)]
+fn spawn_cache_fill(
+    app_handle: tauri::AppHandle,
+    ffmpeg_runner: Option<crate::core::ffmpeg::FFmpegRunner>,
+    project_path: std::path::PathBuf,
+    seq_id: String,
+    profile_hash: String,
+    config: crate::core::render::RenderCacheConfig,
+    manifest: crate::core::render::RenderCacheManifest,
+    pending_indices: Vec<u32>,
+) -> Result<RenderCacheJobResult, String> {
+    use crate::core::render::cache::{enforce_cache_limit, load_manifest, save_manifest};
+    use crate::core::render::ExportEngine;
+    use tauri::Emitter;
+
+    let cache_job_id = ulid::Ulid::new().to_string();
     let total_pending = pending_indices.len() as u32;
 
     if total_pending == 0 {
@@ -2884,18 +2988,11 @@ pub async fn render_preview_cache(
         },
     );
 
-    // Clone FFmpegRunner before spawning (State<'_> cannot be moved into spawn)
-    let ffmpeg_runner = {
-        let ffmpeg_guard = ffmpeg_state.read().await;
-        ffmpeg_guard
-            .runner()
-            .ok_or("FFmpeg not initialized")?
-            .clone()
-    };
+    let ffmpeg_runner = ffmpeg_runner.ok_or("FFmpeg not initialized")?;
 
     let job_seq_id = seq_id.clone();
     let job_profile_hash = profile_hash.clone();
-    let cache_config = config.clone();
+    let cache_config = config;
 
     let cache_job_id_for_task = cache_job_id.clone();
     let cancel = std::sync::Arc::new(PreviewCacheCancel::default());
@@ -3435,6 +3532,114 @@ pub async fn render_preview_cache(
         segments_to_render: total_pending,
         status: RenderCacheJobStatus::Started,
     })
+}
+
+/// Default lookahead, as a multiple of the cache segment duration, when the
+/// caller does not name one: the segment the playhead sits in plus roughly one
+/// more, so a preview parked on a time has somewhere to run to.
+const DEFAULT_PREVIEW_LOOKAHEAD_SEGMENTS: f64 = 2.0;
+
+/// Ensures the preview cache covers the segments around a playhead.
+///
+/// This is the cache-first preview's hot path: it reports which segment file
+/// backs each time in `[playhead_sec, playhead_sec + lookahead_sec)` and, only
+/// when some of those segments are missing or stale, starts a fill for exactly
+/// those segments. Unlike [`render_preview_cache`] it never renders the whole
+/// timeline, so parking on a time costs one window, not one project.
+///
+/// When every window segment is already current, nothing is rendered and
+/// `job_id` is `None`. Otherwise a background fill is started (superseding any
+/// fill already running) and `job_id` names it; the returned segment states are
+/// the pre-render snapshot, so the ones being filled still read `Empty` or
+/// `Stale` — callers refresh on the `render-cache-*` events.
+///
+/// `lookahead_sec` defaults to twice the configured segment duration. A
+/// negative playhead is clamped to the start of the timeline.
+///
+/// # Not yet convergent — do not wire to per-scrub UI without the fixes below
+///
+/// This command is registered but has no caller yet, and it is **not** correct
+/// under its intended per-playhead call pattern. Fix these before wiring it:
+/// 1. It reconciles with [`InterruptedRenderPolicy::Reset`], which flips the
+///    segment a running fill is mid-encode on to `Error` and then supersedes and
+///    restarts it — so a window overlapping the in-flight segment kills and
+///    restarts it on every call and it never completes. The active fill's
+///    segment set must be consulted so a window already being produced is not
+///    superseded (and a live `Rendering` segment is not reset).
+/// 2. Its background fill emits the unfiltered `render-cache-*` events, which a
+///    whole-timeline cache UI reads as its own completion. The events (or the
+///    consumer) must be scoped by job.
+/// 3. On a subset window, [`cleanup_stale_files`] can delete an out-of-window
+///    stale file without persisting, and [`enforce_cache_limit`]'s
+///    highest-index-first eviction can drop the very window segment just
+///    rendered — an eviction loop on a full cache. The active window must be
+///    pinned against eviction and the cleanup persisted.
+#[tauri::command]
+#[specta::specta]
+pub async fn ensure_preview_window(
+    playhead_sec: f64,
+    lookahead_sec: Option<f64>,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    app: tauri::AppHandle,
+) -> Result<crate::core::render::PreviewWindowAvailability, String> {
+    use crate::core::render::cache::{
+        preview_profile_hash, select_window_indices, window_availability, window_pending_indices,
+    };
+
+    let config = resolve_cache_config(&app);
+
+    let CacheRenderInputs {
+        sequence,
+        assets,
+        effects,
+        render_graph,
+        project_path,
+        seq_id,
+    } = gather_cache_render_inputs(&state).await?;
+
+    let profile_hash = preview_profile_hash(&sequence.format.canvas);
+    let manifest = prepare_cache_manifest(
+        &project_path,
+        &seq_id,
+        &profile_hash,
+        &sequence,
+        &render_graph,
+        &assets,
+        &effects,
+        &config,
+    )?;
+
+    let lookahead =
+        lookahead_sec.unwrap_or(DEFAULT_PREVIEW_LOOKAHEAD_SEGMENTS * config.segment_duration_sec);
+    let window_indices = select_window_indices(&manifest, playhead_sec, lookahead);
+    let window_pending = window_pending_indices(&manifest, &window_indices);
+
+    // Project the window before any fill starts, so the reported states are the
+    // snapshot the caller can act on right now.
+    let mut availability = window_availability(&manifest, &project_path, &window_indices);
+
+    if window_pending.is_empty() {
+        // Everything the playhead needs is already current: do not spawn, do not
+        // emit, do not supersede a fill that is usefully running elsewhere.
+        return Ok(availability);
+    }
+
+    let ffmpeg_runner = ffmpeg_state.read().await.runner().cloned();
+
+    let result = spawn_cache_fill(
+        app,
+        ffmpeg_runner,
+        project_path,
+        seq_id,
+        profile_hash,
+        config,
+        manifest,
+        window_pending,
+    )?;
+
+    availability.job_id = Some(result.job_id);
+    Ok(availability)
 }
 
 /// Status of a render cache job
