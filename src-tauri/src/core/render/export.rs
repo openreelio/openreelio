@@ -248,7 +248,7 @@ pub enum ExportPreset {
     Instagram,
     /// WebM (VP9, Opus)
     WebmVp9,
-    /// ProRes (macOS only)
+    /// ProRes
     ProRes,
     /// Custom settings
     Custom,
@@ -290,6 +290,12 @@ pub enum VideoCodec {
     Vp9,
     #[serde(rename = "prores")]
     ProRes,
+    // Ut Video: mathematically lossless, intra-frame, `gbrp`. Records the
+    // compositor's own planes verbatim — no colorspace conversion, no chroma
+    // subsampling, no quantization — and has no quality knob (no CRF). See
+    // `ExportSettings::preview_cache`, its only caller.
+    #[serde(rename = "utvideo")]
+    UtVideo,
     Copy,
 }
 
@@ -852,13 +858,31 @@ impl ExportSettings {
     ///   into a landscape frame, which a fixed 1280x720 profile guarantees.
     /// - **frame rate follows the sequence** (`fps: None`), so cached segments
     ///   carry the sequence's own cadence rather than a fixed 30 fps.
-    /// - **no target bitrate** — quality is CRF-driven. A fixed bitrate cap that
-    ///   is survivable at 720p is catastrophic at full resolution.
-    /// - `ultrafast` x264 preset — render-ahead wants encode speed.
+    /// - **no target bitrate and no CRF** — the codec below is lossless, so
+    ///   there is no quality knob to set. `crf` must stay `None`:
+    ///   [`validate_video_export_request`] rejects a CRF on a codec with no CRF
+    ///   range, and the cache fill validates every segment before rendering it.
+    /// - **`encoder_speed: None`** — the x264 preset ladder does not apply to
+    ///   this encoder, and a value here would only bake a dead string into the
+    ///   profile hash.
     ///
-    /// CRF 28 is the remaining quality/perf knob: it trades cache fidelity for
-    /// render-ahead throughput. Lowering it (or making it configurable) is a
-    /// follow-up, deliberately not bundled with the canvas fix.
+    /// # Fidelity
+    ///
+    /// The picture is encoded with **Ut Video ([`VideoCodec::UtVideo`]) in a
+    /// `.mov`, pixel format `gbrp`** — mathematically lossless. The compositor
+    /// works in `gbrap`; here the alpha plane (opaque everywhere, since every
+    /// layer is overlaid onto an opaque black backdrop) is dropped to `gbrp` and
+    /// the remaining planes are recorded verbatim — no colorspace conversion, no
+    /// chroma subsampling and no quantization — so a decoded cache frame is
+    /// **byte-identical** to the export composite (0/255 error, infinite PSNR). That matters because an agent judges these frames: the
+    /// H.264 4:2:0 profile this replaced measured up to 9/255 error on
+    /// gradients and 155/255 on hard chroma edges such as text and UI, which is
+    /// the difference between reviewing the edit and reviewing the codec. Every
+    /// frame is a keyframe, so any frame is a seek target.
+    ///
+    /// The cost is size: roughly 45x an H.264 draft encode, about 77.5 MB per
+    /// second of 1080p timeline. The default cache budget is sized for that
+    /// (see `PerformanceSettings::cache_size_mb`).
     ///
     /// This is distinct from [`ExportSettings::preview`], which stays a fixed
     /// 720p30 profile for the one-off preview render job and the CLI's frame
@@ -879,14 +903,14 @@ impl ExportSettings {
         Self {
             preset: ExportPreset::Custom,
             output_path,
-            video_codec: VideoCodec::H264,
+            video_codec: VideoCodec::UtVideo,
             audio_codec: AudioCodec::Aac,
             width: Some(canvas.width),
             height: Some(canvas.height),
             video_bitrate: None,
             audio_bitrate: Some("128k".to_string()),
             fps: None,
-            crf: Some(28),
+            crf: None,
             two_pass: false,
             start_time,
             end_time,
@@ -897,7 +921,7 @@ impl ExportSettings {
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::default(),
             resolved_encoder_name: None,
-            encoder_speed: Some("ultrafast".to_string()),
+            encoder_speed: None,
         }
     }
 
@@ -1192,7 +1216,7 @@ fn crf_range_for_codec(codec: &VideoCodec) -> Option<std::ops::RangeInclusive<u8
     match codec {
         VideoCodec::H264 | VideoCodec::H265 => Some(0..=51),
         VideoCodec::Vp9 => Some(0..=63),
-        VideoCodec::ProRes | VideoCodec::Copy => None,
+        VideoCodec::ProRes | VideoCodec::UtVideo | VideoCodec::Copy => None,
     }
 }
 
@@ -1202,7 +1226,7 @@ fn container_supports_video_codec(container: &ContainerFormat, codec: &VideoCode
         (ContainerFormat::Mp4, VideoCodec::H264 | VideoCodec::H265)
             | (
                 ContainerFormat::Mov,
-                VideoCodec::H264 | VideoCodec::H265 | VideoCodec::ProRes
+                VideoCodec::H264 | VideoCodec::H265 | VideoCodec::ProRes | VideoCodec::UtVideo
             )
             | (ContainerFormat::Webm, VideoCodec::Vp9)
     )
@@ -3116,6 +3140,12 @@ pub(super) fn output_video_pixel_format(settings: &ExportSettings) -> &'static s
 
     match settings.video_codec {
         VideoCodec::ProRes => "yuv422p10le",
+        // Lossless only holds if nothing converts the planes on the way out:
+        // the compositor works in `gbrap`, and `gbrp` keeps its colour planes
+        // verbatim (dropping only the opaque alpha), so no colorspace conversion
+        // and no subsampling happens at all. Anything else here silently gives
+        // back the error this codec was chosen to remove.
+        VideoCodec::UtVideo => "gbrp",
         VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9 | VideoCodec::Copy => {
             if use_10_bit {
                 "yuv420p10le"
@@ -11478,7 +11508,7 @@ mod tests {
     #[test]
     fn preview_cache_settings_should_use_the_sequence_canvas_and_fps() {
         let settings = ExportSettings::preview_cache(
-            PathBuf::from("segment_0000.mp4"),
+            PathBuf::from("segment_0000.mov"),
             &Canvas::new(1920, 1080),
             Some(0.0),
             Some(5.0),
@@ -11490,11 +11520,11 @@ mod tests {
         assert_eq!(settings.height, Some(1080));
         // Follows the sequence fps rather than pinning 30.
         assert_eq!(settings.fps, None);
-        // CRF-driven, no bitrate cap (a 720p-sized cap is ruinous at full res).
+        // Lossless: no bitrate cap and no quality knob at all.
         assert_eq!(settings.video_bitrate, None);
-        assert_eq!(settings.crf, Some(28));
-        assert_eq!(settings.encoder_speed.as_deref(), Some("ultrafast"));
-        assert_eq!(settings.video_codec, VideoCodec::H264);
+        assert_eq!(settings.crf, None);
+        assert_eq!(settings.encoder_speed, None);
+        assert_eq!(settings.video_codec, VideoCodec::UtVideo);
         assert_eq!(settings.audio_codec, AudioCodec::Aac);
         assert_eq!(settings.audio_bitrate.as_deref(), Some("128k"));
         assert_eq!(settings.hdr_mode, HdrMode::Sdr);
@@ -11504,11 +11534,76 @@ mod tests {
     }
 
     /// Feature: Preview render cache profile
+    /// Scenario: should be a lossless profile the segment validator accepts
+    #[test]
+    fn preview_cache_settings_should_be_lossless_and_pass_segment_validation() {
+        let settings = ExportSettings::preview_cache(
+            PathBuf::from("segment_0000.mov"),
+            &Canvas::new(1920, 1080),
+            Some(0.0),
+            Some(5.0),
+        );
+
+        // The codec records the compositor's own planes verbatim: `gbrp` in, no
+        // conversion, no subsampling, no quantization. This is the single place
+        // the output pixel format is stated, so anything else here silently
+        // reintroduces the chroma error the codec was chosen to remove.
+        assert_eq!(output_video_pixel_format(&settings), "gbrp");
+        assert_eq!(
+            super::super::hardware::software_encoder_name(&settings.video_codec),
+            "utvideo"
+        );
+
+        // `crf: None` is load-bearing rather than cosmetic: the cache fill runs
+        // this validator on every segment, and a lossless codec has no CRF
+        // range, so a stray CRF would fail every segment render.
+        assert!(crf_range_for_codec(&settings.video_codec).is_none());
+        assert!(
+            validate_export_settings_options(&settings).is_empty(),
+            "preview_cache profile rejected: {:?}",
+            validate_export_settings_options(&settings)
+        );
+
+        // And the .mov extension is what makes that validation pass: the
+        // container is inferred from the output path, and MP4 cannot carry
+        // this codec.
+        let in_mp4 = ExportSettings {
+            output_path: PathBuf::from("segment_0000.mp4"),
+            ..settings.clone()
+        };
+        assert!(!validate_export_settings_options(&in_mp4).is_empty());
+    }
+
+    /// Feature: Preview render cache profile
+    /// Scenario: should retire caches written by the previous H.264 profile
+    #[test]
+    fn preview_cache_profile_hash_should_differ_from_the_h264_profile() {
+        let canvas = Canvas::new(1920, 1080);
+        let lossless = ExportSettings::preview_cache(PathBuf::new(), &canvas, None, None);
+
+        // The old profile: same frame, H.264 4:2:0 at CRF 28.
+        let legacy = ExportSettings {
+            video_codec: VideoCodec::H264,
+            crf: Some(28),
+            encoder_speed: Some("ultrafast".to_string()),
+            ..lossless.clone()
+        };
+
+        // The profile hash names the directory segments live in, so a differing
+        // hash is what makes every cache written by the old profile
+        // unreachable instead of being served at the wrong fidelity.
+        assert_ne!(
+            super::super::cache::compute_profile_hash(&lossless),
+            super::super::cache::compute_profile_hash(&legacy)
+        );
+    }
+
+    /// Feature: Preview render cache profile
     /// Scenario: should keep a vertical sequence vertical instead of pillarboxing it
     #[test]
     fn preview_cache_settings_should_follow_a_vertical_canvas() {
         let settings = ExportSettings::preview_cache(
-            PathBuf::from("segment_0000.mp4"),
+            PathBuf::from("segment_0000.mov"),
             &Canvas::new(1080, 1920),
             None,
             None,
@@ -11516,6 +11611,239 @@ mod tests {
 
         assert_eq!(settings.width, Some(1080));
         assert_eq!(settings.height, Some(1920));
+    }
+
+    // -----------------------------------------------------------------------
+    // Preview cache fidelity (FFmpeg-backed)
+    // -----------------------------------------------------------------------
+
+    const CACHE_FIDELITY_CANVAS: (u32, u32) = (96, 64);
+    const CACHE_FIDELITY_FPS: i32 = 10;
+    const CACHE_FIDELITY_SEC: f64 = 1.0;
+
+    /// Writes the picture the cache is most likely to damage.
+    ///
+    /// `testsrc2` is chosen for its hard, fully saturated colour edges and its
+    /// smooth ramps: those are exactly the two features 4:2:0 subsampling and
+    /// quantization destroy, and the two the agent reading these frames cares
+    /// about (text and UI are hard chroma edges). It is written back out as
+    /// Ut Video `gbrp` so the fixture itself is lossless and can serve as the
+    /// reference the render is compared against.
+    fn write_chroma_edge_source(ffmpeg: &std::path::Path, path: &std::path::Path) -> bool {
+        let mut build = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut build);
+        let built = build
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!(
+                    "testsrc2=size={}x{}:rate={}:duration={}",
+                    CACHE_FIDELITY_CANVAS.0,
+                    CACHE_FIDELITY_CANVAS.1,
+                    CACHE_FIDELITY_FPS,
+                    CACHE_FIDELITY_SEC
+                ),
+                "-c:v",
+                "utvideo",
+                "-pix_fmt",
+                "gbrp",
+            ])
+            .arg(path)
+            .output();
+
+        matches!(built, Ok(built) if built.status.success()) && path.exists()
+    }
+
+    /// Decodes a file to raw `gbrp` planes, one `Vec` per frame.
+    ///
+    /// `gbrp` is the compositor's own working format, so these bytes are the
+    /// planes themselves — nothing is converted on the way out and a comparison
+    /// of them is a comparison of the pictures.
+    fn decode_gbrp_frames(ffmpeg: &std::path::Path, path: &std::path::Path) -> Vec<Vec<u8>> {
+        let mut decode = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut decode);
+        let decoded = decode
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(path)
+            .args(["-pix_fmt", "gbrp", "-f", "rawvideo", "-"])
+            .output()
+            .expect("decode to gbrp");
+        assert!(
+            decoded.status.success(),
+            "could not decode {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+
+        let frame_bytes = 3 * CACHE_FIDELITY_CANVAS.0 as usize * CACHE_FIDELITY_CANVAS.1 as usize;
+        decoded
+            .stdout
+            .chunks_exact(frame_bytes)
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
+
+    /// Renders `sequence` through the real builder with `settings` and returns
+    /// the result decoded back to `gbrp`.
+    fn render_and_decode_gbrp(
+        ffmpeg: &std::path::Path,
+        sequence: &Sequence,
+        assets: &HashMap<String, Asset>,
+        settings: &ExportSettings,
+    ) -> Vec<Vec<u8>> {
+        let args = build_complex_filter_args_with_audio_info(
+            sequence,
+            assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            settings,
+        )
+        .expect("the builder must produce a filtergraph");
+
+        let mut render = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut render);
+        let result = render
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+            .args(&args)
+            .output()
+            .expect("run ffmpeg");
+        assert!(
+            result.status.success(),
+            "ffmpeg refused the builder's graph: {}\n{args:?}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        decode_gbrp_frames(ffmpeg, &settings.output_path)
+    }
+
+    /// The largest per-sample difference between two frame sequences, in 0-255.
+    fn max_plane_error(left: &[Vec<u8>], right: &[Vec<u8>]) -> u8 {
+        assert!(!left.is_empty(), "no frames to compare");
+        assert_eq!(left.len(), right.len(), "frame counts differ");
+        left.iter()
+            .zip(right.iter())
+            .flat_map(|(a, b)| a.iter().zip(b.iter()))
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Feature: Preview render cache fidelity
+    /// Scenario: a cached segment decodes back to the composite it was made from
+    ///
+    /// This is the claim the codec choice rests on, measured rather than
+    /// asserted: the cache is read by an agent that judges the frame, so any
+    /// error it introduces is error the agent attributes to the edit. The same
+    /// picture is put through the profile this replaced to show the measurement
+    /// is capable of failing — an all-zero result on a picture no codec could
+    /// damage would prove nothing.
+    ///
+    /// Ignored by default because it needs an `ffmpeg` binary (with `utvideo`).
+    /// Run with:
+    ///   cargo test -p openreelio --features gui --lib -- --ignored \
+    ///     the_preview_cache_is_byte_identical
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn the_preview_cache_is_byte_identical_to_the_composite_it_caches() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("chroma_edges.mov");
+        if !write_chroma_edge_source(&ffmpeg, &source) {
+            skip_without_ffmpeg("ffmpeg could not build the chroma-edge fixture");
+            return;
+        }
+
+        // A single full-frame clip at the canvas size and cadence: the composite
+        // is then the source frames themselves, so the source doubles as the
+        // reference the cache must reproduce.
+        let mut asset = Asset::new_video(
+            "edges",
+            &source.to_string_lossy(),
+            VideoInfo {
+                width: CACHE_FIDELITY_CANVAS.0,
+                height: CACHE_FIDELITY_CANVAS.1,
+                ..VideoInfo::default()
+            },
+        )
+        .with_duration(CACHE_FIDELITY_SEC)
+        .with_file_size(1_000_000);
+        asset.id = "edges".to_string();
+        let mut assets = HashMap::new();
+        assets.insert("edges".to_string(), asset);
+
+        let format = SequenceFormat::new(
+            CACHE_FIDELITY_CANVAS.0,
+            CACHE_FIDELITY_CANVAS.1,
+            CACHE_FIDELITY_FPS,
+            1,
+            48_000,
+        );
+        let canvas = format.canvas.clone();
+        let mut sequence = Sequence::new("Fidelity", format);
+        sequence.tracks.clear();
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new("edges")
+            .with_source_range(0.0, CACHE_FIDELITY_SEC)
+            .place_at(0.0);
+        clip.id = "edges0".to_string();
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let reference = decode_gbrp_frames(&ffmpeg, &source);
+
+        // When the segment is rendered through the real preview-cache profile
+        let cached = render_and_decode_gbrp(
+            &ffmpeg,
+            &sequence,
+            &assets,
+            &ExportSettings::preview_cache(
+                dir.path().join("segment_0000.mov"),
+                &canvas,
+                None,
+                None,
+            ),
+        );
+
+        // Then it decodes back to the composite exactly.
+        let lossless_error = max_plane_error(&reference, &cached);
+        eprintln!("[preview-cache] utvideo/gbrp max plane error: {lossless_error}/255");
+        assert_eq!(
+            lossless_error, 0,
+            "the preview cache must be a byte-exact record of the composite"
+        );
+
+        // And the profile this replaced damages the very same picture, so the
+        // zero above is a property of the codec and not of the fixture.
+        let legacy = render_and_decode_gbrp(
+            &ffmpeg,
+            &sequence,
+            &assets,
+            &ExportSettings {
+                output_path: dir.path().join("legacy_0000.mp4"),
+                video_codec: VideoCodec::H264,
+                crf: Some(28),
+                encoder_speed: Some("ultrafast".to_string()),
+                ..ExportSettings::preview_cache(PathBuf::new(), &canvas, None, None)
+            },
+        );
+        let lossy_error = max_plane_error(&reference, &legacy);
+        eprintln!("[preview-cache] legacy h264/yuv420p max plane error: {lossy_error}/255");
+        assert!(
+            lossy_error > 0,
+            "the fixture cannot detect codec error: H.264 4:2:0 reproduced it exactly"
+        );
     }
 
     /// Feature: Proxy frame fitting

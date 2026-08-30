@@ -2898,6 +2898,9 @@ pub async fn render_preview_cache(
         config,
         manifest,
         pending_indices,
+        // A whole-timeline fill keeps no window resident by force — the size cap
+        // governs what stays, so it cannot overrun the disk.
+        std::collections::HashSet::new(),
     )
 }
 
@@ -2924,6 +2927,7 @@ fn spawn_cache_fill(
     config: crate::core::render::RenderCacheConfig,
     manifest: crate::core::render::RenderCacheManifest,
     pending_indices: Vec<u32>,
+    protected_window: std::collections::HashSet<u32>,
 ) -> Result<RenderCacheJobResult, String> {
     use crate::core::render::cache::{enforce_cache_limit, load_manifest, save_manifest};
     use crate::core::render::ExportEngine;
@@ -2971,6 +2975,15 @@ fn spawn_cache_fill(
                 .map(|s| (s.index, s.start_sec, s.end_sec))
         })
         .collect();
+
+    // The segments the caller wants kept resident (the playhead window for
+    // `ensure_preview_window`; empty for a whole-timeline `render_preview_cache`
+    // fill, which must stay bounded by the size cap). It is deliberately NOT the
+    // whole `pending_indices`: protecting every pending segment of a cold
+    // whole-timeline fill would make the cap unenforceable and let the cache
+    // grow without bound. The segment currently being written is added per
+    // iteration so a single eviction pass can never delete the frame it just
+    // produced.
 
     let total_segments = manifest.segments.len() as u32;
 
@@ -3391,10 +3404,13 @@ fn spawn_cache_fill(
                             .to_string(),
                         export_result.file_size,
                     );
+                    let mut protected = protected_window.clone();
+                    protected.insert(*idx);
                     enforce_cache_limit(
                         &project_path,
                         &mut updated_manifest,
                         cache_config.max_cache_bytes,
+                        &protected,
                     );
                 }
                 Err(crate::core::render::ExportError::Cancelled) => {
@@ -3636,6 +3652,11 @@ pub async fn ensure_preview_window(
         config,
         manifest,
         window_pending,
+        // Keep the whole playhead window resident — including segments already
+        // cached — so filling the missing ones cannot evict the ones the
+        // playhead is sitting on. The window is a handful of segments, so this
+        // stays well under the size cap.
+        window_indices.iter().copied().collect(),
     )?;
 
     availability.job_id = Some(result.job_id);

@@ -16,7 +16,12 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 /// Settings schema version for migration support
-pub const SETTINGS_VERSION: u32 = 2;
+pub const SETTINGS_VERSION: u32 = 3;
+
+/// The render-cache size default before v3, sized for the old H.264 preview
+/// cache. The v3 lossless (UT Video) cache is ~45x larger, so a file still
+/// carrying this value would hold only seconds of cache; migration raises it.
+const PRE_V3_CACHE_SIZE_MB: u32 = 1024;
 
 /// Settings file name
 pub const SETTINGS_FILE: &str = "settings.json";
@@ -538,8 +543,18 @@ fn default_max_jobs() -> u32 {
     4
 }
 
+/// Default render-cache budget, in megabytes.
+///
+/// The preview render cache is lossless (Ut Video; see
+/// `ExportSettings::preview_cache`), which costs roughly 77.5 MB per second of
+/// 1080p timeline. The previous 1 GB budget held about 13 seconds of it — less
+/// than a single lookahead window — so the cache would thrash instead of
+/// serving anything. 8 GB is about 105 seconds of 1080p lookahead.
+///
+/// Users can still set anything inside the 128–16384 MB clamp applied by
+/// `PerformanceSettings` normalization.
 fn default_cache_size() -> u32 {
-    1024 // 1GB
+    8192 // 8GB
 }
 
 /// Integrated terminal settings
@@ -1289,6 +1304,15 @@ impl SettingsManager {
             settings.ai.assistant_runtime = AssistantRuntime::Codex;
         }
 
+        // The lossless preview cache (v3) writes ~45x larger segments than the
+        // old H.264 one, so a user still on the pre-v3 default (or below) would
+        // get a cache too small to hold even one playhead window and would
+        // thrash. Raise them to the new default; a user who deliberately chose a
+        // larger budget keeps it.
+        if settings.version < 3 && settings.performance.cache_size_mb <= PRE_V3_CACHE_SIZE_MB {
+            settings.performance.cache_size_mb = default_cache_size();
+        }
+
         settings.version = SETTINGS_VERSION;
         settings
     }
@@ -1961,6 +1985,36 @@ mod tests {
 
         assert_eq!(settings.version, SETTINGS_VERSION);
         assert_eq!(settings.ai.assistant_runtime, AssistantRuntime::Codex);
+    }
+
+    /// Feature: Settings migration
+    /// Scenario: a pre-v3 cache budget sized for the old H.264 cache is raised
+    ///
+    /// The lossless preview cache writes ~45x larger segments, so a user left on
+    /// the old 1 GB default would thrash. Migration raises them to the new
+    /// default while leaving a deliberately larger budget alone.
+    #[test]
+    fn should_raise_a_pre_v3_default_cache_budget_but_keep_a_larger_one() {
+        let temp_dir = TempDir::new().unwrap();
+        let raised = temp_dir.path().join(SETTINGS_FILE);
+        fs::write(
+            &raised,
+            r#"{ "version": 2, "performance": { "cacheSizeMb": 1024 } }"#,
+        )
+        .unwrap();
+        let settings = SettingsManager::new(temp_dir.path().to_path_buf()).load();
+        assert_eq!(settings.version, SETTINGS_VERSION);
+        assert_eq!(settings.performance.cache_size_mb, default_cache_size());
+
+        let kept_dir = TempDir::new().unwrap();
+        let kept = kept_dir.path().join(SETTINGS_FILE);
+        fs::write(
+            &kept,
+            r#"{ "version": 2, "performance": { "cacheSizeMb": 12288 } }"#,
+        )
+        .unwrap();
+        let settings = SettingsManager::new(kept_dir.path().to_path_buf()).load();
+        assert_eq!(settings.performance.cache_size_mb, 12288);
     }
 
     #[test]

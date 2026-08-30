@@ -9614,7 +9614,7 @@ warnings: string[] }
 /**
  * Video codec selection
  */
-export type VideoCodec = "h264" | "h265" | "vp9" | "prores" | "copy"
+export type VideoCodec = "h264" | "h265" | "vp9" | "prores" | "utvideo" | "copy"
 /**
  * Structured video export request used by UI and agent-driven export paths.
  */
