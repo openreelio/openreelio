@@ -2898,18 +2898,13 @@ pub async fn render_preview_cache(
         config,
         manifest,
         pending_indices,
-        // A whole-timeline fill keeps no window resident by force — the size cap
-        // governs what stays, so it cannot overrun the disk.
-        std::collections::HashSet::new(),
     )
 }
 
 /// Fills the named segments of a sequence's preview cache in the background.
 ///
 /// Shared by every command that wants cache segments produced: the caller
-/// decides *which* segments (the whole timeline for
-/// [`render_preview_cache`], just the playhead window for
-/// [`ensure_preview_window`]) and this owns the rest — the already-current
+/// decides *which* segments and this owns the rest — the already-current
 /// early return, persisting the manifest, and the background fill task.
 ///
 /// `manifest` must already be reconciled and re-fingerprinted; this function
@@ -2927,7 +2922,6 @@ fn spawn_cache_fill(
     config: crate::core::render::RenderCacheConfig,
     manifest: crate::core::render::RenderCacheManifest,
     pending_indices: Vec<u32>,
-    protected_window: std::collections::HashSet<u32>,
 ) -> Result<RenderCacheJobResult, String> {
     use crate::core::render::cache::{enforce_cache_limit, load_manifest, save_manifest};
     use crate::core::render::ExportEngine;
@@ -2975,15 +2969,6 @@ fn spawn_cache_fill(
                 .map(|s| (s.index, s.start_sec, s.end_sec))
         })
         .collect();
-
-    // The segments the caller wants kept resident (the playhead window for
-    // `ensure_preview_window`; empty for a whole-timeline `render_preview_cache`
-    // fill, which must stay bounded by the size cap). It is deliberately NOT the
-    // whole `pending_indices`: protecting every pending segment of a cold
-    // whole-timeline fill would make the cap unenforceable and let the cache
-    // grow without bound. The segment currently being written is added per
-    // iteration so a single eviction pass can never delete the frame it just
-    // produced.
 
     let total_segments = manifest.segments.len() as u32;
 
@@ -3404,8 +3389,10 @@ fn spawn_cache_fill(
                             .to_string(),
                         export_result.file_size,
                     );
-                    let mut protected = protected_window.clone();
-                    protected.insert(*idx);
+                    // Only the segment just written is pinned: a fill must stay
+                    // bounded by the size cap, and a single eviction pass must
+                    // never delete the frame it just produced.
+                    let protected = std::collections::HashSet::from([*idx]);
                     enforce_cache_limit(
                         &project_path,
                         &mut updated_manifest,
@@ -3548,119 +3535,6 @@ fn spawn_cache_fill(
         segments_to_render: total_pending,
         status: RenderCacheJobStatus::Started,
     })
-}
-
-/// Default lookahead, as a multiple of the cache segment duration, when the
-/// caller does not name one: the segment the playhead sits in plus roughly one
-/// more, so a preview parked on a time has somewhere to run to.
-const DEFAULT_PREVIEW_LOOKAHEAD_SEGMENTS: f64 = 2.0;
-
-/// Ensures the preview cache covers the segments around a playhead.
-///
-/// This is the cache-first preview's hot path: it reports which segment file
-/// backs each time in `[playhead_sec, playhead_sec + lookahead_sec)` and, only
-/// when some of those segments are missing or stale, starts a fill for exactly
-/// those segments. Unlike [`render_preview_cache`] it never renders the whole
-/// timeline, so parking on a time costs one window, not one project.
-///
-/// When every window segment is already current, nothing is rendered and
-/// `job_id` is `None`. Otherwise a background fill is started (superseding any
-/// fill already running) and `job_id` names it; the returned segment states are
-/// the pre-render snapshot, so the ones being filled still read `Empty` or
-/// `Stale` — callers refresh on the `render-cache-*` events.
-///
-/// `lookahead_sec` defaults to twice the configured segment duration. A
-/// negative playhead is clamped to the start of the timeline.
-///
-/// # Not yet convergent — do not wire to per-scrub UI without the fixes below
-///
-/// This command is registered but has no caller yet, and it is **not** correct
-/// under its intended per-playhead call pattern. Fix these before wiring it:
-/// 1. It reconciles with [`InterruptedRenderPolicy::Reset`], which flips the
-///    segment a running fill is mid-encode on to `Error` and then supersedes and
-///    restarts it — so a window overlapping the in-flight segment kills and
-///    restarts it on every call and it never completes. The active fill's
-///    segment set must be consulted so a window already being produced is not
-///    superseded (and a live `Rendering` segment is not reset).
-/// 2. Its background fill emits the unfiltered `render-cache-*` events, which a
-///    whole-timeline cache UI reads as its own completion. The events (or the
-///    consumer) must be scoped by job.
-/// 3. On a subset window, [`cleanup_stale_files`] can delete an out-of-window
-///    stale file without persisting, and [`enforce_cache_limit`]'s
-///    highest-index-first eviction can drop the very window segment just
-///    rendered — an eviction loop on a full cache. The active window must be
-///    pinned against eviction and the cleanup persisted.
-#[tauri::command]
-#[specta::specta]
-pub async fn ensure_preview_window(
-    playhead_sec: f64,
-    lookahead_sec: Option<f64>,
-    state: State<'_, AppState>,
-    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
-    app: tauri::AppHandle,
-) -> Result<crate::core::render::PreviewWindowAvailability, String> {
-    use crate::core::render::cache::{
-        preview_profile_hash, select_window_indices, window_availability, window_pending_indices,
-    };
-
-    let config = resolve_cache_config(&app);
-
-    let CacheRenderInputs {
-        sequence,
-        assets,
-        effects,
-        render_graph,
-        project_path,
-        seq_id,
-    } = gather_cache_render_inputs(&state).await?;
-
-    let profile_hash = preview_profile_hash(&sequence.format.canvas);
-    let manifest = prepare_cache_manifest(
-        &project_path,
-        &seq_id,
-        &profile_hash,
-        &sequence,
-        &render_graph,
-        &assets,
-        &effects,
-        &config,
-    )?;
-
-    let lookahead =
-        lookahead_sec.unwrap_or(DEFAULT_PREVIEW_LOOKAHEAD_SEGMENTS * config.segment_duration_sec);
-    let window_indices = select_window_indices(&manifest, playhead_sec, lookahead);
-    let window_pending = window_pending_indices(&manifest, &window_indices);
-
-    // Project the window before any fill starts, so the reported states are the
-    // snapshot the caller can act on right now.
-    let mut availability = window_availability(&manifest, &project_path, &window_indices);
-
-    if window_pending.is_empty() {
-        // Everything the playhead needs is already current: do not spawn, do not
-        // emit, do not supersede a fill that is usefully running elsewhere.
-        return Ok(availability);
-    }
-
-    let ffmpeg_runner = ffmpeg_state.read().await.runner().cloned();
-
-    let result = spawn_cache_fill(
-        app,
-        ffmpeg_runner,
-        project_path,
-        seq_id,
-        profile_hash,
-        config,
-        manifest,
-        window_pending,
-        // Keep the whole playhead window resident — including segments already
-        // cached — so filling the missing ones cannot evict the ones the
-        // playhead is sitting on. The window is a handful of segments, so this
-        // stays well under the size cap.
-        window_indices.iter().copied().collect(),
-    )?;
-
-    availability.job_id = Some(result.job_id);
-    Ok(availability)
 }
 
 /// Status of a render cache job

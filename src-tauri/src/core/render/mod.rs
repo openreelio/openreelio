@@ -75,11 +75,10 @@ pub use cache::{
     enforce_cache_limit, is_cached_segment_name, load_manifest, manifest_for_profile,
     manifest_path, preview_profile_hash, profile_cache_dir, prune_other_profile_caches,
     refresh_manifest_plan_fingerprints, render_cache_dir, resolve_cached_segment_path,
-    save_manifest, segment_cache_file, select_window_indices, sequence_cache_dir,
-    window_availability, window_pending_indices, CacheSegmentState, CacheSegmentStatusDto,
-    InterruptedRenderPolicy, ManifestForProfile, PreviewWindowAvailability, PreviewWindowSegment,
-    RenderCacheConfig, RenderCacheManifest, RenderCacheSegment, RenderCacheStatus,
-    SegmentFingerprint, SEGMENT_FINGERPRINT_UNSET,
+    save_manifest, segment_cache_file, sequence_cache_dir, CacheSegmentState,
+    CacheSegmentStatusDto, InterruptedRenderPolicy, ManifestForProfile, RenderCacheConfig,
+    RenderCacheManifest, RenderCacheSegment, RenderCacheStatus, SegmentFingerprint,
+    SEGMENT_FINGERPRINT_UNSET,
 };
 
 // Smart render re-exports
