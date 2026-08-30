@@ -4250,7 +4250,19 @@ fingerprint: string;
  * attacker-controlled, so the path is produced by
  * [`resolve_cached_segment_path`] rather than by joining the raw name.
  */
-cachedPath: string | null }
+cachedPath: string | null; 
+/**
+ * Whether the live preview cannot draw this segment faithfully.
+ * 
+ * Independent of `state`: a flagged segment may already be cached, and an
+ * unflagged one may be empty. Flags say what the cache should fill for the
+ * picture to be trustworthy; `state` and `fingerprint` say what it holds.
+ */
+flagged: boolean; 
+/**
+ * Why, in a stable order; empty when `flagged` is false.
+ */
+flagReasons: SegmentFlagReason[] }
 /**
  * Cache usage statistics.
  */
@@ -7607,6 +7619,116 @@ transcriptTotal: number | null;
  * Query processing time in milliseconds
  */
 processingTimeMs: number }
+/**
+ * Why the live preview cannot draw a cache segment faithfully.
+ * 
+ * This is the cache's auto-flag vocabulary, modelled on DaVinci Resolve Smart
+ * Cache's automatic flag list: the timeline is scanned for constructs the
+ * interactive preview cannot reproduce, and those stretches are the ones the
+ * cache fills automatically.
+ * 
+ * # Relationship to the frontend's preview-mode fallback
+ * 
+ * It covers every divergence `getCanvasFallbackReason`
+ * (`src/hooks/usePreviewMode.ts`) reports, and more. That function asks a
+ * narrower question — must the WebView switch from `<video>` playback to
+ * canvas compositing? — so it stays quiet wherever the WebView can draw
+ * *something*, even when that something is not what export writes:
+ * 
+ * - text clips and caption clips are drawn by the WebView as HTML overlays, so
+ * the frontend does not fall back for them — but HTML text is laid out and
+ * rasterized by the browser, while export burns the same text with
+ * `drawtext`/ASS. Fonts, kerning, wrapping and antialiasing all differ, so
+ * the preview is never pixel-identical and both are flagged here.
+ * - the frontend returns the first reason it finds; this returns every reason
+ * that applies, so a status readout can explain the whole segment.
+ * 
+ * The containment is not literal in one place, deliberately: the frontend
+ * falls back whenever `clip.effects` is non-empty, including for a *disabled*
+ * effect. A disabled effect changes neither path, so it is not a divergence and
+ * is not flagged here. That is the frontend being conservative about its own
+ * renderer, not a difference this vocabulary is missing.
+ * 
+ * The rule that decides membership is: *would the export path and the live
+ * preview disagree about these pixels?* If yes, it is flagged.
+ * 
+ * # Fill eligibility
+ * 
+ * A flag says the preview cannot be trusted here; it does not promise the
+ * cache can do better. Some reasons mark content the export pipeline itself
+ * refuses or errors on — see [`SegmentFlagReason::fill_renderable`]. A segment
+ * is eligible for an automatic fill only when **every** reason it carries is
+ * `fill_renderable`, because one unrenderable ingredient fails the whole
+ * segment's render.
+ * 
+ * # Ordering
+ * 
+ * `Ord` derives from declaration order, and classifier output is sorted, so the
+ * declaration order is what gets persisted into manifests. Serde keys on the
+ * variant *names*, so inserting a variant anywhere is safe to deserialize —
+ * but it does re-order stored lists, which makes the next
+ * [`refresh_manifest_segment_flags`] report a change and re-save every
+ * manifest once. That is the whole cost; nothing is invalidated.
+ */
+export type SegmentFlagReason = 
+/**
+ * A non-`Normal` effective blend mode (clip's own, or folded from its track).
+ */
+"blend_mode" | 
+/**
+ * A non-identity clip transform (position, scale, rotation or anchor).
+ */
+"transform" | 
+/**
+ * Animated transform keyframes.
+ */
+"motion_keyframes" | 
+/**
+ * Clip opacity below 1.0.
+ */
+"opacity" | 
+/**
+ * One or more enabled single-input clip effects, or an effect id that
+ * resolves to nothing.
+ */
+"clip_effects" | 
+/**
+ * Retiming: speed, reverse, freeze frame or a time remap curve.
+ */
+"speed" | 
+/**
+ * A two-input transition, which blends across a cut with handles.
+ */
+"transition" | 
+/**
+ * A text clip, burned in by export but drawn as an HTML overlay live.
+ */
+"text_clip" | 
+/**
+ * A caption clip, burned in by export but drawn as an HTML overlay live.
+ */
+"styled_caption" | 
+/**
+ * A visual clip whose asset is not video (an image, say).
+ */
+"non_video_asset" | 
+/**
+ * A clip whose asset is not in the project's asset table.
+ */
+"missing_asset" | 
+/**
+ * A compound clip, whose picture comes from a nested sequence.
+ */
+"compound_clip" | 
+/**
+ * An adjustment layer carrying effects, which apply to everything beneath it.
+ */
+"adjustment_layer" | 
+/**
+ * Media on an overlay track: the canvas preview composites it, the export
+ * pipeline refuses it.
+ */
+"overlay_track_media"
 /**
  * Classification type for a video content segment
  */

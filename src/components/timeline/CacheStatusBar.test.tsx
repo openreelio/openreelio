@@ -12,6 +12,8 @@ describe('CacheStatusBar', () => {
       state: state as CacheSegmentStatusDto['state'],
       fingerprint: '0',
       cachedPath: null,
+      flagged: false,
+      flagReasons: [],
     }));
 
   it('should render nothing when duration is zero', () => {

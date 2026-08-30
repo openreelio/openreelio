@@ -52,15 +52,15 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use crate::core::assets::Asset;
+use crate::core::assets::{Asset, AssetKind};
 use crate::core::effects::Effect;
 use crate::core::fs::validate_path_id_component;
-use crate::core::render::export::output_video_fps;
+use crate::core::render::export::{effective_blend_mode_for_clip, is_text_clip, output_video_fps};
 use crate::core::render::transition_stitch::{DEFAULT_TRANSITION_SEC, MAX_TRANSITION_SEC};
 use crate::core::render::{
     build_render_plan, ExportSettings, RenderGraph, RENDERER_SEMANTICS_VERSION,
 };
-use crate::core::timeline::{Canvas, Clip, Sequence, Track};
+use crate::core::timeline::{BlendMode, Canvas, Clip, Sequence, Track, TrackKind, Transform};
 use crate::core::types::SequenceId;
 
 // =============================================================================
@@ -109,6 +109,121 @@ impl fmt::Display for CacheSegmentState {
             Self::Cached => write!(f, "cached"),
             Self::Error => write!(f, "error"),
         }
+    }
+}
+
+// =============================================================================
+// Segment Flags
+// =============================================================================
+
+/// Why the live preview cannot draw a cache segment faithfully.
+///
+/// This is the cache's auto-flag vocabulary, modelled on DaVinci Resolve Smart
+/// Cache's automatic flag list: the timeline is scanned for constructs the
+/// interactive preview cannot reproduce, and those stretches are the ones the
+/// cache fills automatically.
+///
+/// # Relationship to the frontend's preview-mode fallback
+///
+/// It covers every divergence `getCanvasFallbackReason`
+/// (`src/hooks/usePreviewMode.ts`) reports, and more. That function asks a
+/// narrower question — must the WebView switch from `<video>` playback to
+/// canvas compositing? — so it stays quiet wherever the WebView can draw
+/// *something*, even when that something is not what export writes:
+///
+/// - text clips and caption clips are drawn by the WebView as HTML overlays, so
+///   the frontend does not fall back for them — but HTML text is laid out and
+///   rasterized by the browser, while export burns the same text with
+///   `drawtext`/ASS. Fonts, kerning, wrapping and antialiasing all differ, so
+///   the preview is never pixel-identical and both are flagged here.
+/// - the frontend returns the first reason it finds; this returns every reason
+///   that applies, so a status readout can explain the whole segment.
+///
+/// The containment is not literal in one place, deliberately: the frontend
+/// falls back whenever `clip.effects` is non-empty, including for a *disabled*
+/// effect. A disabled effect changes neither path, so it is not a divergence and
+/// is not flagged here. That is the frontend being conservative about its own
+/// renderer, not a difference this vocabulary is missing.
+///
+/// The rule that decides membership is: *would the export path and the live
+/// preview disagree about these pixels?* If yes, it is flagged.
+///
+/// # Fill eligibility
+///
+/// A flag says the preview cannot be trusted here; it does not promise the
+/// cache can do better. Some reasons mark content the export pipeline itself
+/// refuses or errors on — see [`SegmentFlagReason::fill_renderable`]. A segment
+/// is eligible for an automatic fill only when **every** reason it carries is
+/// `fill_renderable`, because one unrenderable ingredient fails the whole
+/// segment's render.
+///
+/// # Ordering
+///
+/// `Ord` derives from declaration order, and classifier output is sorted, so the
+/// declaration order is what gets persisted into manifests. Serde keys on the
+/// variant *names*, so inserting a variant anywhere is safe to deserialize —
+/// but it does re-order stored lists, which makes the next
+/// [`refresh_manifest_segment_flags`] report a change and re-save every
+/// manifest once. That is the whole cost; nothing is invalidated.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentFlagReason {
+    /// A non-`Normal` effective blend mode (clip's own, or folded from its track).
+    BlendMode,
+    /// A non-identity clip transform (position, scale, rotation or anchor).
+    Transform,
+    /// Animated transform keyframes.
+    MotionKeyframes,
+    /// Clip opacity below 1.0.
+    Opacity,
+    /// One or more enabled single-input clip effects, or an effect id that
+    /// resolves to nothing.
+    ClipEffects,
+    /// Retiming: speed, reverse, freeze frame or a time remap curve.
+    Speed,
+    /// A two-input transition, which blends across a cut with handles.
+    Transition,
+    /// A text clip, burned in by export but drawn as an HTML overlay live.
+    TextClip,
+    /// A caption clip, burned in by export but drawn as an HTML overlay live.
+    StyledCaption,
+    /// A visual clip whose asset is not video (an image, say).
+    NonVideoAsset,
+    /// A clip whose asset is not in the project's asset table.
+    MissingAsset,
+    /// A compound clip, whose picture comes from a nested sequence.
+    CompoundClip,
+    /// An adjustment layer carrying effects, which apply to everything beneath it.
+    AdjustmentLayer,
+    /// Media on an overlay track: the canvas preview composites it, the export
+    /// pipeline refuses it.
+    OverlayTrackMedia,
+}
+
+impl SegmentFlagReason {
+    /// Whether the export pipeline can actually render a segment carrying this
+    /// reason.
+    ///
+    /// Reasons that mark content the export path refuses or errors on still
+    /// warn that the live preview is untrustworthy — that is what they are for —
+    /// but an automatic fill must skip segments whose only path to truth cannot
+    /// run, or it retries a failing render forever:
+    ///
+    /// - [`CompoundClip`](Self::CompoundClip) and
+    ///   [`MissingAsset`](Self::MissingAsset): the media walk resolves the clip's
+    ///   asset id and fails with `Asset not found` (a compound clip's
+    ///   `__compound__…` id resolves to nothing by construction).
+    /// - [`OverlayTrackMedia`](Self::OverlayTrackMedia): the media walk skips
+    ///   overlay tracks outright, and export preflight rejects the sequence with
+    ///   "Overlay tracks are not supported in final render export yet".
+    ///
+    /// A segment is fill-eligible only when every reason it carries returns
+    /// `true` here.
+    pub fn fill_renderable(&self) -> bool {
+        !matches!(
+            self,
+            Self::CompoundClip | Self::MissingAsset | Self::OverlayTrackMedia
+        )
     }
 }
 
@@ -582,6 +697,315 @@ pub fn refresh_manifest_plan_fingerprints(
 }
 
 // =============================================================================
+// Segment Flag Classifier
+// =============================================================================
+
+/// Asset id the backend gives to generated caption clips.
+///
+/// Mirrors `CAPTION_CLIP_ASSET_ID` in `src/utils/captionClip.ts`; a clip
+/// carrying it is caption text even on a plain video track.
+const CAPTION_CLIP_ASSET_ID: &str = "caption";
+
+/// Tolerance for treating a float property as "left at its default".
+///
+/// A transform or opacity that survived a JSON round-trip can come back a few
+/// ULPs off the value it was written with, and exact equality would flag an
+/// untouched clip. `1e-4` is the same tolerance the frontend's preview-mode
+/// check uses, so the two agree on what counts as identity.
+const FLAG_EPSILON: f64 = 1e-4;
+
+/// Reports whether a transform leaves the frame exactly as the source drew it.
+///
+/// Compared component-wise against [`Transform::default`] rather than by
+/// `PartialEq`, so round-trip noise below [`FLAG_EPSILON`] is not a transform.
+fn is_identity_transform(transform: &Transform) -> bool {
+    let identity = Transform::default();
+    let near = |a: f64, b: f64| (a - b).abs() <= FLAG_EPSILON;
+
+    near(transform.position.x, identity.position.x)
+        && near(transform.position.y, identity.position.y)
+        && near(transform.scale.x, identity.scale.x)
+        && near(transform.scale.y, identity.scale.y)
+        && near(transform.rotation_deg, identity.rotation_deg)
+        && near(transform.anchor.x, identity.anchor.x)
+        && near(transform.anchor.y, identity.anchor.y)
+}
+
+/// Reports whether a clip carries caption text rather than media.
+///
+/// Mirrors `isCaptionLikeClip` in `src/utils/captionClip.ts`: a caption track,
+/// a subtitle asset, or the reserved caption asset id.
+fn is_caption_like_clip(clip: &Clip, track: &Track, asset: Option<&Asset>) -> bool {
+    track.kind == TrackKind::Caption
+        || asset.is_some_and(|asset| asset.kind == AssetKind::Subtitle)
+        || clip.asset_id == CAPTION_CLIP_ASSET_ID
+}
+
+/// Reports whether a track contributes *media pixels* to the frame.
+///
+/// This is the gate the visual builders use — `contributes_to_output() &&
+/// visible` in both [`ffmpeg_plan`](crate::core::render::ffmpeg_plan) and
+/// [`pip_stitch`](crate::core::render::pip_stitch) — plus dropping audio tracks,
+/// which reach no frame at all. `contributes_to_output` alone would keep a
+/// hidden video track, because such a track still contributes its audio.
+///
+/// # It is not the only gate the export path uses
+///
+/// The text and caption overlay walks are deliberately wider: they gate on
+/// `track_included_in_media_collection`, which is plain
+/// [`Track::contributes_to_output`] with no `visible` term (see
+/// `collect_drawtext_text_overlays` and the ASS builder in
+/// [`export`](crate::core::render::export)). A hidden — but unmuted — video
+/// track therefore contributes **no media pixels and yet still burns its text
+/// clips** into the output. [`classify_segment_window`] walks that asymmetry as
+/// a separate arm rather than widening this predicate, because widening it here
+/// would wrongly flag the hidden track's *media* clips too.
+fn track_affects_picture(track: &Track) -> bool {
+    track.kind != TrackKind::Audio && track.contributes_to_output() && track.visible
+}
+
+/// Reports whether a track draws no media but still burns its text clips.
+///
+/// The complement of [`track_affects_picture`] over the text overlay walk's own
+/// gate: an unmuted video track that is hidden. See that function for why the
+/// two gates differ.
+fn track_burns_text_only(track: &Track) -> bool {
+    track.kind == TrackKind::Video && track.contributes_to_output() && !track.visible
+}
+
+/// Every reason one clip makes the live preview diverge from the export.
+///
+/// Reasons are independent facts about the clip, so all that apply are
+/// collected — except the media-identity reasons ([`TextClip`], [`StyledCaption`],
+/// [`NonVideoAsset`], [`MissingAsset`]), of which at most one can describe where
+/// a clip's picture comes from.
+///
+/// Unresolvable inputs fail closed: an effect id with no effect behind it counts
+/// as [`ClipEffects`], because "unknown" and "the preview cannot draw it" must
+/// have the same consequence.
+///
+/// [`TextClip`]: SegmentFlagReason::TextClip
+/// [`StyledCaption`]: SegmentFlagReason::StyledCaption
+/// [`NonVideoAsset`]: SegmentFlagReason::NonVideoAsset
+/// [`MissingAsset`]: SegmentFlagReason::MissingAsset
+/// [`ClipEffects`]: SegmentFlagReason::ClipEffects
+fn clip_flag_reasons(
+    clip: &Clip,
+    track: &Track,
+    assets: &HashMap<String, Asset>,
+    effects: &HashMap<String, Effect>,
+) -> Vec<SegmentFlagReason> {
+    let mut reasons = Vec::new();
+    let asset = assets.get(&clip.asset_id);
+    let is_text = is_text_clip(clip);
+
+    // Where the picture comes from. Compound clips and adjustment layers carry
+    // synthetic asset ids that resolve to nothing by design, so they are named
+    // by their own reasons below rather than reported as a missing asset.
+    if is_caption_like_clip(clip, track, asset) {
+        reasons.push(SegmentFlagReason::StyledCaption);
+    } else if is_text {
+        reasons.push(SegmentFlagReason::TextClip);
+    } else if clip.compound_sequence_id.is_none() && !clip.is_adjustment_layer {
+        match asset {
+            Some(asset) if asset.kind != AssetKind::Video => {
+                reasons.push(SegmentFlagReason::NonVideoAsset);
+            }
+            None => reasons.push(SegmentFlagReason::MissingAsset),
+            Some(_) => {}
+        }
+    }
+
+    // Media on an overlay track. The canvas preview composites overlay tracks,
+    // but the export media walk skips them (`Caption | Overlay => continue`) and
+    // preflight rejects the sequence outright — so the two can never agree here.
+    // Text clips are the one exception: they reach the output through the text
+    // overlay walk, which does serve overlay tracks.
+    if track.kind == TrackKind::Overlay && !is_text {
+        reasons.push(SegmentFlagReason::OverlayTrackMedia);
+    }
+
+    if clip.compound_sequence_id.is_some() {
+        reasons.push(SegmentFlagReason::CompoundClip);
+    }
+    // An adjustment layer with no effects composites nothing onto the clips
+    // below it, so it changes no pixels in either path. The export planner gates
+    // on exactly this pair (`is_adjustment_layer() && !effects.is_empty()`).
+    if clip.is_adjustment_layer && !clip.effects.is_empty() {
+        reasons.push(SegmentFlagReason::AdjustmentLayer);
+    }
+
+    // Compositing.
+    if effective_blend_mode_for_clip(clip, track) != BlendMode::Normal {
+        reasons.push(SegmentFlagReason::BlendMode);
+    }
+    if !is_identity_transform(&clip.transform) {
+        reasons.push(SegmentFlagReason::Transform);
+    }
+    if !clip.motion_keyframes.is_empty() {
+        reasons.push(SegmentFlagReason::MotionKeyframes);
+    }
+    if (f64::from(clip.opacity) - 1.0).abs() > FLAG_EPSILON {
+        reasons.push(SegmentFlagReason::Opacity);
+    }
+
+    // Retiming. Any of these makes the frame at a timeline time come from a
+    // source time the live preview does not compute.
+    if (f64::from(clip.speed) - 1.0).abs() > FLAG_EPSILON
+        || clip.reverse
+        || clip.freeze_frame
+        || clip.time_remap.is_some()
+    {
+        reasons.push(SegmentFlagReason::Speed);
+    }
+
+    // Effects. Two-input transitions are consumed at the timeline stitch, not in
+    // the clip's filter chain (see `EffectType::is_two_input_transition`), so
+    // they are reported as transitions instead of as clip effects.
+    //
+    // The predicate deliberately over-approximates what `transition_stitch`
+    // actually renders, exactly as `transition_window_reach_sec` does: it asks
+    // only "is an enabled two-input transition attached to this clip", and never
+    // whether the clip abuts a neighbour to blend with, whether it is the first
+    // such transition the stitcher would keep, or whether its duration survives
+    // quantization. Answering those needs the planned transition set, which
+    // lives behind the export engine's asset probing. Over-flagging costs a
+    // segment that did not need caching; under-flagging leaves the user trusting
+    // a preview of a blend that is not there.
+    let mut has_transition = false;
+    let mut has_clip_effect = false;
+    for effect_id in &clip.effects {
+        match effects.get(effect_id) {
+            Some(effect) if !effect.enabled => {}
+            Some(effect) if effect.effect_type.is_two_input_transition() => has_transition = true,
+            Some(_) => has_clip_effect = true,
+            None => has_clip_effect = true,
+        }
+    }
+    if has_clip_effect {
+        reasons.push(SegmentFlagReason::ClipEffects);
+    }
+    if has_transition {
+        reasons.push(SegmentFlagReason::Transition);
+    }
+
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
+
+/// Classifies the timeline inside `[start_sec, end_sec)` for preview fidelity.
+///
+/// Pure: it reads the timeline and returns why the live WebView preview cannot
+/// draw this window the way the export path would — see [`SegmentFlagReason`]
+/// for the vocabulary and for how it relates to the frontend's own preview-mode
+/// fallback. An empty result means the preview can be trusted here.
+///
+/// Only enabled clips overlapping the window are considered
+/// ([`clips_in_range`]) — the same clip selection the window content hash uses,
+/// so flags and fingerprints are computed over the same material.
+///
+/// Tracks are walked in two arms, because the export path does not use one
+/// track gate. Media pixels come from [`track_affects_picture`] tracks. Text
+/// clips additionally come from [`track_burns_text_only`] tracks — hidden but
+/// unmuted video tracks, whose text the export still burns while the live
+/// preview draws nothing at all. Only [`SegmentFlagReason::TextClip`] is raised
+/// from that second arm: it is the sole thing such a track puts on screen, so
+/// flagging its media clips would invent a divergence that cannot happen.
+///
+/// The result is sorted and deduplicated, so a window carrying the same set of
+/// problems always produces the same list regardless of track or clip order.
+pub fn classify_segment_window(
+    sequence: &Sequence,
+    assets: &HashMap<String, Asset>,
+    effects: &HashMap<String, Effect>,
+    start_sec: f64,
+    end_sec: f64,
+) -> Vec<SegmentFlagReason> {
+    let mut reasons = Vec::new();
+
+    for track in &sequence.tracks {
+        if track_affects_picture(track) {
+            for clip in clips_in_range(track, start_sec, end_sec) {
+                reasons.extend(clip_flag_reasons(clip, track, assets, effects));
+            }
+        } else if track_burns_text_only(track) {
+            // Not `clip_flag_reasons`: nothing else on this track is drawn, so
+            // no other property of these clips can make the preview wrong.
+            for clip in clips_in_range(track, start_sec, end_sec) {
+                if is_text_clip(clip) {
+                    reasons.push(SegmentFlagReason::TextClip);
+                }
+            }
+        }
+    }
+
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
+
+/// Refreshes the preview-fidelity flags on every segment of a manifest.
+///
+/// A segment's flags are classified in exactly one place, and this is it. Every
+/// other manifest operation — creating segments, reconciling a duration change,
+/// recovering from an interrupted render — carries the stored value through
+/// untouched, exactly as it does for the fingerprint.
+///
+/// Each segment is classified over its own window widened by
+/// [`transition_window_reach_sec`], the same widening
+/// [`refresh_manifest_plan_fingerprints`] applies — a transition blending across
+/// a segment boundary belongs to both of its neighbours, and flags that saw a
+/// narrower window than the fingerprint did would disagree about which segments
+/// contain it.
+///
+/// # Flags never demote a segment
+///
+/// A flag change leaves [`RenderCacheSegment::state`] alone. Flags say *what
+/// should be filled automatically*; fingerprints say *whether what is already
+/// filled is still valid*. Removing the last flag from a segment does not make
+/// its cached file wrong, and adding one does not either — only a fingerprint
+/// change can demote `Cached` to `Stale`.
+///
+/// Returns whether any segment's flag set changed. There is no failure mode:
+/// classification builds no render plan and touches no disk.
+pub fn refresh_manifest_segment_flags(
+    manifest: &mut RenderCacheManifest,
+    sequence: &Sequence,
+    assets: &HashMap<String, Asset>,
+    effects: &HashMap<String, Effect>,
+) -> bool {
+    // Measure the transition reach at the fps the segments are encoded at, for
+    // the same reason `refresh_manifest_plan_fingerprints` does.
+    let encode_fps = output_video_fps(
+        sequence,
+        &ExportSettings::preview_cache(PathBuf::new(), &sequence.format.canvas, None, None),
+    );
+    let reach_sec = transition_window_reach_sec(effects, encode_fps);
+
+    let mut changed = false;
+    for segment in &mut manifest.segments {
+        let next = classify_segment_window(
+            sequence,
+            assets,
+            effects,
+            (segment.start_sec - reach_sec).max(0.0),
+            segment.end_sec + reach_sec,
+        );
+        if next != segment.flag_reasons {
+            segment.flag_reasons = next;
+            changed = true;
+        }
+    }
+
+    if changed {
+        manifest.updated_at = chrono::Utc::now().to_rfc3339();
+    }
+
+    changed
+}
+
+// =============================================================================
 // Cache Segment
 // =============================================================================
 
@@ -602,6 +1026,13 @@ pub struct RenderCacheSegment {
     /// [`SEGMENT_FINGERPRINT_UNSET`] until
     /// [`refresh_manifest_plan_fingerprints`] — its only writer — has run.
     pub fingerprint: SegmentFingerprint,
+    /// Why the live preview cannot draw this segment; empty when it can.
+    ///
+    /// Classified only by [`refresh_manifest_segment_flags`]. Defaults to empty so
+    /// a manifest written before flags existed still deserializes, and is
+    /// omitted when empty so an unflagged manifest is unchanged on disk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flag_reasons: Vec<SegmentFlagReason>,
     /// Relative path to cached file (within the profile cache directory)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_file: Option<String>,
@@ -618,6 +1049,7 @@ impl RenderCacheSegment {
             end_sec,
             state: CacheSegmentState::Empty,
             fingerprint: SEGMENT_FINGERPRINT_UNSET,
+            flag_reasons: Vec::new(),
             cached_file: None,
             file_size_bytes: 0,
         }
@@ -634,6 +1066,14 @@ impl RenderCacheSegment {
             self.state,
             CacheSegmentState::Empty | CacheSegmentState::Stale | CacheSegmentState::Error
         )
+    }
+
+    /// Whether the live preview cannot draw this segment faithfully.
+    ///
+    /// A flagged segment is one the cache should fill automatically; it says
+    /// nothing about whether the segment is currently cached or stale.
+    pub fn flagged(&self) -> bool {
+        !self.flag_reasons.is_empty()
     }
 
     /// Whether this segment is valid for smart rendering copy
@@ -794,6 +1234,10 @@ impl RenderCacheManifest {
                 // computed for. A segment whose range is new keeps
                 // `SEGMENT_FINGERPRINT_UNSET` and is planned on the next refresh.
                 segment.fingerprint = previous.fingerprint;
+                // Flags travel with the range for the same reason: they were
+                // classified over it. A new range starts unflagged and is
+                // classified on the next refresh.
+                segment.flag_reasons = previous.flag_reasons;
 
                 match previous.state {
                     CacheSegmentState::Cached => {
@@ -1036,6 +1480,14 @@ pub struct CacheSegmentStatusDto {
     /// attacker-controlled, so the path is produced by
     /// [`resolve_cached_segment_path`] rather than by joining the raw name.
     pub cached_path: Option<String>,
+    /// Whether the live preview cannot draw this segment faithfully.
+    ///
+    /// Independent of `state`: a flagged segment may already be cached, and an
+    /// unflagged one may be empty. Flags say what the cache should fill for the
+    /// picture to be trustworthy; `state` and `fingerprint` say what it holds.
+    pub flagged: bool,
+    /// Why, in a stable order; empty when `flagged` is false.
+    pub flag_reasons: Vec<SegmentFlagReason>,
 }
 
 impl RenderCacheStatus {
@@ -1093,6 +1545,8 @@ impl RenderCacheStatus {
                     state: s.state.clone(),
                     fingerprint: s.fingerprint.to_string(),
                     cached_path,
+                    flagged: s.flagged(),
+                    flag_reasons: s.flag_reasons.clone(),
                 }
             })
             .collect();
@@ -1473,6 +1927,11 @@ pub fn cache_status_snapshot(
             sequence.id
         );
     }
+
+    // Classify the same private copy, so the status always reports flags for the
+    // timeline as it stands now. Like the fingerprint refresh this is in-memory
+    // only; unlike it, it cannot fail, so it runs unconditionally.
+    refresh_manifest_segment_flags(&mut view, sequence, assets, effects);
 
     Ok(RenderCacheStatus::from_manifest(&view, config, project_dir))
 }
@@ -3370,5 +3829,635 @@ mod tests {
         assert_eq!(evicted, 2);
         assert_eq!(manifest.segments[0].state, CacheSegmentState::Empty);
         assert_eq!(manifest.segments[1].state, CacheSegmentState::Empty);
+    }
+
+    // -----------------------------------------------------------------------
+    // Segment flag classifier
+    // -----------------------------------------------------------------------
+
+    /// One asset table holding a video, an image and a subtitle, so a fixture
+    /// can pick which kind a clip resolves to just by naming an asset id.
+    fn flag_test_assets() -> HashMap<String, Asset> {
+        let mut image = Asset::new_image("still.png", "/tmp/still.png", 1920, 1080);
+        image.id = "img0".to_string();
+
+        HashMap::from([
+            ("a0".to_string(), make_video_asset("a0")),
+            ("img0".to_string(), image),
+        ])
+    }
+
+    /// Classifies a single 0..5s clip on one visible video track.
+    ///
+    /// `edit` gets both the clip and its track, so a fixture can move the flag
+    /// onto whichever of the two carries it.
+    fn flags_for(edit: impl FnOnce(&mut Clip, &mut Track)) -> Vec<SegmentFlagReason> {
+        flags_with_effects(&HashMap::new(), edit)
+    }
+
+    /// [`flags_for`] with a project effect table the clip can reference.
+    fn flags_with_effects(
+        effects: &HashMap<String, Effect>,
+        edit: impl FnOnce(&mut Clip, &mut Track),
+    ) -> Vec<SegmentFlagReason> {
+        let mut clip = make_test_clip("c0", "a0", 0.0, 5.0);
+        let mut track = make_test_track("t1", TrackKind::Video, Vec::new());
+        edit(&mut clip, &mut track);
+        track.clips = vec![clip];
+
+        let sequence = make_test_sequence("seq1", vec![track]);
+        classify_segment_window(&sequence, &flag_test_assets(), effects, 0.0, 5.0)
+    }
+
+    #[test]
+    fn should_not_flag_a_segment_when_it_holds_a_plain_full_frame_video_clip() {
+        assert_eq!(flags_for(|_, _| {}), vec![]);
+    }
+
+    #[test]
+    fn should_flag_blend_mode_when_the_clip_carries_one() {
+        assert_eq!(
+            flags_for(|clip, _| clip.blend_mode = BlendMode::Multiply),
+            vec![SegmentFlagReason::BlendMode]
+        );
+    }
+
+    #[test]
+    fn should_flag_blend_mode_when_only_the_track_carries_one() {
+        // The clip is Normal, so the reason exists only after the effective
+        // mode is folded down from the track.
+        assert_eq!(
+            flags_for(|_, track| track.blend_mode = BlendMode::Screen),
+            vec![SegmentFlagReason::BlendMode]
+        );
+    }
+
+    #[test]
+    fn should_flag_transform_when_the_clip_is_not_at_identity() {
+        assert_eq!(
+            flags_for(|clip, _| clip.transform.scale.x = 1.5),
+            vec![SegmentFlagReason::Transform]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_transform_when_the_clip_is_within_the_identity_tolerance() {
+        // JSON round-trip noise must not read as a deliberate transform.
+        assert_eq!(
+            flags_for(|clip, _| {
+                clip.transform.position.x = 0.5 + 1e-6;
+                clip.transform.rotation_deg = -1e-6;
+            }),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn should_flag_motion_keyframes_when_the_base_transform_is_still_identity() {
+        // A Ken Burns move leaves `transform` untouched, so only the keyframes
+        // themselves can reveal it.
+        assert_eq!(
+            flags_for(|clip, _| {
+                let mut zoomed = clip.transform.clone();
+                zoomed.scale.x = 1.4;
+                zoomed.scale.y = 1.4;
+                clip.motion_keyframes = vec![
+                    TransformKeyframe {
+                        time_offset: 0.0,
+                        transform: clip.transform.clone(),
+                        interpolation: KeyframeInterpolation::default(),
+                    },
+                    TransformKeyframe {
+                        time_offset: 5.0,
+                        transform: zoomed,
+                        interpolation: KeyframeInterpolation::default(),
+                    },
+                ];
+            }),
+            vec![SegmentFlagReason::MotionKeyframes]
+        );
+    }
+
+    #[test]
+    fn should_flag_opacity_when_the_clip_is_not_fully_opaque() {
+        assert_eq!(
+            flags_for(|clip, _| clip.opacity = 0.5),
+            vec![SegmentFlagReason::Opacity]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_opacity_when_the_clip_is_fully_opaque() {
+        assert_eq!(flags_for(|clip, _| clip.opacity = 1.0), vec![]);
+    }
+
+    #[test]
+    fn should_flag_clip_effects_when_an_enabled_effect_is_applied() {
+        let blur = make_test_effect("fx-blur", EffectType::GaussianBlur);
+        let effects = HashMap::from([(blur.id.clone(), blur)]);
+        assert_eq!(
+            flags_with_effects(&effects, |clip, _| clip.effects =
+                vec!["fx-blur".to_string()]),
+            vec![SegmentFlagReason::ClipEffects]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_clip_effects_when_the_effect_is_disabled() {
+        let mut blur = make_test_effect("fx-blur", EffectType::GaussianBlur);
+        blur.enabled = false;
+        let effects = HashMap::from([(blur.id.clone(), blur)]);
+        assert_eq!(
+            flags_with_effects(&effects, |clip, _| clip.effects =
+                vec!["fx-blur".to_string()]),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn should_flag_clip_effects_when_an_effect_id_resolves_to_nothing() {
+        // Deny by default: an effect the classifier cannot inspect is an effect
+        // it must assume the preview cannot draw.
+        assert_eq!(
+            flags_with_effects(&HashMap::new(), |clip, _| {
+                clip.effects = vec!["fx-ghost".to_string()];
+            }),
+            vec![SegmentFlagReason::ClipEffects]
+        );
+    }
+
+    #[test]
+    fn should_flag_speed_when_the_clip_is_retimed() {
+        assert_eq!(
+            flags_for(|clip, _| clip.speed = 2.0),
+            vec![SegmentFlagReason::Speed]
+        );
+    }
+
+    #[test]
+    fn should_flag_speed_when_the_clip_is_reversed() {
+        assert_eq!(
+            flags_for(|clip, _| clip.reverse = true),
+            vec![SegmentFlagReason::Speed]
+        );
+    }
+
+    #[test]
+    fn should_flag_speed_when_the_clip_is_a_freeze_frame() {
+        assert_eq!(
+            flags_for(|clip, _| clip.freeze_frame = true),
+            vec![SegmentFlagReason::Speed]
+        );
+    }
+
+    #[test]
+    fn should_flag_speed_when_the_clip_carries_a_time_remap_curve() {
+        assert_eq!(
+            flags_for(|clip, _| {
+                clip.time_remap = Some(crate::core::timeline::TimeRemapCurve {
+                    keyframes: vec![
+                        crate::core::timeline::TimeRemapKeyframe {
+                            timeline_time: 0.0,
+                            source_time: 0.0,
+                            interpolation: KeyframeInterpolation::default(),
+                        },
+                        crate::core::timeline::TimeRemapKeyframe {
+                            timeline_time: 5.0,
+                            source_time: 2.5,
+                            interpolation: KeyframeInterpolation::default(),
+                        },
+                    ],
+                });
+            }),
+            vec![SegmentFlagReason::Speed]
+        );
+    }
+
+    #[test]
+    fn should_flag_a_two_input_transition_as_transition_rather_than_clip_effects() {
+        // `xfade` never enters the clip's own filter chain, so it is a different
+        // problem for the preview than a single-input effect is.
+        let dissolve = make_test_effect("fx-dissolve", EffectType::CrossDissolve);
+        let effects = HashMap::from([(dissolve.id.clone(), dissolve)]);
+        assert_eq!(
+            flags_with_effects(&effects, |clip, _| {
+                clip.effects = vec!["fx-dissolve".to_string()];
+            }),
+            vec![SegmentFlagReason::Transition]
+        );
+    }
+
+    #[test]
+    fn should_widen_transition_flags_to_every_segment_within_the_blend_reach() {
+        // The blend straddles the cut with handles, so a segment that does not
+        // contain the transitioned clip at all still shows frames the blend
+        // wrote. The reach is one number for the whole timeline (see
+        // `transition_window_reach_sec`), so it also spills onto the segment on
+        // the clip's *other* edge — over-flagging, the same way the fingerprint
+        // over-invalidates, and bounded by the reach rather than unbounded.
+        let (mut sequence, assets) = four_segment_sequence();
+        let dissolve = make_test_effect("fx-dissolve", EffectType::CrossDissolve);
+        // The clip spanning 5..10, i.e. ending on the segment 1 / segment 2 cut.
+        sequence.tracks[0].clips[1].effects = vec![dissolve.id.clone()];
+        let effects = HashMap::from([(dissolve.id.clone(), dissolve)]);
+
+        // Without widening, segment 2 holds no transitioned clip at all.
+        assert_eq!(
+            classify_segment_window(&sequence, &assets, &effects, 10.0, 15.0),
+            vec![]
+        );
+
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 20.0, 5.0);
+        assert!(refresh_manifest_segment_flags(
+            &mut manifest,
+            &sequence,
+            &assets,
+            &effects
+        ));
+
+        let transition = vec![SegmentFlagReason::Transition];
+        // Segment 1 holds the clip; segment 2 is the far side of the cut; and
+        // segment 0 is reached across the clip's leading edge at t=5.
+        assert_eq!(manifest.segments[0].flag_reasons, transition);
+        assert_eq!(manifest.segments[1].flag_reasons, transition);
+        assert_eq!(manifest.segments[2].flag_reasons, transition);
+        // Segment 3 (15..20) is further than the reach from the clip, so the
+        // spread stops there rather than covering the timeline.
+        assert!(!manifest.segments[3].flagged());
+    }
+
+    #[test]
+    fn should_flag_a_text_clip_because_export_burns_it_in() {
+        // The WebView draws this as an HTML overlay, so the frontend's preview
+        // fallback stays quiet — but HTML text is not the export's drawtext.
+        assert_eq!(
+            flags_for(|clip, _| clip.asset_id = "__text__title".to_string()),
+            vec![SegmentFlagReason::TextClip]
+        );
+    }
+
+    #[test]
+    fn should_flag_a_caption_clip_on_a_caption_track() {
+        assert_eq!(
+            flags_for(|clip, track| {
+                track.kind = TrackKind::Caption;
+                clip.label = Some("Hello".to_string());
+            }),
+            vec![SegmentFlagReason::StyledCaption]
+        );
+    }
+
+    #[test]
+    fn should_flag_a_caption_clip_that_only_the_reserved_asset_id_identifies() {
+        assert_eq!(
+            flags_for(|clip, _| clip.asset_id = "caption".to_string()),
+            vec![SegmentFlagReason::StyledCaption]
+        );
+    }
+
+    #[test]
+    fn should_flag_a_non_video_asset_when_the_clip_shows_an_image() {
+        assert_eq!(
+            flags_for(|clip, _| clip.asset_id = "img0".to_string()),
+            vec![SegmentFlagReason::NonVideoAsset]
+        );
+    }
+
+    #[test]
+    fn should_flag_a_missing_asset_when_the_clip_resolves_to_nothing() {
+        assert_eq!(
+            flags_for(|clip, _| clip.asset_id = "gone".to_string()),
+            vec![SegmentFlagReason::MissingAsset]
+        );
+    }
+
+    #[test]
+    fn should_flag_a_compound_clip_without_calling_its_asset_missing() {
+        // A compound clip's asset id is synthetic and resolves to nothing by
+        // design, so the missing-asset reason would be pure noise here.
+        assert_eq!(
+            flags_for(|clip, _| {
+                clip.asset_id = format!("{}inner", Clip::COMPOUND_ASSET_PREFIX);
+                clip.compound_sequence_id = Some("inner".to_string());
+            }),
+            vec![SegmentFlagReason::CompoundClip]
+        );
+    }
+
+    #[test]
+    fn should_flag_an_adjustment_layer_without_calling_its_asset_missing() {
+        let grade = make_test_effect("fx-grade", EffectType::Saturation);
+        let effects = HashMap::from([(grade.id.clone(), grade)]);
+        assert_eq!(
+            flags_with_effects(&effects, |clip, _| {
+                clip.asset_id = Clip::ADJUSTMENT_LAYER_ASSET_ID.to_string();
+                clip.is_adjustment_layer = true;
+                clip.effects = vec!["fx-grade".to_string()];
+            }),
+            vec![
+                SegmentFlagReason::ClipEffects,
+                SegmentFlagReason::AdjustmentLayer
+            ]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_an_adjustment_layer_that_carries_no_effects() {
+        // An empty adjustment layer composites nothing onto the clips below it,
+        // so it changes no pixels in either path — and the export planner skips
+        // it on the same `is_adjustment_layer && !effects.is_empty()` gate.
+        assert_eq!(
+            flags_for(|clip, _| {
+                clip.asset_id = Clip::ADJUSTMENT_LAYER_ASSET_ID.to_string();
+                clip.is_adjustment_layer = true;
+            }),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn should_flag_overlay_track_media_because_export_refuses_it() {
+        // The canvas preview composites overlay tracks; the export media walk
+        // skips them and preflight rejects the sequence.
+        assert_eq!(
+            flags_for(|_, track| track.kind = TrackKind::Overlay),
+            vec![SegmentFlagReason::OverlayTrackMedia]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_overlay_track_media_for_a_text_clip_on_an_overlay_track() {
+        // Text clips do reach the output from an overlay track, through the text
+        // overlay walk — so they diverge as text, not as unrenderable media.
+        assert_eq!(
+            flags_for(|clip, track| {
+                track.kind = TrackKind::Overlay;
+                clip.asset_id = "__text__title".to_string();
+            }),
+            vec![SegmentFlagReason::TextClip]
+        );
+    }
+
+    #[test]
+    fn should_flag_a_caption_asset_clip_on_an_overlay_track_as_unrenderable_too() {
+        // The overlay walk's caption arm keys on the caption *track* kind, so a
+        // caption-asset clip parked on an overlay track is never burned — and
+        // preflight rejects it as unsupported overlay media. Both facts are
+        // true, and only the second one stops an automatic fill.
+        let reasons = flags_for(|clip, track| {
+            track.kind = TrackKind::Overlay;
+            clip.asset_id = "caption".to_string();
+        });
+
+        assert_eq!(
+            reasons,
+            vec![
+                SegmentFlagReason::StyledCaption,
+                SegmentFlagReason::OverlayTrackMedia
+            ]
+        );
+        assert!(!reasons.iter().all(SegmentFlagReason::fill_renderable));
+    }
+
+    #[test]
+    fn should_flag_a_text_clip_on_a_hidden_video_track_because_export_still_burns_it() {
+        // The text overlay walk gates on plain `contributes_to_output`, which
+        // has no `visible` term — so a hidden but unmuted video track draws no
+        // media and yet still burns its text. The live preview draws nothing.
+        assert_eq!(
+            flags_for(|clip, track| {
+                track.visible = false;
+                clip.asset_id = "__text__title".to_string();
+            }),
+            vec![SegmentFlagReason::TextClip]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_a_caption_asset_clip_on_a_hidden_video_track() {
+        // Only the caption *track* arm of the overlay walk draws caption clips;
+        // a caption-asset clip on a video track falls through it, hidden or not.
+        assert_eq!(
+            flags_for(|clip, track| {
+                track.visible = false;
+                clip.asset_id = "caption".to_string();
+            }),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn should_report_which_reasons_an_automatic_fill_can_actually_render() {
+        // A reason the export path refuses is still a true warning, but a fill
+        // that acted on it would retry a failing render forever.
+        for reason in [
+            SegmentFlagReason::CompoundClip,
+            SegmentFlagReason::MissingAsset,
+            SegmentFlagReason::OverlayTrackMedia,
+        ] {
+            assert!(!reason.fill_renderable(), "{reason:?} should not be filled");
+        }
+
+        for reason in [
+            SegmentFlagReason::BlendMode,
+            SegmentFlagReason::Transform,
+            SegmentFlagReason::MotionKeyframes,
+            SegmentFlagReason::Opacity,
+            SegmentFlagReason::ClipEffects,
+            SegmentFlagReason::Speed,
+            SegmentFlagReason::Transition,
+            SegmentFlagReason::TextClip,
+            SegmentFlagReason::StyledCaption,
+            SegmentFlagReason::NonVideoAsset,
+            SegmentFlagReason::AdjustmentLayer,
+        ] {
+            assert!(reason.fill_renderable(), "{reason:?} should be fillable");
+        }
+    }
+
+    #[test]
+    fn should_not_flag_a_segment_when_the_offending_track_is_muted() {
+        assert_eq!(
+            flags_for(|clip, track| {
+                track.muted = true;
+                clip.opacity = 0.5;
+            }),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_a_segment_when_the_offending_video_track_is_hidden() {
+        // `contributes_to_output` keeps a hidden video track for its audio, so
+        // the picture-only rule has to AND in `visible` itself.
+        assert_eq!(
+            flags_for(|clip, track| {
+                track.visible = false;
+                clip.blend_mode = BlendMode::Multiply;
+            }),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_a_segment_for_a_clip_on_an_audio_track() {
+        // Nothing on an audio track reaches the frame.
+        assert_eq!(
+            flags_for(|clip, track| {
+                track.kind = TrackKind::Audio;
+                clip.opacity = 0.5;
+            }),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn should_not_flag_a_segment_for_a_disabled_clip() {
+        assert_eq!(
+            flags_for(|clip, _| {
+                clip.enabled = false;
+                clip.speed = 2.0;
+            }),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn should_return_sorted_and_deduplicated_reasons_when_many_clips_offend() {
+        // Two clips share a reason and each adds one of its own; the result must
+        // not depend on the order they were walked in.
+        let mut first = make_test_clip("c0", "a0", 0.0, 2.0);
+        first.opacity = 0.5;
+        first.speed = 2.0;
+        let mut second = make_test_clip("c1", "a0", 2.0, 3.0);
+        second.opacity = 0.25;
+        second.blend_mode = BlendMode::Multiply;
+
+        let track = make_test_track("t1", TrackKind::Video, vec![first, second]);
+        let sequence = make_test_sequence("seq1", vec![track]);
+        let reasons =
+            classify_segment_window(&sequence, &flag_test_assets(), &HashMap::new(), 0.0, 5.0);
+
+        assert_eq!(
+            reasons,
+            vec![
+                SegmentFlagReason::BlendMode,
+                SegmentFlagReason::Opacity,
+                SegmentFlagReason::Speed,
+            ]
+        );
+    }
+
+    #[test]
+    fn should_report_no_change_when_segment_flags_are_refreshed_twice() {
+        let (mut sequence, assets) = four_segment_sequence();
+        sequence.tracks[0].clips[2].opacity = 0.5;
+        let effects = HashMap::new();
+
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 20.0, 5.0);
+
+        assert!(refresh_manifest_segment_flags(
+            &mut manifest,
+            &sequence,
+            &assets,
+            &effects
+        ));
+        assert!(manifest.segments[2].flagged());
+        assert!(!manifest.segments[0].flagged());
+
+        assert!(!refresh_manifest_segment_flags(
+            &mut manifest,
+            &sequence,
+            &assets,
+            &effects
+        ));
+    }
+
+    #[test]
+    fn should_not_demote_a_cached_segment_when_its_flags_change() {
+        // Flags decide what gets filled automatically; only the fingerprint
+        // decides whether what is already filled is still valid.
+        let tmp = tempfile::tempdir().unwrap();
+        let (sequence, assets) = four_segment_sequence();
+        let effects = HashMap::new();
+        let mut manifest = prepare_manifest(tmp.path(), &sequence, &assets, &effects, 20.0);
+        cache_every_segment(&mut manifest);
+
+        let mut edited = sequence.clone();
+        edited.tracks[0].clips[2].blend_mode = BlendMode::Multiply;
+
+        assert!(refresh_manifest_segment_flags(
+            &mut manifest,
+            &edited,
+            &assets,
+            &effects
+        ));
+
+        assert_eq!(
+            manifest.segments[2].flag_reasons,
+            vec![SegmentFlagReason::BlendMode]
+        );
+        assert!(manifest
+            .segments
+            .iter()
+            .all(|segment| segment.state == CacheSegmentState::Cached));
+    }
+
+    #[test]
+    fn should_carry_segment_flags_through_a_layout_reconcile() {
+        let (mut sequence, assets) = four_segment_sequence();
+        sequence.tracks[0].clips[1].opacity = 0.5;
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 20.0, 5.0);
+        refresh_manifest_segment_flags(&mut manifest, &sequence, &assets, &HashMap::new());
+        assert!(manifest.segments[1].flagged());
+
+        // A duration change that keeps segment 1's range keeps its flags too.
+        manifest.reconcile_with_sequence(25.0, 5.0, InterruptedRenderPolicy::Reset);
+
+        assert_eq!(
+            manifest.segments[1].flag_reasons,
+            vec![SegmentFlagReason::Opacity]
+        );
+        // The range that did not exist before starts unflagged.
+        assert!(!manifest.segments[4].flagged());
+    }
+
+    #[test]
+    fn should_roundtrip_segment_flags_through_the_saved_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest =
+            RenderCacheManifest::new("seq1", &preview_profile_hash(&test_canvas()), 10.0, 5.0);
+        manifest.segments[0].flag_reasons =
+            vec![SegmentFlagReason::BlendMode, SegmentFlagReason::TextClip];
+
+        save_manifest(tmp.path(), &manifest).unwrap();
+        let loaded = load_manifest(tmp.path(), "seq1").unwrap().unwrap();
+
+        assert_eq!(
+            loaded.segments[0].flag_reasons,
+            vec![SegmentFlagReason::BlendMode, SegmentFlagReason::TextClip]
+        );
+        assert!(!loaded.segments[1].flagged());
+    }
+
+    #[test]
+    fn should_deserialize_a_segment_written_before_flags_existed() {
+        let json = r#"{
+            "index": 0,
+            "startSec": 0.0,
+            "endSec": 5.0,
+            "state": "cached",
+            "fingerprint": 4242,
+            "cachedFile": "segment_0000.mov",
+            "fileSizeBytes": 2048
+        }"#;
+
+        let segment: RenderCacheSegment = serde_json::from_str(json).unwrap();
+
+        assert!(!segment.flagged());
+        assert_eq!(segment.flag_reasons, vec![]);
     }
 }

@@ -70,15 +70,15 @@ pub use plan::{
 
 // Render cache re-exports
 pub use cache::{
-    cache_status_snapshot, cleanup_stale_files, clear_sequence_cache,
+    cache_status_snapshot, classify_segment_window, cleanup_stale_files, clear_sequence_cache,
     compute_plan_segment_fingerprint, compute_profile_hash, compute_window_content_hash,
     enforce_cache_limit, is_cached_segment_name, load_manifest, manifest_for_profile,
     manifest_path, preview_profile_hash, profile_cache_dir, prune_other_profile_caches,
-    refresh_manifest_plan_fingerprints, render_cache_dir, resolve_cached_segment_path,
-    save_manifest, segment_cache_file, sequence_cache_dir, CacheSegmentState,
-    CacheSegmentStatusDto, InterruptedRenderPolicy, ManifestForProfile, RenderCacheConfig,
-    RenderCacheManifest, RenderCacheSegment, RenderCacheStatus, SegmentFingerprint,
-    SEGMENT_FINGERPRINT_UNSET,
+    refresh_manifest_plan_fingerprints, refresh_manifest_segment_flags, render_cache_dir,
+    resolve_cached_segment_path, save_manifest, segment_cache_file, sequence_cache_dir,
+    CacheSegmentState, CacheSegmentStatusDto, InterruptedRenderPolicy, ManifestForProfile,
+    RenderCacheConfig, RenderCacheManifest, RenderCacheSegment, RenderCacheStatus,
+    SegmentFingerprint, SegmentFlagReason, SEGMENT_FINGERPRINT_UNSET,
 };
 
 // Smart render re-exports

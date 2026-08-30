@@ -2820,14 +2820,24 @@ fn prepare_cache_manifest(
     let mut manifest = loaded.manifest;
 
     reconcile_cache_manifest(&mut manifest, project_path, sequence, config)?;
-    if crate::core::render::refresh_manifest_plan_fingerprints(
+    let fingerprints_changed = crate::core::render::refresh_manifest_plan_fingerprints(
         &mut manifest,
         project_path,
         sequence,
         render_graph,
         assets,
         effects,
-    )? {
+    )?;
+    // Flags are persisted alongside fingerprints so the stored manifest explains
+    // why each segment is worth filling. They never demote a segment, so a
+    // flag-only change is a plain metadata write.
+    let flags_changed = crate::core::render::refresh_manifest_segment_flags(
+        &mut manifest,
+        sequence,
+        assets,
+        effects,
+    );
+    if fingerprints_changed || flags_changed {
         save_manifest(project_path, &manifest)
             .map_err(|error| format!("Failed to save cache manifest: {error}"))?;
     }
