@@ -171,6 +171,7 @@ pub fn resolve_video_encoder(
     match codec {
         VideoCodec::Vp9 => return "libvpx-vp9".to_string(),
         VideoCodec::ProRes => return "prores_ks".to_string(),
+        VideoCodec::UtVideo => return "utvideo".to_string(),
         VideoCodec::Copy => return "copy".to_string(),
         VideoCodec::H264 | VideoCodec::H265 => {}
     }
@@ -229,6 +230,7 @@ pub fn software_encoder_name(codec: &VideoCodec) -> String {
         VideoCodec::H265 => "libx265".to_string(),
         VideoCodec::Vp9 => "libvpx-vp9".to_string(),
         VideoCodec::ProRes => "prores_ks".to_string(),
+        VideoCodec::UtVideo => "utvideo".to_string(),
         VideoCodec::Copy => "copy".to_string(),
     }
 }

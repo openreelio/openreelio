@@ -41,10 +41,10 @@
 //! cache vs. an export ladder, say) plan identically while producing
 //! incompatible files. The profile hash therefore both feeds the fingerprint
 //! and names the directory segments live in
-//! (`renders/<sequenceId>/<profileHash>/segment_0000.mp4`), so one profile's
+//! (`renders/<sequenceId>/<profileHash>/segment_0000.mov`), so one profile's
 //! files can never be handed to a request for another.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -961,7 +961,7 @@ pub struct RenderCacheConfig {
 impl Default for RenderCacheConfig {
     fn default() -> Self {
         Self {
-            max_cache_bytes: 1024 * 1024 * 1024, // 1 GB
+            max_cache_bytes: 8 * 1024 * 1024 * 1024, // 8 GB (lossless cache is ~45x larger than the old H.264 one)
             segment_duration_sec: DEFAULT_SEGMENT_DURATION_SEC,
             enabled: true,
             smart_render_enabled: true,
@@ -1353,14 +1353,33 @@ pub fn segment_cache_file(
         .join(segment_cache_file_name(index)))
 }
 
+/// Extension segments are written with today.
+///
+/// The preview cache encodes Ut Video, which MP4 cannot carry; see
+/// [`ExportSettings::preview_cache`].
+const SEGMENT_FILE_EXTENSION: &str = "mov";
+
+/// Extensions a segment file may have been written with by *some* build.
+///
+/// Only [`SEGMENT_FILE_EXTENSION`] is ever emitted. `mp4` is the extension the
+/// H.264 preview-cache profile used, and it stays recognized so segments an
+/// older build left on disk are still deletable by
+/// [`prune_other_profile_caches`] and the eviction path — a name we refuse to
+/// recognize is a file we can never clean up.
+const RECOGNIZED_SEGMENT_FILE_EXTENSIONS: [&str; 2] = [SEGMENT_FILE_EXTENSION, "mp4"];
+
 /// Builds the on-disk name for a cached segment.
 ///
 /// This is the sole writer of the naming scheme; [`is_cached_segment_name`] mirrors it.
 fn segment_cache_file_name(index: u32) -> String {
-    format!("segment_{index:04}.mp4")
+    format!("segment_{index:04}.{SEGMENT_FILE_EXTENSION}")
 }
 
 /// Reports whether `name` is a file name this module could have produced.
+///
+/// Accepts every extension in [`RECOGNIZED_SEGMENT_FILE_EXTENSIONS`], not just
+/// the one the writer emits today, because this predicate also gates *deletion*
+/// of files older builds wrote.
 ///
 /// # Security
 /// `RenderCacheSegment::cached_file` is deserialized from `manifest.json` inside the
@@ -1368,12 +1387,20 @@ fn segment_cache_file_name(index: u32) -> String {
 /// joined onto the sequence cache directory and handed to `remove_file` or `fs::copy`.
 /// A value such as `../../../snapshot.json` would escape the cache directory entirely.
 /// Rather than blocklisting traversal, this allowlists exactly what
-/// [`segment_cache_file_name`] emits: a name that does not round-trip through the
-/// writer's own formatting was not written by us and is never touched.
+/// [`segment_cache_file_name`] emits (modulo the legacy extensions above): a name that
+/// does not round-trip through the writer's own formatting was not written by us and is
+/// never touched.
 pub fn is_cached_segment_name(name: &str) -> bool {
+    RECOGNIZED_SEGMENT_FILE_EXTENSIONS
+        .iter()
+        .any(|extension| segment_name_matches_extension(name, extension))
+}
+
+/// Round-trips `name` through the writer's formatting with `extension` substituted.
+fn segment_name_matches_extension(name: &str, extension: &str) -> bool {
     let Some(digits) = name
         .strip_prefix("segment_")
-        .and_then(|rest| rest.strip_suffix(".mp4"))
+        .and_then(|rest| rest.strip_suffix(&format!(".{extension}")))
     else {
         return false;
     };
@@ -1382,7 +1409,7 @@ pub fn is_cached_segment_name(name: &str) -> bool {
     }
     digits
         .parse::<u32>()
-        .is_ok_and(|index| segment_cache_file_name(index) == name)
+        .is_ok_and(|index| format!("segment_{index:04}.{extension}") == name)
 }
 
 /// Resolves a manifest-recorded segment file name to a path inside
@@ -1686,10 +1713,22 @@ pub fn clear_sequence_cache(project_dir: &Path, sequence_id: &str) -> std::io::R
 
 /// Enforces cache size limit by evicting the oldest cached segments (LRU by index).
 /// Returns the number of segments evicted.
+///
+/// `protected` names segments an in-flight fill is currently producing; they are
+/// never evicted. Without that, a fill and the size cap deadlock each other: the
+/// cap evicts highest-index-first, a fill renders low-to-high, and once the
+/// resident set is smaller than the fill's own window the highest cached segment
+/// is always the one the fill just wrote. Every segment would be deleted the
+/// moment it landed and re-requested on the next pass, forever. Callers with no
+/// fill in flight pass an empty set.
+///
+/// This is a guard, not the eviction policy: choosing victims by distance from
+/// the playhead instead of by index is a separate change.
 pub fn enforce_cache_limit(
     project_dir: &Path,
     manifest: &mut RenderCacheManifest,
     max_bytes: u64,
+    protected: &HashSet<u32>,
 ) -> usize {
     if manifest.total_cached_bytes <= max_bytes {
         return 0;
@@ -1711,6 +1750,7 @@ pub fn enforce_cache_limit(
         .segments
         .iter()
         .filter(|s| s.state == CacheSegmentState::Cached)
+        .filter(|s| !protected.contains(&s.index))
         .map(|s| s.index)
         .rev()
         .collect();
@@ -2955,7 +2995,7 @@ mod tests {
             sequence_cache_dir(tmp.path(), "seq1")
                 .unwrap()
                 .join(&preview)
-                .join("segment_0000.mp4")
+                .join("segment_0000.mov")
         );
         assert_eq!(half_path.file_name(), preview_path.file_name());
     }
@@ -3127,7 +3167,7 @@ mod tests {
         assert_eq!(
             seg_file,
             PathBuf::from(format!(
-                "/projects/my_video/.openreelio/cache/renders/seq-001/{profile}/segment_0003.mp4"
+                "/projects/my_video/.openreelio/cache/renders/seq-001/{profile}/segment_0003.mov"
             ))
         );
     }
@@ -3345,6 +3385,26 @@ mod tests {
     }
 
     #[test]
+    fn should_write_segments_as_mov_and_still_recognize_legacy_mp4_for_cleanup() {
+        // Given the writer, which emits only the container the lossless
+        // preview-cache codec needs
+        assert_eq!(segment_cache_file_name(0), "segment_0000.mov");
+        assert!(segment_cache_file_name(7).ends_with(".mov"));
+
+        // Then the predicate accepts what the writer emits
+        assert!(is_cached_segment_name("segment_0000.mov"));
+
+        // And it still accepts the extension older builds wrote, so segments
+        // left behind by the H.264 cache remain deletable rather than becoming
+        // permanently unreachable garbage.
+        assert!(is_cached_segment_name("segment_0000.mp4"));
+
+        // While traversal is refused under either extension.
+        assert!(!is_cached_segment_name("../segment_0000.mov"));
+        assert!(!is_cached_segment_name("../segment_0000.mp4"));
+    }
+
+    #[test]
     fn should_not_remove_a_manifest_named_file_outside_the_cache_dir() {
         // Given a manifest whose `cached_file` traverses out of the cache directory
         let tmp = tempfile::tempdir().unwrap();
@@ -3382,7 +3442,7 @@ mod tests {
         manifest.mark_segment_cached(0, "../victim.mp4".to_string(), 4096);
 
         // When the size limit forces an eviction
-        enforce_cache_limit(tmp.path(), &mut manifest, 0);
+        enforce_cache_limit(tmp.path(), &mut manifest, 0, &HashSet::new());
 
         // Then the file outside the cache directory survives
         assert!(victim.exists());
@@ -3400,14 +3460,14 @@ mod tests {
 
         // Cache all 4 segments (500 bytes each = 2000 total)
         for i in 0..4 {
-            let name = format!("segment_{i:04}.mp4");
+            let name = segment_cache_file_name(i);
             std::fs::write(seg_dir.join(&name), vec![0u8; 500]).unwrap();
             manifest.mark_segment_cached(i, name, 500);
         }
         assert_eq!(manifest.total_cached_bytes, 2000);
 
         // When enforcing a 1000-byte limit
-        let evicted = enforce_cache_limit(tmp.path(), &mut manifest, 1000);
+        let evicted = enforce_cache_limit(tmp.path(), &mut manifest, 1000, &HashSet::new());
 
         // Then segments should be evicted from the end
         assert_eq!(evicted, 2);
@@ -3428,11 +3488,46 @@ mod tests {
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
 
         // When enforcing a large limit
-        let evicted = enforce_cache_limit(tmp.path(), &mut manifest, 10_000);
+        let evicted = enforce_cache_limit(tmp.path(), &mut manifest, 10_000, &HashSet::new());
 
         // Then nothing should be evicted
         assert_eq!(evicted, 0);
         assert_eq!(manifest.segments[0].state, CacheSegmentState::Cached);
+    }
+
+    #[test]
+    fn should_not_evict_segments_the_running_fill_is_producing() {
+        // Given a cache well over its byte cap, where the segments a fill is
+        // currently producing are the highest-index ones — exactly the victims
+        // the index-descending eviction order would pick first.
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = preview_profile_hash(&test_canvas());
+        let seg_dir = profile_cache_dir(tmp.path(), "seq1", &profile).unwrap();
+        std::fs::create_dir_all(&seg_dir).unwrap();
+
+        let mut manifest = RenderCacheManifest::new("seq1", &profile, 20.0, 5.0);
+        for index in 0..4 {
+            let name = segment_cache_file_name(index);
+            std::fs::write(seg_dir.join(&name), vec![0u8; 500]).unwrap();
+            manifest.mark_segment_cached(index, name, 500);
+        }
+
+        // When the cap is enforced while that fill holds indices 2 and 3
+        let protected: HashSet<u32> = [2, 3].into_iter().collect();
+        let evicted = enforce_cache_limit(tmp.path(), &mut manifest, 500, &protected);
+
+        // Then the fill's own output survives, files and all, even though the
+        // cache is still over the cap afterwards — a fill that evicted what it
+        // just wrote could never finish.
+        assert_eq!(manifest.segments[2].state, CacheSegmentState::Cached);
+        assert_eq!(manifest.segments[3].state, CacheSegmentState::Cached);
+        assert!(seg_dir.join(segment_cache_file_name(2)).exists());
+        assert!(seg_dir.join(segment_cache_file_name(3)).exists());
+
+        // And the unprotected segments are the ones that were reclaimed.
+        assert_eq!(evicted, 2);
+        assert_eq!(manifest.segments[0].state, CacheSegmentState::Empty);
+        assert_eq!(manifest.segments[1].state, CacheSegmentState::Empty);
     }
 
     // -----------------------------------------------------------------------
