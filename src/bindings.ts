@@ -709,11 +709,17 @@ async clearRenderCache() : Promise<Result<ClearCacheResult, string>> {
  * 
  * Triggers background rendering of uncached segments. Returns the cache
  * status immediately; rendering progress is reported via Tauri events.
- * If a previous cache render is still running it is cancelled first.
+ * 
+ * `scope` selects which segments are wanted;
+ * [`PreviewCacheScope::WholeTimeline`] when omitted.
+ * 
+ * A fill already in flight is *converged onto*, not cancelled: calling this
+ * repeatedly with unchanged work is a no-op, and a changed work set retargets
+ * the running fill. See [`crate::core::render::preview_fill`].
  */
-async renderPreviewCache() : Promise<Result<RenderCacheJobResult, string>> {
+async renderPreviewCache(scope: PreviewCacheScope | null) : Promise<Result<RenderCacheJobResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("render_preview_cache") };
+    return { status: "ok", data: await TAURI_INVOKE("render_preview_cache", { scope }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -6783,6 +6789,23 @@ poolMisses: number;
  */
 hitRate: number }
 /**
+ * Which segments a preview-cache fill request is asking for.
+ */
+export type PreviewCacheScope = 
+/**
+ * Every segment that needs rendering, in timeline order.
+ */
+"whole_timeline" | 
+/**
+ * Only segments the live preview cannot draw faithfully, and only those the
+ * export path can actually render.
+ * 
+ * This is the scope that buys accuracy rather than smoothness: a flagged
+ * segment is one where what the user sees and what the export produces
+ * disagree, so filling it replaces a guess with the real composite.
+ */
+"flagged"
+/**
  * Preview plan for an EditScript.
  */
 export type PreviewPlanDto = { 
@@ -7218,7 +7241,19 @@ export type RenderCacheJobStatus =
 /**
  * All segments are already cached; no rendering needed
  */
-"already_cached"
+"already_cached" | 
+/**
+ * A fill already in flight is producing exactly this work; nothing changed.
+ * 
+ * The returned job id is that running fill's, not a new one.
+ */
+"already_converging" | 
+/**
+ * A fill already in flight had its queue swapped to this work set.
+ * 
+ * The returned job id is that running fill's, not a new one.
+ */
+"retargeted"
 /**
  * Cache status information returned to the frontend
  */

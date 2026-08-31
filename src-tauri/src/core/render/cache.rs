@@ -2012,8 +2012,76 @@ pub fn clear_sequence_cache(project_dir: &Path, sequence_id: &str) -> std::io::R
     Ok(())
 }
 
-/// Enforces cache size limit by evicting the oldest cached segments (LRU by index).
-/// Returns the number of segments evicted.
+/// Removes the file a segment names and clears its entry, reporting success.
+///
+/// Accounting is left to the caller: a `Cached` segment's bytes are part of
+/// [`RenderCacheManifest::total_cached_bytes`] and a `Stale` one's may not be,
+/// and the two callers reconcile that differently.
+fn release_segment_file(seq_dir: &Path, segment: &mut RenderCacheSegment) -> bool {
+    let removed = match segment.cached_file.as_ref() {
+        Some(file) => match resolve_cached_segment_path(seq_dir, file) {
+            Some(full_path) => match std::fs::remove_file(&full_path) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to evict cache file {}: {error}",
+                        full_path.display()
+                    );
+                    false
+                }
+            },
+            // Unrecognized name: nothing of ours to remove, so drop the entry
+            // and let the caller's accounting reclaim its recorded size.
+            None => true,
+        },
+        // No file to remove.
+        None => true,
+    };
+
+    if removed {
+        segment.state = CacheSegmentState::Empty;
+        segment.cached_file = None;
+        segment.file_size_bytes = 0;
+    }
+    removed
+}
+
+/// Enforces the cache size limit, evicting dead bytes first and then the
+/// highest-index cached segments. Returns the number of segments evicted.
+///
+/// # Policy
+///
+/// Victims are chosen in two phases:
+///
+/// 1. **Stale segments**, ascending by index. Their files are superseded by an
+///    edit and nothing will ever read them again, so they are pure waste and go
+///    before anything a user could still play.
+/// 2. **Cached segments**, descending by index — playback starts at the head far
+///    more often than at the tail, so the tail is the cheapest thing to lose.
+///
+/// Phase 1 runs to completion rather than stopping once the manifest reports
+/// itself under the cap. Stale bytes are only intermittently reflected in
+/// [`RenderCacheManifest::total_cached_bytes`] (see the accounting note below),
+/// so a size check between stale victims would make the outcome depend on when
+/// the total was last recomputed. Freeing all of the dead bytes is both cheaper
+/// to reason about and never wrong.
+///
+/// The whole function still early-returns when the manifest is already under the
+/// cap, so the stale sweep only runs when the cache is over budget. That is
+/// deliberate: this is the *size guard*, and routine stale cleanup belongs to
+/// [`cleanup_stale_files`], which the fill's prepare path already runs.
+///
+/// # Accounting note
+///
+/// `recalculate_total_size` sums `Cached` segments only, but the
+/// `Cached` → `Stale` transition in [`refresh_manifest_plan_fingerprints`] does
+/// not recompute the total, so a stale segment's bytes may still be counted
+/// until the next recalculation. Phase 1 therefore recomputes the total once at
+/// its end instead of subtracting per segment, which is correct either way and
+/// mirrors what [`cleanup_stale_files`] does. Phase 2 keeps its incremental
+/// subtraction, which is exact for `Cached` segments and avoids an O(n*m) sweep.
+///
+/// # Protection
 ///
 /// `protected` names segments an in-flight fill is currently producing; they are
 /// never evicted. Without that, a fill and the size cap deadlock each other: the
@@ -2023,8 +2091,15 @@ pub fn clear_sequence_cache(project_dir: &Path, sequence_id: &str) -> std::io::R
 /// moment it landed and re-requested on the next pass, forever. Callers with no
 /// fill in flight pass an empty set.
 ///
-/// This is a guard, not the eviction policy: choosing victims by distance from
-/// the playhead instead of by index is a separate change.
+/// # Why not evict by playhead distance
+///
+/// A survey of how established NLEs expose render-cache management found no
+/// evidence of playhead-proximity eviction: the controls they offer are framed
+/// around age and validity — deleting render files that are unused or
+/// superseded. That matches the failure mode we would expect from proximity
+/// eviction, which re-scores every cached segment on each scrub and thrashes the
+/// cache under exactly the interaction it is meant to serve. Dead bytes first,
+/// then highest index, is therefore the policy here.
 pub fn enforce_cache_limit(
     project_dir: &Path,
     manifest: &mut RenderCacheManifest,
@@ -2046,8 +2121,33 @@ pub fn enforce_cache_limit(
         };
     let mut evicted = 0;
 
-    // Evict from the end (highest index) first — user is more likely to play from the start
-    let indices: Vec<u32> = manifest
+    // Phase 1: dead bytes, oldest first, to completion.
+    let stale_indices: Vec<u32> = manifest
+        .segments
+        .iter()
+        .filter(|s| s.state == CacheSegmentState::Stale)
+        .filter(|s| !protected.contains(&s.index))
+        .map(|s| s.index)
+        .collect();
+
+    let stale_considered = !stale_indices.is_empty();
+    for idx in stale_indices {
+        if let Some(segment) = manifest.segments.iter_mut().find(|s| s.index == idx) {
+            if release_segment_file(&seq_dir, segment) {
+                evicted += 1;
+            }
+        }
+    }
+    // Recomputed whenever a stale segment was *considered*, not only when one was
+    // removed: the total may have been carrying those stale bytes all along (see
+    // the accounting note), and phase 2's budget must be measured against live
+    // bytes either way.
+    if stale_considered {
+        manifest.recalculate_total_size();
+    }
+
+    // Phase 2: live bytes, tail first, only as far as the cap requires.
+    let cached_indices: Vec<u32> = manifest
         .segments
         .iter()
         .filter(|s| s.state == CacheSegmentState::Cached)
@@ -2056,41 +2156,17 @@ pub fn enforce_cache_limit(
         .rev()
         .collect();
 
-    for idx in indices {
+    for idx in cached_indices {
         if manifest.total_cached_bytes <= max_bytes {
             break;
         }
 
         if let Some(segment) = manifest.segments.iter_mut().find(|s| s.index == idx) {
-            let mut file_removed = false;
-            if let Some(ref file) = segment.cached_file {
-                match resolve_cached_segment_path(&seq_dir, file) {
-                    Some(full_path) => match std::fs::remove_file(&full_path) {
-                        Ok(()) => file_removed = true,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to evict cache file {}: {e}",
-                                full_path.display()
-                            );
-                        }
-                    },
-                    // Unrecognized name: nothing of ours to remove, so drop the entry
-                    // and let the accounting below reclaim its recorded size.
-                    None => file_removed = true,
-                }
-            } else {
-                file_removed = true; // No file to remove
-            }
-
-            if file_removed {
+            let freed = segment.file_size_bytes;
+            if release_segment_file(&seq_dir, segment) {
                 // Subtract this segment's size from the running total instead of
                 // recalculating across all segments (avoids O(n*m) cost).
-                manifest.total_cached_bytes = manifest
-                    .total_cached_bytes
-                    .saturating_sub(segment.file_size_bytes);
-                segment.state = CacheSegmentState::Empty;
-                segment.cached_file = None;
-                segment.file_size_bytes = 0;
+                manifest.total_cached_bytes = manifest.total_cached_bytes.saturating_sub(freed);
                 evicted += 1;
             }
         }
@@ -3829,6 +3905,105 @@ mod tests {
         assert_eq!(evicted, 2);
         assert_eq!(manifest.segments[0].state, CacheSegmentState::Empty);
         assert_eq!(manifest.segments[1].state, CacheSegmentState::Empty);
+    }
+
+    /// Builds an over-cap manifest of `count` 500-byte cached segments and marks
+    /// the named indices stale, leaving their files on disk.
+    ///
+    /// Staling this way mirrors `refresh_manifest_plan_fingerprints`, which flips
+    /// the state without recomputing `total_cached_bytes`.
+    fn manifest_with_stale_segments(
+        seg_dir: &Path,
+        profile: &str,
+        count: u32,
+        stale: &[u32],
+    ) -> RenderCacheManifest {
+        std::fs::create_dir_all(seg_dir).unwrap();
+        let mut manifest = RenderCacheManifest::new("seq1", profile, count as f64 * 5.0, 5.0);
+        for index in 0..count {
+            let name = segment_cache_file_name(index);
+            std::fs::write(seg_dir.join(&name), vec![0u8; 500]).unwrap();
+            manifest.mark_segment_cached(index, name, 500);
+        }
+        for index in stale {
+            manifest.segments[*index as usize].state = CacheSegmentState::Stale;
+        }
+        manifest
+    }
+
+    /// Feature: Preview cache size guard
+    /// Scenario: dead bytes are reclaimed before anything still playable
+    #[test]
+    fn should_evict_stale_segments_before_cached_ones() {
+        // Given an over-cap cache whose stale segments sit at low indices, where
+        // the cached-only, index-descending order would evict the tail instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = preview_profile_hash(&test_canvas());
+        let seg_dir = profile_cache_dir(tmp.path(), "seq1", &profile).unwrap();
+        let mut manifest = manifest_with_stale_segments(&seg_dir, &profile, 4, &[1, 2]);
+
+        // When the cap is enforced
+        let evicted = enforce_cache_limit(tmp.path(), &mut manifest, 1000, &HashSet::new());
+
+        // Then only the stale segments were reclaimed, and the playable tail
+        // survived because freeing the dead bytes was already enough.
+        assert_eq!(evicted, 2);
+        assert_eq!(manifest.segments[1].state, CacheSegmentState::Empty);
+        assert_eq!(manifest.segments[2].state, CacheSegmentState::Empty);
+        assert!(!seg_dir.join(segment_cache_file_name(1)).exists());
+        assert!(!seg_dir.join(segment_cache_file_name(2)).exists());
+        assert_eq!(manifest.segments[0].state, CacheSegmentState::Cached);
+        assert_eq!(manifest.segments[3].state, CacheSegmentState::Cached);
+        assert!(seg_dir.join(segment_cache_file_name(3)).exists());
+        assert_eq!(manifest.total_cached_bytes, 1000);
+    }
+
+    /// Feature: Preview cache size guard
+    /// Scenario: the stale sweep does not stop halfway
+    ///
+    /// Stale bytes are only intermittently counted in `total_cached_bytes`, so a
+    /// size check between stale victims would leave dead files behind depending
+    /// on when the total was last recomputed.
+    #[test]
+    fn should_sweep_every_stale_segment_when_the_cache_is_over_its_cap() {
+        // Given an over-cap cache with more stale segments than the cap needs
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = preview_profile_hash(&test_canvas());
+        let seg_dir = profile_cache_dir(tmp.path(), "seq1", &profile).unwrap();
+        let mut manifest = manifest_with_stale_segments(&seg_dir, &profile, 4, &[1, 2, 3]);
+
+        // When the cap is enforced
+        let evicted = enforce_cache_limit(tmp.path(), &mut manifest, 1400, &HashSet::new());
+
+        // Then every stale segment is gone, not just enough of them
+        assert_eq!(evicted, 3);
+        for index in 1..4u32 {
+            assert_eq!(
+                manifest.segments[index as usize].state,
+                CacheSegmentState::Empty
+            );
+            assert!(!seg_dir.join(segment_cache_file_name(index)).exists());
+        }
+        assert_eq!(manifest.total_cached_bytes, 500);
+    }
+
+    /// Feature: Preview cache size guard
+    /// Scenario: a stale segment the running fill owns is left alone
+    #[test]
+    fn should_not_sweep_stale_segments_the_running_fill_is_producing() {
+        // Given an over-cap cache whose stale segment is protected
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = preview_profile_hash(&test_canvas());
+        let seg_dir = profile_cache_dir(tmp.path(), "seq1", &profile).unwrap();
+        let mut manifest = manifest_with_stale_segments(&seg_dir, &profile, 4, &[1]);
+
+        // When the cap is enforced while the fill holds that segment
+        let protected: HashSet<u32> = [1].into_iter().collect();
+        enforce_cache_limit(tmp.path(), &mut manifest, 1000, &protected);
+
+        // Then its file survives
+        assert_eq!(manifest.segments[1].state, CacheSegmentState::Stale);
+        assert!(seg_dir.join(segment_cache_file_name(1)).exists());
     }
 
     // -----------------------------------------------------------------------

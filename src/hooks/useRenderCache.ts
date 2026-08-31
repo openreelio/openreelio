@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { commands } from '@/bindings';
-import type { RenderCacheStatus, CacheSegmentStatusDto } from '@/bindings';
+import type { RenderCacheStatus, CacheSegmentStatusDto, PreviewCacheScope } from '@/bindings';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isDesktopRuntimeAvailable } from '@/services/runtimeEnvironment';
 
@@ -17,6 +17,11 @@ interface CacheProgressPayload {
   completedSegments: number;
   totalSegments: number;
   percent: number;
+  /**
+   * Which segments the running fill is producing. Optional: a fill started by an
+   * older backend emits no scope.
+   */
+  scope?: PreviewCacheScope;
 }
 
 /** Return type for the useRenderCache hook */
@@ -81,11 +86,22 @@ export function useRenderCache(): UseRenderCacheReturn {
     setError(null);
 
     try {
-      const result = await commands.renderPreviewCache();
+      // `null` selects the whole timeline; the flagged scope is not driven from
+      // this hook yet.
+      const result = await commands.renderPreviewCache(null);
       if (result.status === 'ok') {
         if (result.data.status === 'already_cached') {
           setIsRendering(false);
           setProgress(100);
+        } else if (
+          result.data.status === 'already_converging' ||
+          result.data.status === 'retargeted'
+        ) {
+          // This call started nothing: a fill already in flight absorbed the
+          // request. Its own progress and completion events drive the UI through
+          // the listeners below, so this hook must not latch a rendering state
+          // that no event of its own will ever clear.
+          setIsRendering(false);
         }
       } else {
         setError(result.error);
@@ -95,7 +111,9 @@ export function useRenderCache(): UseRenderCacheReturn {
       setError(e instanceof Error ? e.message : String(e));
       setIsRendering(false);
     }
-  }, [backendAvailable]);
+
+    await refreshStatus();
+  }, [backendAvailable, refreshStatus]);
 
   const clearCache = useCallback(async () => {
     if (!backendAvailable) {

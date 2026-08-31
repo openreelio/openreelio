@@ -2697,19 +2697,239 @@ fn reconcile_cache_manifest(
 }
 
 use crate::core::render::preview_cancel::PreviewCacheCancel;
+use crate::core::render::preview_fill::{
+    self, ActiveFillView, CacheFillWorkSet, CancelledOutcome, EnsureAction, PreviewCacheScope,
+};
 
-/// Cancellation handle and identity for the active cache render task.
+/// Cancellation handle, identity and live queue of the active cache render task.
 ///
-/// Starting a new cache render supersedes any in-flight background task so that
-/// only one cache render is active at a time.
+/// At most one cache render is active at a time, but a later request does not
+/// automatically replace it: the decision is
+/// [`preview_fill::decide_ensure_action`], and a request that only changes
+/// *which* segments are wanted retargets `work` in place instead of restarting.
 struct ActiveCacheRender {
     job_id: String,
     sequence_id: String,
     cancel: std::sync::Arc<PreviewCacheCancel>,
+    /// Segments the running fill is still trying to produce.
+    ///
+    /// Shared with the fill task, which pops from it, so a retarget is visible
+    /// to the loop on its next iteration without restarting anything.
+    work: std::sync::Arc<std::sync::Mutex<CacheFillWorkSet>>,
 }
 
 static ACTIVE_CACHE_RENDER: std::sync::LazyLock<std::sync::Mutex<Option<ActiveCacheRender>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// What [`ensure_cache_fill`] settled on inside the registry critical section.
+///
+/// Carried out of the lock so the emits and the task spawn happen without
+/// holding it.
+enum EnsureOutcome {
+    /// Register and spawn a new fill; `superseded` names the fill it replaced.
+    Spawn {
+        /// `(job_id, sequence_id)` of the replaced fill, for its cancel event.
+        superseded: Option<(String, String)>,
+    },
+    /// The running fill is already producing this work set; nothing to do.
+    Converging { job_id: String },
+    /// The running fill's queue was swapped in place.
+    Retargeted {
+        job_id: String,
+        /// Size of the merged queue the fill is now converging on.
+        queued: u32,
+    },
+}
+
+/// Folds a request into a registered fill's work and asks
+/// [`preview_fill::decide_ensure_action`] what to do about it.
+///
+/// Returns the action together with the work set the fill should end up
+/// converging on, which is the *merged* set — a request in a narrower scope must
+/// not shrink a broader fill.
+///
+/// Split out only so the borrow of the registry entry and of its queue guard
+/// both end before the caller mutates the registry.
+fn decide_ensure_action_for(
+    active: &ActiveCacheRender,
+    active_work: &CacheFillWorkSet,
+    desired: &CacheFillWorkSet,
+) -> (EnsureAction, CacheFillWorkSet) {
+    // Read once and use for both the merge and the decision: two reads could
+    // straddle the fill arming or disarming a segment, and then the target would
+    // be folded for one identity while the verdict was computed against another.
+    let in_flight = active.cancel.in_flight();
+    let target = preview_fill::merge_work_sets(active_work, desired, in_flight);
+    let view = ActiveFillView {
+        work: active_work,
+        in_flight,
+    };
+    (
+        preview_fill::decide_ensure_action(Some(&view), &target),
+        target,
+    )
+}
+
+/// Clears the cancel slot's in-flight identity when a fill iteration ends,
+/// however it ends.
+///
+/// The identity is published at *pop* time rather than at encode time, so every
+/// early exit between the two — a project closed, a graph that will not build, a
+/// plan that fails validation — has to retract it. A `Drop` guard covers those
+/// exits without threading a `disarm_segment` call through each one, where a
+/// missed branch would leave the registry claiming an encode that is not
+/// running.
+struct ArmedSegmentGuard(std::sync::Arc<PreviewCacheCancel>);
+
+impl Drop for ArmedSegmentGuard {
+    fn drop(&mut self) {
+        self.0.disarm_segment();
+    }
+}
+
+/// How a fill's end-of-queue check resolved, decided under the registry lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FillExit {
+    /// Work is still queued; keep going.
+    Continue,
+    /// The queue is empty and this fill has deregistered itself.
+    Finished,
+    /// The registry belongs to someone else; stop without deregistering.
+    Superseded,
+}
+
+/// Settles whether a fill with an empty-looking queue may stop.
+///
+/// This closes the dying-fill race. Seeing an empty queue and *then* taking the
+/// registry lock to deregister leaves a window in which an ensure call takes the
+/// registry, finds this fill still registered, and retargets it — pushing work
+/// onto a queue whose owner is already on its way out. That work would never be
+/// rendered and no later request would notice, because the registry entry
+/// disappears a moment later.
+///
+/// Re-reading the queue *under the registry lock* removes the window: an ensure
+/// call has to hold that same lock to retarget, so either it lands before this
+/// check (and the re-read sees the new work, returning
+/// [`Continue`](FillExit::Continue)) or it lands after (and finds no registered
+/// fill, so it starts a new one). Lock order is registry → queue, matching
+/// `ensure_cache_fill`, so the two cannot deadlock.
+fn settle_fill_exit(job_id: &str, work: &std::sync::Mutex<CacheFillWorkSet>) -> FillExit {
+    let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() else {
+        // The registry cannot be read, so nothing can be retargeted onto this
+        // fill either. Stopping is the only safe move.
+        tracing::warn!("Preview cache registry unavailable; ending fill");
+        return FillExit::Finished;
+    };
+
+    if handle.as_ref().is_none_or(|active| active.job_id != job_id) {
+        return FillExit::Superseded;
+    }
+
+    match work.lock() {
+        Ok(queue) if !queue.is_empty() => FillExit::Continue,
+        Ok(_) => {
+            *handle = None;
+            FillExit::Finished
+        }
+        Err(_) => {
+            tracing::warn!("Preview cache fill queue unavailable; ending fill");
+            *handle = None;
+            FillExit::Finished
+        }
+    }
+}
+
+/// Retracts a preview-cache segment whose encode was cancelled, and reports
+/// whether the fill itself should stop.
+///
+/// Used for both cancellation windows — before the encode starts and during it —
+/// so a segment cancelled either way is left renderable rather than failed, and
+/// the fill's next move is decided by the same rule in both cases.
+fn retract_cancelled_segment(
+    app_handle: &tauri::AppHandle,
+    project_path: &std::path::Path,
+    seq_id: &str,
+    job_id: &str,
+    index: u32,
+    plan_hash: Option<String>,
+    superseded: bool,
+) -> CancelledOutcome {
+    reload_mutate_save_manifest(project_path, seq_id, |manifest| {
+        if let Some(segment) = manifest
+            .segments
+            .iter_mut()
+            .find(|segment| segment.index == index)
+        {
+            segment.state = crate::core::render::CacheSegmentState::Empty;
+            segment.cached_file = None;
+            segment.file_size_bytes = 0;
+        }
+    });
+
+    let outcome = preview_fill::cancelled_outcome(superseded);
+    let message = match outcome {
+        CancelledOutcome::StopFill => {
+            format!("Preview cache segment {index} superseded by a newer render")
+        }
+        CancelledOutcome::ContinueFill => {
+            format!("Preview cache segment {index} restarted with newer inputs")
+        }
+    };
+    emit_render_lifecycle(
+        app_handle,
+        RenderLifecycleEvent {
+            job_id: job_id.to_string(),
+            sequence_id: Some(seq_id.to_string()),
+            kind: RenderLifecycleKind::PreviewCache,
+            state: RenderLifecycleState::Cancelled,
+            progress: None,
+            message: Some(message),
+            output_path: None,
+            plan_hash,
+        },
+    );
+
+    outcome
+}
+
+/// Reloads a sequence's cache manifest, applies `mutate`, and saves the result.
+///
+/// Every manifest write in the fill loop goes through this. A manifest snapshot
+/// read before an `.await` — or simply read a moment earlier, since the ensure
+/// path runs on a different thread — is stale by the time it is written back,
+/// and saving it whole reverts everything that landed in between: `Cached` →
+/// `Stale` demotions, refreshed fingerprints, work another request queued. The
+/// reverted state then reads as "nothing to do" and the retargeted work is lost.
+///
+/// Reloading immediately before the mutation, applying only the one segment's
+/// change, and saving with no `.await` in between narrows that window to the
+/// span of this function.
+fn reload_mutate_save_manifest(
+    project_path: &std::path::Path,
+    seq_id: &str,
+    mutate: impl FnOnce(&mut crate::core::render::RenderCacheManifest),
+) -> Option<crate::core::render::RenderCacheManifest> {
+    let mut manifest = match crate::core::render::load_manifest(project_path, seq_id) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => {
+            tracing::warn!("Cache manifest for sequence {seq_id} disappeared before a write");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!("Failed to reload cache manifest for sequence {seq_id}: {error}");
+            return None;
+        }
+    };
+
+    mutate(&mut manifest);
+
+    if let Err(error) = crate::core::render::save_manifest(project_path, &manifest) {
+        tracing::warn!("Failed to save cache manifest for sequence {seq_id}: {error}");
+        return None;
+    }
+
+    Some(manifest)
+}
 
 /// Everything a preview cache command needs from the open project, copied out
 /// from under the project lock so nothing downstream holds it.
@@ -2850,16 +3070,24 @@ fn prepare_cache_manifest(
 ///
 /// Triggers background rendering of uncached segments. Returns the cache
 /// status immediately; rendering progress is reported via Tauri events.
-/// If a previous cache render is still running it is cancelled first.
+///
+/// `scope` selects which segments are wanted;
+/// [`PreviewCacheScope::WholeTimeline`] when omitted.
+///
+/// A fill already in flight is *converged onto*, not cancelled: calling this
+/// repeatedly with unchanged work is a no-op, and a changed work set retargets
+/// the running fill. See [`crate::core::render::preview_fill`].
 #[tauri::command]
 #[specta::specta]
 pub async fn render_preview_cache(
     state: State<'_, AppState>,
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
+    scope: Option<PreviewCacheScope>,
 ) -> Result<RenderCacheJobResult, String> {
     use crate::core::render::cache::preview_profile_hash;
 
+    let scope = scope.unwrap_or_default();
     let config = resolve_cache_config(&app_handle);
 
     // Gather project data
@@ -2871,6 +3099,20 @@ pub async fn render_preview_cache(
         project_path,
         seq_id,
     } = gather_cache_render_inputs(&state).await?;
+
+    // `State<'_>` cannot be moved into the spawned task, so the runner is cloned
+    // out here. It stays optional so that an already-current cache still reports
+    // `AlreadyCached` when FFmpeg is missing, exactly as it did while the fill
+    // was inlined: the "FFmpeg not initialized" error is only raised on the path
+    // that actually spawns.
+    //
+    // Cloned *before* the manifest is prepared, and deliberately so: this is the
+    // last `.await` on the path, and `ensure_cache_fill` saves the manifest
+    // prepared below. An await between the two would let a running fill mark a
+    // segment `Cached` in the meantime, and saving the older snapshot would
+    // revert it to `Error` — orphaning the file it just wrote and undercounting
+    // the cache size. Nothing between here and that save may await.
+    let ffmpeg_runner = ffmpeg_state.read().await.runner().cloned();
 
     let profile_hash = preview_profile_hash(&sequence.format.canvas);
     let manifest = prepare_cache_manifest(
@@ -2884,22 +3126,10 @@ pub async fn render_preview_cache(
         &config,
     )?;
 
-    // Find segments that need rendering
-    let pending_indices: Vec<u32> = manifest
-        .segments
-        .iter()
-        .filter(|s| s.needs_render())
-        .map(|s| s.index)
-        .collect();
+    // Find segments this scope wants rendered
+    let pending = preview_fill::select_fill_segments(&manifest, scope);
 
-    // `State<'_>` cannot be moved into the spawned task, so the runner is cloned
-    // out here. It stays optional so that an already-current cache still reports
-    // `AlreadyCached` when FFmpeg is missing, exactly as it did while the fill
-    // was inlined: the "FFmpeg not initialized" error is only raised on the path
-    // that actually spawns.
-    let ffmpeg_runner = ffmpeg_state.read().await.runner().cloned();
-
-    spawn_cache_fill(
+    ensure_cache_fill(
         app_handle,
         ffmpeg_runner,
         project_path,
@@ -2907,23 +3137,27 @@ pub async fn render_preview_cache(
         profile_hash,
         config,
         manifest,
-        pending_indices,
+        pending,
+        scope,
     )
 }
 
-/// Fills the named segments of a sequence's preview cache in the background.
+/// Converges the preview cache of a sequence onto the named segments.
 ///
-/// Shared by every command that wants cache segments produced: the caller
-/// decides *which* segments and this owns the rest — the already-current
-/// early return, persisting the manifest, and the background fill task.
+/// Its caller — [`render_preview_cache`] — decides *which* segments are wanted;
+/// this owns the rest: the already-current early return, persisting the
+/// manifest, reconciling with any fill already running, and the background fill
+/// task.
 ///
 /// `manifest` must already be reconciled and re-fingerprinted; this function
-/// trusts `pending_indices` and does not recompute freshness.
+/// trusts `pending` and does not recompute freshness.
 ///
-/// Starting a fill supersedes any fill already in flight, so at most one cache
-/// render is running at a time.
+/// At most one cache render runs at a time, but this does not simply supersede:
+/// [`preview_fill::decide_ensure_action`] decides whether to start, converge
+/// silently, retarget the running fill's queue, or replace it outright. This is
+/// the only place that registers into [`ACTIVE_CACHE_RENDER`].
 #[allow(clippy::too_many_arguments)]
-fn spawn_cache_fill(
+fn ensure_cache_fill(
     app_handle: tauri::AppHandle,
     ffmpeg_runner: Option<crate::core::ffmpeg::FFmpegRunner>,
     project_path: std::path::PathBuf,
@@ -2931,14 +3165,16 @@ fn spawn_cache_fill(
     profile_hash: String,
     config: crate::core::render::RenderCacheConfig,
     manifest: crate::core::render::RenderCacheManifest,
-    pending_indices: Vec<u32>,
+    pending: Vec<(u32, crate::core::render::SegmentFingerprint)>,
+    scope: PreviewCacheScope,
 ) -> Result<RenderCacheJobResult, String> {
     use crate::core::render::cache::{enforce_cache_limit, load_manifest, save_manifest};
     use crate::core::render::ExportEngine;
     use tauri::Emitter;
 
     let cache_job_id = ulid::Ulid::new().to_string();
-    let total_pending = pending_indices.len() as u32;
+    let desired = CacheFillWorkSet::new(seq_id.clone(), profile_hash.clone(), scope, pending);
+    let total_pending = desired.len() as u32;
 
     if total_pending == 0 {
         emit_render_lifecycle(
@@ -2968,19 +3204,133 @@ fn spawn_cache_fill(
     save_manifest(&project_path, &manifest)
         .map_err(|error| format!("Failed to save cache manifest: {error}"))?;
 
-    // Collect segment time ranges before spawning (avoids borrow issues)
-    let segment_ranges: Vec<(u32, f64, f64)> = pending_indices
-        .iter()
-        .filter_map(|idx| {
-            manifest
-                .segments
-                .iter()
-                .find(|s| s.index == *idx)
-                .map(|s| (s.index, s.start_sec, s.end_sec))
-        })
-        .collect();
-
     let total_segments = manifest.segments.len() as u32;
+
+    // Checked before the critical section so a failure here cannot leave a
+    // registration behind with no task to honour it. A fill can only be in
+    // flight if FFmpeg resolved, so the converge and retarget arms below are
+    // unaffected in practice.
+    let ffmpeg_runner = ffmpeg_runner.ok_or("FFmpeg not initialized")?;
+
+    let job_seq_id = seq_id.clone();
+    let job_profile_hash = profile_hash.clone();
+    let cache_config = config;
+
+    let cache_job_id_for_task = cache_job_id.clone();
+    let cancel = std::sync::Arc::new(PreviewCacheCancel::default());
+    let task_cancel = cancel.clone();
+    let work = std::sync::Arc::new(std::sync::Mutex::new(desired.clone()));
+    let task_work = work.clone();
+
+    // Reconcile with the fill already in flight and register this one in a
+    // single critical section, so two concurrent calls cannot both end up
+    // running: if the decision and the register were separate locks, a second
+    // call could decide (finding nothing yet registered) and register over this
+    // one, leaving this fill with no one able to cancel it. A supersede that
+    // lands before the task spawns is still caught by the loop-top
+    // `is_superseded()`.
+    let outcome = if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
+        let (action, target) = match handle.as_ref() {
+            None => (EnsureAction::Start, desired.clone()),
+            Some(active) => match active.work.lock() {
+                Ok(active_work) => decide_ensure_action_for(active, &active_work, &desired),
+                // The running fill's queue cannot be read, so there is no way to
+                // converge onto it: take over wholesale rather than guess.
+                Err(_) => (EnsureAction::Supersede, desired.clone()),
+            },
+        };
+
+        match action {
+            EnsureAction::Start | EnsureAction::Supersede => {
+                let previous = handle.take();
+                if let Some(previous) = &previous {
+                    previous.cancel.trigger();
+                }
+                *handle = Some(ActiveCacheRender {
+                    job_id: cache_job_id.clone(),
+                    sequence_id: seq_id.clone(),
+                    cancel,
+                    work,
+                });
+                EnsureOutcome::Spawn {
+                    superseded: previous.map(|previous| (previous.job_id, previous.sequence_id)),
+                }
+            }
+            // Both arms below are only produced from a registered fill, so a
+            // missing entry means the decision and the registry disagree. Fail
+            // loudly instead of fabricating a job id or spawning a fill that
+            // nothing owns.
+            EnsureAction::AlreadyConverging => match handle.as_ref() {
+                Some(active) => EnsureOutcome::Converging {
+                    job_id: active.job_id.clone(),
+                },
+                None => {
+                    tracing::error!(
+                        "Preview cache registry lost its active fill while converging onto it"
+                    );
+                    return Err(
+                        "Preview cache fill state is inconsistent; please try again".to_string()
+                    );
+                }
+            },
+            EnsureAction::Retarget { cancel_in_flight } => match handle.as_ref() {
+                Some(active) => {
+                    if let Ok(mut active_work) = active.work.lock() {
+                        *active_work = target.clone();
+                    }
+                    // Ordered after the swap: the running fill must already see
+                    // the new queue when it picks the cancelled segment back up.
+                    if cancel_in_flight {
+                        active.cancel.cancel_segment_if_stale(&target);
+                    }
+                    EnsureOutcome::Retargeted {
+                        job_id: active.job_id.clone(),
+                        queued: target.len() as u32,
+                    }
+                }
+                None => {
+                    tracing::error!(
+                        "Preview cache registry lost its active fill while retargeting it"
+                    );
+                    return Err(
+                        "Preview cache fill state is inconsistent; please try again".to_string()
+                    );
+                }
+            },
+        }
+    } else {
+        // The registry is unusable. Spawn anyway rather than refusing to fill —
+        // this fill just cannot be cancelled, which is the pre-existing
+        // behaviour of an unlockable registry.
+        EnsureOutcome::Spawn { superseded: None }
+    };
+
+    let superseded = match outcome {
+        EnsureOutcome::Converging { job_id } => {
+            tracing::debug!("Preview cache fill {job_id} is already producing this work set");
+            return Ok(RenderCacheJobResult {
+                job_id,
+                sequence_id: seq_id,
+                total_segments,
+                segments_to_render: total_pending,
+                status: RenderCacheJobStatus::AlreadyConverging,
+            });
+        }
+        EnsureOutcome::Retargeted { job_id, queued } => {
+            tracing::info!("Retargeted preview cache fill {job_id}");
+            return Ok(RenderCacheJobResult {
+                job_id,
+                sequence_id: seq_id,
+                total_segments,
+                // The merged queue, not this request's own list: a narrower
+                // request folded into a broader fill still reports the real
+                // amount of outstanding work.
+                segments_to_render: queued,
+                status: RenderCacheJobStatus::Retargeted,
+            });
+        }
+        EnsureOutcome::Spawn { superseded } => superseded,
+    };
 
     emit_render_lifecycle(
         &app_handle,
@@ -2996,43 +3346,13 @@ fn spawn_cache_fill(
         },
     );
 
-    let ffmpeg_runner = ffmpeg_runner.ok_or("FFmpeg not initialized")?;
-
-    let job_seq_id = seq_id.clone();
-    let job_profile_hash = profile_hash.clone();
-    let cache_config = config;
-
-    let cache_job_id_for_task = cache_job_id.clone();
-    let cancel = std::sync::Arc::new(PreviewCacheCancel::default());
-    let task_cancel = cancel.clone();
-
-    // Supersede any in-flight fill and register this one in a single critical
-    // section, so two concurrent calls cannot both end up running: if the take
-    // and the register were separate locks, a second call could take (finding
-    // nothing yet registered) and register over this one, leaving this fill with
-    // no one able to cancel it. A supersede that lands before the task spawns is
-    // still caught by the loop-top `is_superseded()`.
-    let superseded = if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
-        let previous = handle.take();
-        if let Some(previous) = &previous {
-            previous.cancel.trigger();
-        }
-        *handle = Some(ActiveCacheRender {
-            job_id: cache_job_id.clone(),
-            sequence_id: seq_id.clone(),
-            cancel,
-        });
-        previous
-    } else {
-        None
-    };
-    if let Some(previous) = superseded {
+    if let Some((previous_job_id, previous_sequence_id)) = superseded {
         tracing::info!("Superseded previous cache render task");
         emit_render_lifecycle(
             &app_handle,
             RenderLifecycleEvent {
-                job_id: previous.job_id,
-                sequence_id: Some(previous.sequence_id),
+                job_id: previous_job_id,
+                sequence_id: Some(previous_sequence_id),
                 kind: RenderLifecycleKind::PreviewCache,
                 state: RenderLifecycleState::Cancelled,
                 progress: None,
@@ -3063,7 +3383,11 @@ fn spawn_cache_fill(
             },
         );
 
-        for (completed, (idx, start_sec, end_sec)) in segment_ranges.iter().enumerate() {
+        // The queue is not frozen at spawn time: a later request can retarget it
+        // while this loop runs, so every iteration re-reads what is left rather
+        // than walking a list captured up front.
+        let mut completed: usize = 0;
+        loop {
             // A newer fill has taken over: stop before starting another segment
             // rather than render work no one will read.
             if task_cancel.is_superseded() {
@@ -3071,8 +3395,19 @@ fn spawn_cache_fill(
                 break;
             }
 
+            // Nothing queued: stop, but settle that under the registry lock so a
+            // concurrent retarget cannot push work onto a fill that is leaving.
+            match settle_fill_exit(&cache_job_id_for_task, &task_work) {
+                FillExit::Continue => {}
+                FillExit::Finished => break,
+                FillExit::Superseded => {
+                    completed_normally = false;
+                    break;
+                }
+            }
+
             // Re-load manifest to get latest state
-            let mut current_manifest = match load_manifest(&project_path, &job_seq_id) {
+            let current_manifest = match load_manifest(&project_path, &job_seq_id) {
                 Ok(Some(m)) => m,
                 Ok(None) => {
                     let message = format!(
@@ -3116,6 +3451,65 @@ fn spawn_cache_fill(
                     break;
                 }
             };
+
+            // Take the lowest-index segment still worth rendering. Entries the
+            // manifest has moved on from — rendered by this fill's own earlier
+            // pass, evicted, or re-queued by a retarget after they were already
+            // produced — are dropped rather than re-encoded.
+            let next = match task_work.lock() {
+                Ok(mut queue) => queue.pop_next_where(|index| {
+                    current_manifest
+                        .segments
+                        .iter()
+                        .any(|segment| segment.index == index && segment.needs_render())
+                }),
+                Err(_) => {
+                    tracing::warn!("Preview cache fill queue unavailable; stopping fill");
+                    completed_normally = false;
+                    break;
+                }
+            };
+            let Some((idx, fingerprint)) = next else {
+                // The pop drained the queue without finding work. Same race as
+                // the loop-top check, same atomic exit.
+                match settle_fill_exit(&cache_job_id_for_task, &task_work) {
+                    FillExit::Continue => continue,
+                    FillExit::Finished => break,
+                    FillExit::Superseded => {
+                        completed_normally = false;
+                        break;
+                    }
+                }
+            };
+
+            // The window comes from the manifest, the identity from the queue:
+            // the queue's fingerprint is what a later request compares against,
+            // so arming with anything else would make retarget decisions
+            // disagree with what is actually encoding.
+            let Some((start_sec, end_sec)) = current_manifest
+                .segments
+                .iter()
+                .find(|segment| segment.index == idx)
+                .map(|segment| (segment.start_sec, segment.end_sec))
+            else {
+                continue;
+            };
+
+            // Publish this segment's identity *now*, at pop time, not when the
+            // encode starts. Between the two the fill re-acquires the project
+            // lock, rebuilds the graph and validates — several awaits, during
+            // which the segment is in no queue at all. If the cancel slot were
+            // still empty there, a request landing in that window would see
+            // nothing in flight, decline to cancel, and let the encode run on
+            // pre-edit state; the finished file would then be recorded against
+            // the post-edit fingerprint and look current forever.
+            //
+            // Arming early means a cancel can fire before the exporter is
+            // holding the receiver, so the receiver is polled once immediately
+            // before the encode and a fired cancel is honoured there instead.
+            let mut segment_cancel_rx = task_cancel.arm_segment(idx, fingerprint);
+            // Retracts the identity on every path out of this iteration.
+            let _armed = ArmedSegmentGuard(task_cancel.clone());
 
             // Re-acquire fresh project state for each segment to avoid rendering
             // with stale data if the user edits the timeline during cache rendering.
@@ -3214,22 +3608,26 @@ fn spawn_cache_fill(
                 }
             };
 
-            // Mark rendering
-            if let Some(segment) = current_manifest
-                .segments
-                .iter_mut()
-                .find(|s| s.index == *idx)
-            {
-                segment.state = crate::core::render::CacheSegmentState::Rendering;
-            }
-            let _ = save_manifest(&project_path, &current_manifest);
+            // Mark rendering. Reloaded rather than written from the snapshot
+            // taken before the project lock above: an ensure call on another
+            // thread may have demoted segments or refreshed fingerprints in
+            // between, and saving the older snapshot would revert that.
+            reload_mutate_save_manifest(&project_path, &job_seq_id, |manifest| {
+                if let Some(segment) = manifest
+                    .segments
+                    .iter_mut()
+                    .find(|segment| segment.index == idx)
+                {
+                    segment.state = crate::core::render::CacheSegmentState::Rendering;
+                }
+            });
 
             // Build segment export settings
             let seg_output = match crate::core::render::segment_cache_file(
                 &project_path,
                 &job_seq_id,
                 &job_profile_hash,
-                *idx,
+                idx,
             ) {
                 Ok(path) => path,
                 Err(error) => {
@@ -3250,8 +3648,8 @@ fn spawn_cache_fill(
             let seg_settings = crate::core::render::ExportSettings::preview_cache(
                 seg_output.clone(),
                 &fresh_sequence.format.canvas,
-                Some(*start_sec),
-                Some(*end_sec),
+                Some(start_sec),
+                Some(end_sec),
             );
 
             let validation = match validate_export_settings_off_runtime(
@@ -3266,6 +3664,9 @@ fn spawn_cache_fill(
                 Err(error) => {
                     tracing::warn!("Preview cache segment {} validation failed: {error}", idx);
                     let _ = app_handle.emit("render-cache-error", error);
+                    // The fill is stopping on an error, so it must not go on to
+                    // announce itself complete.
+                    completed_normally = false;
                     break;
                 }
             };
@@ -3326,9 +3727,37 @@ fn spawn_cache_fill(
             }
             let segment_plan_hash = render_plan.plan_hash.clone();
 
+            // The identity has been armed since the pop, so a cancel may already
+            // have fired while this segment was being prepared. Honour it here
+            // rather than starting an encode nobody wants. `Closed` counts as
+            // cancelled too: the sender is only ever dropped by disarming, so a
+            // closed channel means this encode could no longer be stopped.
+            let cancelled_before_encode = !matches!(
+                segment_cancel_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            );
+            if cancelled_before_encode {
+                match retract_cancelled_segment(
+                    &app_handle,
+                    &project_path,
+                    &job_seq_id,
+                    &cache_job_id_for_task,
+                    idx,
+                    Some(segment_plan_hash.clone()),
+                    task_cancel.is_superseded(),
+                ) {
+                    CancelledOutcome::StopFill => {
+                        completed_normally = false;
+                        break;
+                    }
+                    CancelledOutcome::ContinueFill => continue,
+                }
+            }
+
             // Render with fresh data. The segment cancel lets a superseding fill
-            // kill this FFmpeg mid-encode instead of orphaning it.
-            let segment_cancel_rx = task_cancel.arm_segment();
+            // kill this FFmpeg mid-encode instead of orphaning it, and carries the
+            // segment's identity so a fill that was merely retargeted can cancel
+            // this encode only if this segment's own work changed.
             let result = engine
                 .export_sequence_with_effects_for_plan(
                     &fresh_sequence,
@@ -3342,118 +3771,128 @@ fn spawn_cache_fill(
                 .await;
             task_cancel.disarm_segment();
 
-            // Update manifest
-            let mut updated_manifest = match load_manifest(&project_path, &job_seq_id) {
-                Ok(Some(m)) => m,
-                Ok(None) => {
-                    let message = format!(
-                        "Cache manifest disappeared while finalizing sequence {}",
-                        job_seq_id
-                    );
-                    let _ = app_handle.emit("render-cache-error", message.clone());
-                    emit_render_lifecycle(
-                        &app_handle,
-                        RenderLifecycleEvent {
-                            job_id: cache_job_id_for_task.clone(),
-                            sequence_id: Some(job_seq_id.clone()),
-                            kind: RenderLifecycleKind::PreviewCache,
-                            state: RenderLifecycleState::Failed,
-                            progress: None,
-                            message: Some(message),
-                            output_path: None,
-                            plan_hash: None,
-                        },
-                    );
-                    completed_normally = false;
-                    break;
-                }
-                Err(error) => {
-                    let message = format!("Failed to reload cache manifest: {error}");
-                    let _ = app_handle.emit("render-cache-error", message.clone());
-                    emit_render_lifecycle(
-                        &app_handle,
-                        RenderLifecycleEvent {
-                            job_id: cache_job_id_for_task.clone(),
-                            sequence_id: Some(job_seq_id.clone()),
-                            kind: RenderLifecycleKind::PreviewCache,
-                            state: RenderLifecycleState::Failed,
-                            progress: None,
-                            message: Some(message),
-                            output_path: None,
-                            plan_hash: None,
-                        },
-                    );
-                    completed_normally = false;
-                    break;
-                }
-            };
-
             match result {
                 Ok(export_result) => {
-                    updated_manifest.mark_segment_cached(
-                        *idx,
-                        seg_output
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string(),
-                        export_result.file_size,
-                    );
+                    // The identity this encode was started for may have moved
+                    // while it ran. Reload, compare, and only then record —
+                    // `mark_segment_cached` writes `Cached` next to whatever
+                    // fingerprint the manifest now holds, so accepting a
+                    // mismatched file would bind pre-edit pixels to a post-edit
+                    // identity that every later freshness check reports as
+                    // current. That never self-heals.
+                    let mut verdict = preview_fill::RenderedSegmentVerdict::Discard;
+                    let cached_name = seg_output
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let saved =
+                        reload_mutate_save_manifest(&project_path, &job_seq_id, |manifest| {
+                            let stored = manifest
+                                .segments
+                                .iter()
+                                .find(|segment| segment.index == idx)
+                                .map(|segment| segment.fingerprint);
+                            verdict =
+                                preview_fill::verdict_for_rendered_segment(fingerprint, stored);
+                            match verdict {
+                                preview_fill::RenderedSegmentVerdict::Accept => {
+                                    manifest.mark_segment_cached(
+                                        idx,
+                                        cached_name,
+                                        export_result.file_size,
+                                    );
+                                }
+                                preview_fill::RenderedSegmentVerdict::Discard => {
+                                    if let Some(segment) = manifest
+                                        .segments
+                                        .iter_mut()
+                                        .find(|segment| segment.index == idx)
+                                    {
+                                        segment.state =
+                                            crate::core::render::CacheSegmentState::Empty;
+                                        segment.cached_file = None;
+                                        segment.file_size_bytes = 0;
+                                    }
+                                }
+                            }
+                        });
+
+                    if verdict == preview_fill::RenderedSegmentVerdict::Discard {
+                        // The bytes belong to a timeline that no longer exists.
+                        // The retarget that moved the fingerprint also re-queued
+                        // the segment, so it will be rendered again from current
+                        // inputs; this attempt counts as no progress.
+                        if let Err(error) = std::fs::remove_file(&seg_output) {
+                            tracing::warn!(
+                                "Failed to remove superseded cache segment {}: {error}",
+                                seg_output.display()
+                            );
+                        }
+                        tracing::info!(
+                            "Discarded preview cache segment {idx}: its render plan changed while it was encoding"
+                        );
+                        continue;
+                    }
+
                     // Only the segment just written is pinned: a fill must stay
                     // bounded by the size cap, and a single eviction pass must
                     // never delete the frame it just produced.
-                    let protected = std::collections::HashSet::from([*idx]);
-                    enforce_cache_limit(
-                        &project_path,
-                        &mut updated_manifest,
-                        cache_config.max_cache_bytes,
-                        &protected,
-                    );
+                    if let Some(mut manifest) = saved {
+                        let protected = std::collections::HashSet::from([idx]);
+                        if enforce_cache_limit(
+                            &project_path,
+                            &mut manifest,
+                            cache_config.max_cache_bytes,
+                            &protected,
+                        ) > 0
+                        {
+                            let _ = save_manifest(&project_path, &manifest);
+                        }
+                    }
+
+                    completed += 1;
                 }
                 Err(crate::core::render::ExportError::Cancelled) => {
-                    // A newer fill superseded this one mid-segment. The exporter
-                    // already killed FFmpeg and removed the partial file; leave
-                    // the segment renderable (not failed) so the timeline shows
-                    // work still to do, not a permanent error, and stop the loop.
-                    if let Some(seg) = updated_manifest
-                        .segments
-                        .iter_mut()
-                        .find(|s| s.index == *idx)
-                    {
-                        seg.state = crate::core::render::CacheSegmentState::Empty;
-                        seg.cached_file = None;
-                        seg.file_size_bytes = 0;
-                    }
-                    let _ = save_manifest(&project_path, &updated_manifest);
-                    emit_render_lifecycle(
+                    // Something cancelled this segment mid-encode. The exporter
+                    // already killed FFmpeg and removed the partial file; the
+                    // segment is left renderable (not failed) either way, so the
+                    // timeline shows work still to do rather than a permanent
+                    // error. Whether the fill itself is over depends on which
+                    // cancel fired: a supersede stops it, a retarget only
+                    // discarded this one encode.
+                    match retract_cancelled_segment(
                         &app_handle,
-                        RenderLifecycleEvent {
-                            job_id: cache_job_id_for_task.clone(),
-                            sequence_id: Some(job_seq_id.clone()),
-                            kind: RenderLifecycleKind::PreviewCache,
-                            state: RenderLifecycleState::Cancelled,
-                            progress: None,
-                            message: Some(format!(
-                                "Preview cache segment {} superseded by a newer render",
-                                idx
-                            )),
-                            output_path: None,
-                            plan_hash: Some(segment_plan_hash.clone()),
-                        },
-                    );
-                    completed_normally = false;
-                    break;
+                        &project_path,
+                        &job_seq_id,
+                        &cache_job_id_for_task,
+                        idx,
+                        Some(segment_plan_hash.clone()),
+                        task_cancel.is_superseded(),
+                    ) {
+                        CancelledOutcome::StopFill => {
+                            completed_normally = false;
+                            break;
+                        }
+                        // The retarget put this segment back in the queue with
+                        // its new fingerprint, so the next iteration picks it up
+                        // again against fresh inputs. It counts as no progress.
+                        CancelledOutcome::ContinueFill => continue,
+                    }
                 }
                 Err(error) => {
-                    if let Some(seg) = updated_manifest
-                        .segments
-                        .iter_mut()
-                        .find(|s| s.index == *idx)
-                    {
-                        seg.state = crate::core::render::CacheSegmentState::Error;
-                        seg.cached_file = None;
-                        seg.file_size_bytes = 0;
-                    }
+                    reload_mutate_save_manifest(&project_path, &job_seq_id, |manifest| {
+                        if let Some(segment) = manifest
+                            .segments
+                            .iter_mut()
+                            .find(|segment| segment.index == idx)
+                        {
+                            segment.state = crate::core::render::CacheSegmentState::Error;
+                            segment.cached_file = None;
+                            segment.file_size_bytes = 0;
+                        }
+                    });
+
                     let error_message =
                         format!("Failed to render cache segment {}: {}", idx, error);
                     let _ = app_handle.emit("render-cache-error", error_message.clone());
@@ -3470,11 +3909,40 @@ fn spawn_cache_fill(
                             plan_hash: Some(segment_plan_hash.clone()),
                         },
                     );
+                    // Deliberately not counted as completed: a failed segment
+                    // produced nothing, and reporting it as progress would let a
+                    // fill of nothing but failures read as finished work.
                     completed_normally = false;
                 }
             }
 
-            let _ = save_manifest(&project_path, &updated_manifest);
+            // The denominator moves: a retarget can grow or shrink the queue
+            // mid-fill, so progress is measured against what this fill has done
+            // plus what it still has left, not against the count it started
+            // with.
+            //
+            // The segment just handled is excluded from "what is left" even
+            // though it may sit in the queue again: a request that landed while
+            // it was encoding re-derives its work set from a manifest where this
+            // segment reads as `Rendering`, which reconciliation resets to
+            // `Error` — so it is re-queued at the same fingerprint and would
+            // otherwise be counted as both done and outstanding, pinning
+            // progress below where it belongs. The pop-time `needs_render` check
+            // drops it on the next pass.
+            //
+            // The scope label is read from the shared queue, not from this
+            // task's spawn-time copy, so a fill that was widened by a retarget
+            // reports the wider scope from then on.
+            let (remaining, active_scope) = match task_work.lock() {
+                Ok(queue) => (queue.len_excluding(idx), queue.scope),
+                Err(_) => (0, scope),
+            };
+            let total_known = completed + remaining;
+            let percent = if total_known == 0 {
+                100.0
+            } else {
+                (completed as f64 / total_known as f64) * 100.0
+            };
 
             // Emit progress
             let _ = app_handle.emit(
@@ -3482,9 +3950,10 @@ fn spawn_cache_fill(
                 serde_json::json!({
                     "jobId": cache_job_id_for_task.clone(),
                     "sequenceId": job_seq_id.clone(),
-                    "completedSegments": completed + 1,
-                    "totalSegments": total_pending,
-                    "percent": ((completed + 1) as f64 / total_pending as f64) * 100.0,
+                    "completedSegments": completed,
+                    "totalSegments": total_known,
+                    "percent": percent,
+                    "scope": active_scope.event_key(),
                 }),
             );
             emit_render_lifecycle(
@@ -3494,7 +3963,7 @@ fn spawn_cache_fill(
                     sequence_id: Some(job_seq_id.clone()),
                     kind: RenderLifecycleKind::PreviewCache,
                     state: RenderLifecycleState::Running,
-                    progress: Some(((completed + 1) as f64 / total_pending as f64) * 100.0),
+                    progress: Some(percent),
                     message: Some(format!("Rendered preview cache segment {}", idx)),
                     output_path: None,
                     plan_hash: Some(segment_plan_hash),
@@ -3511,6 +3980,13 @@ fn spawn_cache_fill(
                 serde_json::json!({
                     "jobId": cache_job_id_for_task.clone(),
                     "sequenceId": job_seq_id.clone(),
+                    // From the shared queue, so a fill widened by a retarget
+                    // reports what it actually finished, not what it started as.
+                    "scope": task_work
+                        .lock()
+                        .map(|queue| queue.scope)
+                        .unwrap_or(scope)
+                        .event_key(),
                 }),
             );
             emit_render_lifecycle(
@@ -3555,6 +4031,14 @@ pub enum RenderCacheJobStatus {
     Started,
     /// All segments are already cached; no rendering needed
     AlreadyCached,
+    /// A fill already in flight is producing exactly this work; nothing changed.
+    ///
+    /// The returned job id is that running fill's, not a new one.
+    AlreadyConverging,
+    /// A fill already in flight had its queue swapped to this work set.
+    ///
+    /// The returned job id is that running fill's, not a new one.
+    Retargeted,
 }
 
 /// Result of starting a render cache job

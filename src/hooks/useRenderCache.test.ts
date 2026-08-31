@@ -127,6 +127,41 @@ describe('useRenderCache', () => {
     expect(result.current.error).toBeNull();
   });
 
+  it.each(['already_converging', 'retargeted'] as const)(
+    'should not latch isRendering when the request was absorbed by a running fill (%s)',
+    async (status) => {
+      // A fill already in flight took this request over, so this call started
+      // nothing of its own and no completion event of its own will ever arrive.
+      vi.mocked(commands.getCacheStatus).mockResolvedValue({
+        status: 'ok',
+        data: mockStatus,
+      } as never);
+      vi.mocked(commands.renderPreviewCache).mockResolvedValue({
+        status: 'ok',
+        data: {
+          jobId: 'running-job',
+          sequenceId: 'seq1',
+          totalSegments: 4,
+          segmentsToRender: 2,
+          status,
+        },
+      } as never);
+
+      const { result } = renderHook(() => useRenderCache());
+
+      await waitFor(() => {
+        expect(result.current.status).toEqual(mockStatus);
+      });
+
+      await act(async () => {
+        await result.current.renderCache();
+      });
+
+      expect(result.current.isRendering).toBe(false);
+      expect(result.current.error).toBeNull();
+    },
+  );
+
   it('should reset state after clearing cache', async () => {
     vi.mocked(commands.getCacheStatus).mockResolvedValue({
       status: 'ok',
