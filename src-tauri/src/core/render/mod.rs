@@ -41,6 +41,7 @@ pub mod hdr;
 mod pip_stitch;
 pub mod plan;
 pub(crate) mod preview_cancel;
+pub(crate) mod preview_fill;
 mod render_window;
 pub mod smart;
 mod transform_layout;
@@ -80,6 +81,9 @@ pub use cache::{
     RenderCacheConfig, RenderCacheManifest, RenderCacheSegment, RenderCacheStatus,
     SegmentFingerprint, SegmentFlagReason, SEGMENT_FINGERPRINT_UNSET,
 };
+
+// Preview cache fill re-exports
+pub use preview_fill::PreviewCacheScope;
 
 // Smart render re-exports
 pub use smart::{
