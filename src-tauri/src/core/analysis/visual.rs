@@ -781,8 +781,12 @@ impl VisualAnalyzer {
             .arg(video_path)
             .arg("-vf")
             .arg("mpdecimate,showinfo")
-            .arg("-vsync")
-            .arg("vfr")
+            // Spelling follows the resolved binary: FFmpeg 7.0 removed
+            // `-vsync`, and builds older than 5.1 do not know `-fps_mode`.
+            .args(crate::core::ffmpeg::frame_rate_policy_args(
+                &self.ffmpeg_path,
+                crate::core::ffmpeg::FrameRatePolicy::Vfr,
+            ))
             .arg("-f")
             .arg("null")
             .arg("-")
