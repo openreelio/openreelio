@@ -19,6 +19,7 @@ import { useRef, useEffect, useCallback, useState, useMemo, memo, type KeyboardE
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
+import { useRenderCacheStore } from '@/stores/renderCacheStore';
 import { usePlaybackLoop } from '@/hooks/usePlaybackLoop';
 import { useSequenceRenderGraph } from '@/hooks/useSequenceRenderGraph';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
@@ -36,12 +37,20 @@ import { getActiveVisualLayers } from '@/utils/renderGraphLayers';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
 import {
+  cacheFrameAssetId,
+  cacheFrameOffsetSec,
+  cacheSegmentsForSequence,
+  findSegmentForTime,
+  resolveCachedSegmentForTime,
+} from '@/utils/cacheFrameSource';
+import {
   captionColorToRgba,
   getCaptionFontWeightNumber,
   normalizeCaptionPosition as normalizeCaptionPositionValue,
   normalizeCaptionStyle as normalizeCaptionStyleValue,
   resolveCaptionAnchor,
 } from '@/utils/captionStyle';
+import { PreviewDraftBadge } from './PreviewDraftBadge';
 import { SeekBar } from './SeekBar';
 import { TextPlacementOverlay, type TextPlacementCommitPayload } from './TextPlacementOverlay';
 import { TransformOverlay } from './TransformOverlay';
@@ -99,6 +108,15 @@ interface ActiveClipInfo {
 
 type DrawableVisual = HTMLImageElement | HTMLCanvasElement | ImageBitmap;
 
+/**
+ * Origin of the frame on screen.
+ *
+ * `cache` means the pixels were decoded from a render-cache segment, which the
+ * export pipeline produced — the frame is the export composite, not a guess.
+ * `live` means this component composited it from the source clips.
+ */
+type FrameSource = 'cache' | 'live';
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -144,6 +162,25 @@ function frameTargetForClip(
     maxWidth: Math.max(1, Math.round(canvasWidth * zoom)),
     maxHeight: Math.max(1, Math.round(canvasHeight * zoom)),
   };
+}
+
+/** Frame rate assumed when a sequence carries an unusable one. */
+const FALLBACK_SEQUENCE_FPS = 30;
+
+/**
+ * The sequence's frame rate as a number.
+ *
+ * The cached segment files sit on this grid, so the rate is what turns a
+ * timeline time into the frame the renderer actually wrote.
+ */
+function getSequenceFps(sequence: Sequence): number {
+  const fps = sequence.format?.fps;
+  if (!fps || fps.den === 0) {
+    return FALLBACK_SEQUENCE_FPS;
+  }
+
+  const value = fps.num / fps.den;
+  return Number.isFinite(value) && value > 0 ? value : FALLBACK_SEQUENCE_FPS;
 }
 
 /** Map BlendMode to Canvas globalCompositeOperation.
@@ -232,6 +269,15 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width, height });
   const [isMultiFrameLoading, setIsMultiFrameLoading] = useState(false);
+  /**
+   * Where the picture currently on the visible canvas came from.
+   *
+   * Mirrored in a ref so the render pump can update it without the state write
+   * being part of a render-time dependency; the state copy exists only so the
+   * DRAFT badge can react to it.
+   */
+  const frameSourceRef = useRef<FrameSource>('live');
+  const [frameSource, setFrameSource] = useState<FrameSource>('live');
 
   // Ref to track latest render request time (for race condition prevention)
   const lastRenderTimeRef = useRef<number>(0);
@@ -431,6 +477,20 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         console.error('TimelinePreviewPlayer: Failed to get 2D canvas context');
         return;
       }
+
+      // Local rather than a hook callback so publishing the frame's origin costs
+      // renderFrame no dependency: its identity has to stay stable across cache
+      // status changes or every fill event would restart the render pump.
+      const applyFrameSource = (source: FrameSource): void => {
+        if (frameSourceRef.current === source) {
+          return;
+        }
+
+        frameSourceRef.current = source;
+        if (isMountedRef.current) {
+          setFrameSource(source);
+        }
+      };
 
       const renderSequenceToCanvas = async (
         targetCtx: CanvasRenderingContext2D,
@@ -653,6 +713,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       };
 
       if (!activeSequence) {
+        applyFrameSource('live');
         ctx.fillStyle = '#000000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         return;
@@ -662,6 +723,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       if (activeClips.length === 0) {
         // No clips at this time - clear canvas and show black
+        applyFrameSource('live');
         ctx.fillStyle = '#000000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         return;
@@ -690,6 +752,90 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       // cache eviction, so a sequence with more clips than the cache's byte
       // budget holds cannot have a frame closed under it mid-composite.
       videoFrameBuffer.beginRenderPass();
+
+      // =====================================================================
+      // Cache-first frame (paused only)
+      // =====================================================================
+      //
+      // A cached segment file is what the export pipeline wrote, so one decode
+      // of it gives the exact composite for this instant instead of the live
+      // canvas' approximation of it. It is only attempted while paused: during
+      // playback the extra decode would compete with the per-clip decoders for
+      // the frame budget, and degrading the picture while the transport runs is
+      // the accepted trade every NLE makes.
+      //
+      // The store is read through `getState()` rather than a subscription so
+      // that a cache fill landing cannot change `renderFrame`'s identity and
+      // restart the render pump mid-frame.
+      if (!usePlaybackStore.getState().isPlaying) {
+        const { status: cacheStatus, deadCachedPaths } = useRenderCacheStore.getState();
+        // Gated on the snapshot's own sequence id: a snapshot taken before a
+        // sequence switch names files under the previous sequence's cache
+        // directory, and drawing one would show a different edit's picture
+        // labelled as this one's exact composite.
+        const segment = resolveCachedSegmentForTime(
+          cacheSegmentsForSequence(cacheStatus, activeSequence.id),
+          time,
+          deadCachedPaths,
+        );
+        const cachedPath = segment?.cachedPath ?? null;
+
+        if (segment && cachedPath) {
+          // The cached file is the whole composite already framed to the
+          // sequence canvas, so it is decoded at canvas size: the per-clip zoom
+          // inflation would only ask for pixels nothing will magnify.
+          const cachedFrame = await extractFrameForAsset(
+            cacheFrameAssetId(activeSequence.id, segment),
+            cachedPath,
+            cacheFrameOffsetSec(segment, time, getSequenceFps(activeSequence)),
+            { maxWidth: frameCanvas.width, maxHeight: frameCanvas.height },
+          );
+
+          // Unmount is checked as well as staleness: `clearAll()` runs in an
+          // earlier cleanup than the mount flag, so a decode still in flight
+          // when the player goes away resolves null for that reason alone. Left
+          // ungated it would retire a perfectly healthy file in the
+          // module-global dead set, for every later consumer.
+          if (!isMountedRef.current || time !== lastRenderTimeRef.current) {
+            return;
+          }
+
+          if (cachedFrame) {
+            // Final pixels: no clip transform, opacity or blend mode applies —
+            // the segment file already has all of that baked in.
+            frameCtx.fillStyle = '#000000';
+            frameCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height);
+
+            const fitScale = computeContainFit(
+              Math.max(1, cachedFrame.width),
+              Math.max(1, cachedFrame.height),
+              frameCanvas.width,
+              frameCanvas.height,
+            );
+            const drawWidth = cachedFrame.width * fitScale;
+            const drawHeight = cachedFrame.height * fitScale;
+            frameCtx.drawImage(
+              cachedFrame,
+              (frameCanvas.width - drawWidth) / 2,
+              (frameCanvas.height - drawHeight) / 2,
+              drawWidth,
+              drawHeight,
+            );
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(frameCanvas, 0, 0);
+
+            applyFrameSource('cache');
+            onFrameRender?.(time);
+            return;
+          }
+
+          // The manifest still names this file but it did not decode — evicted,
+          // or truncated by a crash. Retiring it here stops every consumer from
+          // reaching for it again until the next status refresh proves otherwise.
+          useRenderCacheStore.getState().markCachedPathDead(cachedPath);
+        }
+      }
 
       // Track loading state via ref to avoid re-renders during playback
       // Only update React state when transitioning between loading/not-loading
@@ -720,6 +866,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(frameCanvas, 0, 0);
 
+        applyFrameSource('live');
         onFrameRender?.(time);
       } finally {
         // Clear multi-frame loading state even when a stale render exits early.
@@ -825,6 +972,82 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       requestRenderFrame(currentTime);
     }
   }, [currentTime, requestRenderFrame]);
+
+  // Tracks the previous transport state so the pause edge can be detected.
+  const wasPlayingRef = useRef(isPlaying);
+
+  // Upgrade the parked frame when playback stops.
+  //
+  // The frame left on screen by the last played frame is a live composite,
+  // because the cache-first path deliberately stands aside during playback.
+  // Re-requesting the same time on the pause edge lets it be redrawn from the
+  // cache. The seek-skip guard is dropped to a value no time can equal, which
+  // is how this render is forced through: the playhead has not moved, so the
+  // scrub effect would otherwise dismiss the redraw as a duplicate.
+  useEffect(() => {
+    const wasPlaying = wasPlayingRef.current;
+    wasPlayingRef.current = isPlaying;
+
+    if (!wasPlaying || isPlaying) {
+      return;
+    }
+
+    lastSeekRenderTimeRef.current = -1;
+    requestRenderFrame(usePlaybackStore.getState().currentTime);
+  }, [isPlaying, requestRenderFrame]);
+
+  const cacheStatus = useRenderCacheStore((state) => state.status);
+
+  /**
+   * The cache segment the playhead is parked in, from a snapshot that actually
+   * describes this sequence.
+   */
+  const parkedSegment = useMemo(
+    () =>
+      findSegmentForTime(
+        cacheSegmentsForSequence(cacheStatus, activeSequence?.id ?? null),
+        currentTime,
+      ),
+    [activeSequence, cacheStatus, currentTime],
+  );
+
+  const deadCachedPaths = useRenderCacheStore((state) => state.deadCachedPaths);
+
+  /**
+   * Everything about the parked segment that can change what is drawn.
+   *
+   * A long fill emits a status snapshot per completed segment, and each is a
+   * fresh object; keying the upgrade effect on the snapshot itself would run a
+   * full recomposite a hundred times over for segments the playhead is nowhere
+   * near. Only a change to the segment under the playhead can change its
+   * picture — including whether its file is currently believed playable, which
+   * is how a refreshed snapshot clearing a death mark becomes visible here.
+   */
+  const parkedSegmentKey = parkedSegment
+    ? [
+        parkedSegment.index,
+        parkedSegment.state,
+        parkedSegment.fingerprint,
+        parkedSegment.cachedPath !== null && !deadCachedPaths.has(parkedSegment.cachedPath)
+          ? 'usable'
+          : 'unusable',
+      ].join(':')
+    : null;
+
+  // Upgrade the parked frame when its own segment changes state.
+  //
+  // A fill lands asynchronously and changes nothing the render pump watches, so
+  // without this the parked frame would keep showing the live guess until the
+  // playhead next moved. The reverse case matters too: an edit re-fingerprints
+  // the segment to stale, and this is what replaces the cached pixels of the
+  // pre-edit composite with an honest live draft.
+  useEffect(() => {
+    if (isPlaying || parkedSegmentKey === null) {
+      return;
+    }
+
+    requestRenderFrame(usePlaybackStore.getState().currentTime);
+  }, [parkedSegmentKey, isPlaying, requestRenderFrame]);
 
   // Release the decoded frames and the FFmpeg processes behind them when the
   // canvas preview goes away, so nothing keeps decoding for a player that is no
@@ -940,6 +1163,15 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     [containerSize.width, containerSize.height, width, height],
   );
 
+  /**
+   * Whether the segment under the playhead is one the live preview cannot draw
+   * faithfully. Says nothing about where the frame on screen came from — that is
+   * `frameSource`, and only the two together mean "what you see is a draft".
+   */
+  const isFlaggedAtCurrentTime = parkedSegment?.flagged === true;
+
+  const showDraftBadge = !isPlaying && isFlaggedAtCurrentTime && frameSource === 'live';
+
   // ===========================================================================
   // Render Empty State
   // ===========================================================================
@@ -979,6 +1211,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     <div
       ref={containerRef}
       data-testid="timeline-preview-player"
+      // Exposed so a test — and a human reading the DOM — can tell an exact
+      // cached frame from a live composite without inspecting pixels.
+      data-frame-source={frameSource}
       className={`relative isolate bg-black overflow-hidden ${className}`}
       style={{ aspectRatio, cursor: textPlacementModeActive ? 'text' : undefined }}
       tabIndex={0}
@@ -1014,6 +1249,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         onCommit={onTextPlacementCommit}
         zIndex={40}
       />
+
+      {/* Draft Frame Warning */}
+      {showDraftBadge && <PreviewDraftBadge />}
 
       {/* Loading Indicator */}
       {isMultiFrameLoading && (
