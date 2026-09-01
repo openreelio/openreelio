@@ -268,6 +268,71 @@ describe('useIdleCacheFill', () => {
     expect(commands.renderPreviewCache).toHaveBeenCalledTimes(1);
   });
 
+  describe('cache status freshness', () => {
+    it('should re-key the status snapshot immediately when the sequence changes', async () => {
+      // The cache-first preview draws from this snapshot. Left until the idle
+      // window, it would keep naming the previous sequence's segment files.
+      renderHook(() => useIdleCacheFill());
+      await act(async () => {
+        await Promise.resolve();
+      });
+      vi.mocked(commands.getCacheStatus).mockClear();
+
+      act(() => {
+        useProjectStore.setState({ activeSequenceId: 'seq2' });
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(commands.getCacheStatus).toHaveBeenCalled();
+    });
+
+    it('should re-key the status snapshot immediately after an edit', async () => {
+      // Until the backend re-fingerprints, the snapshot reports the pre-edit
+      // composite as cached and the preview would present it as exact.
+      renderHook(() => useIdleCacheFill());
+      await act(async () => {
+        await Promise.resolve();
+      });
+      vi.mocked(commands.getCacheStatus).mockClear();
+
+      commitEdit();
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(commands.getCacheStatus).toHaveBeenCalled();
+      // Well before the debounced fill would have run.
+      expect(commands.renderPreviewCache).not.toHaveBeenCalled();
+    });
+
+    it('should re-key the status snapshot even with background caching off', async () => {
+      // Nothing else refreshes it in that mode, so the snapshot would otherwise
+      // stay stale without bound.
+      act(() => {
+        useSettingsStore.setState((state) => {
+          state.settings.performance.backgroundRenderCache = false;
+        });
+      });
+
+      renderHook(() => useIdleCacheFill());
+      await act(async () => {
+        await Promise.resolve();
+      });
+      vi.mocked(commands.getCacheStatus).mockClear();
+
+      act(() => {
+        useProjectStore.setState({ activeSequenceId: 'seq2' });
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(commands.getCacheStatus).toHaveBeenCalled();
+    });
+  });
+
   it('should stay inert when no sequence is active', async () => {
     act(() => {
       useProjectStore.setState({ activeSequenceId: null });

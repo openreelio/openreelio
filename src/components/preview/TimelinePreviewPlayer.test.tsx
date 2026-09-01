@@ -3,7 +3,11 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import { TimelinePreviewPlayer } from './TimelinePreviewPlayer';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
+import { useRenderCacheStore } from '@/stores/renderCacheStore';
 import { useTimelineStore } from '@/stores/timelineStore';
+import { DESKTOP_RUNTIME_TEST_FLAG } from '@/services/runtimeEnvironment';
+import { invoke } from '@tauri-apps/api/core';
+import type { CacheSegmentStatusDto, RenderCacheStatus } from '@/bindings';
 import type { Asset, Clip, Sequence, Track } from '@/types';
 
 const frameBufferMock = vi.hoisted(() => ({
@@ -188,8 +192,51 @@ function createSequence(): Sequence {
   };
 }
 
+const CACHED_SEGMENT_PATH = '/cache/sequence-1/seg-0.mov';
+
+/** The frame-buffer asset id a cached segment's file is addressed under. */
+const CACHE_ASSET_ID = '__cache__sequence-1_0_42';
+
+function createCacheSegment(overrides: Partial<CacheSegmentStatusDto> = {}): CacheSegmentStatusDto {
+  return {
+    index: 0,
+    startSec: 0,
+    endSec: 10,
+    state: 'cached',
+    fingerprint: '42',
+    cachedPath: CACHED_SEGMENT_PATH,
+    flagged: false,
+    flagReasons: [],
+    ...overrides,
+  };
+}
+
+function createCacheStatus(
+  segment: CacheSegmentStatusDto,
+  sequenceId = 'sequence-1',
+): RenderCacheStatus {
+  return {
+    enabled: true,
+    sequenceId,
+    totalSegments: 1,
+    cachedSegments: segment.state === 'cached' ? 1 : 0,
+    staleSegments: 0,
+    renderingSegments: 0,
+    completionPercent: segment.state === 'cached' ? 100 : 0,
+    totalCachedBytes: 1024,
+    maxCacheBytes: 1073741824,
+    segmentStates: [segment],
+  };
+}
+
+/** A stand-in for the decoded frame; only its dimensions are read before drawing. */
+function createFrame(): ImageBitmap {
+  return { width: 640, height: 360 } as unknown as ImageBitmap;
+}
+
 describe('TimelinePreviewPlayer', () => {
   beforeEach(() => {
+    useRenderCacheStore.setState({ status: null, deadCachedPaths: new Set<string>() });
     installCanvasMock();
     frameBufferMock.getFrame.mockReturnValue(new Promise<ImageBitmap | null>(() => {}));
     usePlaybackStore.getState().reset();
@@ -213,6 +260,8 @@ describe('TimelinePreviewPlayer', () => {
   afterEach(() => {
     HTMLCanvasElement.prototype.getContext = originalGetContext;
     useTimelineStore.setState({ selectedClipIds: [] });
+    useRenderCacheStore.setState({ status: null, deadCachedPaths: new Set<string>() });
+    delete globalThis[DESKTOP_RUNTIME_TEST_FLAG];
   });
 
   it('keeps the visible canvas intact while the next frame is still extracting', async () => {
@@ -430,5 +479,292 @@ describe('TimelinePreviewPlayer', () => {
     render(<TimelinePreviewPlayer showControls={false} />);
 
     expect(screen.queryByTestId('transform-bounds')).not.toBeInTheDocument();
+  });
+
+  describe('cache-first paused frames', () => {
+    it('should draw the paused frame from the cached segment instead of compositing it live', async () => {
+      // The cached file is what the export pipeline wrote, so one decode of it
+      // is the exact composite — no per-clip extraction needed.
+      frameBufferMock.getFrame.mockResolvedValue(createFrame());
+      useRenderCacheStore.setState({ status: createCacheStatus(createCacheSegment()) });
+
+      render(<TimelinePreviewPlayer showControls={false} />);
+
+      await waitFor(() => {
+        expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+          CACHE_ASSET_ID,
+          CACHED_SEGMENT_PATH,
+          2,
+          FRAME_TARGET,
+        );
+      });
+
+      expect(frameBufferMock.getFrame).not.toHaveBeenCalledWith(
+        'asset-1',
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('timeline-preview-player')).toHaveAttribute(
+          'data-frame-source',
+          'cache',
+        );
+      });
+      expect(screen.queryByTestId('preview-draft-badge')).not.toBeInTheDocument();
+    });
+
+    it('should warn that a paused frame is a draft when a flagged segment has no cached file', async () => {
+      frameBufferMock.getFrame.mockResolvedValue(null);
+      useRenderCacheStore.setState({
+        status: createCacheStatus(
+          createCacheSegment({
+            state: 'empty',
+            cachedPath: null,
+            flagged: true,
+            flagReasons: ['blend_mode'],
+          }),
+        ),
+      });
+
+      render(<TimelinePreviewPlayer showControls={false} />);
+
+      await waitFor(() => {
+        expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+          'asset-1',
+          '/tmp/asset-1.mp4',
+          2,
+          FRAME_TARGET,
+        );
+      });
+
+      const badge = await screen.findByTestId('preview-draft-badge');
+      expect(badge).toHaveTextContent('DRAFT');
+      expect(screen.getByTestId('timeline-preview-player')).toHaveAttribute(
+        'data-frame-source',
+        'live',
+      );
+    });
+
+    it('should hide the draft warning during playback', async () => {
+      // Degrading the picture while the transport runs is the accepted trade;
+      // nagging about it every frame is not.
+      frameBufferMock.getFrame.mockResolvedValue(null);
+      usePlaybackStore.setState({ isPlaying: true });
+      useRenderCacheStore.setState({
+        status: createCacheStatus(
+          createCacheSegment({
+            state: 'empty',
+            cachedPath: null,
+            flagged: true,
+            flagReasons: ['blend_mode'],
+          }),
+        ),
+      });
+
+      render(<TimelinePreviewPlayer showControls={false} />);
+
+      await waitFor(() => {
+        expect(frameBufferMock.getFrame).toHaveBeenCalled();
+      });
+
+      expect(screen.queryByTestId('preview-draft-badge')).not.toBeInTheDocument();
+    });
+
+    it('should fall back to the live composite and retire a cached file that will not decode', async () => {
+      let cachedFrame: ImageBitmap | null = null;
+      frameBufferMock.getFrame.mockImplementation(async (assetId: string) =>
+        assetId.startsWith('__cache__') ? cachedFrame : null,
+      );
+      useRenderCacheStore.setState({
+        status: createCacheStatus(
+          createCacheSegment({ flagged: true, flagReasons: ['blend_mode'] }),
+        ),
+      });
+
+      render(<TimelinePreviewPlayer showControls={false} />);
+
+      await waitFor(() => {
+        expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+          'asset-1',
+          '/tmp/asset-1.mp4',
+          2,
+          FRAME_TARGET,
+        );
+      });
+
+      expect(useRenderCacheStore.getState().deadCachedPaths.has(CACHED_SEGMENT_PATH)).toBe(true);
+      expect(await screen.findByTestId('preview-draft-badge')).toBeInTheDocument();
+
+      // A fresh status snapshot supersedes the local death mark, and the fill it
+      // reports has to reach the parked frame without the playhead moving.
+      cachedFrame = createFrame();
+      globalThis[DESKTOP_RUNTIME_TEST_FLAG] = true;
+      vi.mocked(invoke).mockResolvedValue(createCacheStatus(createCacheSegment()));
+
+      await act(async () => {
+        await useRenderCacheStore.getState().refreshStatus();
+      });
+
+      expect(useRenderCacheStore.getState().deadCachedPaths.size).toBe(0);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('timeline-preview-player')).toHaveAttribute(
+          'data-frame-source',
+          'cache',
+        );
+      });
+      expect(screen.queryByTestId('preview-draft-badge')).not.toBeInTheDocument();
+    });
+
+    it('should ignore a cache snapshot that describes a different sequence', async () => {
+      // The snapshot is refreshed asynchronously, so just after a sequence
+      // switch it still names segment files under the sequence that was open a
+      // moment ago. Drawing one would show another edit's picture as exact.
+      frameBufferMock.getFrame.mockResolvedValue(null);
+      useRenderCacheStore.setState({
+        status: createCacheStatus(
+          createCacheSegment({ flagged: true, flagReasons: ['blend_mode'] }),
+          'sequence-other',
+        ),
+      });
+
+      render(<TimelinePreviewPlayer showControls={false} />);
+
+      await waitFor(() => {
+        expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+          'asset-1',
+          '/tmp/asset-1.mp4',
+          2,
+          FRAME_TARGET,
+        );
+      });
+
+      expect(frameBufferMock.getFrame).not.toHaveBeenCalledWith(
+        expect.stringContaining('__cache__'),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(screen.getByTestId('timeline-preview-player')).toHaveAttribute(
+        'data-frame-source',
+        'live',
+      );
+      // The flag belongs to the other sequence's segments too, so it must not
+      // drive this sequence's badge either.
+      expect(screen.queryByTestId('preview-draft-badge')).not.toBeInTheDocument();
+    });
+
+    it('should upgrade the parked frame from live to cached when playback stops', async () => {
+      frameBufferMock.getFrame.mockImplementation(async (assetId: string) =>
+        assetId.startsWith('__cache__') ? createFrame() : null,
+      );
+      usePlaybackStore.setState({ isPlaying: true });
+      useRenderCacheStore.setState({ status: createCacheStatus(createCacheSegment()) });
+
+      render(<TimelinePreviewPlayer showControls={false} />);
+
+      await waitFor(() => {
+        expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+          'asset-1',
+          '/tmp/asset-1.mp4',
+          2,
+          FRAME_TARGET,
+        );
+      });
+      expect(frameBufferMock.getFrame).not.toHaveBeenCalledWith(
+        CACHE_ASSET_ID,
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+
+      act(() => {
+        usePlaybackStore.setState({ isPlaying: false });
+      });
+
+      // The playhead has not moved, so only the pause edge can force this redraw.
+      await waitFor(() => {
+        expect(screen.getByTestId('timeline-preview-player')).toHaveAttribute(
+          'data-frame-source',
+          'cache',
+        );
+      });
+      expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+        CACHE_ASSET_ID,
+        CACHED_SEGMENT_PATH,
+        2,
+        FRAME_TARGET,
+      );
+    });
+
+    it('should not blit a cached frame the playhead has already moved past', async () => {
+      const staleDecode = createDeferred<ImageBitmap | null>();
+      frameBufferMock.getFrame
+        .mockImplementationOnce(() => staleDecode.promise)
+        .mockReturnValue(new Promise<ImageBitmap | null>(() => {}));
+      useRenderCacheStore.setState({ status: createCacheStatus(createCacheSegment()) });
+
+      render(<TimelinePreviewPlayer showControls={false} />);
+
+      await waitFor(() => {
+        expect(frameBufferMock.getFrame).toHaveBeenCalledWith(
+          CACHE_ASSET_ID,
+          CACHED_SEGMENT_PATH,
+          2,
+          FRAME_TARGET,
+        );
+      });
+
+      act(() => {
+        usePlaybackStore.setState({ currentTime: 4 });
+      });
+
+      await act(async () => {
+        staleDecode.resolve(createFrame());
+        await Promise.resolve();
+      });
+
+      const visibleCanvas = screen.getByTestId('preview-canvas') as HTMLCanvasElement;
+      expect(contextByCanvas.get(visibleCanvas)!.drawImage).not.toHaveBeenCalled();
+      expect(screen.getByTestId('timeline-preview-player')).toHaveAttribute(
+        'data-frame-source',
+        'live',
+      );
+    });
+
+    it('should stop trusting a cached frame once an edit reports its segment stale', async () => {
+      // Without this the parked frame keeps showing the pre-edit composite,
+      // labelled exact, until a background fill eventually lands.
+      frameBufferMock.getFrame.mockImplementation(async (assetId: string) =>
+        assetId.startsWith('__cache__') ? createFrame() : null,
+      );
+      const segment = createCacheSegment({ flagged: true, flagReasons: ['blend_mode'] });
+      useRenderCacheStore.setState({ status: createCacheStatus(segment) });
+
+      render(<TimelinePreviewPlayer showControls={false} />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('timeline-preview-player')).toHaveAttribute(
+          'data-frame-source',
+          'cache',
+        );
+      });
+
+      act(() => {
+        useRenderCacheStore.setState({
+          status: createCacheStatus({ ...segment, state: 'stale', fingerprint: '43' }),
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('timeline-preview-player')).toHaveAttribute(
+          'data-frame-source',
+          'live',
+        );
+      });
+      expect(await screen.findByTestId('preview-draft-badge')).toBeInTheDocument();
+    });
   });
 });

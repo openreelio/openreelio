@@ -30,6 +30,14 @@
  * "Per activation" rather than per sequence: leaving a sequence and coming
  * back arms another warm-up, since the cache may have been evicted meanwhile.
  *
+ * ## It also keeps the status snapshot honest
+ *
+ * Independently of the fill, it refreshes the cache status as soon as the
+ * active sequence or the project version changes. The cache-first preview draws
+ * from that snapshot, so a stale one is not merely out of date — it is what
+ * would put another sequence's frames, or a pre-edit composite, on screen
+ * labelled exact.
+ *
  * Mount this exactly once, at the editor root.
  */
 
@@ -105,6 +113,24 @@ export function useIdleCacheFill(): void {
         }
       });
   }, []);
+
+  // Re-key the cache snapshot immediately, before any debounce.
+  //
+  // The snapshot is what the cache-first preview trusts, and it is only as
+  // fresh as the last event that happened to refresh it. Two changes make it a
+  // liability the moment they land: a sequence switch leaves it describing
+  // another sequence's segment files, and an edit leaves it reporting pre-edit
+  // pixels as cached. Both are corrected by one round-trip, so it is taken
+  // straight away rather than after the idle window — and independently of the
+  // `enabled` toggle, since with background caching off nothing else would ever
+  // refresh it.
+  useEffect(() => {
+    if (!isDesktopRuntimeAvailable() || !activeSequenceId) {
+      return;
+    }
+
+    void useRenderCacheStore.getState().refreshStatus();
+  }, [activeSequenceId, stateVersion]);
 
   useEffect(() => {
     if (!isDesktopRuntimeAvailable() || !activeSequenceId || !enabled) {
