@@ -64,7 +64,7 @@ const PLAYBACK_QUALITY_OPTIONS: Array<{ value: PreviewPlaybackQuality; label: st
 const MEDIA_PREFERENCE_OPTIONS: Array<{ value: PreviewMediaPreference; label: string }> = [
   { value: 'auto', label: 'Auto' },
   { value: 'proxy', label: 'Proxy' },
-  { value: 'renderCache', label: 'Render cache' },
+  { value: 'renderCache', label: 'Composited (accurate)' },
 ];
 const AUDIO_DRIFT_WARNING_MS = 50;
 const AUDIO_DRIFT_CRITICAL_MS = 500;

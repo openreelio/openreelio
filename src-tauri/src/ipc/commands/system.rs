@@ -161,6 +161,10 @@ pub struct AutoSaveSettingsDto {
     pub backup_count: u32,
 }
 
+fn default_true_dto() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceSettingsDto {
@@ -171,6 +175,9 @@ pub struct PerformanceSettingsDto {
     pub max_concurrent_jobs: u32,
     pub memory_limit_mb: u32,
     pub cache_size_mb: u32,
+    /// Older settings files predate this field, so it defaults rather than failing to load.
+    #[serde(default = "default_true_dto")]
+    pub background_render_cache: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type, Default)]
@@ -372,6 +379,7 @@ impl From<AppSettings> for AppSettingsDto {
                 max_concurrent_jobs: s.performance.max_concurrent_jobs,
                 memory_limit_mb: s.performance.memory_limit_mb,
                 cache_size_mb: s.performance.cache_size_mb,
+                background_render_cache: s.performance.background_render_cache,
             },
             ai: AISettingsDto {
                 assistant_runtime: match s.ai.assistant_runtime {
@@ -518,6 +526,7 @@ impl From<AppSettingsDto> for AppSettings {
                 max_concurrent_jobs: dto.performance.max_concurrent_jobs,
                 memory_limit_mb: dto.performance.memory_limit_mb,
                 cache_size_mb: dto.performance.cache_size_mb,
+                background_render_cache: dto.performance.background_render_cache,
             },
             ai: AISettings {
                 assistant_runtime: match dto.ai.assistant_runtime {

@@ -26,6 +26,7 @@ import {
 // Direct imports instead of barrel to avoid bundling all 100+ hooks
 import { useTimelineActions } from '@/hooks/useTimelineActions';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useIdleCacheFill } from '@/hooks/useIdleCacheFill';
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { useTextClip } from '@/hooks/useTextClip';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
@@ -795,6 +796,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handlePasteAttributes,
     handleRemoveAttributes,
   } = useTimelineActions({ sequence });
+
+  // Mounted here — and only here — because the editor root is the one surface
+  // that stays mounted for the whole session. The timeline is dockable and the
+  // preview players swap, so either would restart the debounce on remount.
+  useIdleCacheFill();
 
   // Text clip operations
   const { addTextClip, updateTextClip } = useTextClip();

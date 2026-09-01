@@ -21,6 +21,7 @@ const baseSettings: PerformanceSettingsType = {
   maxConcurrentJobs: 4,
   memoryLimitMb: 0,
   cacheSizeMb: 1024,
+  backgroundRenderCache: true,
 };
 
 describe('PerformanceSettings', () => {

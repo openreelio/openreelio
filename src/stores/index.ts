@@ -143,6 +143,9 @@ export type {
 export { useAgentArtifactReviewStore } from './agentArtifactReviewStore';
 export { useAgentDelegationStore } from './agentDelegationStore';
 
+export { useRenderCacheStore } from './renderCacheStore';
+export type { RenderCacheState, RenderCacheActions, RenderCacheStore } from './renderCacheStore';
+
 export { usePreviewStore, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP, ZOOM_PRESETS } from './previewStore';
 export type { ZoomMode, PreviewState, PreviewActions, PreviewStore } from './previewStore';
 

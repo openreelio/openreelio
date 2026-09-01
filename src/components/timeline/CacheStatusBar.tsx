@@ -5,12 +5,18 @@
  * - Green = cached (ready for instant playback)
  * - Yellow = stale (needs re-render)
  * - Blue = currently rendering
- * - Transparent = empty (not yet cached)
- * - Red = error
+ * - Dim red = empty but flagged (the live preview cannot draw it faithfully)
+ * - Transparent = empty and unflagged (nothing to gain from caching it)
+ * - Fuchsia = error
+ *
+ * Red is reserved for "needs render" (the NLE red-bar convention) and errors
+ * get their own hue: the bar is 6px tall, so two reds separated only by alpha
+ * would be indistinguishable at that size.
  */
 
 import React, { useMemo } from 'react';
-import type { CacheSegmentStatusDto, CacheSegmentState } from '@/bindings';
+import type { CacheSegmentStatusDto } from '@/bindings';
+import { useRenderCacheStore } from '@/stores/renderCacheStore';
 
 /** Props for the CacheStatusBar component */
 interface CacheStatusBarProps {
@@ -24,9 +30,12 @@ interface CacheStatusBarProps {
   scrollX: number;
 }
 
-/** Map segment state to a color */
-function stateColor(state: CacheSegmentState): string {
-  switch (state) {
+/** Fill for an uncached segment the live preview cannot draw faithfully */
+const NEEDS_RENDER_COLOR = 'rgba(239, 68, 68, 0.35)';
+
+/** Map a segment to a color */
+function segmentColor(seg: CacheSegmentStatusDto): string {
+  switch (seg.state) {
     case 'cached':
       return 'rgba(34, 197, 94, 0.6)'; // green
     case 'stale':
@@ -34,15 +43,32 @@ function stateColor(state: CacheSegmentState): string {
     case 'rendering':
       return 'rgba(59, 130, 246, 0.6)'; // blue
     case 'error':
-      return 'rgba(239, 68, 68, 0.6)'; // red
+      return 'rgba(217, 70, 239, 0.7)'; // fuchsia — distinct hue, not a dimmer red
     default:
-      return 'transparent'; // empty
+      // Empty. A flagged stretch is one the preview is drawing wrong right now,
+      // so it earns a "needs render" bar, following the red-bar convention of
+      // other NLEs; an unflagged one draws nothing because caching it would buy
+      // no accuracy.
+      return seg.flagged ? NEEDS_RENDER_COLOR : 'transparent';
   }
+}
+
+/** Build the hover text for a segment */
+function segmentTitle(seg: CacheSegmentStatusDto): string {
+  const range = `${seg.startSec.toFixed(1)}s - ${seg.endSec.toFixed(1)}s`;
+  if (!seg.flagged) {
+    return `${seg.state}: ${range}`;
+  }
+
+  const reasons = seg.flagReasons.length > 0 ? ` (${seg.flagReasons.join(', ')})` : '';
+  return `${seg.state}: ${range} — needs render${reasons}`;
 }
 
 export const CacheStatusBar: React.FC<CacheStatusBarProps> = React.memo(
   ({ segments, duration, zoom, scrollX }) => {
     const totalWidth = duration * zoom;
+    // The only place a failed fill is visible: the error reaches no other UI.
+    const cacheError = useRenderCacheStore((state) => state.error);
 
     const bars = useMemo(() => {
       if (duration <= 0 || segments.length === 0) return null;
@@ -50,7 +76,7 @@ export const CacheStatusBar: React.FC<CacheStatusBarProps> = React.memo(
       return segments.map((seg) => {
         const left = seg.startSec * zoom;
         const width = (seg.endSec - seg.startSec) * zoom;
-        const color = stateColor(seg.state);
+        const color = segmentColor(seg);
 
         if (color === 'transparent') return null;
 
@@ -63,7 +89,7 @@ export const CacheStatusBar: React.FC<CacheStatusBarProps> = React.memo(
               width: `${width}px`,
               backgroundColor: color,
             }}
-            title={`${seg.state}: ${seg.startSec.toFixed(1)}s - ${seg.endSec.toFixed(1)}s`}
+            title={segmentTitle(seg)}
           />
         );
       });
@@ -75,6 +101,7 @@ export const CacheStatusBar: React.FC<CacheStatusBarProps> = React.memo(
       <div
         className="relative h-1.5 bg-neutral-800/50 border-b border-neutral-700/30 overflow-hidden"
         data-testid="cache-status-bar"
+        title={cacheError !== null ? `Render cache error: ${cacheError}` : undefined}
       >
         <div
           className="absolute top-0 h-full"

@@ -355,7 +355,7 @@ describe('usePreviewMode', () => {
       });
 
       expect(result.current.mode).toBe('canvas');
-      expect(result.current.reason).toBe('Render cache preferred');
+      expect(result.current.reason).toBe('Composited preview preferred');
     });
 
     it('should return video mode with multiple clips all having ready proxies', () => {
