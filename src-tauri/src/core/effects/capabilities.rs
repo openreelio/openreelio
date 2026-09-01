@@ -443,6 +443,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_pin_the_temporal_filter_set_the_preview_cache_fidelity_note_relies_on() {
+        // Temporal filters consume multiple source frames per output frame. A
+        // windowed preview-cache segment gives them full context today only
+        // because windowed renders decode whole inputs (no input-side seek
+        // pruning), which is half of the cache's byte-identical-to-export
+        // property. A new effect mapping to one of these filters — or seek
+        // pruning of windowed inputs — requires lead-in handles for segments
+        // containing it. If this assertion fails, read the Fidelity note on
+        // `ExportSettings::preview_cache` before extending the known list.
+        const TEMPORAL_FFMPEG_FILTERS: &[&str] = &[
+            "vidstabtransform",
+            "tmix",
+            "tblend",
+            "minterpolate",
+            "framerate",
+            "mpdecimate",
+            "decimate",
+            "deflicker",
+            "atadenoise",
+            "hqdn3d",
+            "yadif",
+            "bwdif",
+            "estdif",
+            "w3fdif",
+            "fieldmatch",
+            "nnedi",
+        ];
+
+        let mut temporal_in_use: Vec<String> = all_effect_capabilities()
+            .into_iter()
+            .filter_map(|capability| capability.ffmpeg_filter)
+            .filter(|filter| TEMPORAL_FFMPEG_FILTERS.contains(&filter.as_str()))
+            .collect();
+        temporal_in_use.sort();
+        temporal_in_use.dedup();
+
+        assert_eq!(
+            temporal_in_use,
+            vec!["vidstabtransform".to_string()],
+            "the set of temporal ffmpeg filters reachable from effects changed; \
+             segments containing them need lead-in handles before the preview \
+             cache can claim byte-identity — see ExportSettings::preview_cache"
+        );
+    }
+
+    #[test]
     fn capability_marks_ai_setup_effects_as_not_exportable() {
         for effect_type in [
             EffectType::BackgroundRemoval,
