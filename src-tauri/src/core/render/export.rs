@@ -880,6 +880,22 @@ impl ExportSettings {
     /// the difference between reviewing the edit and reviewing the codec. Every
     /// frame is a keyframe, so any frame is a seek target.
     ///
+    /// ## Where the byte-identical property comes from — and what would break it
+    ///
+    /// Lossless encoding removes the codec from the equation; the other half of
+    /// the property is that a *windowed* segment render runs the same filter
+    /// graph over the same frames as the full export. That holds today because
+    /// windowed renders fold in absolute time and decode whole inputs — nothing
+    /// is seek-pruned — so even a temporal filter (one that consumes multiple
+    /// source frames per output frame; currently only `vidstabtransform` via
+    /// `EffectType::Stabilize`) sees identical context in both paths. Two future
+    /// changes would silently break this and must add lead-in handles (render
+    /// extra frames before the window and discard them) for segments containing
+    /// temporal filters: input-side seek pruning of windowed renders, or a new
+    /// effect mapping to a temporal ffmpeg filter. A tripwire test in
+    /// `core::effects::capabilities` pins the temporal-filter set so the second
+    /// change cannot land unnoticed.
+    ///
     /// The cost is size: roughly 45x an H.264 draft encode, about 77.5 MB per
     /// second of 1080p timeline. The default cache budget is sized for that
     /// (see `PerformanceSettings::cache_size_mb`).
