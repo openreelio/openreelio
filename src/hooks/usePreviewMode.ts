@@ -354,7 +354,7 @@ export function usePreviewMode({
     if (mediaPreference === 'renderCache') {
       const result: PreviewModeResult = {
         mode: 'canvas',
-        reason: 'Render cache preferred',
+        reason: 'Composited preview preferred',
         hasGeneratingProxy: false,
         clipsNeedingProxy: 0,
       };

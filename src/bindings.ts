@@ -6650,7 +6650,11 @@ model: string;
  * ISO 8601 timestamp when this perception result was produced
  */
 analyzedAt: string }
-export type PerformanceSettingsDto = { hardwareAcceleration: boolean; gpuDeviceId: string | null; proxyGeneration: boolean; proxyResolution: string; maxConcurrentJobs: number; memoryLimitMb: number; cacheSizeMb: number }
+export type PerformanceSettingsDto = { hardwareAcceleration: boolean; gpuDeviceId: string | null; proxyGeneration: boolean; proxyResolution: string; maxConcurrentJobs: number; memoryLimitMb: number; cacheSizeMb: number; 
+/**
+ * Older settings files predate this field, so it defaults rather than failing to load.
+ */
+backgroundRenderCache?: boolean }
 /**
  * Persisted permission decision DTO aligned with the frontend session kernel vocabulary.
  */

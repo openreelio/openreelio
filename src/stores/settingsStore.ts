@@ -112,6 +112,8 @@ export interface PerformanceSettings {
   maxConcurrentJobs: number;
   memoryLimitMb: number;
   cacheSizeMb: number;
+  /** Render flagged timeline segments into the preview cache while the editor is idle */
+  backgroundRenderCache: boolean;
 }
 
 /** AI provider type */
@@ -319,6 +321,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     maxConcurrentJobs: 4,
     memoryLimitMb: 0,
     cacheSizeMb: 1024,
+    backgroundRenderCache: true,
   },
   ai: {
     assistantRuntime: 'codex',

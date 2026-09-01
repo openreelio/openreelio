@@ -18,6 +18,22 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 import { commands } from '@/bindings';
+import type { CacheSegmentStatusDto } from '@/bindings';
+import { useRenderCacheStore } from '@/stores/renderCacheStore';
+
+const makeSegment = (
+  index: number,
+  state: CacheSegmentStatusDto['state'],
+): CacheSegmentStatusDto => ({
+  index,
+  startSec: index * 5,
+  endSec: (index + 1) * 5,
+  state,
+  fingerprint: String(index),
+  cachedPath: state === 'cached' ? `/cache/seg-${index}.mp4` : null,
+  flagged: false,
+  flagReasons: [],
+});
 
 const mockStatus = {
   enabled: true,
@@ -30,16 +46,18 @@ const mockStatus = {
   totalCachedBytes: 1024,
   maxCacheBytes: 1073741824,
   segmentStates: [
-    { startSec: 0, endSec: 5, state: 'cached' as const },
-    { startSec: 5, endSec: 10, state: 'cached' as const },
-    { startSec: 10, endSec: 15, state: 'stale' as const },
-    { startSec: 15, endSec: 20, state: 'empty' as const },
+    makeSegment(0, 'cached'),
+    makeSegment(1, 'cached'),
+    makeSegment(2, 'stale'),
+    makeSegment(3, 'empty'),
   ],
 };
 
 describe('useRenderCache', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The hook is a view onto a module-level store; start every case clean.
+    useRenderCacheStore.getState()._resetForTests();
     globalThis[DESKTOP_RUNTIME_TEST_FLAG] = true;
     delete (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });

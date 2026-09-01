@@ -519,6 +519,10 @@ pub struct PerformanceSettings {
     /// Cache size in MB
     #[serde(default = "default_cache_size")]
     pub cache_size_mb: u32,
+
+    /// Render flagged timeline segments into the preview cache while the editor is idle
+    #[serde(default = "default_true")]
+    pub background_render_cache: bool,
 }
 
 impl Default for PerformanceSettings {
@@ -531,6 +535,7 @@ impl Default for PerformanceSettings {
             max_concurrent_jobs: default_max_jobs(),
             memory_limit_mb: 0,
             cache_size_mb: default_cache_size(),
+            background_render_cache: true,
         }
     }
 }
@@ -1697,6 +1702,25 @@ mod tests {
         // Defaults for missing fields
         assert!(settings.general.show_welcome_on_startup);
         assert_eq!(settings.appearance.theme, "dark");
+    }
+
+    #[test]
+    fn should_default_background_render_cache_on() {
+        // Settings files written before the field existed must still opt into
+        // idle preview-cache filling rather than silently disabling it.
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(SETTINGS_FILE);
+        fs::write(
+            &settings_path,
+            r#"{"version": 1, "performance": {"proxyGeneration": false}}"#,
+        )
+        .unwrap();
+
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+        let settings = manager.load();
+
+        assert!(!settings.performance.proxy_generation);
+        assert!(settings.performance.background_render_cache);
     }
 
     #[test]

@@ -79,6 +79,24 @@ export function PerformanceSettings({
       </div>
 
       <div>
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={settings.backgroundRenderCache}
+            onChange={(e) => onUpdate({ backgroundRenderCache: e.target.checked })}
+            disabled={disabled}
+            className="w-4 h-4 rounded border-editor-border bg-editor-bg text-primary-500 focus:ring-primary-500/50 focus:ring-offset-0"
+          />
+          <div>
+            <span className="text-sm text-editor-text">Background render caching</span>
+            <p className="text-xs text-editor-text-muted">
+              Automatically renders flagged timeline segments while idle
+            </p>
+          </div>
+        </label>
+      </div>
+
+      <div>
         <label
           htmlFor="proxyResolution"
           className="block text-sm font-medium text-editor-text mb-2"
