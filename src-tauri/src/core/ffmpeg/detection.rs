@@ -528,6 +528,96 @@ pub(super) fn probe_binary_runs(binary_path: &Path) -> FFmpegResult<()> {
     run_version_probe(binary_path).map(|_| ())
 }
 
+/// How FFmpeg should map decoded frames to output frames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameRatePolicy {
+    /// One output frame per decoded frame, no rate conversion.
+    Passthrough,
+    /// Keep source timestamps, dropping duplicated frames.
+    Vfr,
+}
+
+impl FrameRatePolicy {
+    fn value(self) -> &'static str {
+        match self {
+            Self::Passthrough => "passthrough",
+            Self::Vfr => "vfr",
+        }
+    }
+}
+
+/// Returns the CLI arguments selecting `policy` in the spelling this FFmpeg
+/// binary understands.
+///
+/// FFmpeg 7.0 removed `-vsync` (deprecated since 5.1), while builds older than
+/// 5.1 do not know its replacement `-fps_mode` — so neither spelling works
+/// everywhere and the choice must follow the resolved binary. The support
+/// check runs `-version` once per binary path and caches the answer for the
+/// life of the process. A version that cannot be parsed (a git build such as
+/// `N-113…`) is treated as modern: the bundled and managed binaries this app
+/// prefers are always current, and only an ancient system fallback still
+/// needs `-vsync`.
+pub fn frame_rate_policy_args(ffmpeg_path: &Path, policy: FrameRatePolicy) -> [&'static str; 2] {
+    let flag = if binary_supports_fps_mode(ffmpeg_path) {
+        "-fps_mode"
+    } else {
+        "-vsync"
+    };
+    [flag, policy.value()]
+}
+
+/// Cached per-binary answer to "does this FFmpeg know `-fps_mode`?".
+fn binary_supports_fps_mode(ffmpeg_path: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(map) = cache.lock() {
+        if let Some(&known) = map.get(ffmpeg_path) {
+            return known;
+        }
+    }
+
+    // A binary that cannot even report its version will fail its real spawn
+    // with a clearer error; answer with the modern spelling in the meantime.
+    let supports = run_version_probe(ffmpeg_path)
+        .map(|line| version_line_supports_fps_mode(&line))
+        .unwrap_or(true);
+
+    if let Ok(mut map) = cache.lock() {
+        map.insert(ffmpeg_path.to_path_buf(), supports);
+    }
+    supports
+}
+
+/// Decides `-fps_mode` support from the first line of `ffmpeg -version`.
+///
+/// `-fps_mode` arrived in 5.1, so any parseable `major.minor` at or above that
+/// answers yes. Unparseable versions (git builds, vendor strings) answer yes —
+/// see [`frame_rate_policy_args`] for why modern is the right default.
+fn version_line_supports_fps_mode(first_line: &str) -> bool {
+    let Some(rest) = first_line.strip_prefix("ffmpeg version ") else {
+        return true;
+    };
+    let Some(token) = rest.split_whitespace().next() else {
+        return true;
+    };
+    // Accept distro spellings like "n6.1.1" alongside plain "6.1.1".
+    let token = token.strip_prefix(['n', 'N']).unwrap_or(token);
+
+    let mut numbers = token
+        .split(['.', '-', '_'])
+        .map(|part| part.parse::<u32>().ok());
+    let Some(Some(major)) = numbers.next() else {
+        return true;
+    };
+    let minor = numbers.next().flatten().unwrap_or(0);
+
+    major > 5 || (major == 5 && minor >= 1)
+}
+
 /// Validate that FFmpeg binaries are functional
 pub fn validate_ffmpeg(info: &FFmpegInfo) -> FFmpegResult<()> {
     // Test ffmpeg
@@ -803,5 +893,57 @@ mod tests {
                 panic!("Unexpected error: {}", e);
             }
         }
+    }
+
+    #[test]
+    fn should_choose_fps_mode_for_releases_at_or_above_5_1() {
+        for line in [
+            "ffmpeg version 5.1 Copyright (c) 2000-2022",
+            "ffmpeg version 5.1.2-static https://johnvansickle.com/ffmpeg/",
+            "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023",
+            "ffmpeg version n7.0.2 Copyright (c) 2000-2024",
+            "ffmpeg version 9.0.1-essentials_build-www.gyan.dev Copyright (c)",
+        ] {
+            assert!(
+                version_line_supports_fps_mode(line),
+                "expected modern: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_fall_back_to_vsync_for_releases_below_5_1() {
+        for line in [
+            "ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2000-2021",
+            "ffmpeg version n5.0.3 Copyright (c) 2000-2022",
+            "ffmpeg version 3.4.11 Copyright (c) 2000-2022",
+        ] {
+            assert!(
+                !version_line_supports_fps_mode(line),
+                "expected legacy: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_treat_an_unparseable_version_as_modern() {
+        // Git builds and vendor strings carry no release number; the binaries
+        // this app bundles or manages are always current, so modern wins.
+        for line in [
+            "ffmpeg version N-113007-g8d24a28d06 Copyright (c) 2000-2023",
+            "ffmpeg version git-2024-01-01-abcdef Copyright (c)",
+            "not an ffmpeg banner at all",
+        ] {
+            assert!(
+                version_line_supports_fps_mode(line),
+                "expected modern: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_spell_the_policy_with_the_flag_the_binary_understands() {
+        assert_eq!(FrameRatePolicy::Passthrough.value(), "passthrough");
+        assert_eq!(FrameRatePolicy::Vfr.value(), "vfr");
     }
 }

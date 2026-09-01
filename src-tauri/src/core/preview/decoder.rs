@@ -740,12 +740,13 @@ impl ResidentDecoder {
             .args(["-an", "-sn", "-dn"])
             // Passthrough keeps one output frame per decoded frame; the default
             // rate conversion would duplicate or drop frames on a
-            // variable-rate source and desynchronise the pipe cursor.
-            //
-            // `-vsync 0` rather than the newer `-fps_mode passthrough` it is an
-            // alias for: the resolver can land on a system FFmpeg older than
-            // 5.1, which does not know `-fps_mode` and would refuse to start.
-            .args(["-vsync", "0"])
+            // variable-rate source and desynchronise the pipe cursor. The flag
+            // spelling follows the resolved binary: FFmpeg 7.0 removed
+            // `-vsync`, while builds older than 5.1 do not know `-fps_mode`.
+            .args(crate::core::ffmpeg::frame_rate_policy_args(
+                &self.ffmpeg,
+                crate::core::ffmpeg::FrameRatePolicy::Passthrough,
+            ))
             .args(["-vf", &scale])
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
             .arg("-")
@@ -1493,7 +1494,10 @@ mod ffmpeg_backed_tests {
                 "testsrc2=size={TEST_WIDTH}x{TEST_HEIGHT}:rate=30:duration=3"
             ))
             .args(["-vf", "setpts='(if(lt(N,15),N/30,0.5+(N-15)/5))/TB'"])
-            .args(["-vsync", "passthrough"])
+            .args(crate::core::ffmpeg::frame_rate_policy_args(
+                ffmpeg,
+                crate::core::ffmpeg::FrameRatePolicy::Passthrough,
+            ))
             .args(["-c:v", "libx264", "-g", "250", "-pix_fmt", "yuv420p"])
             .arg(&source)
             .output()
@@ -1574,7 +1578,11 @@ mod ffmpeg_backed_tests {
             .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
             .arg("-i")
             .arg(source)
-            .args(["-an", "-sn", "-dn", "-vsync", "0"])
+            .args(["-an", "-sn", "-dn"])
+            .args(crate::core::ffmpeg::frame_rate_policy_args(
+                ffmpeg,
+                crate::core::ffmpeg::FrameRatePolicy::Passthrough,
+            ))
             .args(["-vf", &format!("scale={TEST_WIDTH}:{TEST_HEIGHT}")])
             .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
             .output()
