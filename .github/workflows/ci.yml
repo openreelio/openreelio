@@ -346,6 +346,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Check Tauri npm and crate versions match
+        # `tauri build` refuses to run when an npm package and its Rust crate
+        # sit on different minor releases, but `cargo build` does not, so a
+        # Dependabot bump of one side alone passes CI and then breaks the
+        # release build. `tauri info` reports the mismatch yet exits 0, hence
+        # the grep.
+        run: |
+          npx tauri info 2>&1 | tee tauri-info.txt
+          if grep -q "version mismatched" tauri-info.txt; then
+            echo "::error::Tauri npm packages and Rust crates are on different minor releases; bump both sides together."
+            exit 1
+          fi
+
       - name: Build frontend
         run: npm run build
 
