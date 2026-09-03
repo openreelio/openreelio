@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import {
   commands,
@@ -49,6 +49,12 @@ export interface OpenReelioCodexToolContext extends OpenReelioCodexSessionContex
   sessionId: string;
   sessionKnown?: boolean;
   approvalDecisionProvider?: ExternalAgentApprovalDecisionProvider;
+  /**
+   * Host-assigned id of the single tool call being served, when the host has
+   * one. It is what lets a cancelled call reach the work it started — a draft
+   * render keeps encoding otherwise.
+   */
+  callId?: string;
 }
 
 const EXTERNAL_AGENT_MUTATION_TIMEOUT_MS = 5 * 60 * 1000;
@@ -790,25 +796,30 @@ const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
     grid: {
       type: 'string',
       description:
-        "Contact sheet layout as COLSxROWS, or 'auto' to size it from the samples. A sheet is ONE image, so it is the cheap way to look at many moments.",
+        "Contact sheet layout as COLSxROWS, or 'auto' to size it from the samples. A sheet is ONE image, so it is the cheap way to look at many moments. 'auto' needs a sampler or times to size itself; with between, pass an explicit COLSxROWS.",
     },
     between: {
       type: 'array',
       items: { type: 'number' },
       description:
-        '[start, end] timeline seconds a grid samples uniformly. Uniform sampling lands on no edit event, so prefer an event sampler when one fits.',
+        '[start, end] seconds a grid samples uniformly. Requires grid, and with between the grid must be an explicit COLSxROWS. Uniform sampling lands on no edit event, so prefer an event sampler when one fits.',
     },
     cellWidth: {
-      type: 'number',
-      description: 'Contact sheet cell width in pixels; raise it when reading burned-in text.',
+      type: 'integer',
+      minimum: 64,
+      maximum: 1024,
+      description:
+        'Contact sheet cell width in pixels; raise it when reading burned-in text. Requires grid.',
     },
     cellHeight: {
-      type: 'number',
-      description: 'Contact sheet cell height in pixels.',
+      type: 'integer',
+      minimum: 64,
+      maximum: 1024,
+      description: 'Contact sheet cell height in pixels. Requires grid.',
     },
     labelCells: {
       type: 'boolean',
-      description: "Burn each cell's index and timecode into the contact sheet.",
+      description: "Burn each cell's index and timecode into the contact sheet. Requires grid.",
     },
     mode: {
       type: 'string',
@@ -817,13 +828,15 @@ const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
         "'composite' (default) renders the whole stack — captions, text, transforms, blends — exactly as export does; 'fast' is the cheap topmost-clip-only look that shows none of the edit.",
     },
     maxWidth: {
-      type: 'number',
+      type: 'integer',
+      minimum: 1,
+      maximum: 3840,
       description: 'Maximum output width in pixels. Aspect ratio is preserved and never upscaled.',
     },
     file: {
       type: 'string',
       description:
-        'Rendered video inside the project directory to read instead of the timeline, such as the outputPath returned by openreelio.render_proxy. Cells then map back as fileSec.',
+        'Rendered video inside the project directory to read instead of the timeline, such as the outputPath returned by render_proxy. Times are relative to the file and cells map back as fileSec. Samplers are not available with file; use times, or between with an explicit grid.',
     },
     atCuts: {
       type: 'boolean',
@@ -847,23 +860,27 @@ const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
     },
     around: {
       type: 'number',
+      minimum: 0,
       description: 'Sample a window centred on this timeline time, in seconds.',
     },
     span: {
       type: 'number',
+      exclusiveMinimum: 0,
       description: 'Half-width of the around window in seconds.',
     },
     aroundCount: {
-      type: 'number',
+      type: 'integer',
+      minimum: 1,
       description: 'Number of samples the around window produces.',
     },
     affected: {
       type: 'boolean',
       description:
-        'Sample exactly the timeline ranges the last applied edit changed. Errors when no edit recorded a hand-off; fall back to atCuts or between around the edited time.',
+        "Sample exactly the timeline ranges the last applied edit changed. Errors when no edit recorded a hand-off; fall back to atCuts: true, grid: 'auto', or around: <edited time>, span: 1, grid: 'auto'.",
     },
     limit: {
-      type: 'number',
+      type: 'integer',
+      minimum: 1,
       description:
         'Largest number of sampler times to keep. At most 12 separate stills come back inline, so pass grid for anything wider.',
     },
@@ -871,22 +888,35 @@ const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
   additionalProperties: false,
 };
 
+/**
+ * Longest range the bridge will draft-render in one call, in seconds.
+ *
+ * A range render is uncancellable from the agent's side once it is running and
+ * blocks the tool call until it finishes, so an unbounded request is an
+ * unbounded stall. Five minutes of timeline is far more than any "does this
+ * motion read?" question needs.
+ */
+const RENDER_PROXY_MAX_RANGE_SEC = 300;
+
 const RENDER_PROXY_SCHEMA: CodexJsonObject = {
   type: 'object',
   required: ['start', 'end'],
   properties: {
     start: {
       type: 'number',
+      minimum: 0,
       description: 'Range start in timeline seconds. Must be non-negative and below end.',
     },
     end: {
       type: 'number',
-      description: 'Range end in timeline seconds.',
+      minimum: 0,
+      description: `Range end in timeline seconds. The range must be at most ${RENDER_PROXY_MAX_RANGE_SEC}s long; render a narrower window and look at that.`,
     },
     preset: {
       type: 'string',
+      enum: ['proxy_480p', 'mp4_draft'],
       description:
-        'Render preset id. Defaults to proxy_480p, which the desktop host serves with its fast 720p draft preset. Pass a desktop preset id such as mp4_draft, youtube_1080p, or prores for a specific format.',
+        'Render preset id, MP4 either way. Defaults to proxy_480p: a CRF 30 ultrafast draft fitted to the sequence canvas (short edge at most 480) at the sequence frame rate, so vertical stays vertical. mp4_draft is a fixed 1280x720 at 30 fps draft; pass it only when the exact 720p30 frame matters.',
     },
   },
   additionalProperties: false,
@@ -1117,12 +1147,13 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Shell and filesystem tools are secondary; prefer OpenReelio tools for video-editing state and mutations.',
     '',
     'Look at the edit before you report on it:',
-    "- After every openreelio.plan_apply or openreelio.command_execute, call openreelio.frame_extract with affected: true, grid: 'auto', labelCells: true, and look at the picture before you say what changed. If affected reports no recorded hand-off, sample the seconds you edited instead: atCuts: true, or between: [start, end] around the edited time.",
-    '- For caption or text edits, inspect with atCaptions: true and cellWidth: 640 so the burned-in words are legible.',
+    "- After every openreelio.plan_apply or openreelio.command_execute, call openreelio.frame_extract with affected: true, grid: 'auto', labelCells: true, and look at the picture before you say what changed. If affected reports no recorded hand-off, sample the seconds you edited instead: atCuts: true, grid: 'auto', or around: <edited time>, span: 1, grid: 'auto'.",
+    "- For caption or text edits, inspect with atCaptions: true, grid: 'auto', cellWidth: 640 so the burned-in words are legible.",
     "- Before finishing a task, sweep the whole cut once with perShot: true, grid: 'auto', limit: 24.",
     "- Do not compute inspection times yourself. frame_extract samples the edit's own events (affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around); uniform between sampling lands on no event and is for whole-timeline overviews only.",
+    "- cellWidth, cellHeight, labelCells and between only apply to a contact sheet and are rejected without grid. grid: 'auto' sizes itself from a sampler or times, so between always needs an explicit grid such as '4x3'.",
     '- frame_extract shows the composited edit by default. Only pass mode: "fast" when you deliberately want the raw footage without captions, text or effects.',
-    "- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, then inspect its outputPath with openreelio.frame_extract { file: outputPath, atCuts: true, grid: 'auto' }. Never full-render to check your work.",
+    `- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, and keep the range under ${RENDER_PROXY_MAX_RANGE_SEC}s. Then inspect its outputPath with openreelio.frame_extract { file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true } — file times are relative to the file, and samplers are not available with file.`,
     '- Never claim a cut, caption, overlay, or transition looks right without having extracted a frame that shows it.',
     '',
     'Available OpenReelio dynamic tools:',
@@ -1202,7 +1233,7 @@ export async function handleOpenReelioCodexDynamicToolCall(
       case 'diagnostics_read':
         return toolResponse(await buildDiagnosticsResponse());
       case 'preview_describe':
-        return toolResponse(await buildPreviewDescription());
+        return toolResponse(await buildPreviewDescription(context));
       case 'frame_extract': {
         const result = await extractFramesToolCall(toolCall.arguments);
         return toolResponseWithImages(result.value, result.images, result.value.status === 'ok');
@@ -1629,7 +1660,21 @@ async function buildDiagnosticsResponse(): Promise<CodexJsonObject> {
   };
 }
 
-async function buildPreviewDescription(): Promise<CodexJsonObject> {
+/**
+ * Name a bridge tool the way the host making the call names it.
+ *
+ * Codex calls the dotted dynamic-tool id; Claude only ever sees the loopback
+ * MCP server's prefixed name. A pointer written in the other host's spelling
+ * names a tool the agent cannot call, so every id the bridge hands back is
+ * spelled for its own caller.
+ */
+function toolIdFor(runtimeId: OpenReelioCodexToolContext['runtimeId'], name: string): string {
+  return runtimeId === 'claude_code' ? `mcp__openreelio__${name}` : `openreelio.${name}`;
+}
+
+async function buildPreviewDescription(
+  context: OpenReelioCodexToolContext,
+): Promise<CodexJsonObject> {
   const [state, playbackModule, previewModule, transcriptionAvailable] = await Promise.all([
     readOptionalProjectState(),
     import('@/stores/playbackStore'),
@@ -1657,12 +1702,11 @@ async function buildPreviewDescription(): Promise<CodexJsonObject> {
       panY: previewState.panY,
     },
     mediaInspection: {
-      frameExtraction: 'openreelio.frame_extract',
-      rangeRender: 'openreelio.render_proxy',
+      frameExtraction: toolIdFor(context.runtimeId, 'frame_extract'),
+      rangeRender: toolIdFor(context.runtimeId, 'render_proxy'),
       transcriptAccess: transcriptionAvailable,
       waveformAccess: false,
-      message:
-        'Use openreelio.frame_extract to actually see the composited edit as stills or a contact sheet, openreelio.render_proxy for a draft of a range when motion matters, openreelio.clip_analyze for indexed frame samples, openreelio.clip_describe for semantic clip-local frame evidence, and openreelio.transcription_generate for speech-to-text subtitle timing. Waveform inspection is not exposed through this bridge yet.',
+      message: `Use ${toolIdFor(context.runtimeId, 'frame_extract')} to actually see the composited edit as stills or a contact sheet, ${toolIdFor(context.runtimeId, 'render_proxy')} for a draft of a range when motion matters, ${toolIdFor(context.runtimeId, 'clip_analyze')} for indexed frame samples, ${toolIdFor(context.runtimeId, 'clip_describe')} for semantic clip-local frame evidence, and ${toolIdFor(context.runtimeId, 'transcription_generate')} for speech-to-text subtitle timing. Waveform inspection is not exposed through this bridge yet.`,
     },
   };
 }
@@ -1792,15 +1836,16 @@ function stripInlineImageBytes(value: unknown): unknown {
 const RENDER_PROXY_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
- * The same budget for a Claude session, kept under the loopback MCP server's
- * own 300s `tools/call` timeout (`MCP_CALL_TIMEOUT`).
+ * The budget for a Claude session, kept under the loopback MCP server's own
+ * `tools/call` timeout for `render_proxy` (900s; 300s for every other tool).
  *
  * Past that point the backend answers Claude with a timeout error and discards
  * whatever the frontend eventually says, so a longer wait here would not buy
  * the agent an answer — it would only hide the outcome behind a response nobody
- * reads.
+ * reads. The 90s margin covers the round trip between the frontend giving up
+ * and the backend receiving the answer.
  */
-const RENDER_PROXY_MCP_TIMEOUT_MS = 4.5 * 60 * 1000;
+const RENDER_PROXY_MCP_TIMEOUT_MS = 13.5 * 60 * 1000;
 
 /** The wait budget for the runtime this call came from. */
 function resolveRenderProxyTimeoutMs(context: OpenReelioCodexToolContext): number {
@@ -1809,21 +1854,25 @@ function resolveRenderProxyTimeoutMs(context: OpenReelioCodexToolContext): numbe
     : RENDER_PROXY_TIMEOUT_MS;
 }
 
-/** Preset id the tool documents, matching the CLI's `--proxy` shorthand. */
+/**
+ * Preset id the tool documents and sends, matching the CLI's `--proxy`
+ * shorthand: a CRF 30 ultrafast draft fitted to the sequence canvas.
+ *
+ * The desktop render path serves this id itself, so nothing is substituted and
+ * a vertical sequence is drafted vertical rather than letterboxed into 720p.
+ */
 const RENDER_PROXY_DEFAULT_PRESET = 'proxy_480p';
 
 /**
- * Preset the desktop render command is actually given for a proxy request.
- *
- * `ExportPreset::from_legacy_id` — the only preset table `render_range` knows —
- * has no `proxy_480p` arm; that id lives in the CLI's own table. Until the
- * desktop path learns it, a proxy request is served by the host's fast draft
- * preset and the substitution is reported rather than hidden.
+ * Presets the bridge will draft with. Both write MP4, which is what makes the
+ * hard-coded `.mp4` output extension correct for either one.
  */
-const RENDER_PROXY_HOST_PRESET = 'mp4_draft';
+const RENDER_PROXY_ALLOWED_PRESETS = new Set([RENDER_PROXY_DEFAULT_PRESET, 'mp4_draft']);
 
-/** Preset ids that mean "a fast draft to look at", not a specific format. */
-const RENDER_PROXY_PRESET_ALIASES = new Set(['proxy', 'proxy_480p']);
+/** The draft presets, quoted, for a rejection the agent can act on. */
+function describeAllowedRenderPresets(): string {
+  return [...RENDER_PROXY_ALLOWED_PRESETS].map((id) => `'${id}'`).join(' or ');
+}
 
 /** Terminal state of a range render, as the bridge reports it. */
 interface RenderProxyOutcome {
@@ -1839,6 +1888,31 @@ interface RenderProxyOutcome {
 let renderProxyOutputSequence = 0;
 
 /**
+ * Draft renders currently blocking a tool call, keyed by the host's call id.
+ *
+ * A render outlives the agent's interest in it: when the host abandons the
+ * `tools/call` (its timeout, or the user stopping the session), the encoder is
+ * still running and the only way to stop it is `cancel_render`. The bridge
+ * cancel path reaches it through this registry.
+ */
+const inflightRenderCancellations = new Map<string, () => void>();
+
+/**
+ * Cancel the draft render blocking `callId`, if one is in flight.
+ *
+ * Returns whether a render was found, so the caller can tell a cancelled
+ * render from a call that was only waiting on approval.
+ */
+export function cancelInflightAgentRender(callId: string): boolean {
+  const cancel = inflightRenderCancellations.get(callId);
+  if (!cancel) {
+    return false;
+  }
+  cancel();
+  return true;
+}
+
+/**
  * Render one timeline range to a draft file inside the project and wait for it.
  *
  * The output lands in the project's own cache directory, which is both an
@@ -1849,6 +1923,13 @@ async function renderProxyToolCall(
   args: CodexJsonObject | null,
   context: OpenReelioCodexToolContext,
 ): Promise<CodexJsonObject> {
+  // Armed before the first await: the host's own `tools/call` clock started
+  // when the call arrived, so every second spent reading project state is a
+  // second off this budget. Deriving the render timeout from a deadline fixed
+  // here keeps the total wait inside it however slow the preamble is.
+  const budgetMs = resolveRenderProxyTimeoutMs(context);
+  const deadlineAt = Date.now() + budgetMs;
+
   if (!args) {
     throw new Error('OpenReelio render_proxy requires object arguments.');
   }
@@ -1861,15 +1942,21 @@ async function renderProxyToolCall(
       message: `OpenReelio render_proxy requires end (${end}) to be greater than start (${start}).`,
     };
   }
+  if (end - start > RENDER_PROXY_MAX_RANGE_SEC) {
+    return {
+      status: 'error',
+      message: `OpenReelio render_proxy renders at most ${RENDER_PROXY_MAX_RANGE_SEC}s in one call, and this range is ${Math.round(
+        end - start,
+      )}s. Render a narrower window around the moment in question, or look at stills with frame_extract instead.`,
+    };
+  }
 
-  const requestedPreset = getString(args, 'preset')?.trim() || RENDER_PROXY_DEFAULT_PRESET;
-  const warnings: string[] = [];
-  let preset = requestedPreset;
-  if (RENDER_PROXY_PRESET_ALIASES.has(requestedPreset.toLowerCase())) {
-    preset = RENDER_PROXY_HOST_PRESET;
-    warnings.push(
-      `The desktop render path does not accept the '${requestedPreset}' preset, so this draft was rendered with '${RENDER_PROXY_HOST_PRESET}' instead.`,
-    );
+  const preset = getString(args, 'preset')?.trim() || RENDER_PROXY_DEFAULT_PRESET;
+  if (!RENDER_PROXY_ALLOWED_PRESETS.has(preset)) {
+    return {
+      status: 'error',
+      message: `OpenReelio render_proxy renders drafts only: pass ${describeAllowedRenderPresets()}, not '${preset}'. Full-quality presets are for delivery, not for checking work.`,
+    };
   }
 
   const [projectInfo, projectState] = await Promise.all([
@@ -1895,34 +1982,52 @@ async function renderProxyToolCall(
   }
 
   const outputPath = buildAgentRenderOutputPath(projectPath);
+  const callId = context.callId ?? null;
   const render = await startRangeRenderAndWait({
     sequenceId,
     outputPath,
     preset,
     start,
     end,
-    timeoutMs: resolveRenderProxyTimeoutMs(context),
+    deadlineAt,
+    budgetMs,
+    registerCancellation: callId
+      ? (cancel) => {
+          inflightRenderCancellations.set(callId, cancel);
+          return () => inflightRenderCancellations.delete(callId);
+        }
+      : undefined,
   });
+
+  // The file only exists when the encoder finished; naming a path the render
+  // never wrote invites the agent to point frame_extract at nothing.
+  const producedFile = render.outcome.status === 'ok';
+  const durationSec = render.outcome.durationSec ?? end - start;
 
   return {
     status: render.outcome.status,
     jobId: render.jobId,
     sequenceId,
     preset,
-    requestedPreset,
     start,
     end,
-    outputPath: render.outcome.outputPath ?? outputPath,
+    ...(producedFile ? { outputPath: render.outcome.outputPath ?? outputPath } : {}),
     durationSec: render.outcome.durationSec,
     fileSize: render.outcome.fileSize,
     encodingTimeSec: render.outcome.encodingTimeSec,
     message: render.outcome.message,
-    warnings: warnings.length > 0 ? warnings : undefined,
-    nextStep:
-      render.outcome.status === 'ok'
-        ? "Look at the render: openreelio.frame_extract { file: outputPath, atCuts: true, grid: 'auto' }."
-        : undefined,
+    nextStep: producedFile
+      ? `Look at the render: ${toolIdFor(
+          context.runtimeId,
+          'frame_extract',
+        )} { file: outputPath, between: [0, ${roundSeconds(durationSec)}], grid: '4x3', labelCells: true }. File times are relative to the file, and samplers are not available with file.`
+      : undefined,
   };
+}
+
+/** Round a duration to the two decimals a timecode hint is worth. */
+function roundSeconds(seconds: number): number {
+  return Math.round(seconds * 100) / 100;
 }
 
 /** Build the cache path a bridge-initiated render writes to. */
@@ -1947,7 +2052,15 @@ interface RangeRenderRequest {
   preset: string;
   start: number;
   end: number;
-  timeoutMs: number;
+  /** Wall-clock instant the wait must end by, fixed before the call's first await. */
+  deadlineAt: number;
+  /** The full budget the deadline was derived from, for the timeout message. */
+  budgetMs: number;
+  /**
+   * Publish a cancel hook for as long as the render is in flight, and return
+   * the function that withdraws it.
+   */
+  registerCancellation?: (cancel: () => void) => () => void;
 }
 
 /**
@@ -1984,30 +2097,47 @@ async function startRangeRenderAndWait(
     }
   };
 
-  const unlisteners = await Promise.all([
-    listen<RenderCompleteEvent>('render-complete', (event) => {
-      deliver(event.payload.jobId, {
-        status: 'ok',
-        outputPath: event.payload.outputPath,
-        durationSec: event.payload.durationSec,
-        fileSize: event.payload.fileSize,
-        encodingTimeSec: event.payload.encodingTimeSec,
-      });
-    }),
-    listen<RenderLifecycleEvent>('render-lifecycle', (event) => {
-      const { state } = event.payload;
-      if (state !== 'failed' && state !== 'cancelled') {
-        return;
-      }
-      deliver(event.payload.jobId, {
-        status: state,
-        message: event.payload.message ?? undefined,
-      });
-    }),
-  ]);
+  // The host can abandon the call while the encoder runs; `cancelled` is the
+  // hook it pulls, and it settles the wait the same way a cancel event would.
+  let cancelled = false;
+  let requestCancel: (() => void) | null = null;
+  const abandoned = new Promise<'cancelled'>((resolve) => {
+    requestCancel = () => {
+      cancelled = true;
+      resolve('cancelled');
+    };
+  });
 
+  // Registered one at a time inside the try: a second `listen` that rejects
+  // must still detach the first, and `finally` is what guarantees that.
+  const unlisteners: UnlistenFn[] = [];
+  const withdrawCancellation = request.registerCancellation?.(() => requestCancel?.());
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    unlisteners.push(
+      await listen<RenderCompleteEvent>('render-complete', (event) => {
+        deliver(event.payload.jobId, {
+          status: 'ok',
+          outputPath: event.payload.outputPath,
+          durationSec: event.payload.durationSec,
+          fileSize: event.payload.fileSize,
+          encodingTimeSec: event.payload.encodingTimeSec,
+        });
+      }),
+    );
+    unlisteners.push(
+      await listen<RenderLifecycleEvent>('render-lifecycle', (event) => {
+        const { state } = event.payload;
+        if (state !== 'failed' && state !== 'cancelled') {
+          return;
+        }
+        deliver(event.payload.jobId, {
+          status: state,
+          message: event.payload.message ?? undefined,
+        });
+      }),
+    );
+
     const started = await commands.renderRange(
       request.sequenceId,
       request.outputPath,
@@ -2025,19 +2155,31 @@ async function startRangeRenderAndWait(
     if (early) {
       return { jobId, outcome: early };
     }
+    if (cancelled) {
+      // The host gave up while the job was still being started, so the job id
+      // only became cancellable now.
+      return { jobId, outcome: cancelRunningRender(jobId) };
+    }
 
     const timeout = new Promise<'timeout'>((resolve) => {
-      timer = setTimeout(() => resolve('timeout'), request.timeoutMs);
+      // Derived from the deadline rather than the budget: the preamble already
+      // spent part of it, and the host's clock does not restart here.
+      timer = setTimeout(() => resolve('timeout'), Math.max(0, request.deadlineAt - Date.now()));
     });
-    const settled = await Promise.race([terminal, timeout]);
+    const settled = await Promise.race([terminal, timeout, abandoned]);
+    if (settled === 'cancelled') {
+      return { jobId, outcome: cancelRunningRender(jobId) };
+    }
     if (settled === 'timeout') {
-      await commands.cancelRender(jobId);
+      // Fire-and-forget: the agent is already out of time, so it gets its
+      // answer now rather than after another backend round trip.
+      void commands.cancelRender(jobId);
       return {
         jobId,
         outcome: {
           status: 'timeout',
           message: `The range render did not finish within ${Math.round(
-            request.timeoutMs / 1000,
+            request.budgetMs / 1000,
           )}s and was cancelled. Render a shorter range.`,
         },
       };
@@ -2045,10 +2187,26 @@ async function startRangeRenderAndWait(
     return { jobId, outcome: settled };
   } finally {
     clearTimeout(timer);
+    withdrawCancellation?.();
     for (const unlisten of unlisteners) {
       unlisten();
     }
   }
+}
+
+/**
+ * Ask the backend to stop a running render without waiting for it to confirm.
+ *
+ * The caller has already decided what to answer; awaiting the cancellation
+ * would only delay that answer behind a round trip whose result changes
+ * nothing.
+ */
+function cancelRunningRender(jobId: string): RenderProxyOutcome {
+  void commands.cancelRender(jobId);
+  return {
+    status: 'cancelled',
+    message: 'The draft render was cancelled before it finished.',
+  };
 }
 
 async function insertMediaToolCall(
@@ -2289,7 +2447,7 @@ async function executeApprovedCommand(
     approval: buildApprovalExecutionSummary(execution),
     result: execution.result,
     affectedRanges: readAffectedRanges(execution.result),
-    nextStep: buildInspectionNextStep(execution.result),
+    nextStep: buildInspectionNextStep(execution.result, context.runtimeId),
     targeting: payloadNormalization.notes.length > 0 ? payloadNormalization.notes : undefined,
     refresh,
   };
@@ -2307,14 +2465,25 @@ function readAffectedRanges(result: AgentPlanResult): unknown {
   return Array.isArray(ranges) && ranges.length > 0 ? ranges : undefined;
 }
 
-/** Tell the agent where to look now that the edit is applied. */
-function buildInspectionNextStep(result: AgentPlanResult): string | undefined {
+/**
+ * Tell the agent where to look now that the edit is applied.
+ *
+ * The fallback is spelled out as a request the frame probe accepts: `between`
+ * is rejected without an explicit `COLSxROWS` grid, so the recovery path an
+ * agent reads under pressure must not name it.
+ */
+function buildInspectionNextStep(
+  result: AgentPlanResult,
+  runtimeId: OpenReelioCodexToolContext['runtimeId'],
+): string | undefined {
   if (!result.success) {
     return undefined;
   }
+  const tool = toolIdFor(runtimeId, 'frame_extract');
+  const look = `Look at what changed: ${tool} { affected: true, grid: 'auto', labelCells: true }.`;
   return readAffectedRanges(result)
-    ? "Look at what changed: openreelio.frame_extract { affected: true, grid: 'auto', labelCells: true }."
-    : "Look at what changed: openreelio.frame_extract { affected: true, grid: 'auto', labelCells: true }. If no hand-off is recorded, sample the edited seconds instead with atCuts or between.";
+    ? look
+    : `${look} If no hand-off is recorded, sample the edited seconds instead: { atCuts: true, grid: 'auto' }, or { around: <edited time>, span: 1, grid: 'auto' }.`;
 }
 
 async function validateCommandToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
@@ -2475,7 +2644,7 @@ async function applyApprovedPlan(
     approval: buildApprovalExecutionSummary(execution),
     result: execution.result,
     affectedRanges: readAffectedRanges(execution.result),
-    nextStep: buildInspectionNextStep(execution.result),
+    nextStep: buildInspectionNextStep(execution.result, context.runtimeId),
     targeting: validation.normalizationNotes.length > 0 ? validation.normalizationNotes : undefined,
     refresh,
   };
@@ -3295,9 +3464,13 @@ function buildTranscriptionResponse(
         'timeline-relative segments instead.';
       response.importHint = response.timelineMappingSkippedReason;
     } else {
-      const timelineCaptionSegments = mapCaptionSegmentsToClipTimeline(captionSegments, clipMapping);
+      const timelineCaptionSegments = mapCaptionSegmentsToClipTimeline(
+        captionSegments,
+        clipMapping,
+      );
       response.timelineSegmentCount = timelineCaptionSegments.length;
-      response.skippedTimelineSegmentCount = captionSegments.length - timelineCaptionSegments.length;
+      response.skippedTimelineSegmentCount =
+        captionSegments.length - timelineCaptionSegments.length;
       response.timelineCaptionSegments = timelineCaptionSegments as unknown as CodexJsonObject[];
       response.importHint =
         'Use timelineCaptionSegments as ImportGeneratedCaptions.segments when creating subtitles for this timeline clip.';
@@ -4927,10 +5100,12 @@ function toolResponse(value: unknown, success = true): CodexDynamicToolCallRespo
 /**
  * Build a dynamic-tool response that carries pictures alongside its JSON.
  *
- * Images come first so the host renders them before the text that explains
- * them, and each is a `data:` URL because that is the only image form the Codex
- * app-server dynamic-tool protocol accepts. `value` must already be free of
- * base64 bytes: the picture travels once, as a picture.
+ * Images come first here, which is the order Codex renders them in, and each is
+ * a `data:` URL because that is the only image form the Codex app-server
+ * dynamic-tool protocol accepts. The Claude path does not inherit that order:
+ * the loopback MCP wrapper rebuilds the result as one text block followed by
+ * the image blocks, so on that host the text leads. `value` must already be
+ * free of base64 bytes either way: the picture travels once, as a picture.
  */
 function toolResponseWithImages(
   value: unknown,
