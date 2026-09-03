@@ -67,18 +67,26 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
 - `--time` is a timeline position; `--asset` + `--source-time` reads the asset's
   own media timebase; `--times a,b,c` writes a batch and needs `--out` to be a
   directory.
-- `--mode fast` (default) renders the topmost file-backed clip only — no
-  effects, text, or compositing. Cheap, and right for "what footage is here". It
-  auto-falls back to composite, reporting `fellBackToComposite: true`, whenever
-  fast mode cannot answer honestly: when there is no file-backed clip at that
-  time (a title card, say), and when the topmost clip carries a transform or a
-  non-default opacity, whose whole point is that the picture is no longer the
-  source file. So a still used to check your own `SetClipTransform` edit shows
-  the transform, at composite cost.
-- `--mode composite` renders a minimal window through the full stack, so effects
-  and overlays appear. Range renders decode from zero, so it costs more. It works
-  anywhere inside the timeline, including over a gap — a gap has no picture, so a
-  black frame is the answer, not an error.
+- `--mode composite` is the **default**, and it is what export produces:
+  captions, text clips, transforms, layered clips and blends all rendered, at the
+  sequence canvas, losslessly. It works anywhere inside the timeline, including
+  over a gap — a gap has no picture, so a black frame is the answer, not an
+  error. Cost tracks the in-clip offset rather than the timeline position.
+- A composite still is served **out of the preview render cache** when a cached
+  segment covers the time and still matches the edit: one seek, identical pixels.
+  Every still says where it came from — `"source": "cache" | "composite" |
+  "source"` — and a contact sheet adds `sheet.sources`, counting the cells per
+  tier. Nothing is written back to the cache; no cache is a miss, not an error.
+- `--mode fast` is the opt-in cheap path: the topmost file-backed clip's own
+  media, no effects, text, or compositing. Right for "what footage is here",
+  wrong for judging an edit — when the sampled time carries captions, text, an
+  effect, a transition, or a source that is not the canvas size, `warnings` names
+  the time and says the picture is missing them. It still auto-falls back to
+  composite, reporting `fellBackToComposite: true`, whenever fast mode cannot
+  answer at all: no file-backed clip at that time (a title card, say), or a
+  topmost clip carrying a transform or a non-default opacity, whose whole point
+  is that the picture is no longer the source file. Outside `fast`,
+  `fellBackToComposite` is `null`.
 - `--max-width` caps output size (1–3840 px, default 1280 px, aspect preserved,
   never upscaled).
 - `--format png|jpeg` is optional: the format follows the `--out` extension, so

@@ -57,12 +57,13 @@ directory once per candidate.
 ## Judge the render, not the timeline
 
 Score the sheet extracted from the rendered file (`frame extract --file`).
-A timeline sheet in fast mode omits effects, text, and compositing — exactly
-the things being judged — and a composite sheet re-renders per cell. The
-`--file` sheet is cheap (fast seeks into an existing render) and shows the same
-pixels `verify --file` measured, so scores and measurements describe one
-artifact. In `--file` mode cells map back as `fileSec` (the render's own
-timebase).
+A timeline sheet does show the composited edit now — that is the default — but a
+cell the render cache cannot serve is re-rendered per cell, and `--mode fast`
+omits effects, text and compositing outright, which are exactly the things being
+judged. The `--file` sheet is cheap (fast seeks into an existing render) and
+shows the same pixels `verify --file` measured, so scores and measurements
+describe one artifact. In `--file` mode cells map back as `fileSec` (the
+render's own timebase).
 
 Cut-boundary sheets beat uniform sheets for continuity judging: read each
 clip's `timelineInSec` from `timeline clips`, and sample the frame **before**

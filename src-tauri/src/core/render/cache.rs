@@ -589,25 +589,43 @@ fn is_profile_hash(value: &str) -> bool {
 /// transition set (which boundaries actually blend, and how wide), and that
 /// planner lives behind the export engine's asset probing.
 fn transition_window_reach_sec(effects: &HashMap<String, Effect>, fps: f64) -> f64 {
+    effects
+        .values()
+        .map(|effect| transition_effect_reach_sec(effect, fps))
+        .fold(0.0f64, f64::max)
+}
+
+/// Seconds one two-input transition's blend can reach either side of its cut.
+///
+/// The per-effect half of [`transition_window_reach_sec`], carrying the same
+/// over-approximation: `ceil(D * fps)` frames halved, plus one frame of slack,
+/// which covers both the stitcher's rounding and its uneven split. Zero for
+/// anything that blends nothing — a single-input effect, a disabled one, an
+/// unusable duration, or an unusable frame rate — so a caller can treat a
+/// positive reach as "this really is a blend".
+///
+/// Shared with the frame probe, which asks the same question about one cut
+/// rather than about a whole timeline: whether a still at a given instant falls
+/// inside a transition's blend. Both surfaces must measure a blend the same way
+/// or one of them describes a picture the renderer does not produce.
+pub(crate) fn transition_effect_reach_sec(effect: &Effect, fps: f64) -> f64 {
     if !fps.is_finite() || fps <= 0.0 {
         return 0.0;
     }
+    if !effect.enabled || !effect.effect_type.is_two_input_transition() {
+        return 0.0;
+    }
 
-    effects
-        .values()
-        .filter(|effect| effect.enabled && effect.effect_type.is_two_input_transition())
-        .map(|effect| {
-            effect
-                .get_float("duration")
-                .unwrap_or(DEFAULT_TRANSITION_SEC)
-        })
-        // A transition the stitcher would refuse blends nothing, so it reaches nowhere.
-        .filter(|duration| duration.is_finite() && *duration > 0.0)
-        .map(|duration| {
-            let frames = (duration.min(MAX_TRANSITION_SEC) * fps).ceil();
-            (frames / 2.0 + 1.0) / fps
-        })
-        .fold(0.0f64, f64::max)
+    let duration_sec = effect
+        .get_float("duration")
+        .unwrap_or(DEFAULT_TRANSITION_SEC);
+    // A transition the stitcher would refuse blends nothing, so it reaches nowhere.
+    if !duration_sec.is_finite() || duration_sec <= 0.0 {
+        return 0.0;
+    }
+
+    let frames = (duration_sec.min(MAX_TRANSITION_SEC) * fps).ceil();
+    (frames / 2.0 + 1.0) / fps
 }
 
 /// Refreshes segment fingerprints.

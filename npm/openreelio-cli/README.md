@@ -103,6 +103,12 @@ The perception loop that makes autonomous editing work is: **analyze → edit �
 render → look at frames → verify → fix**. `analysis`, `frame extract`,
 `render start --proxy` and `verify` exist specifically to close it.
 
+`frame extract` shows the composited edit by default — captions, text,
+transforms and blends included, losslessly, reusing a current preview-cache
+segment where one exists — and each still reports whether it came from the
+`cache`, a fresh `composite` render, or (with the opt-in `--mode fast`) the
+clip's own `source` media.
+
 ### MCP server
 
 `openreelio-cli` is also an MCP server over stdio, so MCP-capable agents can use

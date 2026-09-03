@@ -68,7 +68,14 @@ pub(super) fn effective_blend_mode_for_clip(clip: &Clip, track: &Track) -> Blend
     track.blend_mode.clone()
 }
 
-fn track_included_in_export(track: &Track) -> bool {
+/// Whether a track's contents reach the exported file at all.
+///
+/// A hidden or muted track is dropped before the argument builders ever see it,
+/// so nothing on it is in the picture. Shared with the frame probe, whose
+/// fast-mode warning describes what the composited still would have held: a
+/// warning scan over a wider set of tracks than the renderer draws would name
+/// content that is not in either picture.
+pub fn track_included_in_export(track: &Track) -> bool {
     match track.kind {
         TrackKind::Video | TrackKind::Overlay | TrackKind::Caption => track.visible && !track.muted,
         TrackKind::Audio => !track.muted,
