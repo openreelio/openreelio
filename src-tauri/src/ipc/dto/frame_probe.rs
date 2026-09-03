@@ -115,6 +115,22 @@ pub struct TimelineFrameProbeRequestDto {
     /// Sample the timeline ranges the last applied edit changed.
     #[serde(default)]
     pub affected: bool,
+    /// Operation id the `affected` record must end at.
+    ///
+    /// The record is one slot every surface overwrites, so `affected` alone
+    /// means "the last edit anyone applied". Naming the operation the caller's
+    /// own apply ended at — `plan_apply` and `execute_command` both report it —
+    /// makes a record left by somebody else's edit a refusal instead of a
+    /// confident picture of the wrong seconds.
+    #[serde(default)]
+    pub after_op: Option<String>,
+    /// Sample these timeline ranges, named outright.
+    ///
+    /// What the in-app bridge uses: `plan_apply` already answers with the
+    /// `affectedRanges` its own apply changed, so the ranges never have to make
+    /// the round trip through a file another surface can overwrite.
+    #[serde(default)]
+    pub ranges: Option<Vec<crate::core::TimeRange>>,
     /// Largest number of sampler times to keep.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -164,6 +180,7 @@ impl TimelineFrameProbeRequestDto {
             || self.per_shot
             || self.around.is_some()
             || self.affected
+            || self.ranges.is_some()
     }
 
     /// What this request writes into its cache entry.
@@ -284,6 +301,8 @@ impl TimelineFrameProbeRequestDto {
             span: self.span,
             around_count: self.around_count,
             affected: self.affected,
+            after_op: self.after_op,
+            ranges: self.ranges,
             limit,
         }
     }
@@ -439,11 +458,19 @@ pub(crate) fn confine_probe_file(
     }
 
     let requested_path = Path::new(trimmed);
+    // A prefix on a path the platform does not call absolute is a drive-relative
+    // spelling (`C:project\out.mp4`), which resolves against that drive's own
+    // current directory rather than against anything this check can see. Joining
+    // it onto the project root produces a path nobody wrote, so it is refused
+    // outright — only a plain disk prefix on a genuinely absolute path survives.
+    let is_absolute = requested_path.is_absolute();
     let escapes_lexically = requested_path
         .components()
         .any(|component| match component {
             Component::ParentDir => true,
-            Component::Prefix(prefix) => !matches!(prefix.kind(), std::path::Prefix::Disk(_)),
+            Component::Prefix(prefix) => {
+                !is_absolute || !matches!(prefix.kind(), std::path::Prefix::Disk(_))
+            }
             _ => false,
         });
     if escapes_lexically {
@@ -486,9 +513,15 @@ pub(crate) fn confine_probe_file(
 /// What is enforced is what the frame probe itself adds: it must not be the
 /// thing that reaches off-host. A UNC or network path is refused lexically,
 /// before anything stats it, because on Windows the stat *is* the outbound SMB
-/// connection and the NTLM handshake that leaks with it. Existence is checked
-/// so the caller is told the media is gone rather than reading an FFmpeg error
-/// about a file it cannot see.
+/// connection and the NTLM handshake that leaks with it. Media that is not
+/// readable here is refused too, so the caller is told the footage is missing
+/// rather than reading an FFmpeg error about a file it cannot see.
+///
+/// Neither message names the resolved path, and neither distinguishes the two
+/// failures beyond what the caller can already act on: the asset id is what a
+/// caller fixes, and echoing where a project's media lives — or answering
+/// "does this path exist" per asset — is not something a frame probe owes
+/// anybody.
 pub(crate) fn check_asset_media(
     project_path: &Path,
     project_state: &ProjectState,
@@ -500,15 +533,14 @@ pub(crate) fn check_asset_media(
     };
 
     let media_path = asset.resolved_path(project_path);
-    let media = media_path.to_string_lossy();
-    if is_network_path(&media) {
+    if is_network_path(&media_path.to_string_lossy()) {
         return Err(format!(
             "Asset '{asset_id}' resolves to media on a UNC or network path; frame extraction only reads local media"
         ));
     }
     if !media_path.exists() {
         return Err(format!(
-            "Asset '{asset_id}' resolves to media that is not on this machine: '{media}'"
+            "Asset '{asset_id}' has no readable media on this machine"
         ));
     }
 
@@ -881,6 +913,13 @@ mod tests {
             error.contains("asset-1"),
             "the refusal should name the asset, got: {error}"
         );
+        // The asset id is what a caller acts on. Echoing the resolved path told
+        // an external agent where the user keeps their footage, and answered
+        // "does this path exist" for anything a project could be made to name.
+        assert!(
+            !error.contains("relinked_away"),
+            "the refusal must not echo the resolved path, got: {error}"
+        );
     }
 
     #[test]
@@ -909,6 +948,10 @@ mod tests {
             r"\\attacker\share\cut.mp4".to_string(),
             "https://example.com/cut.mp4".to_string(),
             "  ".to_string(),
+            // Drive-relative: a prefix on a path the platform does not call
+            // absolute resolves against that drive's own current directory,
+            // which is not somewhere this check can reason about.
+            r"C:exports\cut.mp4".to_string(),
         ] {
             assert!(
                 confine_probe_file(&canonical, &escape).is_err(),
@@ -1091,6 +1134,66 @@ mod tests {
         assert!(
             error.to_string().contains("Nothing to extract"),
             "the refusal should be the engine's own, got: {error}"
+        );
+    }
+
+    #[test]
+    fn should_carry_named_ranges_and_after_op_through_to_the_engine() {
+        // What the in-app bridge sends after an apply: the ranges the apply
+        // itself reported, so nothing is read back out of a shared slot.
+        let request: TimelineFrameProbeRequestDto = serde_json::from_value(json!({
+            "ranges": [{ "startSec": 1.0, "endSec": 2.5 }],
+            "grid": "auto",
+            "inline": true,
+        }))
+        .expect("a ranges request deserializes");
+        assert!(
+            request.has_sampler(),
+            "named ranges are a sampler, so the artifact and the budget follow"
+        );
+        assert_eq!(request.artifact(), FrameArtifact::Sheet);
+
+        let format = request.resolve_format().expect("format");
+        let limit = request.resolve_limit();
+        let probe = request.into_probe_request(PathBuf::new(), None, format, limit);
+        assert_eq!(
+            probe.ranges,
+            Some(vec![crate::core::TimeRange::new(1.0, 2.5)])
+        );
+        crate::core::render::frame_probe::FrameProbePlan::validate(&probe)
+            .expect("named ranges are servable");
+
+        // And the identity-bearing form of the other route.
+        let checked: TimelineFrameProbeRequestDto = serde_json::from_value(json!({
+            "affected": true,
+            "afterOp": "op-7",
+        }))
+        .expect("an afterOp request deserializes");
+        let format = checked.resolve_format().expect("format");
+        let limit = checked.resolve_limit();
+        let probe = checked.into_probe_request(PathBuf::new(), None, format, limit);
+        assert_eq!(probe.after_op.as_deref(), Some("op-7"));
+        crate::core::render::frame_probe::FrameProbePlan::validate(&probe)
+            .expect("affected with afterOp is servable");
+    }
+
+    #[test]
+    fn should_refuse_naming_ranges_and_reading_the_recorded_ones_at_once() {
+        let request: TimelineFrameProbeRequestDto = serde_json::from_value(json!({
+            "ranges": [{ "startSec": 1.0, "endSec": 2.5 }],
+            "affected": true,
+        }))
+        .expect("the request deserializes");
+
+        let format = request.resolve_format().expect("format");
+        let limit = request.resolve_limit();
+        let probe = request.into_probe_request(PathBuf::new(), None, format, limit);
+        let error = crate::core::render::frame_probe::FrameProbePlan::validate(&probe)
+            .expect_err("two authorities on the same ranges must be refused");
+
+        assert!(
+            error.to_string().contains("--affected"),
+            "the refusal should name the other source, got: {error}"
         );
     }
 }

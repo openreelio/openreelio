@@ -237,11 +237,15 @@ pub(crate) fn save_project(project: &mut ActiveProject) -> anyhow::Result<()> {
 /// clip and retrims it — opens one recorder and executes through it repeatedly;
 /// the ranges are then the diff across the whole verb, which is what the caller
 /// asked about anyway.
+///
+/// The range arithmetic itself is not reimplemented here: this wraps the core's
+/// [`EditRecording`](openreelio_core::commands::EditRecording), which the GUI's
+/// own edit path and its plan runner also apply through, so no two surfaces can
+/// disagree about what `--affected` will point at. What the CLI adds is the
+/// order it needs — ranges, then save, then hand-off — because a hand-off
+/// written before a failed save would describe an edit that is not on disk.
 pub(crate) struct EditRecorder {
-    sequence_id: String,
-    before: openreelio_core::commands::SequenceSnapshot,
-    op_ids: Vec<String>,
-    changes: Vec<openreelio_core::commands::StateChange>,
+    recording: openreelio_core::commands::EditRecording,
 }
 
 impl EditRecorder {
@@ -252,13 +256,14 @@ impl EditRecorder {
     /// names.
     pub(crate) fn begin(project: &ActiveProject, sequence_id: &str) -> Self {
         Self {
-            sequence_id: sequence_id.to_string(),
-            before: openreelio_core::commands::SequenceSnapshot::capture(
+            recording: openreelio_core::commands::EditRecording::begin(
                 &project.state,
                 sequence_id,
+                // Every verb of this binary is headless, and so is the MCP
+                // server that shares its code: a reader has to be able to tell
+                // these ranges from an interactive edit in the app.
+                openreelio_core::commands::RecordSource::Cli,
             ),
-            op_ids: Vec::new(),
-            changes: Vec::new(),
         }
     }
 
@@ -272,8 +277,7 @@ impl EditRecorder {
         command: Box<dyn openreelio_core::commands::Command>,
     ) -> openreelio_core::CoreResult<openreelio_core::commands::CommandResult> {
         let result = project.executor.execute(command, &mut project.state)?;
-        self.op_ids.push(result.op_id.clone());
-        self.changes.extend(result.changes.iter().cloned());
+        self.recording.observe(&result);
         Ok(result)
     }
 
@@ -286,16 +290,11 @@ impl EditRecorder {
         self,
         project: &mut ActiveProject,
     ) -> anyhow::Result<Vec<openreelio_core::TimeRange>> {
-        let affected_ranges =
-            self.before
-                .affected_ranges(&project.state, &self.sequence_id, &self.changes);
+        let affected_ranges = self.recording.ranges(&project.state);
+        let sequence_id = self.recording.sequence_id().to_string();
+        let op_ids = self.recording.op_ids().to_vec();
         save_project(project)?;
-        command::record_affected_ranges(
-            &project.path,
-            &self.sequence_id,
-            self.op_ids,
-            &affected_ranges,
-        );
+        command::record_affected_ranges(&project.path, &sequence_id, op_ids, &affected_ranges);
         Ok(affected_ranges)
     }
 }

@@ -9,8 +9,9 @@ use tauri::State;
 use crate::core::{
     analysis::ducking::{generate_duck_keyframes, AudioDuckingParams, SpeechRegion},
     commands::{
-        infer_sequence_id, ApplyAudioDuckingCommand, CommandResult, CreateAdjustmentLayerCommand,
-        CreateCompoundClipCommand, CreateSequenceCommand, EditRecording, UnnestCompoundClipCommand,
+        infer_sequence_id, payload_string, ApplyAudioDuckingCommand, CommandResult,
+        CreateAdjustmentLayerCommand, CreateCompoundClipCommand, CreateSequenceCommand,
+        EditRecording, RecordSource, UnnestCompoundClipCommand,
     },
     timeline::Sequence,
     CoreError, TimeRange,
@@ -69,7 +70,10 @@ fn execute_recorded(
             .map(|result| (result, Vec::new()));
     };
 
-    let mut recording = EditRecording::begin(&project.state, sequence_id);
+    // Tagged as the app's own edit path: the hand-off record is a single slot,
+    // and a later `affected: true` has to be able to tell an interactive edit
+    // from the asking agent's own apply.
+    let mut recording = EditRecording::begin(&project.state, sequence_id, RecordSource::Gui);
     let result = project.executor.execute(command, &mut project.state)?;
     recording.observe(&result);
     let ranges = recording.finish(&project.path, &project.state);
@@ -250,14 +254,6 @@ pub async fn execute_command(
     );
 
     Ok(CommandResultDto::new(result, sequence_id, affected_ranges))
-}
-
-/// Reads a plain-string field from a command payload, if it carries one.
-fn payload_string(payload: &serde_json::Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
 }
 
 /// Undoes the last command

@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use super::agent_plan::{AgentPlan, AgentPlanResult, RollbackReport, StepResult};
 use super::plan_executor::{resolve_step_references, PlanExecutor};
-use crate::core::commands::{record_affected_ranges, union_ranges, SequenceSnapshot};
+use crate::core::commands::{infer_sequence_id, payload_string, EditRecording, RecordSource};
 use crate::core::project::ProjectState;
 use crate::core::TimeRange;
 use crate::ipc::CommandPayload;
@@ -124,8 +124,9 @@ pub fn run_agent_plan(
 /// `execution_order` must come from [`PlanExecutor::validate_and_prepare`] for
 /// the same plan.
 ///
-/// Every step is diffed against a before-image of the target sequence, and the
-/// union is reported as `affected_ranges` and written to the project's
+/// The whole plan is diffed against one before-image of the target sequence,
+/// through the same [`EditRecording`] every other surface applies edits with,
+/// and the result is reported as `affected_ranges` and written to the project's
 /// where-to-look hand-off. That is what lets the next inspection step — a
 /// contact sheet of the change, say — ask for "the last edit" instead of
 /// re-reading the whole timeline. On failure the ranges follow the rollback:
@@ -141,7 +142,12 @@ pub fn execute_prepared_plan(
     let plan_id = plan.id.clone();
     let total_steps = plan.steps.len();
     let project_path = project.path.clone();
-    let target_sequence_id = resolve_plan_sequence_id(&project.state, plan);
+    let target_sequence_id = resolve_plan_sequence_id(&project.state, plan).unwrap_or_default();
+    // The before-image has to be taken before the first step runs: the ranges
+    // are a diff across the whole apply, and a ripple move shifts clips no
+    // reported `StateChange` names.
+    let mut recording =
+        EditRecording::begin(&project.state, &target_sequence_id, RecordSource::AgentPlan);
 
     // Rollback unwinds the executor's in-memory undo stack, and that stack is
     // capped for interactive use — far below the plan step cap. Without this, a
@@ -152,7 +158,6 @@ pub fn execute_prepared_plan(
     let mut step_results: Vec<StepResult> = Vec::with_capacity(total_steps);
     let mut results_by_id: HashMap<String, StepResult> = HashMap::new();
     let mut operation_ids: Vec<String> = Vec::new();
-    let mut step_ranges: Vec<Vec<TimeRange>> = Vec::new();
     let mut steps_completed: usize = 0;
 
     tracing::info!(
@@ -197,7 +202,8 @@ pub fn execute_prepared_plan(
                 });
 
                 let rollback_report = rollback_steps(project, executor, step_idx, &step_results);
-                let affected_ranges = rolled_back_ranges(&rollback_report, step_ranges);
+                let affected_ranges =
+                    rolled_back_ranges(&rollback_report, &recording, &project.state);
 
                 return AgentPlanResult {
                     plan_id,
@@ -243,7 +249,8 @@ pub fn execute_prepared_plan(
                 });
 
                 let rollback_report = rollback_steps(project, executor, step_idx, &step_results);
-                let affected_ranges = rolled_back_ranges(&rollback_report, step_ranges);
+                let affected_ranges =
+                    rolled_back_ranges(&rollback_report, &recording, &project.state);
 
                 return AgentPlanResult {
                     plan_id,
@@ -261,21 +268,12 @@ pub fn execute_prepared_plan(
             }
         };
 
-        // Build and execute the command. The before-image has to be taken
-        // while the state still holds it: the ranges a step changed are the
-        // diff across its mutation, and a ripple move shifts clips no reported
-        // `StateChange` names.
         let command = typed_payload.build_command(&project_path);
-        let before = SequenceSnapshot::capture(&project.state, &target_sequence_id);
         match project.executor.execute(command, &mut project.state) {
             Ok(cmd_result) => {
                 let duration_ms = step_start.elapsed().as_millis() as u64;
                 let op_id = cmd_result.op_id.clone();
-                step_ranges.push(before.affected_ranges(
-                    &project.state,
-                    &target_sequence_id,
-                    &cmd_result.changes,
-                ));
+                recording.observe(&cmd_result);
 
                 let step_data = serde_json::json!({
                     "operationId": op_id,
@@ -342,7 +340,8 @@ pub fn execute_prepared_plan(
                 );
 
                 let rollback_report = rollback_steps(project, executor, step_idx, &step_results);
-                let affected_ranges = rolled_back_ranges(&rollback_report, step_ranges);
+                let affected_ranges =
+                    rolled_back_ranges(&rollback_report, &recording, &project.state);
 
                 return AgentPlanResult {
                     plan_id,
@@ -361,20 +360,10 @@ pub fn execute_prepared_plan(
         }
     }
 
-    let affected_ranges = union_ranges(step_ranges);
-    if let Err(error) = record_affected_ranges(
-        &project_path,
-        &target_sequence_id,
-        operation_ids.clone(),
-        &affected_ranges,
-    ) {
-        // The plan is already durable in the ops log, so a failed hand-off
-        // costs the next inspection step its shortcut and nothing else.
-        tracing::warn!(
-            plan_id = %plan_id,
-            "Could not record the affected ranges: {error}"
-        );
-    }
+    // The plan is already durable in the ops log by now, so a hand-off that
+    // cannot be written costs the next inspection step its shortcut and nothing
+    // else; the recorder logs that failure itself.
+    let affected_ranges = recording.finish(&project_path, &project.state);
 
     tracing::info!(
         plan_id = %plan_id,
@@ -401,21 +390,38 @@ pub fn execute_prepared_plan(
 
 /// Picks the sequence a plan's affected ranges are measured against.
 ///
-/// The first step that names an existing `sequenceId` wins; a plan that names
-/// none falls back to the active sequence. Resolved once for the whole plan
-/// rather than per step, because a hand-off file describing two timelines could
-/// not say which seconds of which one to look at.
+/// The first step that names an existing `sequenceId` wins. Failing that, the
+/// first step naming an `effectId` or a `clipId` identifies one through
+/// [`infer_sequence_id`]: `UpdateEffect`, `UpdateMask` and `RemoveMask` address
+/// an effect and never a sequence, so a plan made only of those reported no
+/// ranges at all — or, worse, the active sequence's.
 ///
-/// Returns an empty string when nothing can be resolved — a project with no
-/// active sequence — which yields empty ranges rather than an error.
-fn resolve_plan_sequence_id(state: &ProjectState, plan: &AgentPlan) -> String {
-    plan.steps
+/// Resolved once for the whole plan rather than per step, because a hand-off
+/// file describing two timelines could not say which seconds of which one to
+/// look at.
+///
+/// `None` when nothing in the plan identifies a timeline — an asset import, a
+/// `CreateSequence` — and deliberately *not* the active sequence: reporting the
+/// whole timeline of a sequence the plan never touched is worse than reporting
+/// nothing, because an agent cannot tell a confident wrong answer from a right
+/// one.
+fn resolve_plan_sequence_id(state: &ProjectState, plan: &AgentPlan) -> Option<String> {
+    let named = plan
+        .steps
         .iter()
         .filter_map(|step| step.params.get("sequenceId").and_then(|id| id.as_str()))
-        .find(|sequence_id| state.sequences.contains_key(*sequence_id))
-        .map(str::to_string)
-        .or_else(|| state.active_sequence_id.clone())
-        .unwrap_or_default()
+        .find(|sequence_id| state.sequences.contains_key(*sequence_id));
+    if let Some(sequence_id) = named {
+        return Some(sequence_id.to_string());
+    }
+
+    plan.steps.iter().find_map(|step| {
+        infer_sequence_id(
+            state,
+            payload_string(&step.params, "effectId").as_deref(),
+            payload_string(&step.params, "clipId").as_deref(),
+        )
+    })
 }
 
 /// The sequence id a result reports, or `None` when none could be resolved.
@@ -434,17 +440,23 @@ fn reported_sequence_id(sequence_id: &str) -> Option<String> {
 /// undone or discarded stays applied and comes back on the next open, so the
 /// project really is changed. Reporting no ranges there would say in one breath
 /// that the project was mutated and that nothing on the timeline moved. The
-/// union of the applied steps' ranges is the only honest answer to "where do I
-/// look now".
+/// recording's own diff — the plan's before-image against the state the failed
+/// rollback actually left — is the answer to "where do I look now", and it is
+/// measured rather than assembled, so a step that was undone cleanly before the
+/// rollback stalled contributes only what still differs.
 ///
 /// Nothing is written to the hand-off file either way: a failed plan must not
 /// overwrite the record of the last apply that did land.
-fn rolled_back_ranges(report: &RollbackReport, step_ranges: Vec<Vec<TimeRange>>) -> Vec<TimeRange> {
+fn rolled_back_ranges(
+    report: &RollbackReport,
+    recording: &EditRecording,
+    state: &ProjectState,
+) -> Vec<TimeRange> {
     if report.rollback_errors.is_empty() {
         return Vec::new();
     }
 
-    union_ranges(step_ranges)
+    recording.ranges(state)
 }
 
 /// Rolls back completed steps in reverse order and excludes their persisted ops
@@ -618,6 +630,80 @@ mod tests {
             depends_on: vec![],
             optional: false,
         }
+    }
+
+    /// A step carrying nothing but the given params, for the resolution tests.
+    fn step_with_params(id: &str, params: serde_json::Value) -> PlanStep {
+        PlanStep {
+            id: id.to_string(),
+            tool_name: "updateEffect".to_string(),
+            params,
+            description: "Resolution fixture".to_string(),
+            risk_level: PlanRiskLevel::Low,
+            depends_on: vec![],
+            optional: false,
+        }
+    }
+
+    #[test]
+    fn resolve_plan_sequence_id_should_infer_the_timeline_an_effect_hangs_on() {
+        let dir = TempDir::new().expect("temp dir");
+        let mut project = open_project(&dir);
+        let sequence_id = project
+            .state
+            .active_sequence_id
+            .clone()
+            .expect("active sequence");
+
+        // `UpdateEffect`, `UpdateMask` and `RemoveMask` address an effect and
+        // never a sequence, so this is the only thing that identifies the
+        // timeline such a plan changes.
+        let mut clip = crate::core::timeline::Clip::new("asset-a");
+        clip.effects.push("fx-1".to_string());
+        let sequence = project
+            .state
+            .sequences
+            .get_mut(&sequence_id)
+            .expect("the active sequence exists");
+        sequence
+            .tracks
+            .first_mut()
+            .expect("a new project has a track")
+            .clips
+            .push(clip);
+
+        let plan = plan_with(vec![step_with_params(
+            "step-1",
+            serde_json::json!({ "effectId": "fx-1", "params": {} }),
+        )]);
+
+        assert_eq!(
+            resolve_plan_sequence_id(&project.state, &plan).as_deref(),
+            Some(sequence_id.as_str())
+        );
+    }
+
+    #[test]
+    fn resolve_plan_sequence_id_should_report_nothing_for_a_plan_that_names_no_timeline() {
+        let dir = TempDir::new().expect("temp dir");
+        let project = open_project(&dir);
+        assert!(
+            project.state.active_sequence_id.is_some(),
+            "the fallback under test only differs while an active sequence exists"
+        );
+
+        let plan = plan_with(vec![step_with_params(
+            "step-1",
+            serde_json::json!({ "name": "clip.mp4", "uri": "/media/clip.mp4" }),
+        )]);
+
+        // Falling back to the active sequence reported the whole timeline of a
+        // sequence the plan had not touched, which an agent cannot tell from a
+        // right answer.
+        assert!(
+            resolve_plan_sequence_id(&project.state, &plan).is_none(),
+            "an import identifies no timeline, and the active one is not an answer"
+        );
     }
 
     #[test]

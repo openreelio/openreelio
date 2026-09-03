@@ -131,15 +131,18 @@ pub fn frame_cache_dir(project_dir: &Path) -> PathBuf {
 ///
 /// The caller never names an output path: a tool argument that decided where
 /// bytes land would make a read-only surface an arbitrary-write primitive. A
-/// timestamped directory under `.openreelio/cache/frames/` keeps concurrent
-/// judgements from overwriting each other's evidence, and puts every image in a
-/// place that is safe to delete.
+/// timestamped directory under `.openreelio/cache/frames/` gives every
+/// extraction a name of its own, so two of them never write into one another's
+/// stills, and puts every image in a place that is safe to delete.
 ///
 /// Pruning happens here rather than after the probe so a surface cannot forget
-/// it. The entry just claimed is excluded from the sweep outright rather than
-/// trusted to sort last: a clock that moved backwards, or a stale entry stamped
-/// in the future, would otherwise let the allocation delete the very directory
-/// it was called to produce.
+/// it. The exclusion protects *this* call's entry only — the one just claimed,
+/// excluded outright rather than trusted to sort last, because a clock that
+/// moved backwards or a stale entry stamped in the future would otherwise let
+/// the allocation delete the very directory it was called to produce. It is not
+/// a guarantee for a concurrent extraction: enough parallel calls and an entry
+/// still being written can be swept, because the cache bound is what keeps a
+/// judge loop from filling the user's project directory.
 pub fn allocate_frame_output(
     project_dir: &Path,
     artifact: FrameArtifact,
@@ -173,8 +176,12 @@ pub fn allocate_frame_output(
 /// the same microsecond in two processes — would otherwise both be handed the
 /// same directory, and the second would overwrite the first's stills, or
 /// `discard` them out from under a caller still reading them.
+///
+/// The exhaustion message names no path: it travels to whatever asked for the
+/// frame, including an external agent, and the project's location on disk is
+/// not part of the answer to "the cache could not give me a name".
 fn claim_cache_entry(root: &Path) -> FrameProbeResult<PathBuf> {
-    let mut taken = Vec::new();
+    let mut taken = 0_usize;
     for _ in 0..FRAME_CACHE_NAME_ATTEMPTS {
         // Masked to four hex digits so every entry name keeps the fixed width
         // that makes a lexicographic sort an age sort.
@@ -187,7 +194,7 @@ fn claim_cache_entry(root: &Path) -> FrameProbeResult<PathBuf> {
         match std::fs::create_dir(&candidate) {
             Ok(()) => return Ok(candidate),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                taken.push(candidate);
+                taken += 1;
             }
             Err(error) => {
                 return Err(FrameProbeError::new(format!(
@@ -199,13 +206,8 @@ fn claim_cache_entry(root: &Path) -> FrameProbeResult<PathBuf> {
     }
 
     Err(FrameProbeError::new(format!(
-        "Failed to claim a frame cache entry under '{}' after {FRAME_CACHE_NAME_ATTEMPTS} attempts; \
-         the last name tried was '{}'",
-        root.display(),
-        taken
-            .last()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default()
+        "Failed to claim a frame cache entry after {FRAME_CACHE_NAME_ATTEMPTS} attempts; \
+         {taken} of the names tried were already taken"
     )))
 }
 

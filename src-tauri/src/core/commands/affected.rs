@@ -398,6 +398,7 @@ impl SequenceSnapshot {
 #[derive(Clone, Debug)]
 pub struct EditRecording {
     sequence_id: String,
+    source: RecordSource,
     before: SequenceSnapshot,
     op_ids: Vec<String>,
     changes: Vec<StateChange>,
@@ -409,9 +410,14 @@ impl EditRecording {
     /// Must be called before the first command runs: the ranges are a diff
     /// across the mutation, and a ripple move shifts clips no reported change
     /// names.
-    pub fn begin(state: &ProjectState, sequence_id: &str) -> Self {
+    ///
+    /// `source` names the surface that is applying the edit, and travels into
+    /// the hand-off record: a reader has to be able to tell an agent's own
+    /// apply from an interactive edit that landed after it.
+    pub fn begin(state: &ProjectState, sequence_id: &str, source: RecordSource) -> Self {
         Self {
             sequence_id: sequence_id.to_string(),
+            source,
             before: SequenceSnapshot::capture(state, sequence_id),
             op_ids: Vec::new(),
             changes: Vec::new(),
@@ -449,9 +455,13 @@ impl EditRecording {
     /// did apply did not.
     pub fn finish(self, project_dir: &Path, state: &ProjectState) -> Vec<TimeRange> {
         let ranges = self.ranges(state);
-        if let Err(error) =
-            record_affected_ranges(project_dir, &self.sequence_id, self.op_ids, &ranges)
-        {
+        if let Err(error) = record_affected_ranges(
+            project_dir,
+            &self.sequence_id,
+            self.op_ids,
+            &ranges,
+            self.source,
+        ) {
             tracing::warn!(
                 sequence_id = %self.sequence_id,
                 "Could not record the affected ranges: {error}"
@@ -499,6 +509,19 @@ pub fn infer_sequence_id(
         .map(|(sequence_id, _)| sequence_id.clone())
 }
 
+/// Reads a plain-string field from a command payload, if it carries one.
+///
+/// Lives beside [`infer_sequence_id`] because it exists for the same reason:
+/// the ids that decide which timeline an edit is measured against have to be
+/// read off the raw payload before the typed command consumes it, and every
+/// surface that applies a command does that the same way.
+pub fn payload_string(payload: &serde_json::Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
 fn whole_sequence_range(sequence: &Sequence) -> Vec<TimeRange> {
     let end = sequence.duration();
     if !end.is_finite() || end <= 0.0 {
@@ -541,12 +564,39 @@ pub fn last_affected_ranges_path(project_dir: &Path) -> PathBuf {
     agent_cache_dir(project_dir).join(LAST_AFFECTED_RANGES_FILE)
 }
 
+/// The surface that wrote a hand-off record.
+///
+/// The record is a single slot every surface overwrites, so the surface that
+/// wrote it is part of the answer: an agent that asks "where did the last edit
+/// land" is asking about *its own* edit, and a record left by the person
+/// dragging a clip in the app answers a different question. The tag cannot make
+/// the slot exclusive — that is what `afterOp` and explicit ranges are for —
+/// but it lets a reader say whose edit it is about to look at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordSource {
+    /// A headless verb: the CLI, or the MCP server that shares its code.
+    Cli,
+    /// The app's own edit path, which the timeline UI applies through.
+    Gui,
+    /// The in-app agent's plan runner.
+    AgentPlan,
+    /// A record written before records carried a source.
+    #[default]
+    Unknown,
+}
+
 /// The ranges the most recent successful apply changed.
 ///
 /// Written after every successful mutating verb so a later inspection step can
 /// ask "where did the last edit land" without the caller having to carry the
 /// answer between processes. Overwritten each time — this is a hand-off, not a
 /// history; the ops log is the history.
+///
+/// Being a single slot is also its limit: two surfaces write it, so a reader
+/// that must be certain the ranges are its own edit's names the operation it
+/// expects the record to end at (see `afterOp` on the frame probe) or passes
+/// the ranges outright instead of asking for the last ones.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LastAffectedRanges {
@@ -558,16 +608,29 @@ pub struct LastAffectedRanges {
     pub affected_ranges: Vec<TimeRange>,
     /// RFC 3339 timestamp of the write.
     pub recorded_at: String,
+    /// The surface that applied the edit.
+    ///
+    /// Defaulted rather than required, so a record written by an older build —
+    /// the file is a cache entry that survives an upgrade — still parses, as
+    /// [`RecordSource::Unknown`].
+    #[serde(default)]
+    pub source: RecordSource,
 }
 
 impl LastAffectedRanges {
     /// Builds a record stamped with the current time.
-    pub fn new(sequence_id: String, op_ids: Vec<String>, affected_ranges: Vec<TimeRange>) -> Self {
+    pub fn new(
+        sequence_id: String,
+        op_ids: Vec<String>,
+        affected_ranges: Vec<TimeRange>,
+        source: RecordSource,
+    ) -> Self {
         Self {
             sequence_id,
             op_ids,
             affected_ranges,
             recorded_at: chrono::Utc::now().to_rfc3339(),
+            source,
         }
     }
 }
@@ -627,12 +690,18 @@ pub fn record_affected_ranges(
     sequence_id: &str,
     op_ids: Vec<String>,
     affected_ranges: &[TimeRange],
+    source: RecordSource,
 ) -> Result<bool, String> {
     if sequence_id.is_empty() || affected_ranges.is_empty() {
         return Ok(false);
     }
 
-    let record = LastAffectedRanges::new(sequence_id.to_string(), op_ids, affected_ranges.to_vec());
+    let record = LastAffectedRanges::new(
+        sequence_id.to_string(),
+        op_ids,
+        affected_ranges.to_vec(),
+        source,
+    );
     save_last_affected_ranges(project_dir, &record)?;
     Ok(true)
 }
@@ -1038,7 +1107,7 @@ mod tests {
         let (mut state, sequence_id) = rippleable_project();
         let mut executor = crate::core::commands::CommandExecutor::new();
 
-        let mut recording = EditRecording::begin(&state, &sequence_id);
+        let mut recording = EditRecording::begin(&state, &sequence_id, RecordSource::Cli);
         let result = executor
             .execute(
                 Box::new(crate::core::commands::RippleDeleteCommand::new(
@@ -1076,6 +1145,7 @@ mod tests {
             "seq-record".to_string(),
             vec!["op-earlier".to_string()],
             vec![TimeRange::new(1.0, 2.0)],
+            RecordSource::Cli,
         );
         save_last_affected_ranges(dir.path(), &landed).expect("save");
 
@@ -1083,7 +1153,8 @@ mod tests {
         // No command ran, so the diff is empty. The file is one hand-off slot:
         // blanking it here would lose the answer to "where did the last edit
         // land" for a command that never had one.
-        let ranges = EditRecording::begin(&state, &sequence_id).finish(dir.path(), &state);
+        let ranges = EditRecording::begin(&state, &sequence_id, RecordSource::Cli)
+            .finish(dir.path(), &state);
 
         assert!(ranges.is_empty());
         assert_eq!(load_last_affected_ranges(dir.path()), Some(landed));
@@ -1098,11 +1169,32 @@ mod tests {
             "seq-1".to_string(),
             vec!["op-1".to_string()],
             vec![TimeRange::new(1.0, 2.0)],
+            RecordSource::Gui,
         );
         save_last_affected_ranges(dir.path(), &record).expect("save");
 
         let loaded = load_last_affected_ranges(dir.path()).expect("record");
         assert_eq!(loaded, record);
+        assert_eq!(loaded.source, RecordSource::Gui);
         assert!(last_affected_ranges_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn should_read_a_record_written_before_records_named_their_surface() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = last_affected_ranges_path(dir.path());
+        std::fs::create_dir_all(path.parent().expect("cache dir")).expect("create");
+        // The file is a cache entry that survives an upgrade, so a record with
+        // no `source` has to keep working — as an unnamed surface, not as a
+        // parse failure that silently reads as "nothing recorded".
+        std::fs::write(
+            &path,
+            r#"{"sequenceId":"seq-1","opIds":["op-1"],"affectedRanges":[{"startSec":1.0,"endSec":2.0}],"recordedAt":"2026-01-01T00:00:00Z"}"#,
+        )
+        .expect("write legacy record");
+
+        let loaded = load_last_affected_ranges(dir.path()).expect("a legacy record still parses");
+        assert_eq!(loaded.op_ids, vec!["op-1".to_string()]);
+        assert_eq!(loaded.source, RecordSource::Unknown);
     }
 }

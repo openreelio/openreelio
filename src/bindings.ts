@@ -9164,6 +9164,24 @@ aroundCount?: number | null;
  */
 affected?: boolean; 
 /**
+ * Operation id the `affected` record must end at.
+ * 
+ * The record is one slot every surface overwrites, so `affected` alone
+ * means "the last edit anyone applied". Naming the operation the caller's
+ * own apply ended at — `plan_apply` and `execute_command` both report it —
+ * makes a record left by somebody else's edit a refusal instead of a
+ * confident picture of the wrong seconds.
+ */
+afterOp?: string | null; 
+/**
+ * Sample these timeline ranges, named outright.
+ * 
+ * What the in-app bridge uses: `plan_apply` already answers with the
+ * `affectedRanges` its own apply changed, so the ranges never have to make
+ * the round trip through a file another surface can overwrite.
+ */
+ranges?: TimeRange[] | null; 
+/**
  * Largest number of sampler times to keep.
  */
 limit?: number | null; 

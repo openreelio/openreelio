@@ -322,7 +322,9 @@ pub struct FrameExportResultDto {
 /// square edit rendered into a landscape frame arrives with a fraction of its
 /// picture and is useless to look at.
 ///
-/// The proxy is handled before [`ExportPreset::from_legacy_id`] because it is
+/// The proxy is handled before
+/// [`ExportPreset::from_legacy_id`](crate::core::render::ExportPreset::from_legacy_id)
+/// because it is
 /// not one of its variants: `proxy_480p` is a documented preset the CLI serves,
 /// and reaching the enum with it produced "Unknown export preset" from every
 /// desktop render command.

@@ -10960,6 +10960,130 @@ fn test_frame_extract_sheets_the_ranges_the_last_edit_changed() {
 }
 
 /// Feature: where-to-look samplers
+/// Scenario: a second edit lands between the apply and the look
+///
+/// The hand-off is one slot every surface overwrites — the app's own edit path
+/// included — so "the last edit" stops meaning "my edit" the moment anything
+/// else applies one. This is that race, end to end: the first edit's ranges are
+/// no longer what `--affected` would show. `--after-op` turns the assumption
+/// into a refusal that names both operations, and `--range` skips the record
+/// entirely by naming the seconds the edit itself reported.
+#[test]
+fn test_frame_extract_refuses_a_hand_off_that_is_not_the_callers_own_edit() {
+    let Some((dir, path, sequence_id, track_id, _outgoing)) =
+        create_two_shot_project("frame_affected_race")
+    else {
+        return;
+    };
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let incoming_id = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .find(|clip| clip["timelineInSec"].as_f64() == Some(TRANSITION_SHOT_SEC))
+        .expect("the second shot")["id"]
+        .as_str()
+        .expect("clip id")
+        .to_string();
+
+    let mine = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "MoveClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": incoming_id,
+            "newTimelineIn": TRANSITION_SHOT_SEC + 0.5,
+        })
+        .to_string(),
+    ]);
+    let my_op = mine["opId"].as_str().expect("op id").to_string();
+    let my_ranges = affected_pairs(&mine["affectedRanges"]);
+    assert!(!my_ranges.is_empty(), "{mine}");
+
+    // Somebody else's edit, which overwrites the slot.
+    let theirs = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "AddMarker",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "timeSec": 0.25,
+            "label": "Somebody else was here",
+        })
+        .to_string(),
+    ]);
+    assert_ne!(theirs["opId"].as_str(), Some(my_op.as_str()));
+
+    let sheet_path = dir.path().join("race.jpg");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--affected",
+        "--after-op",
+        &my_op,
+        "--grid",
+        "auto",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains(&my_op) && stderr.contains(theirs["opId"].as_str().expect("op id")),
+        "the refusal must name both the recorded and the expected operation, got: {stderr}"
+    );
+    assert!(
+        !sheet_path.exists(),
+        "a refused look must not leave a picture behind"
+    );
+
+    // The ranges the edit itself reported need no record at all.
+    let mut args = vec![
+        "frame".to_string(),
+        "extract".to_string(),
+        "--path".to_string(),
+        path.clone(),
+    ];
+    for (start, end) in &my_ranges {
+        args.push("--range".to_string());
+        args.push(start.to_string());
+        args.push(end.to_string());
+    }
+    args.extend([
+        "--grid".to_string(),
+        "auto".to_string(),
+        "--out".to_string(),
+        sheet_path.to_string_lossy().to_string(),
+    ]);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = run_cli_ok(&borrowed);
+
+    assert_eq!(result["sampler"]["kinds"][0], "ranges");
+    assert_eq!(
+        affected_pairs(&result["sampler"]["affectedRanges"]),
+        my_ranges,
+        "the sheet has to name the ranges it was built from: {result}"
+    );
+    let reasons = cell_reasons(&result["sheet"]);
+    assert!(
+        reasons.iter().any(|reason| reason == "affectedMid"),
+        "named ranges produce the same reasons the recorded ones do: {reasons:?}"
+    );
+    assert!(sheet_path.exists());
+}
+
+/// Feature: where-to-look samplers
 /// Scenario: --affected on a project nothing has been applied to
 ///
 /// The shortcut is only available after a mutating verb has recorded where it
@@ -10986,8 +11110,10 @@ fn test_frame_extract_affected_names_the_missing_hand_off() {
     ]);
 
     assert!(
-        stderr.contains("command execute") && stderr.contains("--between"),
-        "Expected the error to name the verb that records a hand-off and the fallback, got: {stderr}"
+        stderr.contains("command execute")
+            && stderr.contains("--range")
+            && stderr.contains("--between"),
+        "Expected the error to name the verb that records a hand-off and both fallbacks, got: {stderr}"
     );
 }
 

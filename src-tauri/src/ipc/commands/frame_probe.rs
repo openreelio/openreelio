@@ -76,7 +76,17 @@ pub async fn extract_timeline_frames(
         }
     };
 
-    let images = collect_images(&payload, inline).await?;
+    // A read-back that fails leaves the stills on disk with nobody told where:
+    // the payload names them, but the payload is not what comes back from an
+    // error. Discarding the entry keeps the cache honest — every directory in
+    // it belongs to an answer somebody received.
+    let images = match collect_images(&payload, inline).await {
+        Ok(images) => images,
+        Err(error) => {
+            discard_frame_output(output).await;
+            return Err(error);
+        }
+    };
 
     Ok(TimelineFrameProbeResultDto { payload, images })
 }
@@ -94,12 +104,11 @@ async fn confine_requested_file(
     let requested = requested.to_string();
 
     tokio::task::spawn_blocking(move || {
-        let canonical_project = std::fs::canonicalize(&project_path).map_err(|error| {
-            format!(
-                "Project directory '{}' could not be resolved: {error}",
-                project_path.display()
-            )
-        })?;
+        // The message names no path: it travels to an external agent, and where
+        // the user keeps their project is not part of "the project could not be
+        // resolved".
+        let canonical_project = std::fs::canonicalize(&project_path)
+            .map_err(|error| format!("The project directory could not be resolved: {error}"))?;
         confine_probe_file(&canonical_project, &requested)
     })
     .await

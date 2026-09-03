@@ -18,7 +18,7 @@ use crate::output;
 use clap::{Args, Subcommand};
 use openreelio_core::ffmpeg::FFmpegRunner;
 use openreelio_core::render::frame_probe::{FrameProbePlan, FrameProbeProject, FrameProbeRequest};
-use openreelio_core::ActiveProject;
+use openreelio_core::{ActiveProject, TimeRange};
 use std::path::PathBuf;
 
 pub use openreelio_core::render::frame_probe::{
@@ -155,6 +155,21 @@ pub struct ExtractArgs {
     #[arg(long, conflicts_with_all = SAMPLER_CONFLICTS)]
     pub affected: bool,
 
+    /// Operation id --affected must find the recorded hand-off ending at
+    #[arg(long, requires = "affected")]
+    pub after_op: Option<String>,
+
+    /// Sample this timeline range; repeat the flag for several ranges
+    #[arg(
+        long = "range",
+        num_args = 2,
+        value_names = ["START", "END"],
+        action = clap::ArgAction::Append,
+        conflicts_with_all = SAMPLER_CONFLICTS,
+        conflicts_with = "affected"
+    )]
+    pub range: Option<Vec<f64>>,
+
     /// Largest number of sampler times to keep; the rest are thinned out evenly
     #[arg(long)]
     pub limit: Option<usize>,
@@ -193,9 +208,31 @@ impl ExtractArgs {
             span: self.span,
             around_count: self.around_count,
             affected: self.affected,
+            after_op: self.after_op,
+            ranges: self.range.as_deref().map(pair_ranges),
             limit: self.limit,
         }
     }
+}
+
+/// Turns the flat `--range START END` values clap collects into ranges.
+///
+/// clap appends every occurrence into one list, two values at a time, so the
+/// pairs are recovered here. A trailing odd value cannot occur —
+/// `num_args = 2` refuses the occurrence — and is dropped rather than guessed
+/// at if it ever did.
+///
+/// Built field by field rather than through [`TimeRange::new`], which silently
+/// swaps a reversed pair: a caller who typed `--range 5 2` has to be told, and
+/// the engine's own validation is what tells them.
+fn pair_ranges(values: &[f64]) -> Vec<TimeRange> {
+    values
+        .chunks_exact(2)
+        .map(|pair| TimeRange {
+            start_sec: pair[0],
+            end_sec: pair[1],
+        })
+        .collect()
 }
 
 /// Value parser enforcing the accepted contact-sheet cell dimension range.

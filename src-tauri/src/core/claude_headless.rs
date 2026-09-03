@@ -352,17 +352,25 @@ pub const MCP_RENDER_CALL_TIMEOUT: Duration = Duration::from_secs(900);
 /// `tool_name` may arrive bare (as the loopback server registers it) or
 /// prefixed (as Claude spells it); both resolve to the same budget so the two
 /// hosts cannot disagree about how long a render is allowed to take.
+///
+/// The bare name is matched *exactly*. A suffix match handed the render budget
+/// to any tool whose name happened to end that way — `my_render_proxy`, a
+/// differently prefixed host — which is a fifteen-minute wait granted to a tool
+/// nobody sized it for.
 pub fn tool_call_timeout(tool_name: &str) -> Duration {
     let bare = tool_name
         .strip_prefix(CLAUDE_MCP_TOOL_PREFIX)
         .unwrap_or(tool_name);
 
-    if bare.ends_with("render_proxy") {
+    if bare == RENDER_PROXY_TOOL {
         return MCP_RENDER_CALL_TIMEOUT;
     }
 
     MCP_CALL_TIMEOUT
 }
+
+/// Bare name of the one tool that renders, and so is given the longer budget.
+const RENDER_PROXY_TOOL: &str = "render_proxy";
 
 /// Wraps a frontend tool-call response as an MCP `tools/call` result payload of
 /// the shape `{ content: [{ type: "text", text }, ...images], isError }`.
@@ -586,9 +594,11 @@ mod tests {
             "frame_extract",
             "plan_apply",
             "mcp__openreelio__timeline_snapshot",
-            // Not a suffix match: only a tool that actually renders gets the
-            // longer budget.
+            // Matched exactly, not as a suffix or a prefix: only the tool that
+            // actually renders gets the longer budget.
             "render_proxy_status",
+            "my_render_proxy",
+            "mcp__other__render_proxy",
         ] {
             assert_eq!(tool_call_timeout(tool), MCP_CALL_TIMEOUT, "{tool}");
         }

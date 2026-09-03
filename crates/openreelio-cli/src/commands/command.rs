@@ -6,7 +6,7 @@
 
 use crate::output;
 use clap::Subcommand;
-use openreelio_core::commands::{SequenceSnapshot, StateChange};
+use openreelio_core::commands::{payload_string, StateChange};
 use openreelio_core::ipc::CommandPayload;
 use openreelio_core::TimeRange;
 use std::path::{Path, PathBuf};
@@ -67,9 +67,9 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
 
             let mut project = super::load_project(&path)?;
-            // The before-image has to be taken while the state still holds it:
-            // the ranges an edit changed are the diff across the mutation, and
-            // a ripple move shifts clips no `StateChange` entry names.
+            // Which timeline the edit is measured against has to be settled
+            // before it runs: the ranges are a diff across the mutation, and a
+            // ripple move shifts clips no `StateChange` entry names.
             let sequence_id = named_sequence_id.or_else(|| {
                 openreelio_core::commands::infer_sequence_id(
                     &project.state,
@@ -77,32 +77,33 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
                     named_clip_id.as_deref(),
                 )
             });
-            let before = SequenceSnapshot::capture(
-                &project.state,
-                sequence_id.as_deref().unwrap_or_default(),
-            );
 
             let command = typed_payload.build_command(&project.path);
-            let result = project
-                .executor
-                .execute(command, &mut project.state)
-                .map_err(|error| anyhow::anyhow!("Command '{}' failed: {}", command_type, error))?;
-            let affected_ranges = match sequence_id.as_deref() {
+            // Through the same recorder every other mutating verb uses, so this
+            // one cannot drift from them about what `--affected` will point at.
+            // A payload naming no timeline — an asset import, a `CreateSequence`
+            // — has nothing to diff and nothing to hand off, and says so by
+            // reporting no sequence rather than guessing at the active one.
+            let (result, affected_ranges) = match sequence_id.as_deref() {
                 Some(sequence_id) => {
-                    before.affected_ranges(&project.state, sequence_id, &result.changes)
+                    let mut recorder = super::EditRecorder::begin(&project, sequence_id);
+                    let result = recorder.execute(&mut project, command).map_err(|error| {
+                        anyhow::anyhow!("Command '{}' failed: {}", command_type, error)
+                    })?;
+                    let affected_ranges = recorder.finish(&mut project)?;
+                    (result, affected_ranges)
                 }
-                None => Vec::new(),
+                None => {
+                    let result = project
+                        .executor
+                        .execute(command, &mut project.state)
+                        .map_err(|error| {
+                            anyhow::anyhow!("Command '{}' failed: {}", command_type, error)
+                        })?;
+                    super::save_project(&mut project)?;
+                    (result, Vec::new())
+                }
             };
-            super::save_project(&mut project)?;
-
-            if let Some(sequence_id) = sequence_id.as_deref() {
-                record_affected_ranges(
-                    &project.path,
-                    sequence_id,
-                    vec![result.op_id.clone()],
-                    &affected_ranges,
-                );
-            }
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
@@ -169,14 +170,6 @@ fn read_payload(
     Ok(value)
 }
 
-/// Reads a plain-string field from a payload, if it carries one.
-fn payload_string(payload: &serde_json::Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-}
-
 /// Writes the where-to-look hand-off for the next inspection step.
 ///
 /// Best effort by design: the edit is already durable in the ops log, so a
@@ -199,6 +192,8 @@ pub(crate) fn record_affected_ranges(
         sequence_id,
         op_ids,
         affected_ranges,
+        // Everything this binary applies is headless, the MCP server included.
+        openreelio_core::commands::RecordSource::Cli,
     ) {
         eprintln!("warning: could not record the affected ranges: {error}");
     }
