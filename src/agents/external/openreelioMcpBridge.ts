@@ -3,13 +3,11 @@ import { listen, type Event, type UnlistenFn } from '@tauri-apps/api/event';
 import { commands } from '@/bindings';
 
 import {
+  cancelInflightAgentRender,
   executeOpenReelioAgentToolCall,
   type OpenReelioAgentToolCallResult,
 } from './adapters/openreelioCodexTools';
-import type {
-  ExternalAgentApprovalDecision,
-  ExternalAgentApprovalDecisionProvider,
-} from './types';
+import type { ExternalAgentApprovalDecision, ExternalAgentApprovalDecisionProvider } from './types';
 
 /**
  * Tauri event name carrying loopback MCP tool-call requests from the Claude
@@ -19,9 +17,10 @@ const OPENREELIO_MCP_CALL_EVENT = 'openreelio:mcp:call';
 
 /**
  * Tauri event name signalling that a pending `tools/call` was cancelled by the
- * backend (its 300s timeout elapsed or its session was deregistered with calls
- * in flight). Rust has already answered Claude with a timeout error, so the
- * frontend must stop waiting on approval and skip its own late response.
+ * backend (its timeout elapsed — 300s for most tools, 900s for `render_proxy` —
+ * or its session was deregistered with calls in flight). Rust has already
+ * answered Claude with a timeout error, so the frontend must stop waiting on
+ * approval, stop any work the call started, and skip its own late response.
  */
 const OPENREELIO_MCP_CANCEL_EVENT = 'openreelio:mcp:cancel';
 
@@ -59,10 +58,7 @@ export interface OpenReelioMcpSessionContext {
 
 type TauriListen = <T>(event: string, handler: (event: Event<T>) => void) => Promise<UnlistenFn>;
 
-type RespondMcpCall = (
-  callId: string,
-  response: OpenReelioAgentToolCallResult,
-) => Promise<void>;
+type RespondMcpCall = (callId: string, response: OpenReelioAgentToolCallResult) => Promise<void>;
 
 async function defaultRespond(
   callId: string,
@@ -71,6 +67,9 @@ async function defaultRespond(
   const result = await commands.respondOpenreelioMcpCall(callId, {
     text: response.text,
     isError: response.isError,
+    // Pictures travel as their own MCP content blocks. Omitted entirely when
+    // there are none, so every text-only tool serialises exactly as before.
+    ...(response.images && response.images.length > 0 ? { images: response.images } : {}),
   });
   if (result.status === 'error') {
     throw new Error(result.error);
@@ -113,10 +112,7 @@ export class OpenReelioMcpBridge {
    * the bridge is receiving before Claude spawns and issues its first tool call.
    * Safe to call repeatedly for the same `serverId`.
    */
-  async registerMcpSession(
-    serverId: string,
-    context: OpenReelioMcpSessionContext,
-  ): Promise<void> {
+  async registerMcpSession(serverId: string, context: OpenReelioMcpSessionContext): Promise<void> {
     this.sessions.set(serverId, context);
     await this.ensureSubscribed();
   }
@@ -163,7 +159,16 @@ export class OpenReelioMcpBridge {
     }
   }
 
+  /**
+   * Stop work the backend has stopped waiting for.
+   *
+   * Two things can be in flight: a pending approval, which the wrapped provider
+   * resolves as `'cancel'`, and a draft render, which keeps encoding until
+   * `cancel_render` reaches it. Both are released here — the approval race
+   * alone would leave the encoder running for a call nobody will read.
+   */
   private handleCancel(payload: OpenReelioMcpCancelEvent): void {
+    cancelInflightAgentRender(payload.callId);
     this.inflightCalls.get(payload.callId)?.cancel();
   }
 
@@ -213,6 +218,8 @@ export class OpenReelioMcpBridge {
           runtimeId: 'claude_code',
           sessionId: context.sessionId,
           sessionKnown: true,
+          // Lets a cancel reach work this call started, not just its approval.
+          callId: payload.callId,
           approvalDecisionProvider: wrapApprovalProviderWithCancellation(
             context.approvalDecisionProvider,
             cancellation,

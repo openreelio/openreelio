@@ -2,3 +2,6 @@
 # `cargo test -p openreelio --lib regenerate_text_preset_manifest -- --ignored`.
 # Reformatting it here would only churn against the generator.
 src/data/textPresets.manifest.json
+
+# Agent worktrees checked out inside the repository.
+.claude/

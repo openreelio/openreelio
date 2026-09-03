@@ -14,6 +14,9 @@ export default tseslint.config(
       'playwright-report/**',
       'test-results/**',
       'coverage/**',
+      // Agent worktrees are checked out inside the repository; linting them
+      // would lint a second copy of the tree (and its build output).
+      '.claude/**',
     ],
   },
   {
