@@ -12,8 +12,9 @@ use crate::core::{
         validate_scoped_output_path,
     },
     render::{
-        cancel_render_job, register_render_job, unregister_render_job, AudioExportFormat,
-        ExportError, ImageFormat, VideoExportRequest,
+        cancel_render_job, is_agent_render_output, prune_agent_renders, register_render_job,
+        unregister_render_job, AudioExportFormat, ExportError, ImageFormat, VideoExportRequest,
+        MAX_AGENT_RENDERS,
     },
     CoreError,
 };
@@ -624,6 +625,14 @@ pub async fn validate_export(
 ///
 /// This command validates the export settings before starting the render,
 /// and reports real-time progress via Tauri events.
+///
+/// # Agent draft renders
+///
+/// An output path inside the project's agent render directory
+/// (`.openreelio/cache/renders/agent/`) is treated as an agent's scratch draft
+/// and pruned exactly as [`render_range`] prunes it — an agent renders whole
+/// drafts through this command as readily as ranges, and nothing else bounds
+/// that directory. Renders anywhere else are untouched.
 #[tauri::command]
 #[specta::specta]
 #[tracing::instrument(skip(state, ffmpeg_state, app_handle), fields(sequence_id = %sequence_id, preset = %preset, output_path = %output_path))]
@@ -695,6 +704,12 @@ pub async fn start_render(
             .collect::<Vec<_>>()
             .join(", ")
     );
+
+    // An agent's draft renders land in a directory nothing else prunes, so the
+    // bound is enforced here, before the job that adds to it starts. The file
+    // this call is about to write is excluded, so re-rendering over an existing
+    // draft cannot delete the very output being produced.
+    prune_agent_renders_off_runtime(&project_path, &validated_output_path).await;
 
     // Get FFmpeg runner
     let ffmpeg_guard = ffmpeg_state.read().await;
@@ -861,6 +876,51 @@ pub async fn start_render(
     })
 }
 
+/// Trims the agent render directory, off the runtime driving the UI.
+///
+/// Does nothing unless `output_path` is a draft render inside that directory —
+/// a user's own export is never pruned. Both the recognition and the pruning
+/// touch the filesystem (`canonicalize`, `read_dir`, `remove_file`), which is
+/// exactly the blocking the worker-separation rule exists to prevent.
+///
+/// The prune runs *before* the render writes, so it asks to keep one fewer than
+/// [`MAX_AGENT_RENDERS`]: the file this call is about to add takes the last
+/// slot, and the directory holds the bound — not the bound plus one — once the
+/// render lands.
+///
+/// Best-effort in every direction: a directory that cannot be listed, a file
+/// that will not delete, or a blocking thread that panicked are all logged and
+/// stepped over. A full agent cache is a housekeeping problem, not a reason to
+/// refuse the render the user asked for.
+async fn prune_agent_renders_off_runtime(
+    project_path: &std::path::Path,
+    output_path: &std::path::Path,
+) {
+    let project_path = project_path.to_path_buf();
+    let output_path = output_path.to_path_buf();
+
+    let pruned = tokio::task::spawn_blocking(move || {
+        if !is_agent_render_output(&project_path, &output_path) {
+            return Ok(0);
+        }
+        prune_agent_renders(
+            &project_path,
+            MAX_AGENT_RENDERS.saturating_sub(1),
+            Some(&output_path),
+        )
+    })
+    .await;
+
+    match pruned {
+        Ok(Ok(0)) => {}
+        Ok(Ok(removed)) => tracing::debug!("Pruned {} stale agent draft render(s)", removed),
+        Ok(Err(error)) => {
+            tracing::warn!("Failed to prune the agent render directory: {}", error)
+        }
+        Err(error) => tracing::warn!("Agent render pruning did not complete: {}", error),
+    }
+}
+
 // =============================================================================
 // Render Range Command
 // =============================================================================
@@ -869,6 +929,17 @@ pub async fn start_render(
 ///
 /// Uses `in_point` and `out_point` (in seconds) to restrict the export
 /// to a portion of the timeline. Reports progress via Tauri events.
+///
+/// # Agent draft renders
+///
+/// An output path inside the project's agent render directory
+/// (`.openreelio/cache/renders/agent/`) is treated as an agent's scratch draft:
+/// before the job starts, that directory is trimmed so that it holds at most
+/// `MAX_AGENT_RENDERS` (8) `.mp4` files once this render lands, never touching
+/// the file this call is about to write. Nothing else prunes it, and an agent
+/// that renders a draft per iteration of a judge loop would otherwise leave
+/// every intermediate cut inside the user's project. Renders anywhere else are
+/// untouched.
 #[tauri::command]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)]
@@ -941,6 +1012,12 @@ pub async fn render_range(
     let root_refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
     let validated_output_path =
         validate_scoped_output_path(&output_path, "Output path", &root_refs)?;
+
+    // An agent's draft renders land in a directory nothing else prunes, so the
+    // bound is enforced here, before the job that adds to it starts. The file
+    // this call is about to write is excluded, so re-rendering over an existing
+    // draft cannot delete the very output being produced.
+    prune_agent_renders_off_runtime(&project_path, &validated_output_path).await;
 
     let ffmpeg_guard = ffmpeg_state.read().await;
     let ffmpeg = ffmpeg_guard.runner().ok_or_else(|| {

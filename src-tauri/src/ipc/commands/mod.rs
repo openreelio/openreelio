@@ -84,6 +84,9 @@ pub mod export_dialog;
 // Frame probe (stills and contact sheets of the composited edit, for agents)
 pub mod frame_probe;
 
+// Deterministic QC over a sequence and its render, for agents
+pub mod verify;
+
 // Transcript-based editing commands (S35-001)
 pub mod transcript_editing;
 
@@ -136,6 +139,9 @@ pub use export_dialog::*;
 
 // Re-export frame probe commands
 pub use frame_probe::*;
+
+// Re-export verification commands
+pub use verify::*;
 
 // Re-export transcript editing commands
 pub use transcript_editing::*;

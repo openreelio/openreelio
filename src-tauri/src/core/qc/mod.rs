@@ -8,6 +8,7 @@ pub mod engine;
 pub mod measure;
 pub mod rules;
 pub mod structural;
+pub mod verify;
 pub mod violation;
 
 /// Proves every fix a rule can suggest is a command the edit layer accepts.
@@ -32,5 +33,10 @@ pub use structural::{
     crossref_black_ranges_with_gaps, CaptionOutOfBoundsRule, CaptionOverlapRule,
     CaptionReadingRateRule, ClipOrphanRule, EmptySequenceRule, MissingAssetRule,
     ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
+};
+pub use verify::{
+    exit_code_for, CheckStatus, VerifyArgumentNames, VerifyError, VerifyErrorKind, VerifyPlan,
+    VerifyReport, VerifyRequest, VerifyResult, DEFAULT_FAIL_ON, DEFAULT_MEASURE_TIMEOUT_SEC,
+    EXIT_THRESHOLD_BREACHED, EXIT_TOOL_FAILURE, OPT_IN_CHECK_IDS,
 };
 pub use violation::{merged_span_duration_sec, QCViolation, Severity, TimeRange, ViolationFix};

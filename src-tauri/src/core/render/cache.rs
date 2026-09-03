@@ -1612,6 +1612,201 @@ pub fn render_cache_dir(project_dir: &Path) -> PathBuf {
         .join("renders")
 }
 
+/// Newest agent draft renders kept in a project's agent render directory.
+///
+/// Eight covers the recent history of a judge loop — the last few drafts an
+/// agent may want to re-measure or point a frame probe at — without letting a
+/// long session leave every intermediate cut inside the user's project. Draft
+/// renders are whole video files, so the bound here is much tighter than the
+/// frame cache's.
+///
+/// This is the count that must hold *after* a render lands. Pruning happens
+/// before the render starts, so a caller about to add a file passes
+/// `MAX_AGENT_RENDERS - 1` to [`prune_agent_renders`]; passing the bound itself
+/// would leave the directory at nine.
+pub const MAX_AGENT_RENDERS: usize = 8;
+
+/// File extension an agent draft render carries.
+///
+/// Pruning only ever deletes files it recognises as its own output, so a note
+/// or a log an agent left in the directory survives.
+const AGENT_RENDER_EXTENSION: &str = "mp4";
+
+/// How recently a draft render must have been touched to be left alone.
+///
+/// A file still being written is the one file pruning must never take: on
+/// Windows the open handle usually refuses the deletion, but on Unix it
+/// succeeds and the render finishes into an unlinked inode nobody can find.
+/// Age is the only signal available here — the writer is another process — so a
+/// draft written within this window is treated as still in progress. Half a
+/// minute is far longer than the gap between allocating an output path and the
+/// encoder's first write, and far shorter than the lifetime of any draft worth
+/// keeping.
+pub const AGENT_RENDER_IN_PROGRESS_GRACE_SEC: u64 = 30;
+
+/// Returns the directory an in-app agent's draft renders are written into.
+///
+/// Kept inside the project's own render cache rather than beside the user's
+/// exports: these files are the agent's scratch space, they are safe to delete,
+/// and [`prune_agent_renders`] bounds how many of them survive.
+pub fn agent_render_dir(project_dir: &Path) -> PathBuf {
+    render_cache_dir(project_dir).join("agent")
+}
+
+/// Whether `output_path` names a file directly inside the agent render
+/// directory of `project_dir`.
+///
+/// The lexical comparison is the common case — a caller that built the path
+/// from [`agent_render_dir`] matches outright. The canonical fallback catches
+/// the spellings a string comparison misses (a symlinked project root, 8.3
+/// short names, differing case on Windows) and answers `false` whenever either
+/// side cannot be resolved, because an unresolvable path is not one this
+/// function may authorise deletions around.
+pub fn is_agent_render_output(project_dir: &Path, output_path: &Path) -> bool {
+    let Some(parent) = output_path.parent() else {
+        return false;
+    };
+    let agent_dir = agent_render_dir(project_dir);
+    if parent == agent_dir {
+        return true;
+    }
+
+    match (
+        std::fs::canonicalize(parent),
+        std::fs::canonicalize(&agent_dir),
+    ) {
+        (Ok(resolved_parent), Ok(resolved_agent)) => resolved_parent == resolved_agent,
+        _ => false,
+    }
+}
+
+/// Keeps the agent render directory to its newest `keep` draft renders.
+///
+/// Nothing else prunes it: an agent that renders a draft on every iteration of
+/// a judge loop would otherwise deposit every intermediate cut into the user's
+/// project and never take one back. Called before a render starts rather than
+/// after it finishes, so a caller that is about to add a file asks to keep one
+/// fewer than the bound it wants to hold afterwards — see
+/// [`MAX_AGENT_RENDERS`]. `exclude` names the file that render is about to
+/// write, so an overwrite of an existing draft is never swept out from under
+/// the job producing it; it still counts towards `keep`, and skipping it does
+/// not reduce how many files go, so the count really does come down to `keep`.
+///
+/// Age is read from modification time, with the file name as the tie-break so
+/// two drafts written in the same clock tick still have a stable order. Only
+/// `.mp4` files directly in the directory are candidates: a subdirectory or a
+/// file of another type belongs to something else and is left alone, as is a
+/// file written within [`AGENT_RENDER_IN_PROGRESS_GRACE_SEC`] of now, which may
+/// still be being written, or one whose metadata cannot be read at all.
+///
+/// Individual deletions are best-effort and their failures are counted as
+/// "not deleted" rather than raised: housekeeping must not be what fails a
+/// render. `Err` is reserved for a directory that exists but cannot be listed;
+/// a directory that does not exist yet is `Ok(0)`.
+///
+/// Returns how many files were removed.
+pub fn prune_agent_renders(
+    project_dir: &Path,
+    keep: usize,
+    exclude: Option<&Path>,
+) -> std::io::Result<usize> {
+    let directory = agent_render_dir(project_dir);
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+
+    let now = std::time::SystemTime::now();
+    let grace = std::time::Duration::from_secs(AGENT_RENDER_IN_PROGRESS_GRACE_SEC);
+
+    let mut candidates: Vec<(std::time::SystemTime, std::ffi::OsString, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| !extension.eq_ignore_ascii_case(AGENT_RENDER_EXTENSION))
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        // A file whose metadata will not come back cannot be aged at all, so it
+        // is not a candidate: pruning deletes oldest-first and has no idea
+        // where an unaged file belongs in that order.
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        // A concurrent render's output is a real, readable file the whole time
+        // it is being written, and on Unix unlinking it succeeds silently. Only
+        // its age says it is still in flight.
+        let still_in_flight = match now.duration_since(modified) {
+            Ok(age) => age < grace,
+            // A modification time in the future is not an age this can reason
+            // about; leaving the file alone is the half of that guess which
+            // cannot destroy somebody's render.
+            Err(_) => true,
+        };
+        if still_in_flight {
+            continue;
+        }
+        candidates.push((modified, entry.file_name(), path));
+    }
+
+    if candidates.len() <= keep {
+        return Ok(0);
+    }
+
+    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let stale = candidates.len().saturating_sub(keep);
+
+    // Compared by file name because every candidate came from this one
+    // directory: a name identifies a file uniquely inside it, and it is the one
+    // part of a path both sides spell identically whatever the platform did to
+    // the rest of it.
+    let excluded_name = exclude.and_then(Path::file_name);
+
+    // Oldest first until `stale` files have actually gone. Skipping the
+    // excluded file — or failing to delete one — moves on to the next
+    // candidate rather than giving up a removal, because the point of the
+    // sweep is the count the directory is left at, not which slot was freed.
+    let mut removed = 0_usize;
+    for (_, name, path) in candidates {
+        if removed == stale {
+            break;
+        }
+        if excluded_name.is_some_and(|excluded| agent_render_names_match(&name, excluded)) {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Windows file names are matched case-insensitively, so the excluded draft is
+/// recognised however the caller spelled it.
+#[cfg(windows)]
+fn agent_render_names_match(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
+/// Every other platform has case-sensitive file names, so they are compared
+/// verbatim.
+#[cfg(not(windows))]
+fn agent_render_names_match(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    left == right
+}
+
 /// Returns the cache directory for a specific sequence.
 ///
 /// # Security
@@ -2213,6 +2408,301 @@ mod tests {
         Sequence, SequenceFormat, Track, TrackKind, Transform, TransformKeyframe,
     };
     use crate::core::types::Ratio;
+
+    // -----------------------------------------------------------------------
+    // Agent render pruning
+    // -----------------------------------------------------------------------
+
+    /// Writes a file into the agent render directory with an explicit age.
+    ///
+    /// The modification time is set rather than waited for: pruning orders by
+    /// it, and a test that slept between writes would be both slow and at the
+    /// mercy of the filesystem's timestamp granularity.
+    fn write_agent_render(project_dir: &Path, name: &str, age_secs: u64) -> PathBuf {
+        let directory = agent_render_dir(project_dir);
+        std::fs::create_dir_all(&directory).expect("agent render directory");
+        let path = directory.join(name);
+        std::fs::write(&path, b"draft render").expect("write draft render");
+
+        let modified = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(age_secs);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open draft render")
+            .set_modified(modified)
+            .expect("set modification time");
+
+        path
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should keep the newest drafts and delete the oldest
+    #[test]
+    fn test_prune_agent_renders_should_keep_the_newest_drafts() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path();
+
+        for (index, name) in ["a.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4"]
+            .iter()
+            .enumerate()
+        {
+            write_agent_render(project, name, 1_000 + index as u64);
+        }
+
+        let removed = prune_agent_renders(project, 2, None).expect("prune runs");
+
+        assert_eq!(removed, 3);
+        let directory = agent_render_dir(project);
+        assert!(!directory.join("a.mp4").exists());
+        assert!(!directory.join("b.mp4").exists());
+        assert!(!directory.join("c.mp4").exists());
+        assert!(directory.join("d.mp4").exists());
+        assert!(
+            directory.join("e.mp4").exists(),
+            "the newest draft must always survive"
+        );
+    }
+
+    /// Counts the `.mp4` drafts currently in the agent render directory.
+    fn agent_render_count(project_dir: &Path) -> usize {
+        std::fs::read_dir(agent_render_dir(project_dir))
+            .expect("agent render directory")
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mp4"))
+            .count()
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should never delete the file the caller is about to write
+    ///
+    /// Sparing the incoming draft must not spare a slot with it: it counts
+    /// towards `keep`, so the next-oldest draft goes in its place and the
+    /// directory still comes down to `keep`.
+    #[test]
+    fn test_prune_agent_renders_should_spare_the_excluded_file() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path();
+
+        // The oldest file by modification time is also the one being rewritten,
+        // so age alone would sweep the output of the render now starting.
+        let incoming = write_agent_render(project, "incoming.mp4", 1_000);
+        write_agent_render(project, "newer.mp4", 2_000);
+        write_agent_render(project, "newest.mp4", 3_000);
+
+        let removed = prune_agent_renders(project, 2, Some(&incoming)).expect("prune runs");
+
+        assert_eq!(removed, 1, "only the middle draft may go");
+        assert!(
+            incoming.exists(),
+            "the render about to be written must survive its own prune"
+        );
+        assert!(!agent_render_dir(project).join("newer.mp4").exists());
+        assert!(agent_render_dir(project).join("newest.mp4").exists());
+        assert_eq!(
+            agent_render_count(project),
+            2,
+            "an excluded stale draft must not buy the directory an extra slot"
+        );
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should leave the directory at the bound once the render lands
+    ///
+    /// Pruning runs before the render writes, which is why callers ask to keep
+    /// one fewer than the bound. This drives that convention end to end: prune,
+    /// then write, then count.
+    #[test]
+    fn test_prune_agent_renders_should_bound_the_directory_after_the_write() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path();
+
+        for index in 0..MAX_AGENT_RENDERS {
+            write_agent_render(project, &format!("draft-{index}.mp4"), 1_000 + index as u64);
+        }
+        let incoming = agent_render_dir(project).join("incoming.mp4");
+
+        prune_agent_renders(
+            project,
+            MAX_AGENT_RENDERS.saturating_sub(1),
+            Some(&incoming),
+        )
+        .expect("prune runs");
+        std::fs::write(&incoming, b"draft render").expect("write the incoming draft");
+
+        assert_eq!(
+            agent_render_count(project),
+            MAX_AGENT_RENDERS,
+            "the bound is what the directory holds after the render lands"
+        );
+        assert!(incoming.exists());
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should recognise its own drafts whatever their case
+    #[test]
+    fn test_prune_agent_renders_should_count_an_uppercase_extension() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path();
+
+        write_agent_render(project, "old.MP4", 1_000);
+        write_agent_render(project, "new.mp4", 2_000);
+
+        let removed = prune_agent_renders(project, 1, None).expect("prune runs");
+
+        assert_eq!(removed, 1);
+        assert!(
+            !agent_render_dir(project).join("old.MP4").exists(),
+            "an uppercase extension names the same kind of file"
+        );
+        assert!(agent_render_dir(project).join("new.mp4").exists());
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should order drafts written in the same tick by name
+    ///
+    /// Filesystem timestamp granularity is coarse enough that a judge loop can
+    /// write two drafts with identical modification times; without a tie-break
+    /// which of them survives would be whatever order `read_dir` returned.
+    #[test]
+    fn test_prune_agent_renders_should_break_equal_ages_by_name() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path();
+
+        write_agent_render(project, "b.mp4", 1_000);
+        write_agent_render(project, "a.mp4", 1_000);
+        write_agent_render(project, "c.mp4", 1_000);
+
+        let removed = prune_agent_renders(project, 1, None).expect("prune runs");
+
+        assert_eq!(removed, 2);
+        assert!(!agent_render_dir(project).join("a.mp4").exists());
+        assert!(!agent_render_dir(project).join("b.mp4").exists());
+        assert!(
+            agent_render_dir(project).join("c.mp4").exists(),
+            "the last name in order is the newest of an equal-aged set"
+        );
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should leave a render that is still being written alone
+    ///
+    /// A concurrent render's output is a perfectly readable file while it is
+    /// being written, and on Unix unlinking it succeeds — the render then
+    /// finishes into an inode nobody can open. Age is the only signal there is.
+    #[test]
+    fn test_prune_agent_renders_should_not_unlink_a_render_in_progress() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path();
+
+        write_agent_render(project, "old.mp4", 1_000);
+        let directory = agent_render_dir(project);
+        let in_progress = directory.join("in-progress.mp4");
+        std::fs::write(&in_progress, b"half a render").expect("write in-progress render");
+
+        // `keep: 0` asks for everything deletable to go, so whatever survives
+        // survived because pruning refused to take it.
+        let removed = prune_agent_renders(project, 0, None).expect("prune runs");
+
+        assert_eq!(removed, 1);
+        assert!(!directory.join("old.mp4").exists());
+        assert!(
+            in_progress.exists(),
+            "a draft written moments ago may still have a writer behind it"
+        );
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should spare the incoming draft however Windows spells it
+    ///
+    /// Windows file names are case-insensitive, so `Draft.mp4` in the
+    /// directory and `draft.mp4` in the render settings are the same file. A
+    /// case-sensitive comparison would delete the output of the render that
+    /// asked to be excluded.
+    #[cfg(windows)]
+    #[test]
+    fn test_prune_agent_renders_should_match_the_excluded_name_case_insensitively() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path();
+
+        let incoming = write_agent_render(project, "Incoming.mp4", 1_000);
+        write_agent_render(project, "newer.mp4", 2_000);
+
+        let differently_cased = agent_render_dir(project).join("incoming.MP4");
+        let removed =
+            prune_agent_renders(project, 1, Some(&differently_cased)).expect("prune runs");
+
+        assert_eq!(removed, 1);
+        assert!(
+            incoming.exists(),
+            "the same file under another spelling must still be excluded"
+        );
+        assert!(!agent_render_dir(project).join("newer.mp4").exists());
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should treat a directory that was never used as empty
+    #[test]
+    fn test_prune_agent_renders_should_tolerate_a_missing_directory() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+
+        assert_eq!(
+            prune_agent_renders(temp.path(), MAX_AGENT_RENDERS, None).expect("prune runs"),
+            0
+        );
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should delete only its own draft renders
+    #[test]
+    fn test_prune_agent_renders_should_ignore_what_it_did_not_write() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path();
+        let directory = agent_render_dir(project);
+
+        write_agent_render(project, "draft.mp4", 1_000);
+        std::fs::write(directory.join("notes.txt"), b"kept").expect("write note");
+        std::fs::write(directory.join("no-extension"), b"kept").expect("write bare file");
+        std::fs::create_dir_all(directory.join("nested")).expect("nested directory");
+        std::fs::write(directory.join("nested").join("inner.mp4"), b"kept")
+            .expect("write nested render");
+
+        // `keep: 0` asks for everything deletable to go, so whatever survives
+        // survived because pruning did not recognise it as its own.
+        let removed = prune_agent_renders(project, 0, None).expect("prune runs");
+
+        assert_eq!(removed, 1, "only the .mp4 draft is pruning's to delete");
+        assert!(directory.join("notes.txt").exists());
+        assert!(directory.join("no-extension").exists());
+        assert!(directory.join("nested").join("inner.mp4").exists());
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should recognise only paths inside the agent directory
+    #[test]
+    fn test_is_agent_render_output_should_recognise_the_agent_directory() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path();
+
+        assert!(is_agent_render_output(
+            project,
+            &agent_render_dir(project).join("proxy-1.mp4")
+        ));
+        assert!(!is_agent_render_output(
+            project,
+            &render_cache_dir(project).join("proxy-1.mp4")
+        ));
+        assert!(!is_agent_render_output(
+            project,
+            &project.join("export.mp4")
+        ));
+        assert!(
+            !is_agent_render_output(
+                project,
+                &agent_render_dir(project).join("nested").join("proxy-1.mp4")
+            ),
+            "only files directly in the directory are agent drafts"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Test Helpers

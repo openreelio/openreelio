@@ -413,7 +413,10 @@ pub(crate) async fn collect_images(
 /// existence oracle for the whole disk — "does not exist" versus "outside the
 /// project" answers `file` for any path a caller cares to try — and the
 /// second of them printed the canonical project path back to the caller.
-fn probe_file_escape_error(requested: &str) -> String {
+///
+/// Shared with [`crate::ipc::dto::verify`], which re-words the engine's own
+/// "the render is not there" refusal into these words for the same reason.
+pub(crate) fn probe_file_escape_error(requested: &str) -> String {
     format!("file '{requested}' must resolve inside the project directory")
 }
 
@@ -497,6 +500,32 @@ pub(crate) fn confine_probe_file(
     Ok(PathBuf::from(
         strip_verbatim_prefix(&resolved.to_string_lossy()).into_owned(),
     ))
+}
+
+/// Resolves the project root and confines a caller-supplied render path to it.
+///
+/// The one round trip both path-taking bridge commands make — the frame probe
+/// and `verify` — so a hostile `file` is refused in the same words whichever
+/// one it arrives at. Both halves canonicalize, which is a filesystem round
+/// trip on a path that may not exist and, on Windows, a call that can block for
+/// as long as the volume takes to answer, so it runs on a blocking thread.
+pub(crate) async fn confine_requested_file(
+    project_path: &Path,
+    requested: &str,
+) -> Result<PathBuf, String> {
+    let project_path = project_path.to_path_buf();
+    let requested = requested.to_string();
+
+    tokio::task::spawn_blocking(move || {
+        // The message names no path: it travels to an external agent, and where
+        // the user keeps their project is not part of "the project could not be
+        // resolved".
+        let canonical_project = std::fs::canonicalize(&project_path)
+            .map_err(|error| format!("The project directory could not be resolved: {error}"))?;
+        confine_probe_file(&canonical_project, &requested)
+    })
+    .await
+    .map_err(|error| format!("Project path resolution failed: {error}"))?
 }
 
 /// Checks the media behind an asset id before FFmpeg is asked to read it.
@@ -992,6 +1021,49 @@ mod tests {
                 "the refusal must not leak the canonical project path: {message}"
             );
         }
+    }
+
+    /// Feature: The command layer's confinement round trip
+    /// Scenario: should confine a caller's render against an unresolved project
+    /// root
+    ///
+    /// Both bridge commands — the frame probe and `verify` — reach a caller's
+    /// `file` through this one helper, so the refusals they hand an external
+    /// agent are the same words in the same order whichever tool it called.
+    #[tokio::test]
+    async fn should_confine_a_requested_file_against_the_resolved_project_root() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join("exports")).expect("project");
+        std::fs::write(project.join("exports").join("cut.mp4"), b"render").expect("render");
+        let outside = temp.path().join("secret.mp4");
+        std::fs::write(&outside, b"render").expect("outside render");
+
+        let inside = confine_requested_file(&project, "exports/cut.mp4")
+            .await
+            .expect("a render inside the project");
+        assert!(inside.ends_with("cut.mp4"));
+        assert!(
+            inside.is_absolute(),
+            "the confined path is what FFmpeg is handed, so it must be resolved"
+        );
+
+        let refused = confine_requested_file(&project, &outside.to_string_lossy())
+            .await
+            .expect_err("a render outside the project must be refused");
+        assert!(refused.ends_with("must resolve inside the project directory"));
+
+        let unresolvable = confine_requested_file(&temp.path().join("no_such_project"), "cut.mp4")
+            .await
+            .expect_err("a project directory that is not there cannot confine anything");
+        assert!(
+            unresolvable.starts_with("The project directory could not be resolved"),
+            "got: {unresolvable}"
+        );
+        assert!(
+            !unresolvable.contains("no_such_project"),
+            "the refusal must not say where the project was looked for: {unresolvable}"
+        );
     }
 
     #[cfg(windows)]

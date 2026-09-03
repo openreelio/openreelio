@@ -262,6 +262,8 @@ describe('openreelio.render_proxy', () => {
     expect(result.nextStep).toContain('between: [0, 4]');
     expect(result.nextStep).toContain("grid: '4x3'");
     expect(result.nextStep).not.toContain("grid: 'auto'");
+    // Looking is only half of it: the draft is also what the QC pass measures.
+    expect(result.nextStep).toContain('openreelio.verify { file: outputPath }');
     expect(unlistened()).toBe(2);
   });
 
@@ -294,7 +296,9 @@ describe('openreelio.render_proxy', () => {
     }
     const result = JSON.parse(responseText(response));
     expect(result.nextStep).toContain('mcp__openreelio__frame_extract');
+    expect(result.nextStep).toContain('mcp__openreelio__verify');
     expect(result.nextStep).not.toContain('openreelio.frame_extract');
+    expect(result.nextStep).not.toContain('openreelio.verify');
   });
 
   it('should write the draft inside the project cache and send the proxy preset unchanged', async () => {
@@ -671,6 +675,257 @@ describe('openreelio.render_proxy', () => {
   });
 });
 
+describe('openreelio.verify', () => {
+  /** A report whose findings span two checks, one of them auto-fixable. */
+  const REPORT_WITH_VIOLATIONS = {
+    status: 'error',
+    passed: false,
+    checks: [
+      {
+        id: 'timeline.gap',
+        violations: [
+          {
+            id: 'gap-1',
+            severity: 'error',
+            message: 'Gap on V1',
+            timeRange: { startSec: 2, endSec: 3.5 },
+          },
+          {
+            id: 'gap-2',
+            severity: 'error',
+            message: 'Gap on V1',
+            timeRange: { startSec: 2, endSec: 3.5 },
+          },
+        ],
+      },
+      {
+        id: 'audio.silence',
+        violations: [
+          {
+            id: 'silence-1',
+            severity: 'warning',
+            message: 'Silence',
+            timeRange: { startSec: 10, endSec: 12 },
+            suggestedFix: { steps: [{ type: 'CloseGap', trackId: 'track_v1' }] },
+          },
+          { id: 'meta-1', severity: 'info', message: 'No window for this one' },
+        ],
+      },
+    ],
+  };
+
+  /** The ranges a nextStep handed to the frame probe, as it spelled them. */
+  function nextStepRanges(nextStep: string): Array<{ startSec: number; endSec: number }> {
+    const match = /ranges: (\[.*?\])/.exec(nextStep);
+    if (!match) {
+      throw new Error(`Expected a ranges request in '${nextStep}'`);
+    }
+    return JSON.parse(match[1]) as Array<{ startSec: number; endSec: number }>;
+  }
+
+  it('should forward every argument to the verify command', async () => {
+    vi.mocked(invoke).mockResolvedValue({ payload: { status: 'ok', checks: [] }, exitCode: 0 });
+
+    await callTool('verify', {
+      file: 'D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4',
+      structuralOnly: false,
+      checks: ['audio.loudness'],
+      skip: ['asset.license'],
+      targetLufs: -14,
+      maxTruePeak: -1,
+      durationToleranceSec: 0.5,
+      failOn: 'warning',
+      timeoutSec: 120,
+    });
+
+    expect(invoke).toHaveBeenCalledWith('verify_sequence', {
+      request: {
+        file: 'D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4',
+        structuralOnly: false,
+        checks: ['audio.loudness'],
+        skip: ['asset.license'],
+        targetLufs: -14,
+        maxTruePeak: -1,
+        durationToleranceSec: 0.5,
+        failOn: 'warning',
+        timeoutSec: 120,
+      },
+    });
+  });
+
+  it('should send a complete structural request when the agent passes nothing', async () => {
+    vi.mocked(invoke).mockResolvedValue({ payload: { status: 'ok', checks: [] }, exitCode: 0 });
+
+    await callTool('verify');
+
+    expect(invoke).toHaveBeenCalledWith('verify_sequence', {
+      request: {
+        file: null,
+        structuralOnly: false,
+        checks: null,
+        skip: null,
+        targetLufs: null,
+        maxTruePeak: null,
+        durationToleranceSec: null,
+        failOn: null,
+        timeoutSec: null,
+      },
+    });
+  });
+
+  it('should report a clean run as passed and hand back the report verbatim', async () => {
+    const payload = { status: 'ok', passed: true, checks: [{ id: 'timeline.gap', passed: true }] };
+    vi.mocked(invoke).mockResolvedValue({ payload, exitCode: 0 });
+
+    const response = await callTool('verify');
+    const result = JSON.parse(responseText(response));
+
+    expect(response.success).toBe(true);
+    expect(result.status).toBe('ok');
+    expect(result.exitCode).toBe(0);
+    expect(result.passed).toBe(true);
+    expect(result.report).toEqual(payload);
+    expect(result.nextStep).toBeUndefined();
+  });
+
+  it('should keep a breached threshold a successful call that did not pass', async () => {
+    vi.mocked(invoke).mockResolvedValue({ payload: REPORT_WITH_VIOLATIONS, exitCode: 1 });
+
+    const response = await callTool('verify');
+    const result = JSON.parse(responseText(response));
+
+    expect(response.success).toBe(true);
+    expect(result.status).toBe('ok');
+    expect(result.exitCode).toBe(1);
+    expect(result.passed).toBe(false);
+  });
+
+  it('should report a run that could not complete as a failed tool call', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      payload: { status: 'error', errors: ['ffmpeg is not available'] },
+      exitCode: 2,
+    });
+
+    const response = await callTool('verify');
+    const result = JSON.parse(responseText(response));
+
+    expect(response.success).toBe(false);
+    expect(result.status).toBe('error');
+    expect(result.exitCode).toBe(2);
+    expect(result.passed).toBe(false);
+    expect(result.nextStep).toContain('report.errors');
+  });
+
+  it('should point the frame probe at the windows the report flagged', async () => {
+    vi.mocked(invoke).mockResolvedValue({ payload: REPORT_WITH_VIOLATIONS, exitCode: 1 });
+
+    const result = JSON.parse(responseText(await callTool('verify')));
+
+    expect(result.nextStep).toContain('openreelio.frame_extract');
+    expect(result.nextStep).toContain("grid: 'auto', labelCells: true");
+    // Duplicated windows collapse and a violation without one is skipped.
+    expect(nextStepRanges(result.nextStep)).toEqual([
+      { startSec: 2, endSec: 3.5 },
+      { startSec: 10, endSec: 12 },
+    ]);
+    // The request it spells must be one the frame probe accepts.
+    expect(
+      frameProbeRejection({
+        ranges: nextStepRanges(result.nextStep),
+        grid: 'auto',
+        labelCells: true,
+      }),
+    ).toBeNull();
+  });
+
+  it('should name the suggested fix as something plan_apply applies after review', async () => {
+    vi.mocked(invoke).mockResolvedValue({ payload: REPORT_WITH_VIOLATIONS, exitCode: 1 });
+
+    const result = JSON.parse(responseText(await callTool('verify')));
+
+    expect(result.nextStep).toContain('suggestedFix');
+    expect(result.nextStep).toContain('openreelio.plan_apply');
+    expect(result.nextStep).toContain('review');
+  });
+
+  it('should spell the follow-up tools the way the calling host names them', async () => {
+    vi.mocked(invoke).mockResolvedValue({ payload: REPORT_WITH_VIOLATIONS, exitCode: 1 });
+
+    const response = await handleOpenReelioCodexDynamicToolCall(callRequest('verify'), {
+      ...CONTEXT,
+      runtimeId: 'claude_code',
+    });
+    if (!response) {
+      throw new Error('Expected a verify response');
+    }
+    const result = JSON.parse(responseText(response));
+
+    expect(result.nextStep).toContain('mcp__openreelio__frame_extract');
+    expect(result.nextStep).toContain('mcp__openreelio__plan_apply');
+    expect(result.nextStep).not.toContain('openreelio.frame_extract');
+    expect(result.nextStep).not.toContain('openreelio.plan_apply');
+  });
+
+  it('should cap the windows it spells out and say where the rest are', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      payload: {
+        checks: [
+          {
+            id: 'timeline.gap',
+            violations: Array.from({ length: 12 }, (_, index) => ({
+              id: `gap-${index}`,
+              severity: 'error',
+              message: 'Gap',
+              timeRange: { startSec: index, endSec: index + 0.5 },
+            })),
+          },
+        ],
+      },
+      exitCode: 1,
+    });
+
+    const result = JSON.parse(responseText(await callTool('verify')));
+
+    expect(nextStepRanges(result.nextStep)).toHaveLength(8);
+    expect(result.nextStep).toContain('first 8 of 12');
+    expect(result.nextStep).toContain('report.checks');
+  });
+
+  it('should read violations a report lists at the top level too', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      payload: {
+        violations: [
+          { id: 'v1', severity: 'error', message: 'Black', timeRange: { startSec: 4, endSec: 6 } },
+        ],
+      },
+      exitCode: 1,
+    });
+
+    const result = JSON.parse(responseText(await callTool('verify')));
+
+    expect(nextStepRanges(result.nextStep)).toEqual([{ startSec: 4, endSec: 6 }]);
+  });
+
+  it('should report a rejected verify call as a failed tool call', async () => {
+    vi.mocked(invoke).mockRejectedValue('No project is open.');
+
+    const response = await callTool('verify');
+    const result = JSON.parse(responseText(response));
+
+    expect(response.success).toBe(false);
+    expect(result.status).toBe('error');
+    expect(result.message).toContain('No project is open.');
+  });
+
+  it('should refuse a checks argument that is not a list of ids', async () => {
+    const response = await callTool('verify', { checks: [1, 2] });
+
+    expect(response.success).toBe(false);
+    expect(responseText(response)).toContain('array of strings');
+    expect(vi.mocked(invoke).mock.calls.some(([name]) => name === 'verify_sequence')).toBe(false);
+  });
+});
+
 describe('executeOpenReelioAgentToolCall', () => {
   it('should route pictures into images and keep base64 out of the text', async () => {
     vi.mocked(invoke).mockResolvedValue({
@@ -836,17 +1091,25 @@ describe('developer instructions', () => {
     expect(instructions).toContain('openreelio.render_proxy');
   });
 
+  it('should close the loop on a verified result before reporting done', () => {
+    expect(instructions).toContain('openreelio.verify');
+    expect(instructions).toContain('openreelio.verify { file: outputPath }');
+    expect(instructions).toContain('exitCode');
+    expect(instructions).toContain('openreelio.plan_apply only after reviewing it');
+  });
+
   it('should name every tool in the dotted form the Claude adapter rewrites', () => {
-    for (const tool of ['frame_extract', 'render_proxy']) {
+    for (const tool of ['frame_extract', 'render_proxy', 'verify']) {
       expect(instructions).toContain(`openreelio.${tool}`);
       expect(instructions).not.toContain(`mcp__openreelio__${tool}`);
     }
   });
 
-  it('should advertise both new tools in the catalog', () => {
+  it('should advertise the perception tools in the catalog', () => {
     const names = OPENREELIO_CODEX_DYNAMIC_TOOLS.map((tool) => tool.name);
     expect(names).toContain('frame_extract');
     expect(names).toContain('render_proxy');
+    expect(names).toContain('verify');
   });
 
   it('should only recommend frame_extract requests the probe accepts', () => {
@@ -988,6 +1251,10 @@ const INSTRUCTION_RECIPES: Array<{ text: string; request: FrameProbeRecipe }> = 
   {
     text: "{ file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true }",
     request: { file: 'draft.mp4', between: [0, 12], grid: '4x3', labelCells: true },
+  },
+  {
+    text: "ranges: <the violation timeRanges>, grid: 'auto', labelCells: true",
+    request: { ranges: [{ startSec: 2, endSec: 3.5 }], grid: 'auto', labelCells: true },
   },
 ];
 

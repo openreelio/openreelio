@@ -559,6 +559,14 @@ async validateExport(sequenceId: string, outputPath: string, preset: string, set
  * 
  * This command validates the export settings before starting the render,
  * and reports real-time progress via Tauri events.
+ * 
+ * # Agent draft renders
+ * 
+ * An output path inside the project's agent render directory
+ * (`.openreelio/cache/renders/agent/`) is treated as an agent's scratch draft
+ * and pruned exactly as [`render_range`] prunes it — an agent renders whole
+ * drafts through this command as readily as ranges, and nothing else bounds
+ * that directory. Renders anywhere else are untouched.
  */
 async startRender(sequenceId: string, outputPath: string, preset: string, settings: VideoExportRequest | null) : Promise<Result<RenderStartResult, string>> {
     try {
@@ -572,6 +580,17 @@ async startRender(sequenceId: string, outputPath: string, preset: string, settin
  * 
  * Uses `in_point` and `out_point` (in seconds) to restrict the export
  * to a portion of the timeline. Reports progress via Tauri events.
+ * 
+ * # Agent draft renders
+ * 
+ * An output path inside the project's agent render directory
+ * (`.openreelio/cache/renders/agent/`) is treated as an agent's scratch draft:
+ * before the job starts, that directory is trimmed so that it holds at most
+ * `MAX_AGENT_RENDERS` (8) `.mp4` files once this render lands, never touching
+ * the file this call is about to write. Nothing else prunes it, and an agent
+ * that renders a draft per iteration of a judge loop would otherwise leave
+ * every intermediate cut inside the user's project. Renders anywhere else are
+ * untouched.
  */
 async renderRange(sequenceId: string, outputPath: string, preset: string, settings: VideoExportRequest | null, inPoint: number, outPoint: number) : Promise<Result<RenderStartResult, string>> {
     try {
@@ -633,6 +652,22 @@ async exportFrame(sequenceId: string, timeSec: number, format: string, outputPat
 async extractTimelineFrames(request: TimelineFrameProbeRequestDto) : Promise<Result<TimelineFrameProbeResultDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("extract_timeline_frames", { request }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Runs deterministic QC over a sequence, and over a rendered file when named.
+ * 
+ * The same report `openreelio-cli verify` prints, so an agent working inside
+ * the app judges its edit by exactly the rules the headless surfaces apply.
+ * Structural checks always run; the rendered measurements — black, freeze,
+ * silence, EBU R128 loudness, true peak — need a `file`, which must be inside
+ * the project directory.
+ */
+async verifySequence(request: VerifySequenceRequestDto) : Promise<Result<VerifySequenceResultDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("verify_sequence", { request }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -9896,6 +9931,80 @@ issues: string[];
  * Non-critical warnings
  */
 warnings: string[] }
+/**
+ * What to verify, as the in-app agent bridge expresses it.
+ * 
+ * Mirrors [`VerifyRequest`] field for field, with `file` as a string the app
+ * confines rather than a path it trusts, and with `failOn` and `timeoutSec`
+ * optional so `{}` is a complete request: verify the active sequence
+ * structurally, failing on error-or-worse.
+ */
+export type VerifySequenceRequestDto = { 
+/**
+ * Sequence to verify; the project's active sequence when absent.
+ */
+sequence?: string | null; 
+/**
+ * Rendered video inside the project to measure.
+ * 
+ * Without it only structural checks run and FFmpeg is never invoked.
+ * Measured times are file-relative and compared against timeline times, so
+ * this should be a render of the whole sequence from timeline zero.
+ */
+file?: string | null; 
+/**
+ * Run structural checks only and never touch FFmpeg.
+ */
+structuralOnly?: boolean; 
+/**
+ * Run only these check IDs.
+ */
+checks?: string[] | null; 
+/**
+ * Skip these check IDs.
+ */
+skip?: string[] | null; 
+/**
+ * Integrated loudness target in LUFS.
+ */
+targetLufs?: number | null; 
+/**
+ * Maximum acceptable true peak in dBTP.
+ */
+maxTruePeak?: number | null; 
+/**
+ * Divergence tolerated between the rendered file and the sequence, in seconds.
+ */
+durationToleranceSec?: number | null; 
+/**
+ * Lowest severity that fails the run: `info`, `warning`, `error` (default)
+ * or `critical`.
+ */
+failOn?: string | null; 
+/**
+ * Timeout for the rendered-file measurement pass, in seconds.
+ */
+timeoutSec?: number | null }
+/**
+ * A finished verification.
+ */
+export type VerifySequenceResultDto = { 
+/**
+ * The QC report — the same object `openreelio-cli verify` prints.
+ * 
+ * Passed through verbatim rather than re-typed, so the checks, violations,
+ * suggested fixes and measurements an agent reasons over are identical on
+ * every surface and cannot drift as the rule set grows.
+ */
+payload: JsonValue; 
+/**
+ * `0` clean, `1` the `failOn` threshold was breached, `2` the run could
+ * not complete — the same grading the CLI exits with.
+ * 
+ * The payload's own `status`, `passed` and per-check outcomes say the same
+ * thing in more detail; this is the one-glance verdict a loop branches on.
+ */
+exitCode: number }
 /**
  * Video codec selection
  */
