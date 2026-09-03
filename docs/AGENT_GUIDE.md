@@ -203,15 +203,27 @@ a dissolve reports the stretch it blends across, around the cut. `plan execute`
 reports them per step as well as in total; a plan that rolled back cleanly
 reports an empty list because nothing stayed changed, while one whose rollback
 did not complete (`rollbackIncomplete: true`) keeps them, because the project
-really is mutated. The last successful apply's ranges are also written to
-`<project>/.openreelio/cache/agent/last_affected_ranges.json`, which is what
-`frame extract --affected` reads — so the post-apply look needs no times carried
-between commands:
+really is mutated. **Hand those ranges straight back.** One `--range START END`
+per range the verb reported is the post-apply look, and it reads nothing from
+disk, so no edit another surface makes in between can redirect it:
 
 ```bash
-openreelio-cli plan execute  --path ./demo --file cut.json
-openreelio-cli frame extract --path ./demo --affected --grid auto --out ./look.jpg
+openreelio-cli plan execute  --path ./demo --file cut.json     # → affectedRanges + operationIds
+openreelio-cli frame extract --path ./demo --range 4 9.5 --range 21 24.5 \
+  --grid auto --label-cells --out ./look.jpg
 ```
+
+The last successful apply's ranges are also written to
+`<project>/.openreelio/cache/agent/last_affected_ranges.json`, which
+`frame extract --affected` reads — the shortcut for when you did not keep the
+verb's result. That file is a **shared slot**: the app's own edit path writes it
+too (each record carries `source: cli | gui | agent-plan`), so an interactive
+edit made in the timeline after yours overwrites it. Such a record is still
+served, carrying a warning that the ranges belong to an interactive edit. Pin it
+with `--after-op <OP_ID>` — the `opId` your `command execute` reported, or the
+last of `plan execute`'s `operationIds` — and a record ending anywhere else is
+refused, naming both operations, instead of passing somebody else's seconds off
+as yours.
 
 ### Transitions
 
@@ -519,7 +531,7 @@ back), so the desktop app sees whatever the CLI computed.
 ### Looking at frames
 
 ```bash
-openreelio-cli frame extract --path ./demo --affected --grid auto --out changed.jpg  # what just changed
+openreelio-cli frame extract --path ./demo --range 4 9.5 --grid auto --out changed.jpg # what just changed
 openreelio-cli frame extract --path ./demo --at-cuts --grid auto --out cuts.jpg      # every cut
 openreelio-cli frame extract --path ./demo --time 12.5 --out frame.png      # one still
 openreelio-cli frame extract --path ./demo --times 2,8,14 --out ./stills/   # batch (dir)
@@ -533,7 +545,8 @@ and reports why every frame was chosen as `reason`:
 
 | Flag | Samples | `reason` |
 | ---- | ------- | -------- |
-| `--affected` | every range the last applied edit changed: start, middle, last frame, and both sides of each cut inside it | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
+| `--range START END` (repeatable) | every range you name — the `affectedRanges` an apply just reported: start, middle, last frame, and both sides of each cut inside it | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
+| `--affected` | the same, over the last *recorded* edit's ranges rather than ranges you name | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
 | `--at-cuts` | every cut twice: `cut − 1.5/fps` and the cut itself | `cutBefore` `cutAfter` |
 | `--at-transitions` | each blend's start, cut and end | `transitionStart` `transitionCut` `transitionEnd` |
 | `--at-captions` | the middle of every caption span and text clip | `captionMid` `textMid` |
@@ -546,10 +559,20 @@ smaller backoff lands on the incoming shot, and both samples then show the same
 picture. Samplers union, deduplicate and sort; `--limit <N>` thins an oversized
 selection evenly while keeping its first and last entry; and the payload gains
 `sampler: {kinds, candidates, selected, limited, affectedRanges?}` so a thinned
-list cannot be mistaken for a short timeline. They are refused alongside
-`--time`, `--times`, `--between`, `--count`, `--asset` and `--file`, all of which
-name their own times. `--affected` with no recorded apply — or one on another
-sequence — is an error naming `command execute` / `plan execute`, never a guess.
+list cannot be mistaken for a short timeline — `--range` reports
+`kinds: ["ranges"]` and echoes the ranges it was handed. They are refused
+alongside `--time`, `--times`, `--between`, `--count`, `--asset` and `--file`,
+all of which name their own times, and `--range` and `--affected` are refused
+together.
+
+**After an apply, reach for `--range` before `--affected`.** `--range` takes the
+`affectedRanges` the edit itself returned and reads no hand-off file.
+`--affected` reads one — a slot the app's own interactive edits write too — so
+pin it with `--after-op <OP_ID>`, which refuses a record that does not end at
+your operation and names both. Unpinned, a record written by an interactive edit
+is still served, with a warning on the payload saying so. `--affected` with no
+recorded apply — or one on another sequence — is an error naming
+`command execute` / `plan execute`, never a guess.
 
 - `--mode composite` is the **default**: the picture export produces, with
   captions, text clips, transforms, layered clips and blends all in it. It is
@@ -1150,10 +1173,18 @@ that separately as `"cacheWrites": "frame-extract"`. That cache is derived data
 and safe to delete; it bounds itself to its 16 newest entries, and an extraction
 that fails removes the entry it created.
 
-**The project directory is the whole filesystem scope.** Every path a client
-sends resolves inside it: a relative path is joined onto the project root, and
-absolute paths outside it, `..` escapes, UNC/network paths, and URLs are
-rejected before they reach the filesystem or FFmpeg.
+**Every path a client sends resolves inside the project directory.** A relative
+path is joined onto the project root, and absolute paths outside it, `..`
+escapes, UNC/network paths, and URLs are rejected before they reach the
+filesystem or FFmpeg.
+
+**The project's own media is read wherever it lives.** The app imports media by
+reference — the footage stays on the drive the user put it on — so confining
+asset and sequence media to the served directory would refuse most GUI-authored
+projects while protecting nothing. What is enforced there is *locality, not
+location*: media on a UNC or network path is refused lexically, before anything
+stats it, and media that is not readable on this machine is refused as missing.
+Neither error echoes the resolved path.
 
 **`openreelio.verify`** is read-only-safe and always advertised. It accepts
 `{sequenceId?, file?, structuralOnly?, checks?[], skip?[], failOn?}` and returns
@@ -1166,16 +1197,21 @@ picture itself, as an MCP `image` content block, so a vision model can look at
 the edit without a Bash or file-reading tool. It accepts
 `{time?, times?[], grid?, between?[start,end], file?, sequenceId?, mode?,
 cellWidth?, cellHeight?, labelCells?, maxWidth?}` plus the samplers —
-`{affected?, atCuts?, atTransitions?, atCaptions?, atMarkers?, perShot?,
-around?, span?, aroundCount?, limit?}` and `grid: "auto"` — the same selectors as
-[`frame extract`](#5-the-perception-loop).
+`{ranges?[{startSec, endSec}], affected?, afterOp?, atCuts?, atTransitions?,
+atCaptions?, atMarkers?, perShot?, around?, span?, aroundCount?, limit?}` and
+`grid: "auto"` — the same selectors as
+[`frame extract`](#5-the-perception-loop). `openreelio.plan.apply` returns
+`affectedRanges`, so its result feeds `ranges` straight back.
 
 ```jsonc
 // tools/call → openreelio.frame.extract — the whole render
 { "file": "render.mp4", "grid": "4x3", "between": [0, 90], "labelCells": true }
 
-// tools/call → openreelio.frame.extract — what the last apply changed
-{ "affected": true, "grid": "auto", "labelCells": true }
+// tools/call → openreelio.frame.extract — the ranges plan.apply just reported
+{ "ranges": [{ "startSec": 4, "endSec": 9.5 }], "grid": "auto", "labelCells": true }
+
+// tools/call → openreelio.frame.extract — the last recorded edit, pinned to your op
+{ "affected": true, "afterOp": "<OP_ID>", "grid": "auto", "labelCells": true }
 ```
 
 A sampler batch without `grid` is capped at the same 12 inline stills a `times`

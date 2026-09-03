@@ -58,18 +58,26 @@ rendered preview-cache segment when one covers the time. `--mode fast` is the
 opt-in cheap look at the raw footage; it shows none of the edit.
 
 **Do not compute the times yourself.** `frame extract` samples the edit's own
-events: `--affected` for exactly the seconds the last apply changed (the step to
-run straight after `command execute` or `plan execute`), `--at-cuts` for both
-sides of every cut, `--at-transitions`, `--at-captions`, `--at-markers`,
+events: `--range START END` (repeatable) for ranges you name, `--at-cuts` for
+both sides of every cut, `--at-transitions`, `--at-captions`, `--at-markers`,
 `--per-shot`, `--around <SEC>`. Add `--grid auto` and the whole answer comes
 back as one contact sheet whose cells name their timecode and the reason they
 were chosen; `--limit <N>` caps how many frames that is. Uniform `--between`
 sampling lands on no event at all — keep it for a whole-render overview.
 
+**The post-apply step is `--range`, with the ranges the verb just returned.**
+Every mutating verb answers with `affectedRanges` and its op ids; pass one
+`--range` per entry and no hand-off file is read.
+
 ```bash
-openreelio-cli plan execute  --path ./demo --file cut.json
-openreelio-cli frame extract --path ./demo --affected --grid auto   --label-cells --out ./look.jpg
+openreelio-cli plan execute  --path ./demo --file cut.json     # → affectedRanges
+openreelio-cli frame extract --path ./demo --range 4 9.5 --range 21 24.5 \
+  --grid auto --label-cells --out ./look.jpg
 ```
+
+`--affected` is the shortcut for when you did not keep that result: it reads the
+last recorded edit, which is a slot the app's own interactive edits also write,
+so pin it with `--after-op <OP_ID>`.
 
 ## Setup
 

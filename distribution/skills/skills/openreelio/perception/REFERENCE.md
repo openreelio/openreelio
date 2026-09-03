@@ -58,7 +58,7 @@ openreelio-cli analysis build-selects  --path ./demo --query "crowd cheer" \
 ## Look at frames
 
 ```bash
-openreelio-cli frame extract --path ./demo --affected --grid auto --out changed.jpg
+openreelio-cli frame extract --path ./demo --range 4 9.5 --grid auto --out changed.jpg
 openreelio-cli frame extract --path ./demo --at-cuts --grid auto --out cuts.jpg
 openreelio-cli frame extract --path ./demo --time 12.5 --out frame.png
 openreelio-cli frame extract --path ./demo --times 2,8,14 --out ./stills/
@@ -102,7 +102,8 @@ and assembling a `--times` list, ask for the events:
 
 | Flag | Samples | `reason` on each frame/cell |
 | ---- | ------- | --------------------------- |
-| `--affected` | every range the last applied edit changed: its start, its middle, its last frame, and both sides of each cut inside it | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
+| `--range START END` (repeatable) | every range you name — the `affectedRanges` an apply just returned: its start, its middle, its last frame, and both sides of each cut inside it | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
+| `--affected` | the same, over the last *recorded* edit's ranges rather than ranges you name | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
 | `--at-cuts` | every cut, twice: the outgoing shot's last frame at `cut − 1.5/fps` and the incoming shot's first at the cut itself | `cutBefore` `cutAfter` |
 | `--at-transitions` | each two-input blend's start, cut and end | `transitionStart` `transitionCut` `transitionEnd` |
 | `--at-captions` | the middle of every caption span and text clip | `captionMid` `textMid` |
@@ -115,18 +116,28 @@ and assembling a `--times` list, ask for the events:
   show the same picture.
 - Samplers combine as a union, deduplicate to the microsecond, and sort
   ascending. They cannot be combined with `--time`, `--times`, `--between`,
-  `--count`, `--asset` or `--file`, which name their own times.
+  `--count`, `--asset` or `--file`, which name their own times, and `--range`
+  and `--affected` are mutually exclusive.
 - `--limit <N>` thins an oversized selection evenly, keeping its first and last
   entry.
 - The payload gains `sampler: {kinds, candidates, selected, limited,
   affectedRanges?}`, so a thinned list is visible rather than looking like a
   short timeline.
-- `--affected` reads
-  `<project>/.openreelio/cache/agent/last_affected_ranges.json`, written by every
-  successful mutating verb: `command execute`, `plan execute`, and the
-  `timeline`, `text` and `caption` edit verbs. With no record, one naming another
-  sequence, or one that does not end at the project's current operation, it
-  errors and says what to do — it never guesses.
+- **After an apply, use `--range`.** Every mutating verb — `command execute`,
+  `plan execute`, and the `timeline`, `text` and `caption` edit verbs — returns
+  `affectedRanges` alongside its op ids; pass one `--range START END` per entry.
+  No hand-off file is read, so nothing another surface applies in between can
+  redirect the look, and `sampler.kinds` reports `["ranges"]`.
+- `--affected` is the shortcut for when you did not keep that result. It reads
+  `<project>/.openreelio/cache/agent/last_affected_ranges.json`, written by those
+  same verbs **and by the app's own edit path** (each record carries
+  `source: cli | gui | agent-plan`) — so it is a shared slot, and an interactive
+  edit made in the timeline after yours overwrites it. Such a record is still
+  served, with a warning on the payload that the ranges belong to an interactive
+  edit. Pass `--after-op <OP_ID>` — the `opId` your own edit reported — to have
+  that checked: a record ending at another operation is refused, naming both.
+  With no record, one naming another sequence, or one that does not end at the
+  project's current operation, it errors and says what to do — it never guesses.
 - Without `--grid` a sampler writes a batch of stills, so `--out` must be a
   directory.
 

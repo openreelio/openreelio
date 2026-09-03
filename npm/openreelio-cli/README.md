@@ -87,14 +87,21 @@ Every mutating verb reports where the edit landed. `command execute` and
 `plan execute` return `affectedRanges` - a sorted `[{startSec, endSec}]` list
 covering everything that moved, ripple shifts included - so the sheet or partial
 render that checks the result can be aimed at those seconds instead of the whole
-timeline. The last successful apply's union is also written to
-`<project>/.openreelio/cache/agent/last_affected_ranges.json`, which is what
-`frame extract --affected` reads:
+timeline. Hand them straight back, one `--range` per entry:
 
 ```bash
-openreelio-cli plan execute  --path ./demo --file cut.json
-openreelio-cli frame extract --path ./demo --affected --grid auto --out ./look.jpg
+openreelio-cli plan execute  --path ./demo --file cut.json   # -> affectedRanges
+openreelio-cli frame extract --path ./demo --range 4 9.5 --range 21 24.5 \
+  --grid auto --out ./look.jpg
 ```
+
+The last successful apply's union is also written to
+`<project>/.openreelio/cache/agent/last_affected_ranges.json`, which
+`frame extract --affected` reads - the shortcut for when you did not keep the
+verb's result. That file is a shared slot the app's own interactive edits write
+too, so an interactive edit made after yours is what you would look at; pin it
+with `--after-op <OP_ID>`, which refuses a record that does not end at your
+operation.
 
 `verify --file` expects a render of the whole sequence, which is why step 4
 renders without `--start`/`--end`. Add them when you only want to eyeball a
@@ -123,9 +130,11 @@ segment where one exists — and each still reports whether it came from the
 `cache`, a fresh `composite` render, or (with the opt-in `--mode fast`) the
 clip's own `source` media.
 
-It also picks the times for you, so no cut arithmetic is needed: `--affected`
-(the seconds the last apply changed), `--at-cuts`, `--at-transitions`,
-`--at-captions`, `--at-markers`, `--per-shot`, `--around <SEC>`. Add
+It also picks the times for you, so no cut arithmetic is needed: `--range START
+END` (repeatable - the `affectedRanges` an apply just returned), `--affected`
+(the last recorded edit, a shared slot - pin it with `--after-op`), `--at-cuts`,
+`--at-transitions`, `--at-captions`, `--at-markers`, `--per-shot`,
+`--around <SEC>`. Add
 `--grid auto` for one contact sheet whose cells carry their timecode and the
 `reason` they were sampled, and `--limit <N>` to cap how many frames come back.
 Uniform `--between` sampling lands on no event at all — keep it for an overview.
@@ -147,8 +156,9 @@ command log and stays undoable.
 The read tools cover the whole perception loop, so a vision-capable host closes
 it without shelling out: `openreelio.frame.extract` returns stills and contact
 sheets **inline** as MCP `image` blocks — including the samplers, so
-`{ "affected": true, "grid": "auto" }` after an apply is one image of exactly
-what changed — and `openreelio.verify` returns the deterministic QC report. Both
+`{ "ranges": [...], "grid": "auto" }` with the `affectedRanges` an apply
+returned is one image of exactly what changed — and `openreelio.verify` returns
+the deterministic QC report. Both
 are available without any write grant.
 
 MCP registry identifier:
