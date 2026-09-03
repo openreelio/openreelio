@@ -20,17 +20,20 @@
 //!
 //! A `file` to measure is confined to the project directory, because it is a
 //! caller-supplied path handed straight to FFmpeg. It shares
-//! [`confine_probe_file`] with the frame probe rather than restating the rules:
+//! [`confine_probe_file`](super::frame_probe::confine_probe_file) with the
+//! frame probe rather than restating the rules:
 //! the two arguments have the same shape, the same threat model, and must be
 //! refused in the same words — including the deliberately identical message for
 //! "outside the project" and "not there at all", which is what stops the
 //! argument becoming a whole-disk existence oracle.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::core::qc::verify::{VerifyPlan, VerifyRequest, DEFAULT_MEASURE_TIMEOUT_SEC};
+use crate::core::qc::verify::{
+    VerifyArgumentNames, VerifyErrorKind, VerifyPlan, VerifyRequest, DEFAULT_MEASURE_TIMEOUT_SEC,
+};
 
-pub(crate) use super::frame_probe::confine_probe_file;
+use super::frame_probe::probe_file_escape_error;
 
 /// What to verify, as the in-app agent bridge expresses it.
 ///
@@ -116,6 +119,9 @@ impl VerifySequenceRequestDto {
                 .fail_on
                 .unwrap_or_else(|| crate::core::qc::verify::DEFAULT_FAIL_ON.to_string()),
             timeout_sec: self.timeout_sec.unwrap_or(DEFAULT_MEASURE_TIMEOUT_SEC),
+            // The bridge speaks the JSON field names, so a refusal from the
+            // shared engine names `timeoutSec`, not the CLI's `--timeout-sec`.
+            names: VerifyArgumentNames::api(),
         }
     }
 }
@@ -126,17 +132,42 @@ impl VerifySequenceRequestDto {
 /// ordered so a caller learns its arguments are wrong before anything is paid
 /// for — in particular before FFmpeg is resolved, which a structural run must
 /// never need.
+///
+/// A render that vanished between confinement and planning is re-worded into
+/// the refusal confinement itself produces. The engine names the resolved path,
+/// which is exactly what confinement declines to disclose: left as it is,
+/// losing that race would print the canonical project path back to an external
+/// agent and answer whether a path exists.
 pub fn plan_verify_sequence(
     request: VerifySequenceRequestDto,
     file: Option<PathBuf>,
 ) -> Result<VerifyPlan, String> {
-    VerifyPlan::resolve(request.into_request(file)).map_err(|error| error.to_string())
+    let label = rendered_file_label(&request, file.as_deref());
+
+    VerifyPlan::resolve(request.into_request(file)).map_err(|error| match error.kind() {
+        VerifyErrorKind::MissingRenderedFile => probe_file_escape_error(&label),
+        VerifyErrorKind::InvalidArgument => error.to_string(),
+    })
+}
+
+/// How to name the rendered file in a refusal, without naming where it lives.
+///
+/// The caller's own spelling when there is one; otherwise the file name alone,
+/// which an in-process caller that skipped confinement already knows and which
+/// says nothing about the directory the file was resolved in.
+fn rendered_file_label(request: &VerifySequenceRequestDto, file: Option<&Path>) -> String {
+    request.file.clone().unwrap_or_else(|| {
+        file.and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::qc::Severity;
+    use crate::ipc::dto::frame_probe::confine_probe_file;
 
     /// Feature: The bridge request
     /// Scenario: should treat an empty request as a structural run of the
@@ -303,31 +334,6 @@ mod tests {
         }
     }
 
-    /// Feature: Rendered-file confinement
-    /// Scenario: should refuse a symlink inside the project that points out of it
-    #[cfg(windows)]
-    #[test]
-    fn should_refuse_a_symlink_that_escapes_the_project() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let project = temp.path().join("project");
-        std::fs::create_dir_all(&project).expect("project");
-        let outside = temp.path().join("outside.mp4");
-        std::fs::write(&outside, b"render").expect("outside render");
-        let canonical = std::fs::canonicalize(&project).expect("canonical project");
-
-        let link = project.join("linked.mp4");
-        // Symlink creation needs Developer Mode or elevation on Windows; when it
-        // is unavailable there is nothing to prove here.
-        if std::os::windows::fs::symlink_file(&outside, &link).is_err() {
-            return;
-        }
-
-        assert!(
-            confine_probe_file(&canonical, "linked.mp4").is_err(),
-            "a link out of the project must be refused by resolution, not by spelling"
-        );
-    }
-
     /// Feature: The result shape
     /// Scenario: should carry the report verbatim under a camelCase envelope
     #[test]
@@ -349,22 +355,72 @@ mod tests {
     }
 
     /// Feature: Path confinement reuse
-    /// Scenario: should refuse a request whose confined file is not there
+    /// Scenario: should refuse a render that vanished without saying where it
+    /// was looked for
     ///
-    /// Confinement resolves the path, so a file it accepted exists. This covers
-    /// the other direction — a caller that skipped confinement gets the engine's
-    /// own refusal rather than an FFmpeg failure minutes later.
+    /// Confinement resolves the path, so a file it accepted existed a moment
+    /// ago. This covers what happens when it no longer does — and a caller that
+    /// skipped confinement entirely — in the words confinement itself uses,
+    /// rather than with the engine's resolved-path message.
     #[test]
     fn should_reject_a_rendered_file_that_is_not_there() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let missing = temp.path().join("never_rendered.mp4");
+        let request = VerifySequenceRequestDto {
+            file: Some("exports/never_rendered.mp4".to_string()),
+            ..Default::default()
+        };
+
+        let error = plan_verify_sequence(request, Some(missing)).expect_err("a missing render");
+
+        assert_eq!(
+            error, "file 'exports/never_rendered.mp4' must resolve inside the project directory",
+            "a lost race must read as the confinement refusal, not as an existence answer"
+        );
+        assert!(
+            !error.contains(&temp.path().to_string_lossy().to_string()),
+            "the refusal must not leak where the render was looked for: {error}"
+        );
+    }
+
+    /// Feature: Path confinement reuse
+    /// Scenario: should still name the render when the caller sent no spelling
+    ///
+    /// An in-process caller can hand over a `PathBuf` with no `file` string
+    /// beside it. The refusal then names the file, and only the file — never
+    /// the directory it was resolved in.
+    #[test]
+    fn should_name_only_the_file_when_the_request_carried_no_spelling() {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let missing = temp.path().join("never_rendered.mp4");
 
         let error = plan_verify_sequence(VerifySequenceRequestDto::default(), Some(missing))
             .expect_err("a missing render is an error");
 
+        assert_eq!(
+            error,
+            "file 'never_rendered.mp4' must resolve inside the project directory"
+        );
+    }
+
+    /// Feature: Argument names in refusals
+    /// Scenario: should name the JSON field the bridge sends
+    #[test]
+    fn should_refuse_a_bad_argument_in_the_bridge_spelling() {
+        let request = VerifySequenceRequestDto {
+            timeout_sec: Some(0),
+            ..Default::default()
+        };
+
+        let error = plan_verify_sequence(request, None).expect_err("a zero timeout is invalid");
+
         assert!(
-            error.contains("does not exist"),
-            "expected a missing-file message, got: {error}"
+            error.contains("timeoutSec"),
+            "expected the refusal to name 'timeoutSec', got: {error}"
+        );
+        assert!(
+            !error.contains("--timeout-sec"),
+            "the bridge has no command-line flags to offer: {error}"
         );
     }
 }

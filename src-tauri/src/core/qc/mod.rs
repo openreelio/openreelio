@@ -35,8 +35,8 @@ pub use structural::{
     ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
 };
 pub use verify::{
-    exit_code_for, CheckStatus, VerifyError, VerifyPlan, VerifyReport, VerifyRequest, VerifyResult,
-    DEFAULT_FAIL_ON, DEFAULT_MEASURE_TIMEOUT_SEC, EXIT_THRESHOLD_BREACHED, EXIT_TOOL_FAILURE,
-    OPT_IN_CHECK_IDS,
+    exit_code_for, CheckStatus, VerifyArgumentNames, VerifyError, VerifyErrorKind, VerifyPlan,
+    VerifyReport, VerifyRequest, VerifyResult, DEFAULT_FAIL_ON, DEFAULT_MEASURE_TIMEOUT_SEC,
+    EXIT_THRESHOLD_BREACHED, EXIT_TOOL_FAILURE, OPT_IN_CHECK_IDS,
 };
 pub use violation::{merged_span_duration_sec, QCViolation, Severity, TimeRange, ViolationFix};

@@ -56,7 +56,7 @@ use openreelio_core::commands::SplitClipCommand;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
 use openreelio_core::fs::is_network_path;
 use openreelio_core::ipc::CommandPayload;
-use openreelio_core::qc::verify::VerifyRequest;
+use openreelio_core::qc::verify::{VerifyArgumentNames, VerifyRequest};
 #[cfg(test)]
 use openreelio_core::render::frame_probe::frame_cache_dir;
 use openreelio_core::render::frame_probe::{
@@ -2152,6 +2152,9 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
         fail_on: optional_string_argument(&arguments, "failOn")?
             .unwrap_or_else(|| DEFAULT_VERIFY_FAIL_ON.to_string()),
         timeout_sec: VERIFY_MEASURE_TIMEOUT_SEC,
+        // A refusal from the shared engine reaches an MCP client, which sends
+        // JSON fields and has no command-line flags to correct.
+        names: VerifyArgumentNames::api(),
         ..Default::default()
     };
 

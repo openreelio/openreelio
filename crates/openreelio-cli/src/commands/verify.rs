@@ -16,7 +16,8 @@ use crate::output;
 use clap::Args;
 use openreelio_core::ffmpeg::FFmpegRunner;
 use openreelio_core::qc::verify::{
-    VerifyPlan, VerifyRequest, DEFAULT_FAIL_ON, DEFAULT_MEASURE_TIMEOUT_SEC, EXIT_TOOL_FAILURE,
+    VerifyArgumentNames, VerifyPlan, VerifyRequest, DEFAULT_FAIL_ON, DEFAULT_MEASURE_TIMEOUT_SEC,
+    EXIT_TOOL_FAILURE,
 };
 use serde_json::Value;
 use std::io::Write;
@@ -93,6 +94,9 @@ impl VerifyArgs {
                 duration_tolerance_sec: self.duration_tolerance_sec,
                 fail_on: self.fail_on,
                 timeout_sec: self.timeout_sec,
+                // A refusal from the shared engine has to name the flag the
+                // user typed, not the JSON field another surface sends.
+                names: VerifyArgumentNames::cli(),
             },
             json_pretty,
         )
@@ -170,4 +174,65 @@ pub(crate) fn run_verify(path: &Path, request: VerifyRequest) -> anyhow::Result<
 
 fn flush_stdout() {
     let _ = std::io::stdout().flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Parses `verify` arguments exactly as the binary's own parser would.
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: VerifyArgs,
+    }
+
+    fn parse(arguments: &[&str]) -> VerifyArgs {
+        TestCli::try_parse_from(arguments)
+            .expect("the arguments parse")
+            .args
+    }
+
+    /// Feature: Argument names in refusals
+    /// Scenario: should name the flag the user typed, not another surface's
+    /// JSON field
+    #[test]
+    fn should_refuse_a_bad_argument_in_the_cli_spelling() {
+        for (arguments, expected) in [
+            (
+                vec!["verify", "--path", "project", "--timeout-sec", "0"],
+                "--timeout-sec",
+            ),
+            (
+                vec!["verify", "--path", "project", "--fail-on", "loud"],
+                "--fail-on",
+            ),
+            (
+                vec!["verify", "--path", "project", "--duration-tolerance-sec=-1"],
+                "--duration-tolerance-sec",
+            ),
+        ] {
+            let (_, request, _) = parse(&arguments).into_request();
+
+            let error = VerifyPlan::resolve(request).expect_err("the argument is invalid");
+
+            assert!(
+                error.to_string().contains(expected),
+                "expected the refusal to name '{expected}', got: {error}"
+            );
+        }
+    }
+
+    /// Feature: Argument names in the report
+    /// Scenario: should nudge a CLI caller towards the flag it can pass
+    #[test]
+    fn should_nudge_towards_the_file_flag_in_the_cli_spelling() {
+        let (_, request, _) = parse(&["verify", "--path", "project"]).into_request();
+
+        assert_eq!(
+            request.names.rendered_file_hint,
+            "pass --file <RENDER> to run them"
+        );
+    }
 }

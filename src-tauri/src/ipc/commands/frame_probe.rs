@@ -7,15 +7,13 @@
 //! the project snapshot, resolve the FFmpeg runner, and drive the probe, moving
 //! every filesystem step off the runtime that is also driving the UI.
 
-use std::path::PathBuf;
-
 use tauri::State;
 
 use crate::core::ffmpeg::SharedFFmpegState;
 use crate::core::render::frame_probe::{FrameOutput, FrameProbeProject};
 use crate::ipc::commands::analysis::{resolve_ffmpeg_runner_for, resolve_project_snapshot};
 use crate::ipc::dto::frame_probe::{
-    check_asset_media, collect_images, confine_probe_file, plan_frame_probe,
+    check_asset_media, collect_images, confine_requested_file, plan_frame_probe,
     TimelineFrameProbeRequestDto, TimelineFrameProbeResultDto,
 };
 use crate::AppState;
@@ -89,30 +87,6 @@ pub async fn extract_timeline_frames(
     };
 
     Ok(TimelineFrameProbeResultDto { payload, images })
-}
-
-/// Resolves the project root and confines a caller-supplied render path to it.
-///
-/// Both halves canonicalize, which is a filesystem round trip on a path that
-/// may not exist and, on Windows, a call that can block for as long as the
-/// volume takes to answer.
-async fn confine_requested_file(
-    project_path: &std::path::Path,
-    requested: &str,
-) -> Result<PathBuf, String> {
-    let project_path = project_path.to_path_buf();
-    let requested = requested.to_string();
-
-    tokio::task::spawn_blocking(move || {
-        // The message names no path: it travels to an external agent, and where
-        // the user keeps their project is not part of "the project could not be
-        // resolved".
-        let canonical_project = std::fs::canonicalize(&project_path)
-            .map_err(|error| format!("The project directory could not be resolved: {error}"))?;
-        confine_probe_file(&canonical_project, &requested)
-    })
-    .await
-    .map_err(|error| format!("Project path resolution failed: {error}"))?
 }
 
 /// Removes the cache entry of an extraction that produced nothing usable.

@@ -81,6 +81,24 @@ const PEAK_CHECK_ID: &str = "audio.peak";
 /// Check ID of the render-length rule, wired to `duration_tolerance_sec`.
 const DURATION_CHECK_ID: &str = "render.duration_mismatch";
 
+/// Why a verification could not be run as asked.
+///
+/// Callers read the message; only a surface that has to *re-word* a refusal
+/// needs the kind. The one that does is the in-app bridge, which must not
+/// repeat a resolved path back to an external agent — see
+/// [`VerifyErrorKind::MissingRenderedFile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyErrorKind {
+    /// An argument was missing, malformed, or contradicted another one.
+    InvalidArgument,
+    /// The rendered file named by `file` was not there when the plan resolved.
+    ///
+    /// Kept apart from every other refusal because the message names the path:
+    /// harmless for a CLI caller that typed it, but a surface whose path was
+    /// resolved on the caller's behalf has to say so in its own words.
+    MissingRenderedFile,
+}
+
 /// A verification that could not be run as asked.
 ///
 /// From a caller's point of view verification has one failure mode — the
@@ -89,18 +107,112 @@ const DURATION_CHECK_ID: &str = "render.duration_mismatch";
 /// the CLI prints the message and exits [`EXIT_TOOL_FAILURE`], the MCP server
 /// returns it as a tool error, the IPC command as an error string.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct VerifyError(String);
+#[error("{message}")]
+pub struct VerifyError {
+    message: String,
+    kind: VerifyErrorKind,
+}
 
 impl VerifyError {
-    /// Builds an error from an already-formatted, caller-facing message.
+    /// Builds an argument error from an already-formatted, caller-facing message.
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            kind: VerifyErrorKind::InvalidArgument,
+        }
+    }
+
+    /// Builds the refusal for a `file` that is not on disk.
+    pub fn missing_rendered_file(file: &Path) -> Self {
+        Self {
+            message: format!("Rendered file '{}' does not exist", file.display()),
+            kind: VerifyErrorKind::MissingRenderedFile,
+        }
+    }
+
+    /// What kind of refusal this is, for a surface that must re-word it.
+    pub fn kind(&self) -> VerifyErrorKind {
+        self.kind
     }
 }
 
 /// Result of a verification operation.
 pub type VerifyResult<T> = Result<T, VerifyError>;
+
+/// How one surface spells `verify`'s arguments back to its own caller.
+///
+/// The engine is shared by three surfaces that name the same argument three
+/// ways — `--timeout-sec` on the command line, `timeoutSec` in an MCP payload
+/// or an IPC request — and a refusal that names an argument the caller cannot
+/// type is a refusal it cannot act on. Every "Invalid value for …" message is
+/// built from these labels, so each surface refuses in its own vocabulary
+/// without the rules themselves being restated per surface.
+///
+/// Build one with [`VerifyArgumentNames::cli`] or [`VerifyArgumentNames::api`];
+/// the fields are public so a fourth surface can spell an argument its own way
+/// without a new constructor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerifyArgumentNames {
+    /// Name of the severity-threshold argument.
+    pub fail_on: &'static str,
+    /// Name of the measurement-timeout argument.
+    pub timeout_sec: &'static str,
+    /// Name of the check-selection argument.
+    pub checks: &'static str,
+    /// Name of the loudness-target argument.
+    pub target_lufs: &'static str,
+    /// Name of the true-peak-ceiling argument.
+    pub max_true_peak: &'static str,
+    /// Name of the render-length-tolerance argument.
+    pub duration_tolerance_sec: &'static str,
+    /// Name of the rendered-file argument.
+    pub file: &'static str,
+    /// Name of the structural-only switch.
+    pub structural_only: &'static str,
+    /// How to ask this surface for the rendered measurement pass, as a phrase
+    /// the report's warning about skipped rendered checks ends with.
+    pub rendered_file_hint: &'static str,
+}
+
+impl VerifyArgumentNames {
+    /// The `openreelio-cli verify` spelling: long flags, as clap accepts them.
+    pub const fn cli() -> Self {
+        Self {
+            fail_on: "--fail-on",
+            timeout_sec: "--timeout-sec",
+            checks: "--checks",
+            target_lufs: "--target-lufs",
+            max_true_peak: "--max-true-peak",
+            duration_tolerance_sec: "--duration-tolerance-sec",
+            file: "--file",
+            structural_only: "--structural-only",
+            rendered_file_hint: "pass --file <RENDER> to run them",
+        }
+    }
+
+    /// The JSON spelling shared by the MCP tool and the in-app IPC request.
+    pub const fn api() -> Self {
+        Self {
+            fail_on: "failOn",
+            timeout_sec: "timeoutSec",
+            checks: "checks",
+            target_lufs: "targetLufs",
+            max_true_peak: "maxTruePeak",
+            duration_tolerance_sec: "durationToleranceSec",
+            file: "file",
+            structural_only: "structuralOnly",
+            rendered_file_hint: "name a rendered file (file) to run them",
+        }
+    }
+}
+
+/// The JSON spelling, because two of the three surfaces speak it and a request
+/// built field by field is far more likely to be one of those than the CLI's.
+impl Default for VerifyArgumentNames {
+    fn default() -> Self {
+        Self::api()
+    }
+}
 
 /// What to verify, exactly as the caller expressed it.
 ///
@@ -131,6 +243,9 @@ pub struct VerifyRequest {
     pub fail_on: String,
     /// Timeout for the rendered-file measurement pass, in seconds.
     pub timeout_sec: u64,
+    /// How the calling surface spells these arguments when it has to name one
+    /// in a refusal or a warning.
+    pub names: VerifyArgumentNames,
 }
 
 impl Default for VerifyRequest {
@@ -146,6 +261,7 @@ impl Default for VerifyRequest {
             duration_tolerance_sec: None,
             fail_on: DEFAULT_FAIL_ON.to_string(),
             timeout_sec: DEFAULT_MEASURE_TIMEOUT_SEC,
+            names: VerifyArgumentNames::api(),
         }
     }
 }
@@ -190,14 +306,19 @@ impl VerifyPlan {
     /// unknown check ID, a threshold name that names no severity, a selection
     /// that would leave nothing enabled.
     pub fn resolve(request: VerifyRequest) -> VerifyResult<Self> {
-        let fail_on = parse_severity(&request.fail_on)?;
+        let names = request.names;
+        let fail_on = parse_severity(&request.fail_on, names.fail_on)?;
         if request.timeout_sec == 0 {
-            return Err(VerifyError::new("Invalid value for timeout: must be >= 1"));
+            return Err(VerifyError::new(format!(
+                "Invalid value for {}: must be >= 1",
+                names.timeout_sec
+            )));
         }
         if request.file.is_some() && request.structural_only {
-            return Err(VerifyError::new(
-                "file and structuralOnly cannot be combined",
-            ));
+            return Err(VerifyError::new(format!(
+                "{} and {} cannot be combined",
+                names.file, names.structural_only
+            )));
         }
 
         let engine = QCEngine::new();
@@ -208,10 +329,7 @@ impl VerifyPlan {
         // a typo'd path rather than as a missing toolchain.
         if let Some(file) = request.file.as_ref() {
             if !file.exists() {
-                return Err(VerifyError::new(format!(
-                    "Rendered file '{}' does not exist",
-                    file.display()
-                )));
+                return Err(VerifyError::missing_rendered_file(file));
             }
         }
 
@@ -328,6 +446,7 @@ impl VerifyPlan {
                 measurement: measurement.as_ref(),
                 rendered_file: self.request.file.as_deref(),
                 structural_only: self.request.structural_only,
+                rendered_file_hint: self.request.names.rendered_file_hint,
             },
             warnings,
             errors,
@@ -396,22 +515,23 @@ fn resolve_sequence_id(state: &ProjectState, explicit: Option<&str>) -> VerifyRe
         .ok_or_else(|| VerifyError::new("No sequence specified and no active sequence set"))
 }
 
-/// Parses a severity threshold name.
-pub(crate) fn parse_severity(raw: &str) -> VerifyResult<Severity> {
+/// Parses a severity threshold name, refusing in the caller's own vocabulary.
+pub(crate) fn parse_severity(raw: &str, argument: &str) -> VerifyResult<Severity> {
     match raw.trim().to_lowercase().as_str() {
         "info" => Ok(Severity::Info),
         "warning" | "warn" => Ok(Severity::Warning),
         "error" => Ok(Severity::Error),
         "critical" => Ok(Severity::Critical),
         other => Err(VerifyError::new(format!(
-            "Invalid value for failOn: expected info, warning, error, or critical (got '{}')",
-            other
+            "Invalid value for {}: expected info, warning, error, or critical (got '{}')",
+            argument, other
         ))),
     }
 }
 
 /// Builds the engine configuration from the selection and threshold arguments.
 fn build_engine_config(engine: &QCEngine, request: &VerifyRequest) -> VerifyResult<QCEngineConfig> {
+    let names = request.names;
     let mut config = QCEngineConfig {
         // Informational findings carry the metrics agents steer by, so the
         // report keeps every severity and lets `fail_on` decide the verdict.
@@ -430,9 +550,10 @@ fn build_engine_config(engine: &QCEngine, request: &VerifyRequest) -> VerifyResu
         // An empty selection would disable every rule and report a clean run
         // over nothing checked, which an agent reads as "verified".
         if requested.is_empty() {
-            return Err(VerifyError::new(
-                "Invalid value for checks: at least one check ID is required",
-            ));
+            return Err(VerifyError::new(format!(
+                "Invalid value for {}: at least one check ID is required",
+                names.checks
+            )));
         }
         for id in &requested {
             if !known_ids.contains(id) {
@@ -465,9 +586,10 @@ fn build_engine_config(engine: &QCEngine, request: &VerifyRequest) -> VerifyResu
 
     if let Some(target_lufs) = request.target_lufs {
         if !target_lufs.is_finite() {
-            return Err(VerifyError::new(
-                "Invalid value for targetLufs: must be a finite number",
-            ));
+            return Err(VerifyError::new(format!(
+                "Invalid value for {}: must be a finite number",
+                names.target_lufs
+            )));
         }
         set_param(
             engine,
@@ -480,18 +602,20 @@ fn build_engine_config(engine: &QCEngine, request: &VerifyRequest) -> VerifyResu
 
     if let Some(max_true_peak) = request.max_true_peak {
         if !max_true_peak.is_finite() {
-            return Err(VerifyError::new(
-                "Invalid value for maxTruePeak: must be a finite number",
-            ));
+            return Err(VerifyError::new(format!(
+                "Invalid value for {}: must be a finite number",
+                names.max_true_peak
+            )));
         }
         set_param(engine, &mut config, PEAK_CHECK_ID, "peak_db", max_true_peak);
     }
 
     if let Some(tolerance_sec) = request.duration_tolerance_sec {
         if !tolerance_sec.is_finite() || tolerance_sec < 0.0 {
-            return Err(VerifyError::new(
-                "Invalid value for durationToleranceSec: must be a finite, non-negative number",
-            ));
+            return Err(VerifyError::new(format!(
+                "Invalid value for {}: must be a finite, non-negative number",
+                names.duration_tolerance_sec
+            )));
         }
         set_param(
             engine,
@@ -672,6 +796,9 @@ struct OutputInputs<'a> {
     measurement: Option<&'a MeasurementReport>,
     rendered_file: Option<&'a Path>,
     structural_only: bool,
+    /// How the calling surface asks for the rendered pass, for the warning
+    /// that names the checks it skipped without one.
+    rendered_file_hint: &'a str,
 }
 
 /// Assembles the report document.
@@ -686,8 +813,8 @@ fn build_output(inputs: OutputInputs<'_>, mut warnings: Vec<String>, errors: Vec
         .count();
     if rendered_skipped > 0 && inputs.rendered_file.is_none() && !inputs.structural_only {
         warnings.push(format!(
-            "{} rendered check(s) were skipped; pass --file <RENDER> to run them",
-            rendered_skipped
+            "{} rendered check(s) were skipped; {}",
+            rendered_skipped, inputs.rendered_file_hint
         ));
     }
 
@@ -973,17 +1100,127 @@ mod tests {
 
     #[test]
     fn test_parse_severity_should_accept_every_threshold_name() {
-        assert_eq!(parse_severity("info").expect("info"), Severity::Info);
+        let argument = VerifyArgumentNames::api().fail_on;
         assert_eq!(
-            parse_severity("WARNING").expect("warning"),
+            parse_severity("info", argument).expect("info"),
+            Severity::Info
+        );
+        assert_eq!(
+            parse_severity("WARNING", argument).expect("warning"),
             Severity::Warning
         );
-        assert_eq!(parse_severity(" error ").expect("error"), Severity::Error);
         assert_eq!(
-            parse_severity("critical").expect("critical"),
+            parse_severity(" error ", argument).expect("error"),
+            Severity::Error
+        );
+        assert_eq!(
+            parse_severity("critical", argument).expect("critical"),
             Severity::Critical
         );
-        assert!(parse_severity("nonsense").is_err());
+        assert!(parse_severity("nonsense", argument).is_err());
+    }
+
+    /// Feature: Surface-specific argument names
+    /// Scenario: should refuse in the vocabulary the caller can actually type
+    ///
+    /// The engine is shared by surfaces that spell the same argument three
+    /// ways. A refusal naming a spelling none of them accepts is one the caller
+    /// cannot act on, so every message is built from the caller's own labels.
+    #[test]
+    fn test_refusals_should_name_arguments_in_the_calling_surface_spelling() {
+        let cases = [
+            (
+                VerifyArgumentNames::cli(),
+                [
+                    "--fail-on",
+                    "--timeout-sec",
+                    "--checks",
+                    "--target-lufs",
+                    "--max-true-peak",
+                    "--duration-tolerance-sec",
+                ],
+            ),
+            (
+                VerifyArgumentNames::api(),
+                [
+                    "failOn",
+                    "timeoutSec",
+                    "checks",
+                    "targetLufs",
+                    "maxTruePeak",
+                    "durationToleranceSec",
+                ],
+            ),
+        ];
+
+        for (names, expected) in cases {
+            let base = || VerifyRequest {
+                names,
+                ..Default::default()
+            };
+            let refusals = [
+                VerifyPlan::resolve(VerifyRequest {
+                    fail_on: "loud".to_string(),
+                    ..base()
+                })
+                .err(),
+                VerifyPlan::resolve(VerifyRequest {
+                    timeout_sec: 0,
+                    ..base()
+                })
+                .err(),
+                VerifyPlan::resolve(VerifyRequest {
+                    checks: Some(vec!["  ".to_string()]),
+                    ..base()
+                })
+                .err(),
+                VerifyPlan::resolve(VerifyRequest {
+                    target_lufs: Some(f64::NAN),
+                    ..base()
+                })
+                .err(),
+                VerifyPlan::resolve(VerifyRequest {
+                    max_true_peak: Some(f64::INFINITY),
+                    ..base()
+                })
+                .err(),
+                VerifyPlan::resolve(VerifyRequest {
+                    duration_tolerance_sec: Some(-1.0),
+                    ..base()
+                })
+                .err(),
+            ];
+
+            for (refusal, argument) in refusals.into_iter().zip(expected) {
+                let message = refusal.expect("the argument is invalid").to_string();
+                assert!(
+                    message.contains(argument),
+                    "expected the refusal to name '{argument}', got: {message}"
+                );
+            }
+        }
+    }
+
+    /// Feature: Surface-specific argument names
+    /// Scenario: should refuse contradictory arguments in the same spelling
+    #[test]
+    fn test_contradictory_arguments_should_be_named_in_the_calling_surface_spelling() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let file = temp.path().join("render.mp4");
+        std::fs::write(&file, b"render").expect("write render");
+
+        let error = VerifyPlan::resolve(VerifyRequest {
+            file: Some(file),
+            structural_only: true,
+            names: VerifyArgumentNames::cli(),
+            ..Default::default()
+        })
+        .expect_err("contradictory arguments");
+
+        assert_eq!(
+            error.to_string(),
+            "--file and --structural-only cannot be combined"
+        );
     }
 
     #[test]
@@ -1151,6 +1388,54 @@ mod tests {
             error.to_string().contains("does not exist"),
             "expected a missing-file message, got: {error}"
         );
+        assert_eq!(
+            error.kind(),
+            VerifyErrorKind::MissingRenderedFile,
+            "a surface that resolved the path on the caller's behalf re-words this one"
+        );
+    }
+
+    /// Feature: Surface-specific argument names
+    /// Scenario: should tell each surface how *it* asks for the rendered pass
+    ///
+    /// The nudge is only useful if the caller can follow it, and `--file` is
+    /// not something an MCP or IPC client can pass.
+    #[tokio::test]
+    async fn test_skipped_rendered_checks_should_be_nudged_in_the_calling_surface_spelling() {
+        let mut state = ProjectState::new("Rendered nudge");
+        let sequence = sequence_with_gap();
+        state.active_sequence_id = Some(sequence.id.clone());
+        state.sequences.insert(sequence.id.clone(), sequence);
+
+        for (names, expected) in [
+            (
+                VerifyArgumentNames::cli(),
+                "pass --file <RENDER> to run them",
+            ),
+            (
+                VerifyArgumentNames::api(),
+                "name a rendered file (file) to run them",
+            ),
+        ] {
+            let plan = VerifyPlan::resolve(VerifyRequest {
+                names,
+                ..Default::default()
+            })
+            .expect("plan resolves");
+
+            let report = plan.run(&state, None).await.expect("verification runs");
+            let warnings = report.payload()["warnings"]
+                .as_array()
+                .expect("warnings array")
+                .iter()
+                .filter_map(|warning| warning.as_str().map(str::to_string))
+                .collect::<Vec<_>>();
+
+            assert!(
+                warnings.iter().any(|warning| warning.ends_with(expected)),
+                "expected a warning ending in '{expected}', got: {warnings:?}"
+            );
+        }
     }
 
     /// Feature: FFmpeg dependency

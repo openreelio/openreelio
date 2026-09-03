@@ -81,7 +81,8 @@ pub use cache::{
     resolve_cached_segment_path, save_manifest, segment_cache_file, sequence_cache_dir,
     CacheSegmentState, CacheSegmentStatusDto, InterruptedRenderPolicy, ManifestForProfile,
     RenderCacheConfig, RenderCacheManifest, RenderCacheSegment, RenderCacheStatus,
-    SegmentFingerprint, SegmentFlagReason, MAX_AGENT_RENDERS, SEGMENT_FINGERPRINT_UNSET,
+    SegmentFingerprint, SegmentFlagReason, AGENT_RENDER_IN_PROGRESS_GRACE_SEC, MAX_AGENT_RENDERS,
+    SEGMENT_FINGERPRINT_UNSET,
 };
 
 // Preview cache fill re-exports
