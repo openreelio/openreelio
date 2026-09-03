@@ -559,6 +559,14 @@ async validateExport(sequenceId: string, outputPath: string, preset: string, set
  * 
  * This command validates the export settings before starting the render,
  * and reports real-time progress via Tauri events.
+ * 
+ * # Agent draft renders
+ * 
+ * An output path inside the project's agent render directory
+ * (`.openreelio/cache/renders/agent/`) is treated as an agent's scratch draft
+ * and pruned exactly as [`render_range`] prunes it — an agent renders whole
+ * drafts through this command as readily as ranges, and nothing else bounds
+ * that directory. Renders anywhere else are untouched.
  */
 async startRender(sequenceId: string, outputPath: string, preset: string, settings: VideoExportRequest | null) : Promise<Result<RenderStartResult, string>> {
     try {
@@ -577,11 +585,12 @@ async startRender(sequenceId: string, outputPath: string, preset: string, settin
  * 
  * An output path inside the project's agent render directory
  * (`.openreelio/cache/renders/agent/`) is treated as an agent's scratch draft:
- * before the job starts, that directory is trimmed back to its newest
- * `MAX_AGENT_RENDERS` (8) `.mp4` files, never touching the file this call is
- * about to write. Nothing else prunes it, and an agent that renders a draft
- * per iteration of a judge loop would otherwise leave every intermediate cut
- * inside the user's project. Renders anywhere else are untouched.
+ * before the job starts, that directory is trimmed so that it holds at most
+ * `MAX_AGENT_RENDERS` (8) `.mp4` files once this render lands, never touching
+ * the file this call is about to write. Nothing else prunes it, and an agent
+ * that renders a draft per iteration of a judge loop would otherwise leave
+ * every intermediate cut inside the user's project. Renders anywhere else are
+ * untouched.
  */
 async renderRange(sequenceId: string, outputPath: string, preset: string, settings: VideoExportRequest | null, inPoint: number, outPoint: number) : Promise<Result<RenderStartResult, string>> {
     try {
