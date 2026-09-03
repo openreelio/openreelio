@@ -10255,3 +10255,968 @@ fn test_frame_extract_ignores_a_cached_segment_the_edit_moved_past() {
         "a segment whose plan moved must be re-rendered, not served: {after_move}"
     );
 }
+
+// =============================================================================
+// Where-to-look signals (timeline info + affected ranges)
+// =============================================================================
+
+/// Reads an `affectedRanges` array as `(startSec, endSec)` pairs.
+fn affected_pairs(value: &serde_json::Value) -> Vec<(f64, f64)> {
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("expected an affectedRanges array, got: {value}"))
+        .iter()
+        .map(|range| {
+            (
+                range["startSec"].as_f64().expect("startSec"),
+                range["endSec"].as_f64().expect("endSec"),
+            )
+        })
+        .collect()
+}
+
+/// Reads the last-apply hand-off record a mutating verb writes.
+fn last_affected_record(path: &str) -> serde_json::Value {
+    let record_path = std::path::Path::new(path)
+        .join(".openreelio")
+        .join("cache")
+        .join("agent")
+        .join("last_affected_ranges.json");
+    let contents = std::fs::read_to_string(&record_path)
+        .unwrap_or_else(|error| panic!("{}: {error}", record_path.display()));
+    serde_json::from_str(&contents).unwrap()
+}
+
+/// Adds a caption track and returns its id.
+fn add_caption_track(path: &str) -> String {
+    let track = run_cli_ok(&[
+        "timeline",
+        "add-track",
+        "--path",
+        path,
+        "--kind",
+        "caption",
+        "--name",
+        "Captions",
+    ]);
+    track["createdIds"][0].as_str().unwrap().to_string()
+}
+
+/// Feature: where-to-look signals on timeline reads
+/// Scenario: an agent asks the timeline where the interesting times are
+///
+/// Every signal here used to have to be reconstructed by hand from
+/// `timeline clips`: the length, the frame rate the times are quantised to,
+/// the cut times, the marker times and the caption spans. Reconstructing them
+/// is exactly the step that goes wrong, so they are asserted as one contract.
+#[test]
+fn test_timeline_info_reports_duration_fps_markers_and_spans() {
+    let (_dir, path, _asset_id, _track_id) =
+        create_project_with_placed_dummy("timeline_info_signals");
+    let sequence_id = active_sequence(&path);
+    let caption_track_id = add_caption_track(&path);
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "CreateCaption",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": caption_track_id,
+            "text": "Watch this",
+            "startSec": 1.0,
+            "endSec": 3.0,
+        })
+        .to_string(),
+    ]);
+
+    let marker = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "AddMarker",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "time": 1.5,
+            "label": "Hook",
+        })
+        .to_string(),
+    ]);
+    // A marker moves no picture, so it is reported as the instant it names.
+    assert_eq!(affected_pairs(&marker["affectedRanges"]), vec![(1.5, 1.5)]);
+
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+
+    // The dummy asset carries no probed duration, so the clip takes the
+    // timeline's default length; what matters is that both durations agree
+    // with the clip that is actually there.
+    let duration = info["durationSec"].as_f64().expect("durationSec");
+    assert!(duration > 3.0, "{info}");
+    assert_eq!(info["outputDurationSec"].as_f64(), Some(duration));
+
+    assert_eq!(info["fps"].as_f64(), Some(30.0));
+    assert_eq!(info["fpsRatio"]["num"], 30);
+    assert_eq!(info["fpsRatio"]["den"], 1);
+    assert_eq!(info["canvas"]["width"], 1920);
+    assert_eq!(info["canvas"]["height"], 1080);
+
+    let edit_points: Vec<f64> = info["editPoints"]
+        .as_array()
+        .expect("editPoints")
+        .iter()
+        .map(|point| point.as_f64().expect("edit point"))
+        .collect();
+    assert_eq!(edit_points.first(), Some(&0.0));
+    assert!(edit_points.contains(&1.0), "{edit_points:?}");
+    assert!(edit_points.contains(&3.0), "{edit_points:?}");
+    assert!(edit_points.contains(&duration), "{edit_points:?}");
+
+    assert_eq!(info["markers"][0]["timeSec"].as_f64(), Some(1.5));
+    assert_eq!(info["markers"][0]["label"], "Hook");
+
+    assert_eq!(info["captionSpans"][0]["startSec"].as_f64(), Some(1.0));
+    assert_eq!(info["captionSpans"][0]["endSec"].as_f64(), Some(3.0));
+    assert_eq!(info["captionSpans"][0]["text"], "Watch this");
+    assert_eq!(
+        info["captionSpans"][0]["trackId"],
+        caption_track_id.as_str()
+    );
+
+    assert_eq!(info["transitions"].as_array().map(Vec::len), Some(0));
+    assert_eq!(info["inspectionHints"]["markerCount"], 1);
+    assert_eq!(info["inspectionHints"]["captionCount"], 1);
+    assert_eq!(info["inspectionHints"]["transitionCount"], 0);
+    assert_eq!(info["inspectionHints"]["refusedTransitionCount"], 0);
+    // 1.0 and 3.0 are the caption's boundaries and 0 and the tail are the
+    // timeline's own, so nowhere does the picture cut: one clip runs the whole
+    // sequence. `editPoints` still lists all four.
+    assert_eq!(info["cuts"].as_array().map(Vec::len), Some(0));
+    assert_eq!(info["inspectionHints"]["cutCount"], 0);
+
+    // Additive: the keys `timeline info` already published are untouched.
+    assert_eq!(info["sequenceId"], sequence_id.as_str());
+    assert!(info["trackCount"].as_u64().unwrap() >= 2);
+}
+
+/// Feature: where-to-look signals on timeline reads
+/// Scenario: a dissolve reports the stretch it blends across
+///
+/// A transition hangs on the outgoing clip and blends *around* the cut, so its
+/// span is neither clip's boundary — the one signal a caller genuinely cannot
+/// derive from a clip list.
+#[test]
+fn test_timeline_info_reports_a_transition_span_centred_on_the_cut() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("timeline_info_transition");
+    let path = project_path(&dir, "timeline_info_transition");
+
+    let dark = dir.path().join("dark.mp4");
+    let light = dir.path().join("light.mp4");
+    if !create_solid_tone_source(&dark, "black", 440, 8) {
+        return;
+    }
+    if !create_solid_tone_source(&light, "white", 880, 8) {
+        return;
+    }
+
+    let (sequence_id, track_id, outgoing_clip) =
+        place_two_shot_timeline(&path, [&dark, &light], 2.0);
+    add_dissolve(&path, &sequence_id, &track_id, &outgoing_clip);
+
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+    let transitions = info["transitions"].as_array().expect("transitions");
+    assert_eq!(transitions.len(), 1, "{info}");
+
+    let span = &transitions[0];
+    let cut_sec = TRANSITION_SHOT_SEC;
+    let half = TRANSITION_DISSOLVE_SEC / 2.0;
+    assert_eq!(span["clipId"], outgoing_clip.as_str());
+    assert_eq!(span["trackId"], track_id.as_str());
+    assert_eq!(span["effectType"], "cross_dissolve");
+    assert_eq!(span["cutSec"].as_f64(), Some(cut_sec));
+    assert_eq!(span["startSec"].as_f64(), Some(cut_sec - half));
+    assert_eq!(span["endSec"].as_f64(), Some(cut_sec + half));
+    assert_eq!(span["durationSec"].as_f64(), Some(TRANSITION_DISSOLVE_SEC));
+    assert_eq!(info["inspectionHints"]["transitionCount"], 1);
+}
+
+/// Feature: affected ranges on mutating verbs
+/// Scenario: a move reports where the clip was and where it now is
+///
+/// Both halves matter: the old span is where the picture changed by losing the
+/// clip, the new span is where it changed by gaining it.
+#[test]
+fn test_command_execute_reports_the_union_of_the_old_and_new_span() {
+    let (_dir, path, _asset_id, track_id) = create_project_with_placed_dummy("affected_move");
+    let sequence_id = active_sequence(&path);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip = &clips["clips"][0];
+    let clip_id = clip["id"].as_str().unwrap().to_string();
+    let original_start = clip["timelineInSec"].as_f64().expect("timelineInSec");
+    let original_end = original_start + clip["durationSec"].as_f64().expect("durationSec");
+
+    let moved_start = original_end + 10.0;
+    let result = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "MoveClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "newTimelineIn": moved_start,
+        })
+        .to_string(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sequenceId"], sequence_id.as_str());
+    assert_eq!(
+        affected_pairs(&result["affectedRanges"]),
+        vec![
+            (original_start, original_end),
+            (moved_start, moved_start + (original_end - original_start))
+        ]
+    );
+
+    // The raw change list rides along, so a caller can see what moved as well
+    // as where.
+    let change_types: Vec<String> = result["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|change| change["type"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        change_types.iter().any(|kind| kind == "clipModified"),
+        "{change_types:?}"
+    );
+    // camelCase throughout, like every other key the CLI prints.
+    assert_eq!(result["changes"][0]["clipId"], clip_id.as_str());
+
+    // The hand-off file part B's sampler reads.
+    let record = last_affected_record(&path);
+    assert_eq!(record["sequenceId"], sequence_id.as_str());
+    assert_eq!(record["opIds"][0], result["opId"]);
+    assert_eq!(
+        affected_pairs(&record["affectedRanges"]),
+        affected_pairs(&result["affectedRanges"])
+    );
+}
+
+/// Feature: affected ranges on mutating verbs
+/// Scenario: a plan reports each step's ranges and their union
+#[test]
+fn test_plan_execute_reports_step_and_total_affected_ranges() {
+    let dir = create_temp_project("plan_affected_ranges");
+    let path = project_path(&dir, "plan_affected_ranges");
+    let sequence_id = active_sequence(&path);
+    let caption_track_id = add_caption_track(&path);
+
+    let plan_file = write_plan(
+        &dir,
+        "affected.json",
+        serde_json::json!({
+            "id": "affected_plan",
+            "steps": [
+                {
+                    "id": "caption",
+                    "commandType": "CreateCaption",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": caption_track_id,
+                        "text": "Look here",
+                        "startSec": 1.0,
+                        "endSec": 3.0
+                    },
+                    "dependsOn": []
+                },
+                {
+                    "id": "marker",
+                    "commandType": "AddMarker",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "time": 5.0,
+                        "label": "Beat"
+                    },
+                    "dependsOn": ["caption"]
+                }
+            ]
+        }),
+    );
+
+    let (stdout, stderr, code) =
+        run_cli_exit(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sequenceId"], sequence_id.as_str());
+    assert_eq!(
+        affected_pairs(&result["stepResults"][0]["affectedRanges"]),
+        vec![(1.0, 3.0)]
+    );
+    assert_eq!(
+        affected_pairs(&result["stepResults"][1]["affectedRanges"]),
+        vec![(5.0, 5.0)]
+    );
+    assert_eq!(
+        affected_pairs(&result["affectedRanges"]),
+        vec![(1.0, 3.0), (5.0, 5.0)]
+    );
+
+    let record = last_affected_record(&path);
+    assert_eq!(record["sequenceId"], sequence_id.as_str());
+    assert_eq!(record["opIds"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        affected_pairs(&record["affectedRanges"]),
+        vec![(1.0, 3.0), (5.0, 5.0)]
+    );
+    assert!(record["recordedAt"]
+        .as_str()
+        .is_some_and(|at| !at.is_empty()));
+}
+
+/// Feature: affected ranges on mutating verbs
+/// Scenario: a rolled-back plan points nowhere
+///
+/// A step that applied and was then undone changed nothing in the end, so
+/// reporting the range it briefly touched would send an inspector to a frame
+/// that never differed.
+#[test]
+fn test_failed_plan_reports_no_affected_ranges() {
+    let dir = create_temp_project("plan_affected_rollback");
+    let path = project_path(&dir, "plan_affected_rollback");
+    let sequence_id = active_sequence(&path);
+    let caption_track_id = add_caption_track(&path);
+
+    let plan_file = write_plan(
+        &dir,
+        "rollback_affected.json",
+        serde_json::json!({
+            "id": "rollback_affected_plan",
+            "steps": [
+                {
+                    "id": "caption",
+                    "commandType": "CreateCaption",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": caption_track_id,
+                        "text": "Gone again",
+                        "startSec": 1.0,
+                        "endSec": 3.0
+                    },
+                    "dependsOn": []
+                },
+                {
+                    "id": "doomed",
+                    "commandType": "SplitClip",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": "no-such-track",
+                        "clipId": "no-such-clip",
+                        "splitTime": 1.0
+                    },
+                    "dependsOn": ["caption"]
+                }
+            ]
+        }),
+    );
+
+    let (stdout, stderr, code) =
+        run_cli_exit(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["failedStep"], "doomed");
+    assert_eq!(result["rolledBack"], 1);
+    assert!(
+        affected_pairs(&result["affectedRanges"]).is_empty(),
+        "{result}"
+    );
+    for step in result["stepResults"].as_array().expect("stepResults") {
+        assert!(
+            affected_pairs(&step["affectedRanges"]).is_empty(),
+            "a rolled-back step must point nowhere: {step}"
+        );
+    }
+}
+
+// =============================================================================
+// Where-to-look samplers (frame extract)
+// =============================================================================
+
+/// Frame rate every CLI-created sequence uses.
+const SAMPLER_FPS: f64 = 30.0;
+
+/// Seconds a cut sample is backed off by to land on the outgoing shot.
+///
+/// Seeks resolve forward, so the frame *before* a cut is only reachable from a
+/// time a frame and a half earlier.
+const CUT_LEAD_SEC: f64 = 1.5 / SAMPLER_FPS;
+
+/// Builds a two-shot timeline backed by real media, cut at `TRANSITION_SHOT_SEC`.
+///
+/// Real media rather than a placeholder: every sampler test here extracts a
+/// composited still, which needs something FFmpeg can decode. `None` on a
+/// machine without FFmpeg, so the tests skip instead of failing there.
+///
+/// Returns `(dir, project_path, sequence_id, track_id, outgoing_clip_id)`.
+fn create_two_shot_project(
+    name: &str,
+) -> Option<(tempfile::TempDir, String, String, String, String)> {
+    available_ffmpeg_path()?;
+
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+    let dark = dir.path().join("dark.mp4");
+    let light = dir.path().join("light.mp4");
+    if !create_solid_tone_source(&dark, "black", 440, 8) {
+        return None;
+    }
+    if !create_solid_tone_source(&light, "white", 880, 8) {
+        return None;
+    }
+
+    let (sequence_id, track_id, outgoing_clip) =
+        place_two_shot_timeline(&path, [&dark, &light], 2.0);
+
+    Some((dir, path, sequence_id, track_id, outgoing_clip))
+}
+
+/// The reasons a sampler payload reported for its contact-sheet cells.
+fn cell_reasons(sheet: &serde_json::Value) -> Vec<String> {
+    sheet["cells"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected sheet cells, got: {sheet}"))
+        .iter()
+        .map(|cell| cell["reason"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: one call sheets both sides of every cut
+///
+/// The arithmetic this replaces was the agent's own: read `timeline info`,
+/// subtract 1.5/fps from each cut, assemble a `--times` list, choose a layout.
+/// Getting the offset wrong puts both cells on the incoming shot, which looks
+/// like a perfectly continuous edit no matter what the cut actually does.
+#[test]
+fn test_frame_extract_sheets_both_sides_of_every_cut() {
+    let Some((dir, path, _sequence_id, _track_id, _clip_id)) =
+        create_two_shot_project("frame_at_cuts")
+    else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("cuts.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--at-cuts",
+        "--grid",
+        "auto",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "grid");
+    // Two samples, so `auto` lays them out side by side.
+    assert_eq!(result["sheet"]["cols"], 2);
+    assert_eq!(result["sheet"]["rows"], 1);
+
+    let cells = result["sheet"]["cells"].as_array().expect("cells");
+    assert_eq!(cells.len(), 2, "{result}");
+    assert_eq!(
+        cell_reasons(&result["sheet"]),
+        vec!["cutBefore", "cutAfter"]
+    );
+
+    let before = cells[0]["timelineSec"].as_f64().expect("cell time");
+    assert!(
+        (before - (TRANSITION_SHOT_SEC - CUT_LEAD_SEC)).abs() < 1e-6,
+        "the outgoing frame must sit 1.5 frames before the cut, got {before}"
+    );
+    assert_eq!(
+        cells[1]["timelineSec"].as_f64(),
+        Some(TRANSITION_SHOT_SEC),
+        "the incoming frame is the cut itself"
+    );
+
+    assert_eq!(result["sampler"]["kinds"][0], "atCuts");
+    assert_eq!(result["sampler"]["candidates"], 2);
+    assert_eq!(result["sampler"]["selected"], 2);
+    assert_eq!(result["sampler"]["limited"], false);
+    assert!(result["sampler"]["affectedRanges"].is_null());
+
+    assert!(sheet_path.exists(), "Expected the sheet at the .jpg path");
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: a blend is sampled across the stretch it actually covers
+///
+/// A transition hangs on the outgoing clip and blends *around* the cut, so
+/// neither end of the blend is a clip boundary. Sampling it by hand means
+/// re-deriving the span from the effect's duration.
+#[test]
+fn test_frame_extract_samples_a_transition_across_its_blend() {
+    let Some((dir, path, sequence_id, track_id, outgoing_clip)) =
+        create_two_shot_project("frame_at_transitions")
+    else {
+        return;
+    };
+    add_dissolve(&path, &sequence_id, &track_id, &outgoing_clip);
+
+    let out_dir = dir.path().join("transition_stills");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--at-transitions",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["count"], 3, "{result}");
+
+    let frames = result["frames"].as_array().expect("frames");
+    let reasons: Vec<&str> = frames
+        .iter()
+        .map(|frame| frame["reason"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec!["transitionStart", "transitionCut", "transitionEnd"]
+    );
+
+    let half = TRANSITION_DISSOLVE_SEC / 2.0;
+    let times: Vec<f64> = frames
+        .iter()
+        .map(|frame| frame["timeSec"].as_f64().expect("timeSec"))
+        .collect();
+    assert_eq!(
+        times,
+        vec![
+            TRANSITION_SHOT_SEC - half,
+            TRANSITION_SHOT_SEC,
+            TRANSITION_SHOT_SEC + half
+        ]
+    );
+
+    for frame in frames {
+        let written = std::path::PathBuf::from(frame["path"].as_str().expect("frame path"));
+        assert!(written.exists(), "{} was not written", written.display());
+    }
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: a coverage sweep is thinned to the caller's budget
+#[test]
+fn test_frame_extract_thins_a_per_shot_sweep_to_the_requested_budget() {
+    let Some((dir, path, _sequence_id, _track_id, _clip_id)) =
+        create_two_shot_project("frame_per_shot")
+    else {
+        return;
+    };
+
+    let out_dir = dir.path().join("shots");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--per-shot",
+        "--limit",
+        "1",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["count"], 1, "{result}");
+    assert_eq!(result["frames"][0]["reason"], "shotMid");
+    // Both shots were found; the budget is what cut the list down, and the
+    // payload has to say so rather than looking like a one-shot timeline.
+    assert_eq!(result["sampler"]["candidates"], 2);
+    assert_eq!(result["sampler"]["selected"], 1);
+    assert_eq!(result["sampler"]["limited"], true);
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: the post-apply look, without the agent carrying any times
+///
+/// This is the loop the whole feature exists for: apply an edit, then ask to
+/// see exactly the seconds that moved. The ranges come from the hand-off the
+/// mutating verb wrote, and are echoed back so the picture can be checked
+/// against them.
+#[test]
+fn test_frame_extract_sheets_the_ranges_the_last_edit_changed() {
+    let Some((dir, path, sequence_id, track_id, _outgoing)) =
+        create_two_shot_project("frame_affected")
+    else {
+        return;
+    };
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let incoming = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .find(|clip| clip["timelineInSec"].as_f64() == Some(TRANSITION_SHOT_SEC))
+        .expect("the second shot")
+        .clone();
+    let incoming_id = incoming["id"].as_str().expect("clip id").to_string();
+
+    let moved = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "MoveClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": incoming_id,
+            "newTimelineIn": TRANSITION_SHOT_SEC + 0.5,
+        })
+        .to_string(),
+    ]);
+    let expected_ranges = affected_pairs(&moved["affectedRanges"]);
+    assert!(!expected_ranges.is_empty(), "{moved}");
+
+    let sheet_path = dir.path().join("affected.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--affected",
+        "--grid",
+        "auto",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "grid");
+    assert_eq!(result["sampler"]["kinds"][0], "affected");
+    assert_eq!(
+        affected_pairs(&result["sampler"]["affectedRanges"]),
+        expected_ranges,
+        "the sheet has to name the ranges it was built from: {result}"
+    );
+
+    // Every cell lands inside the changed stretch — allowing the 1.5-frame
+    // backoff, which is deliberately just outside a boundary it samples.
+    let lowest = expected_ranges
+        .iter()
+        .map(|(start, _)| *start)
+        .fold(f64::INFINITY, f64::min);
+    let highest = expected_ranges
+        .iter()
+        .map(|(_, end)| *end)
+        .fold(f64::NEG_INFINITY, f64::max);
+    for cell in result["sheet"]["cells"].as_array().expect("cells") {
+        let time = cell["timelineSec"].as_f64().expect("cell time");
+        assert!(
+            time >= lowest - CUT_LEAD_SEC && time <= highest,
+            "cell at {time}s is outside the changed range {lowest}..{highest}: {result}"
+        );
+    }
+
+    let reasons = cell_reasons(&result["sheet"]);
+    assert!(
+        reasons.iter().any(|reason| reason == "affectedStart"),
+        "the range boundary has to be one of the cells: {reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|reason| reason == "affectedMid"),
+        "the middle of the change has to be one of the cells: {reasons:?}"
+    );
+    assert!(sheet_path.exists());
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: --affected on a project nothing has been applied to
+///
+/// The shortcut is only available after a mutating verb has recorded where it
+/// landed, and "no record" is a different problem from "the edit changed
+/// nothing" — so the message has to name the step that produces one.
+#[test]
+fn test_frame_extract_affected_names_the_missing_hand_off() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("frame_affected_missing");
+    let path = project_path(&dir, "frame_affected_missing");
+
+    let out_dir = dir.path().join("nothing");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--affected",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("command execute") && stderr.contains("--between"),
+        "Expected the error to name the verb that records a hand-off and the fallback, got: {stderr}"
+    );
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: words on screen are judged on the frame they are settled in
+#[test]
+fn test_frame_extract_samples_the_middle_of_a_title_card() {
+    let Some((dir, path, _gap_time, _title_time)) =
+        create_project_with_trailing_title_card("frame_at_captions")
+    else {
+        return;
+    };
+
+    let out_dir = dir.path().join("captions");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--at-captions",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["count"], 1, "{result}");
+    // The card runs 6-8s, so its settled frame is 7.0s.
+    assert_eq!(result["frames"][0]["timeSec"].as_f64(), Some(7.0));
+    assert_eq!(result["frames"][0]["reason"], "textMid");
+    assert_eq!(result["sampler"]["kinds"][0], "atCaptions");
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: a sampler and a hand-written time list are refused together
+#[test]
+fn test_frame_extract_rejects_a_sampler_combined_with_explicit_times() {
+    let dir = create_temp_project("frame_sampler_conflict");
+    let path = project_path(&dir, "frame_sampler_conflict");
+
+    let out_dir = dir.path().join("stills");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--at-cuts",
+        "--times",
+        "1.0,2.0",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("--times") && stderr.contains("--at-cuts"),
+        "Expected the refusal to name both sides of the conflict, got: {stderr}"
+    );
+}
+
+/// Feature: affected ranges on mutating verbs
+/// Scenario: a convenience verb records the hand-off too
+///
+/// `--affected` reads a single hand-off slot. While only `command execute` and
+/// `plan execute` wrote it, a `timeline move` left the file describing an older
+/// edit, and the next `--affected` sheet silently showed the wrong seconds —
+/// the exact failure the sampler exists to remove.
+#[test]
+fn test_timeline_move_reports_and_records_its_affected_ranges() {
+    let (_dir, path, _asset_id, track_id) =
+        create_project_with_placed_dummy("timeline_move_affected");
+    let sequence_id = active_sequence(&path);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip = &clips["clips"][0];
+    let clip_id = clip["id"].as_str().unwrap().to_string();
+    let original_start = clip["timelineInSec"].as_f64().expect("timelineInSec");
+    let length = clip["durationSec"].as_f64().expect("durationSec");
+    let moved_start = original_start + length + 10.0;
+
+    let result = run_cli_ok(&[
+        "timeline",
+        "move",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--to",
+        &moved_start.to_string(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sequenceId"], sequence_id.as_str());
+    assert_eq!(
+        affected_pairs(&result["affectedRanges"]),
+        vec![
+            (original_start, original_start + length),
+            (moved_start, moved_start + length)
+        ],
+        "a convenience verb must report where it landed too: {result}"
+    );
+
+    let record = last_affected_record(&path);
+    assert_eq!(record["sequenceId"], sequence_id.as_str());
+    assert_eq!(
+        record["opIds"].as_array().and_then(|ids| ids.last()),
+        Some(&result["opId"])
+    );
+    assert_eq!(
+        affected_pairs(&record["affectedRanges"]),
+        affected_pairs(&result["affectedRanges"])
+    );
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: `--affected` follows a convenience verb, not just `command execute`
+#[test]
+fn test_frame_extract_samples_the_range_a_timeline_move_changed() {
+    let Some((dir, path, _sequence_id, track_id, _outgoing)) =
+        create_two_shot_project("frame_affected_timeline_move")
+    else {
+        return;
+    };
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let incoming = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .find(|clip| clip["timelineInSec"].as_f64() == Some(TRANSITION_SHOT_SEC))
+        .expect("the second shot")
+        .clone();
+    let incoming_id = incoming["id"].as_str().expect("clip id").to_string();
+
+    let moved = run_cli_ok(&[
+        "timeline",
+        "move",
+        "--path",
+        &path,
+        "--clip",
+        &incoming_id,
+        "--track",
+        &track_id,
+        "--to",
+        &(TRANSITION_SHOT_SEC + 0.5).to_string(),
+    ]);
+    let expected_ranges = affected_pairs(&moved["affectedRanges"]);
+    assert!(!expected_ranges.is_empty(), "{moved}");
+
+    let sheet_path = dir.path().join("moved.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--affected",
+        "--grid",
+        "auto",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        affected_pairs(&result["sampler"]["affectedRanges"]),
+        expected_ranges,
+        "the sheet has to be built from the ranges the move reported: {result}"
+    );
+    assert!(sheet_path.exists());
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: a hand-off the project has moved past is refused, not used
+///
+/// An undo leaves the record describing an edit the project no longer has.
+/// Sampling it anyway is the one thing worse than not sampling at all: the
+/// sheet looks right and points at seconds nothing changed at.
+#[test]
+fn test_frame_extract_affected_refuses_a_stale_hand_off() {
+    let Some((dir, path, sequence_id, track_id, _outgoing)) =
+        create_two_shot_project("frame_affected_stale")
+    else {
+        return;
+    };
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let incoming_id = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .find(|clip| clip["timelineInSec"].as_f64() == Some(TRANSITION_SHOT_SEC))
+        .and_then(|clip| clip["id"].as_str())
+        .expect("the second shot")
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "MoveClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": incoming_id,
+            "newTimelineIn": TRANSITION_SHOT_SEC + 0.5,
+        })
+        .to_string(),
+    ]);
+
+    // Undo does not record a hand-off, so the file now describes an edit the
+    // project has rolled off its history.
+    run_cli_ok(&["timeline", "undo", "--path", &path]);
+
+    let out_dir = dir.path().join("stale");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--affected",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("was not recorded") && stderr.contains("--between"),
+        "Expected the refusal to say the hand-off is stale and name the fallback, got: {stderr}"
+    );
+}

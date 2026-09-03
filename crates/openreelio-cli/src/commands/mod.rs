@@ -223,6 +223,83 @@ pub(crate) fn save_project(project: &mut ActiveProject) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to save project: {}", e))
 }
 
+/// One mutating verb's edit, from the before-image to the recorded hand-off.
+///
+/// Every mutating CLI verb has to answer the same question — *where on the
+/// timeline did this land* — and only `command execute` and `plan execute` used
+/// to. The rest saved and exited, which left the hand-off file describing an
+/// older edit: a later `frame extract --affected` then sampled the previous
+/// change and said nothing about it. Routing every verb through one recorder is
+/// what makes `--affected` mean "the last edit" rather than "the last edit some
+/// surfaces bothered to record".
+///
+/// A verb that applies several commands under one save — `text update` moves a
+/// clip and retrims it — opens one recorder and executes through it repeatedly;
+/// the ranges are then the diff across the whole verb, which is what the caller
+/// asked about anyway.
+pub(crate) struct EditRecorder {
+    sequence_id: String,
+    before: openreelio_core::commands::SequenceSnapshot,
+    op_ids: Vec<String>,
+    changes: Vec<openreelio_core::commands::StateChange>,
+}
+
+impl EditRecorder {
+    /// Captures the before-image of the sequence the verb is about to change.
+    ///
+    /// Must be called before the first command runs: the ranges are a diff
+    /// across the mutation, and a ripple move shifts clips no reported change
+    /// names.
+    pub(crate) fn begin(project: &ActiveProject, sequence_id: &str) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            before: openreelio_core::commands::SequenceSnapshot::capture(
+                &project.state,
+                sequence_id,
+            ),
+            op_ids: Vec::new(),
+            changes: Vec::new(),
+        }
+    }
+
+    /// Executes one command, folding its result into the recording.
+    ///
+    /// The executor's error is passed through untouched so each verb keeps
+    /// phrasing its own failure ("Insert failed", "Trim failed").
+    pub(crate) fn execute(
+        &mut self,
+        project: &mut ActiveProject,
+        command: Box<dyn openreelio_core::commands::Command>,
+    ) -> openreelio_core::CoreResult<openreelio_core::commands::CommandResult> {
+        let result = project.executor.execute(command, &mut project.state)?;
+        self.op_ids.push(result.op_id.clone());
+        self.changes.extend(result.changes.iter().cloned());
+        Ok(result)
+    }
+
+    /// Saves the project, records the hand-off, and returns the changed ranges.
+    ///
+    /// The ranges are returned so the verb can publish them under
+    /// `affectedRanges` as well — an additive key, so a reader of the verb's
+    /// JSON keeps everything it already parsed.
+    pub(crate) fn finish(
+        self,
+        project: &mut ActiveProject,
+    ) -> anyhow::Result<Vec<openreelio_core::TimeRange>> {
+        let affected_ranges =
+            self.before
+                .affected_ranges(&project.state, &self.sequence_id, &self.changes);
+        save_project(project)?;
+        command::record_affected_ranges(
+            &project.path,
+            &self.sequence_id,
+            self.op_ids,
+            &affected_ranges,
+        );
+        Ok(affected_ranges)
+    }
+}
+
 /// Resolve the sequence ID: use explicit arg or fall back to active sequence.
 pub(crate) fn resolve_sequence_id(
     project: &ActiveProject,

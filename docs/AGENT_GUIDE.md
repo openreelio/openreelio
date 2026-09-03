@@ -152,6 +152,29 @@ not `--in` / `--out`.
 `timelineInSec`, `durationSec`, `sourceInSec`, `sourceOutSec` and `speed` —
 enough to compute any subsequent edit without dumping full state.
 
+`timeline info` answers *where to look* without any arithmetic over the clip
+list: `durationSec` (editing length) and `outputDurationSec` (render length),
+`fps` plus the exact `fpsRatio`, `canvas`, `cuts`, `editPoints`, `markers`,
+`transitions`, `captionSpans`, `textSpans`, and an `inspectionHints` count
+summary.
+
+Read the cut times from `cuts` rather than reducing over `timeline clips`.
+`cuts` is where the *picture* changes: boundaries of enabled clips on the video
+tracks the export includes, with the timeline's head and tail left out. It is
+what `frame extract --at-cuts` samples, and `inspectionHints.cutCount` counts.
+`editPoints` answers a different question — every boundary on every track,
+including `0`, the end, caption and audio boundaries, and disabled clips — which
+is the editing view, not the cut list.
+
+Read blend spans from `transitions`: a transition hangs on the outgoing clip and
+is rendered around the cut rather than along a clip, so neither edge is a clip
+boundary the clip list prints. The span is quantised to whole frames the way the
+renderer places it, and is asymmetric for an odd frame count. A stored
+transition the renderer refuses is still listed, with `rendersAsCut: true` and a
+`refusalReason` — the file will show a hard cut there, and
+`inspectionHints.transitionCount` counts only the blends it will really get
+(`refusedTransitionCount` counts the rest).
+
 ### The escape hatch: `command execute`
 
 The convenience verbs cover the common cuts. Everything the editor can do —
@@ -168,6 +191,27 @@ openreelio-cli command execute  --path ./demo --type SplitClip \
 Payloads are camelCase JSON objects. Use `--payload-file <FILE>` instead of
 `--payload` when the JSON is large or shell quoting is awkward. `command
 validate` runs the same strict parser without touching the project.
+
+Every mutating verb answers *where the edit landed*. `command execute`,
+`plan execute` and the `timeline`, `text` and `caption` edit verbs all report
+`affectedRanges` — a sorted, merged list of `{startSec, endSec}` measured
+against `sequenceId` — so the next `frame extract` or
+`render start --start/--end` can be aimed at the seconds that actually changed
+instead of the whole timeline. The ranges are computed by diffing the sequence,
+so a ripple edit reports every clip it shifted, not only the ids in `changes`;
+a dissolve reports the stretch it blends across, around the cut. `plan execute`
+reports them per step as well as in total; a plan that rolled back cleanly
+reports an empty list because nothing stayed changed, while one whose rollback
+did not complete (`rollbackIncomplete: true`) keeps them, because the project
+really is mutated. The last successful apply's ranges are also written to
+`<project>/.openreelio/cache/agent/last_affected_ranges.json`, which is what
+`frame extract --affected` reads — so the post-apply look needs no times carried
+between commands:
+
+```bash
+openreelio-cli plan execute  --path ./demo --file cut.json
+openreelio-cli frame extract --path ./demo --affected --grid auto --out ./look.jpg
+```
 
 ### Transitions
 
@@ -475,11 +519,37 @@ back), so the desktop app sees whatever the CLI computed.
 ### Looking at frames
 
 ```bash
+openreelio-cli frame extract --path ./demo --affected --grid auto --out changed.jpg  # what just changed
+openreelio-cli frame extract --path ./demo --at-cuts --grid auto --out cuts.jpg      # every cut
 openreelio-cli frame extract --path ./demo --time 12.5 --out frame.png      # one still
 openreelio-cli frame extract --path ./demo --times 2,8,14 --out ./stills/   # batch (dir)
 openreelio-cli frame extract --path ./demo --asset <ASSET_ID> --source-time 3.0 --out src.png
 openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet.jpg
 ```
+
+**Samplers pick the times for you.** Reading `timeline info` and computing cut
+offsets by hand is the step that goes wrong; each of these reads the sequence
+and reports why every frame was chosen as `reason`:
+
+| Flag | Samples | `reason` |
+| ---- | ------- | -------- |
+| `--affected` | every range the last applied edit changed: start, middle, last frame, and both sides of each cut inside it | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
+| `--at-cuts` | every cut twice: `cut − 1.5/fps` and the cut itself | `cutBefore` `cutAfter` |
+| `--at-transitions` | each blend's start, cut and end | `transitionStart` `transitionCut` `transitionEnd` |
+| `--at-captions` | the middle of every caption span and text clip | `captionMid` `textMid` |
+| `--at-markers` | every sequence marker | `marker` |
+| `--per-shot` | the middle of every shot on the video tracks the export includes | `shotMid` |
+| `--around <SEC>` | a window around one time (`--span`, default 0.5 s; `--around-count`, default 5) | `around` |
+
+The lead before a cut is a frame and a half because seeks resolve **forward**: a
+smaller backoff lands on the incoming shot, and both samples then show the same
+picture. Samplers union, deduplicate and sort; `--limit <N>` thins an oversized
+selection evenly while keeping its first and last entry; and the payload gains
+`sampler: {kinds, candidates, selected, limited, affectedRanges?}` so a thinned
+list cannot be mistaken for a short timeline. They are refused alongside
+`--time`, `--times`, `--between`, `--count`, `--asset` and `--file`, all of which
+name their own times. `--affected` with no recorded apply — or one on another
+sequence — is an error naming `command execute` / `plan execute`, never a guess.
 
 - `--mode composite` is the **default**: the picture export produces, with
   captions, text clips, transforms, layered clips and blends all in it. It is
@@ -513,12 +583,17 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   extensionless paths and `--times` directories (which default to PNG). A
   `--format` that contradicts a `.png`/`.jpg` extension is rejected rather than
   silently writing to a different file.
-- `--grid COLSxROWS` with `--between START END [--count N]` (uniform sampling)
-  or `--times a,b,c` (explicit list, kept in order) writes one contact sheet
-  and returns `sheet.cells[{index,row,col,timelineSec}]`, which maps every cell
-  a vision model comments on back to a timecode. Grids are capped at 100 cells,
-  and the finished sheet at 8000 px on either edge — an oversized combination is
-  rejected before the first cell is extracted, not after the whole grid.
+- `--grid COLSxROWS` with a sampler, `--between START END [--count N]` (uniform
+  sampling) or `--times a,b,c` (explicit list, kept in order) writes one contact
+  sheet and returns `sheet.cells[{index,row,col,timelineSec,reason?}]`, which
+  maps every cell a vision model comments on back to a timecode. Grids are
+  capped at 100 cells, and the finished sheet at 8000 px on either edge — an
+  oversized combination is rejected before the first cell is extracted, not
+  after the whole grid.
+- `--grid auto` sizes the sheet from the sample count — 1 column for a single
+  sample, 2 for two, 3 up to 9, 4 up to 16, then 6 — so a sampler needs no
+  layout guess.
+  It requires a sampler or `--times`; `--between` already fixes its own count.
 - `--label-cells` burns each cell's **requested** index and timecode into the
   image (not the decoded frame's PTS); `--cell-width` / `--cell-height`
   (64–1024, default 320×180) size the cells — 640×360 is the floor for reading
@@ -541,7 +616,8 @@ the end is rejected with the sequence's actual duration in the message, so widen
 the edit or narrow `--between` rather than guessing.
 
 Single and batch extraction return
-`frames[{index,timeSec,sourceTimeSec,clipId,assetId,path,width,height}]`.
+`frames[{index,timeSec,sourceTimeSec,clipId,assetId,path,width,height}]`, plus
+`reason` on every frame a sampler chose.
 `sourceTimeSec`, `clipId` and `assetId` name the clip the pixels came from, so
 they are absent on a composited frame — there is no single source clip behind a
 title card or a gap. Treat them as optional.
@@ -1089,13 +1165,22 @@ into the project before verifying.
 picture itself, as an MCP `image` content block, so a vision model can look at
 the edit without a Bash or file-reading tool. It accepts
 `{time?, times?[], grid?, between?[start,end], file?, sequenceId?, mode?,
-cellWidth?, cellHeight?, labelCells?, maxWidth?}` — the same selectors as
+cellWidth?, cellHeight?, labelCells?, maxWidth?}` plus the samplers —
+`{affected?, atCuts?, atTransitions?, atCaptions?, atMarkers?, perShot?,
+around?, span?, aroundCount?, limit?}` and `grid: "auto"` — the same selectors as
 [`frame extract`](#5-the-perception-loop).
 
 ```jsonc
-// tools/call → openreelio.frame.extract
+// tools/call → openreelio.frame.extract — the whole render
 { "file": "render.mp4", "grid": "4x3", "between": [0, 90], "labelCells": true }
+
+// tools/call → openreelio.frame.extract — what the last apply changed
+{ "affected": true, "grid": "auto", "labelCells": true }
 ```
+
+A sampler batch without `grid` is capped at the same 12 inline stills a `times`
+batch is, so pass `grid: "auto"` — one image whatever the sampler found — or a
+`limit` at or under 12.
 
 The reply is one `image` block per still — or exactly one for a contact sheet,
 however many cells it holds — followed by the usual `text` block carrying the

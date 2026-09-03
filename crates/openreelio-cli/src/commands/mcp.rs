@@ -36,14 +36,17 @@
 
 use crate::{
     commands::frame::{
-        self, DEFAULT_MAX_WIDTH, MAX_CELL_SIZE_PX, MAX_GRID_CELLS, MAX_SHEET_DIMENSION_PX,
-        MAX_STILL_WIDTH_PX, MIN_CELL_SIZE_PX, MIN_STILL_WIDTH_PX,
+        self, DEFAULT_AROUND_COUNT, DEFAULT_AROUND_SPAN_SEC, DEFAULT_MAX_WIDTH, MAX_CELL_SIZE_PX,
+        MAX_GRID_CELLS, MAX_SHEET_DIMENSION_PX, MAX_STILL_WIDTH_PX, MIN_CELL_SIZE_PX,
+        MIN_STILL_WIDTH_PX,
     },
     commands::{help_json, plan, transcription, verify},
     output,
 };
 use base64::Engine as _;
 use clap::Args;
+#[cfg(test)]
+use openreelio_core::commands::SplitClipCommand;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
 use openreelio_core::ipc::CommandPayload;
 use openreelio_core::style::{
@@ -622,7 +625,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.timeline.snapshot",
             "OpenReelio timeline snapshot",
-            "Read active timeline tracks, clips, markers, and duration summary.",
+            "Read the timeline: tracks, clips, markers, and the where-to-look signals for each sequence — durationSec/outputDurationSec, fps and fpsRatio, canvas, editPoints (cut times), markers, transitions (each blend span centred on its cut, which no clip boundary gives you), and inspectionHints counts.",
             serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         ),
         tool(
@@ -757,7 +760,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.frame.extract",
             "OpenReelio frame extract",
-            &format!("See the edit: extract stills from the timeline, or from a rendered video with 'file', and get them back as inline images plus JSON metadata. Timeline stills show the COMPOSITED edit by default — captions, text, transforms and blends, exactly what export produces. Pass 'grid' with 'between' or 'times' for a contact sheet whose cells[] maps every cell back to a timecode — that is the cheapest way to judge pacing and continuity across a whole cut. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' must be inside the project directory, so render there before judging."),
+            &format!("See the edit — and above all, see what you just changed. Right after applying an edit, call this with affected:true and grid:'auto': it samples only the seconds that moved and returns them as ONE contact sheet whose cells[] name their timecode and their reason. Other event samplers answer the other standing questions without any arithmetic: atCuts for continuity (each cut gives the outgoing shot's last frame and the incoming shot's first), atTransitions for a blend's start/cut/end, atCaptions for readability (pass cellWidth 640 or more so the words are legible), atMarkers, perShot for coverage, and around+span for one moment in detail. Samplers combine, and 'limit' caps how many frames come back. Reach for 'between' — evenly spaced midpoints that land on no event at all — only when nothing event-driven fits. Timeline stills show the COMPOSITED edit by default: captions, text, transforms and blends, exactly what export produces. Without 'grid' the result is up to {MAX_INLINE_FRAME_STILLS} separate stills; with it, one sheet. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' reads an already rendered video instead of the timeline, must be inside the project directory, and takes no sampler."),
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -776,8 +779,52 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     "grid": {
                         "type": "string",
                         "description": format!(
-                            "Contact sheet layout as COLSxROWS (e.g. '4x3'), at most {MAX_GRID_CELLS} cells, and at most {MAX_SHEET_DIMENSION_PX}px on either finished edge. Requires exactly one of 'between' or 'times'."
+                            "Contact sheet layout as COLSxROWS (e.g. '4x3'), at most {MAX_GRID_CELLS} cells, and at most {MAX_SHEET_DIMENSION_PX}px on either finished edge. Or 'auto', which sizes the sheet from however many samples there turn out to be — use it with a sampler or with 'times'; 'between' still needs an explicit COLSxROWS. One sheet is one inline image however many cells it holds."
                         )
+                    },
+                    "affected": {
+                        "type": "boolean",
+                        "description": "Sample the timeline ranges the LAST applied edit changed: each range's start, its middle, its last frame, and both sides of every cut inside it. This is the post-apply look: run it straight after plan.apply or a mutating tool. Errors when nothing has been applied to this sequence yet, or when the last edit was on another sequence."
+                    },
+                    "atCuts": {
+                        "type": "boolean",
+                        "description": "Sample both sides of every cut: the outgoing shot's last frame (cut - 1.5/fps, because seeks resolve forward) and the incoming shot's first. The continuity check."
+                    },
+                    "atTransitions": {
+                        "type": "boolean",
+                        "description": "Sample the start, the cut and the end of every two-input transition. None of those three is a clip boundary, so they cannot be derived from a clip list."
+                    },
+                    "atCaptions": {
+                        "type": "boolean",
+                        "description": "Sample the middle of every caption and text span — the settled frame, after any animation in. Pass cellWidth 640 or more when sheeting these, or the words are unreadable."
+                    },
+                    "atMarkers": {
+                        "type": "boolean",
+                        "description": "Sample every sequence marker."
+                    },
+                    "perShot": {
+                        "type": "boolean",
+                        "description": "Sample the middle of every shot on the video tracks the export includes. Coverage at a glance; pair with limit on a long sequence."
+                    },
+                    "around": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "Sample a window centred on this timeline time in seconds — one moment in detail."
+                    },
+                    "span": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": format!("Half-width of the 'around' window in seconds (default {DEFAULT_AROUND_SPAN_SEC}). Only with 'around'.")
+                    },
+                    "aroundCount": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": format!("Number of 'around' samples, spread across the window including its edges (default {DEFAULT_AROUND_COUNT}). Only with 'around'.")
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": format!("Largest number of sampler times to keep. Over the limit the list is thinned evenly, keeping the first and last, and 'sampler.limited' reports it. Without 'grid' a sampler is capped at {MAX_INLINE_FRAME_STILLS} stills, so pass a limit at or under that.")
                     },
                     "between": {
                         "type": "array",
@@ -1416,12 +1463,33 @@ fn build_timeline_snapshot(state: &McpServerState) -> Result<Value, ToolError> {
                     })
                 })
                 .collect();
+            // Where-to-look signals: duration, frame rate, cut times, marker
+            // times, transition spans and the caption/text spans. A transition
+            // blends across the cut rather than along a clip, so no reader can
+            // derive its span from the clip list below it. The whole summary is
+            // published, exactly as `timeline info` publishes it: an agent that
+            // reads the snapshot instead of the CLI must not have to reassemble
+            // the caption spans from the clip list to ask the same question.
+            let summary =
+                openreelio_core::timeline::inspection_summary(sequence, &project.state.effects);
             serde_json::json!({
                 "id": sequence_id,
                 "name": sequence.name,
                 "isActive": active_sequence_id.as_deref() == Some(sequence_id.as_str()),
                 "trackCount": tracks.len(),
                 "markerCount": sequence.markers.len(),
+                "durationSec": summary.duration_sec,
+                "outputDurationSec": summary.output_duration_sec,
+                "fps": summary.fps,
+                "fpsRatio": summary.fps_ratio,
+                "canvas": summary.canvas,
+                "editPoints": summary.edit_points,
+                "cuts": summary.cuts,
+                "markers": summary.markers,
+                "transitions": summary.transitions,
+                "captionSpans": summary.caption_spans,
+                "textSpans": summary.text_spans,
+                "inspectionHints": summary.inspection_hints,
                 "tracks": tracks,
             })
         })
@@ -2077,6 +2145,7 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
 /// clap, which this surface never runs through: every constraint `frame extract`
 /// gets from `#[arg(conflicts_with = ...)]` has to be restated here, or the tool
 /// would accept combinations the extraction then silently ignores.
+#[cfg_attr(test, derive(Debug))]
 struct FrameExtractRequest {
     time: Option<f64>,
     times: Option<Vec<f64>>,
@@ -2089,6 +2158,16 @@ struct FrameExtractRequest {
     cell_height: Option<u32>,
     label_cells: bool,
     max_width: Option<u32>,
+    at_cuts: bool,
+    at_transitions: bool,
+    at_captions: bool,
+    at_markers: bool,
+    per_shot: bool,
+    around: Option<f64>,
+    span: Option<f64>,
+    around_count: Option<usize>,
+    affected: bool,
+    limit: Option<usize>,
 }
 
 impl FrameExtractRequest {
@@ -2105,6 +2184,16 @@ impl FrameExtractRequest {
             cell_height: optional_pixel_argument(arguments, "cellHeight")?,
             label_cells: optional_bool_argument(arguments, "labelCells")?.unwrap_or(false),
             max_width: optional_pixel_argument(arguments, "maxWidth")?,
+            at_cuts: optional_bool_argument(arguments, "atCuts")?.unwrap_or(false),
+            at_transitions: optional_bool_argument(arguments, "atTransitions")?.unwrap_or(false),
+            at_captions: optional_bool_argument(arguments, "atCaptions")?.unwrap_or(false),
+            at_markers: optional_bool_argument(arguments, "atMarkers")?.unwrap_or(false),
+            per_shot: optional_bool_argument(arguments, "perShot")?.unwrap_or(false),
+            around: optional_non_negative_number(arguments, "around")?,
+            span: optional_positive_number(arguments, "span")?,
+            around_count: optional_positive_count(arguments, "aroundCount")?,
+            affected: optional_bool_argument(arguments, "affected")?.unwrap_or(false),
+            limit: optional_positive_count(arguments, "limit")?,
         };
 
         request.validate()?;
@@ -2115,10 +2204,30 @@ impl FrameExtractRequest {
         self.grid.is_some()
     }
 
+    /// Whether the layout is chosen from the sample count rather than stated.
+    fn is_auto_grid(&self) -> bool {
+        self.grid
+            .as_deref()
+            .is_some_and(|grid| grid.trim().eq_ignore_ascii_case("auto"))
+    }
+
+    /// Whether any event sampler was asked for.
+    fn has_sampler(&self) -> bool {
+        self.at_cuts
+            || self.at_transitions
+            || self.at_captions
+            || self.at_markers
+            || self.per_shot
+            || self.around.is_some()
+            || self.affected
+    }
+
     fn validate(&self) -> Result<(), ToolError> {
-        if self.time.is_none() && self.times.is_none() && !self.is_grid() {
+        self.validate_sampler_combination()?;
+        if self.time.is_none() && self.times.is_none() && !self.is_grid() && !self.has_sampler() {
             return Err(ToolError::InvalidArguments(
-                "Nothing to extract: pass time, times, or grid".to_string(),
+                "Nothing to extract: pass affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around, time, times, or grid"
+                    .to_string(),
             ));
         }
         if self.time.is_some() && (self.times.is_some() || self.is_grid()) {
@@ -2147,6 +2256,70 @@ impl FrameExtractRequest {
         self.validate_cell_geometry()?;
         self.validate_still_width()?;
         self.validate_selection_size()
+    }
+
+    /// Rejects a sampler paired with a selector that already names its times.
+    ///
+    /// Samplers union with each other but not with a hand-written list, and the
+    /// shaping arguments are meaningless without something to shape. The engine
+    /// enforces the same rules; restating them here makes the refusal an
+    /// argument error rather than an execution failure.
+    fn validate_sampler_combination(&self) -> Result<(), ToolError> {
+        if self.has_sampler() {
+            let conflicting = [
+                ("time", self.time.is_some()),
+                ("times", self.times.is_some()),
+                ("between", self.between.is_some()),
+                ("file", self.file.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(name, used)| used.then_some(name))
+            .collect::<Vec<_>>();
+
+            if !conflicting.is_empty() {
+                return Err(ToolError::InvalidArguments(format!(
+                    "A sampler chooses its own times, so it cannot be combined with {}",
+                    conflicting.join(", ")
+                )));
+            }
+
+            return self.validate_sampler_budget();
+        }
+
+        let orphaned = [
+            ("span", self.span.is_some()),
+            ("aroundCount", self.around_count.is_some()),
+            ("limit", self.limit.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, used)| used.then_some(name))
+        .collect::<Vec<_>>();
+
+        if orphaned.is_empty() {
+            return Ok(());
+        }
+
+        Err(ToolError::InvalidArguments(format!(
+            "{} only shapes a sampler; add affected, atCuts, atTransitions, atCaptions, atMarkers, perShot or around",
+            orphaned.join(", ")
+        )))
+    }
+
+    /// Bounds how many separate stills a sampler may return.
+    ///
+    /// A sheet is one image whatever it holds, so only the batch path needs a
+    /// cap — and the count is not known until the sequence is read, so the cap
+    /// has to be expressed as a limit the caller states up front.
+    fn validate_sampler_budget(&self) -> Result<(), ToolError> {
+        if self.is_grid() {
+            return Ok(());
+        }
+        match self.limit {
+            Some(limit) if limit > MAX_INLINE_FRAME_STILLS => Err(ToolError::InvalidArguments(
+                format!("limit asks for up to {limit} stills, more than the maximum of {MAX_INLINE_FRAME_STILLS}. Lower it, or pass grid for a contact sheet."),
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Bounds the pixels one still carries.
@@ -2226,6 +2399,10 @@ impl FrameExtractRequest {
             return Ok(());
         };
 
+        if self.is_auto_grid() {
+            return self.validate_auto_grid();
+        }
+
         let (columns, rows) = frame::parse_grid_spec(grid)
             .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
         let capacity = columns.saturating_mul(rows);
@@ -2233,6 +2410,23 @@ impl FrameExtractRequest {
             return Err(ToolError::InvalidArguments(format!(
                 "grid {columns}x{rows} needs {capacity} cells, more than the maximum of {MAX_GRID_CELLS}"
             )));
+        }
+
+        // A sampler is a time source in its own right, and `between`/`times`
+        // are already refused alongside one. Falling through to the check below
+        // therefore rejected a perfectly good `{atCuts, grid: "4x3"}` for
+        // lacking the very arguments it is not allowed to carry. How many cells
+        // the sampler actually fills is not knowable until it has run, so the
+        // engine checks it in `resolve_sampled_grid`; what is knowable here is
+        // the finished image size.
+        if self.has_sampler() {
+            return frame::ensure_sheet_dimensions_in_range(
+                columns,
+                rows,
+                self.cell_width,
+                self.cell_height,
+            )
+            .map_err(|error| ToolError::InvalidArguments(error.to_string()));
         }
 
         // The sheet's own source: exactly one, because a sampled range and an
@@ -2288,6 +2482,41 @@ impl FrameExtractRequest {
         .map_err(|error| ToolError::InvalidArguments(error.to_string()))
     }
 
+    /// Checks what can be checked about an `auto` sheet before it is sampled.
+    ///
+    /// With `times` the count is already known, so the finished geometry is
+    /// measured here exactly as it is for a stated grid. With a sampler it is
+    /// not known until the sequence is read, and the extraction measures the
+    /// layout it actually chose.
+    fn validate_auto_grid(&self) -> Result<(), ToolError> {
+        if let Some(times) = self.times.as_deref() {
+            if times.is_empty() {
+                return Err(ToolError::InvalidArguments(
+                    "times requires at least one value".to_string(),
+                ));
+            }
+            let (columns, rows) = frame::auto_grid(times.len())
+                .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+
+            return frame::ensure_sheet_dimensions_in_range(
+                columns,
+                rows,
+                self.cell_width,
+                self.cell_height,
+            )
+            .map_err(|error| ToolError::InvalidArguments(error.to_string()));
+        }
+
+        if self.has_sampler() {
+            return Ok(());
+        }
+
+        Err(ToolError::InvalidArguments(
+            "grid 'auto' sizes the sheet from its samples, so it needs a sampler (affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around) or times. With between, state the layout as COLSxROWS."
+                .to_string(),
+        ))
+    }
+
     /// Builds the CLI-side arguments, with the paths the server chose.
     fn into_extract_args(
         self,
@@ -2296,6 +2525,8 @@ impl FrameExtractRequest {
         file: Option<PathBuf>,
         sequence_id: Option<String>,
     ) -> frame::ExtractArgs {
+        let sampler_batch = self.has_sampler() && !self.is_grid();
+
         frame::ExtractArgs {
             path: project_path,
             out,
@@ -2317,8 +2548,62 @@ impl FrameExtractRequest {
             cell_width: self.cell_width,
             cell_height: self.cell_height,
             label_cells: self.label_cells,
+            at_cuts: self.at_cuts,
+            at_transitions: self.at_transitions,
+            at_captions: self.at_captions,
+            at_markers: self.at_markers,
+            per_shot: self.per_shot,
+            around: self.around,
+            span: self.span,
+            around_count: self.around_count,
+            affected: self.affected,
+            // A batch of stills travels inline, so an unbounded sampler would
+            // build a response no host can carry. The cap is applied as the
+            // caller's own budget when they state none.
+            limit: match (self.limit, sampler_batch) {
+                (Some(limit), _) => Some(limit),
+                (None, true) => Some(MAX_INLINE_FRAME_STILLS),
+                (None, false) => None,
+            },
         }
     }
+}
+
+/// Reads an optional strictly positive number of seconds.
+fn optional_positive_number(arguments: &Value, key: &str) -> Result<Option<f64>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    value
+        .as_f64()
+        .filter(|number| number.is_finite() && *number > 0.0)
+        .map(Some)
+        .ok_or_else(|| {
+            ToolError::InvalidArguments(format!("{key} must be a positive number when provided"))
+        })
+}
+
+/// Reads an optional whole count of at least one.
+fn optional_positive_count(arguments: &Value, key: &str) -> Result<Option<usize>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    value
+        .as_u64()
+        .filter(|count| *count >= 1)
+        .and_then(|count| usize::try_from(count).ok())
+        .map(Some)
+        .ok_or_else(|| {
+            ToolError::InvalidArguments(format!("{key} must be a whole number of at least 1"))
+        })
 }
 
 fn run_frame_extract_tool(
@@ -2434,7 +2719,7 @@ fn frame_output_path(directory: &Path, request: &FrameExtractRequest) -> PathBuf
     if request.is_grid() {
         return directory.join("sheet.jpg");
     }
-    if request.times.is_some() {
+    if request.times.is_some() || request.has_sampler() {
         // A batch writes one file per time, so the extraction is handed the
         // directory and names the stills itself.
         return directory.to_path_buf();
@@ -3937,6 +4222,20 @@ mod tests {
         assert_eq!(result["planId"], "approved-plan");
         assert_eq!(result["stepsExecuted"], 1);
 
+        // The where-to-look signal rides along with the shared plan applier, so
+        // an MCP client gets the same answer as `plan execute` without the CLI
+        // envelope. An empty list is the right answer for a bare AddTrack — an
+        // empty track shows nothing — but the keys have to be there.
+        assert_eq!(result["sequenceId"], sequence_id.as_str());
+        assert!(
+            result["affectedRanges"].is_array(),
+            "plan.apply must report affectedRanges: {result}"
+        );
+        assert!(
+            result["stepResults"][0]["affectedRanges"].is_array(),
+            "every step result must report affectedRanges: {result}"
+        );
+
         let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
         let sequence = reopened
             .state
@@ -4602,6 +4901,232 @@ mod tests {
         }
     }
 
+    /// Splits the fixture's single clip so the timeline has a real cut.
+    ///
+    /// Both halves stay inside the six seconds of decodable media, so the frame
+    /// before the cut and the frame after it can both actually be extracted.
+    fn split_the_only_clip(project_path: &Path, at_sec: f64) {
+        let mut project =
+            super::super::load_project(&project_path.to_path_buf()).expect("project opens");
+        let sequence_id = project
+            .state
+            .active_sequence_id
+            .clone()
+            .expect("active sequence");
+        let (track_id, clip_id) = {
+            let sequence = &project.state.sequences[&sequence_id];
+            let track = sequence
+                .tracks
+                .iter()
+                .find(|track| !track.clips.is_empty())
+                .expect("a track with a clip");
+            (track.id.clone(), track.clips[0].id.clone())
+        };
+
+        project
+            .executor
+            .execute(
+                Box::new(SplitClipCommand::new(
+                    &sequence_id,
+                    &track_id,
+                    &clip_id,
+                    at_sec,
+                )),
+                &mut project.state,
+            )
+            .expect("split clip");
+        project.save().expect("save project");
+    }
+
+    #[test]
+    fn should_sheet_both_sides_of_every_cut_as_one_auto_sized_image() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let Some(project_path) = project_with_real_media(&temp_dir, "frame_at_cuts_project") else {
+            return;
+        };
+        split_the_only_clip(&project_path, 3.0);
+        let state = frame_extract_state(project_path);
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.frame.extract",
+                    "arguments": { "atCuts": true, "grid": "auto" }
+                }),
+            ),
+        );
+
+        let content = response["result"]["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("frame extract failed: {response}"));
+        assert_eq!(
+            content.len(),
+            2,
+            "an auto sheet is one image plus its metadata"
+        );
+        assert_image_block(&content[0], "image/jpeg");
+
+        let payload: Value =
+            serde_json::from_str(content[1]["text"].as_str().expect("text block")).expect("JSON");
+        assert_eq!(payload["status"], "ok");
+        // Two samples per cut, laid out side by side without the caller
+        // choosing a layout.
+        assert_eq!(payload["sheet"]["cols"], 2);
+        assert_eq!(payload["sheet"]["rows"], 1);
+
+        let cells = payload["sheet"]["cells"].as_array().expect("cells");
+        assert_eq!(cells.len(), 2, "{payload}");
+        // The reason is what makes the picture readable: the first cell is the
+        // outgoing shot, the second the incoming one.
+        assert_eq!(cells[0]["reason"], "cutBefore");
+        assert_eq!(cells[1]["reason"], "cutAfter");
+        assert_eq!(cells[1]["timelineSec"].as_f64(), Some(3.0));
+        assert!(
+            cells[0]["timelineSec"].as_f64().expect("cell time") < 3.0,
+            "the outgoing frame has to be sampled before the cut: {payload}"
+        );
+
+        assert_eq!(payload["sampler"]["kinds"][0], "atCuts");
+        assert_eq!(payload["sampler"]["selected"], 2);
+        assert_eq!(payload["sampler"]["limited"], false);
+    }
+
+    #[test]
+    fn should_refuse_a_sampler_combined_with_a_hand_written_time_list() {
+        let error = FrameExtractRequest::parse(&serde_json::json!({
+            "atCuts": true,
+            "times": [1.0, 2.0]
+        }))
+        .expect_err("a sampler and a list describe different pictures");
+
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected an argument refusal");
+        };
+        assert!(
+            message.contains("times"),
+            "the refusal must name the conflicting selector: {message}"
+        );
+    }
+
+    #[test]
+    fn should_accept_a_sampler_with_an_explicit_grid() {
+        // A sampler is its own time source, and `between`/`times` are refused
+        // alongside one — so demanding them here rejected the only shape a
+        // sampled sheet with a fixed layout can have.
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "atCuts": true,
+            "grid": "4x3"
+        }))
+        .expect("a sampler sizes its own sheet");
+
+        assert!(request.at_cuts);
+        assert_eq!(request.grid.as_deref(), Some("4x3"));
+    }
+
+    #[test]
+    fn should_still_refuse_a_sampler_sheet_whose_image_is_too_large() {
+        let error = FrameExtractRequest::parse(&serde_json::json!({
+            "atCuts": true,
+            "grid": "8x8",
+            "cellWidth": 1024,
+            "cellHeight": 1024
+        }))
+        .expect_err("the finished image is knowable before anything is sampled");
+
+        assert!(matches!(error, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn should_refuse_an_auto_grid_with_nothing_to_size_it_from() {
+        let error = FrameExtractRequest::parse(&serde_json::json!({
+            "grid": "auto",
+            "between": [0.0, 4.0]
+        }))
+        .expect_err("between already fixes its own count");
+
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected an argument refusal");
+        };
+        assert!(
+            message.contains("COLSxROWS"),
+            "the refusal must point at an explicit layout: {message}"
+        );
+    }
+
+    #[test]
+    fn should_cap_a_sampler_batch_at_the_inline_still_budget() {
+        // A sheet is one image whatever it holds, so only the batch path is
+        // capped — and the cap is applied as the caller's own limit, because
+        // the sample count is not known until the sequence is read.
+        let batch = FrameExtractRequest::parse(&serde_json::json!({ "perShot": true }))
+            .expect("a sampler batch parses")
+            .into_extract_args(
+                PathBuf::from("project"),
+                PathBuf::from("project/stills"),
+                None,
+                Some("seq".to_string()),
+            );
+        assert_eq!(batch.limit, Some(MAX_INLINE_FRAME_STILLS));
+
+        let sheet =
+            FrameExtractRequest::parse(&serde_json::json!({ "perShot": true, "grid": "auto" }))
+                .expect("a sampler sheet parses")
+                .into_extract_args(
+                    PathBuf::from("project"),
+                    PathBuf::from("project/sheet.jpg"),
+                    None,
+                    Some("seq".to_string()),
+                );
+        assert_eq!(sheet.limit, None, "a sheet needs no still budget");
+
+        let error = FrameExtractRequest::parse(
+            &serde_json::json!({ "perShot": true, "limit": MAX_INLINE_FRAME_STILLS + 1 }),
+        )
+        .expect_err("an oversized batch must be refused");
+        assert!(matches!(error, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn should_carry_every_sampler_through_to_the_extraction_arguments() {
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "affected": true,
+            "atCuts": true,
+            "atTransitions": true,
+            "atCaptions": true,
+            "atMarkers": true,
+            "perShot": true,
+            "around": 4.25,
+            "span": 0.75,
+            "aroundCount": 7,
+            "limit": 9,
+            "grid": "auto"
+        }))
+        .expect("a fully specified sampler request parses");
+
+        let args = request.into_extract_args(
+            PathBuf::from("project"),
+            PathBuf::from("project/sheet.jpg"),
+            None,
+            Some("seq-resolved".to_string()),
+        );
+
+        // Every flag here decides which seconds are looked at, and the mapping
+        // is written out by hand — a transposed pair would still compile.
+        assert!(args.affected);
+        assert!(args.at_cuts);
+        assert!(args.at_transitions);
+        assert!(args.at_captions);
+        assert!(args.at_markers);
+        assert!(args.per_shot);
+        assert_eq!(args.around, Some(4.25));
+        assert_eq!(args.span, Some(0.75));
+        assert_eq!(args.around_count, Some(7));
+        assert_eq!(args.limit, Some(9));
+        assert_eq!(args.grid.as_deref(), Some("auto"));
+    }
+
     #[test]
     fn should_carry_every_sheet_selector_through_to_the_extraction_arguments() {
         let request = FrameExtractRequest::parse(&serde_json::json!({
@@ -4918,6 +5443,16 @@ mod tests {
             cell_width: None,
             cell_height: None,
             label_cells: false,
+            at_cuts: false,
+            at_transitions: false,
+            at_captions: false,
+            at_markers: false,
+            per_shot: false,
+            around: None,
+            span: None,
+            around_count: None,
+            affected: false,
+            limit: None,
         };
 
         frame::run_extract_with_project(args, &project)

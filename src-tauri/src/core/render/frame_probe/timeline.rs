@@ -13,6 +13,7 @@
 //! 3. **Source** — `fast` mode only, and only on explicit request: the topmost
 //!    clip's own media, which shows the footage but not the edit.
 
+use super::sampler::{SampleReason, SamplerReport};
 use super::sheet::{build_contact_sheet, grid_cell_extract_width, resolve_cell_size, CellStaging};
 use super::{
     batch_frame_name, create_batch_output_dir, ensure_times_inside_sequence, remove_stale_output,
@@ -94,6 +95,44 @@ impl FrameSourceCounts {
     }
 }
 
+/// What a sampler decided, for the payload the extraction reports.
+///
+/// `reasons` runs parallel to the times it was built from, so entry `n` explains
+/// frame `n`. Kept beside the times rather than folded into them because every
+/// other path through this module has no reason to report at all.
+pub(super) struct SamplerContext<'a> {
+    /// Why each time was chosen, in the same order as the times.
+    pub reasons: &'a [SampleReason],
+    /// The sampler run's own arithmetic.
+    pub report: &'a SamplerReport,
+}
+
+impl SamplerContext<'_> {
+    /// The reason for the nth extracted time, if there is one.
+    fn reason(&self, index: usize) -> Option<SampleReason> {
+        self.reasons.get(index).copied()
+    }
+}
+
+/// Adds the sampler report to a finished payload.
+fn attach_sampler_report(
+    payload: &mut serde_json::Value,
+    sampler: Option<&SamplerContext<'_>>,
+) -> FrameProbeResult<()> {
+    let Some(sampler) = sampler else {
+        return Ok(());
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return Ok(());
+    };
+    let report = serde_json::to_value(sampler.report).map_err(|error| {
+        FrameProbeError::new(format!("Failed to report the sampler result: {}", error))
+    })?;
+    object.insert("sampler".to_string(), report);
+
+    Ok(())
+}
+
 /// Extracts a single still from an asset's own media timebase.
 pub(super) async fn run_asset_mode(
     project: &FrameProbeProject<'_>,
@@ -148,6 +187,8 @@ pub(super) async fn run_asset_mode(
         // The request named the asset's own media, so the media is the answer.
         source: FrameSource::Source,
         fell_back_to_composite: None,
+        // An asset time is named by the caller, never derived by a sampler.
+        reason: None,
     };
 
     Ok(serde_json::json!({
@@ -162,6 +203,7 @@ pub(super) async fn run_asset_mode(
 }
 
 /// Extracts one or many timeline stills.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_timeline_mode(
     project: &FrameProbeProject<'_>,
     runner: &FFmpegRunner,
@@ -170,6 +212,7 @@ pub(super) async fn run_timeline_mode(
     mode: TimelineMode,
     times: &[f64],
     batch: bool,
+    sampler: Option<&SamplerContext<'_>>,
 ) -> FrameProbeResult<serde_json::Value> {
     let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
     ensure_times_inside_sequence(sequence, times)?;
@@ -195,16 +238,21 @@ pub(super) async fn run_timeline_mode(
         } else {
             resolve_single_output_path(&request.out, *time, format.clone())?
         };
-        frames.push(context.extract(index, *time, &output_path).await?);
+        let mut frame = context.extract(index, *time, &output_path).await?;
+        frame.reason = sampler.and_then(|sampler| sampler.reason(index));
+        frames.push(frame);
     }
 
-    Ok(serde_json::json!({
+    let mut payload = serde_json::json!({
         "status": "ok",
         "mode": mode.label(),
         "frames": frames,
         "count": frames.len(),
         "warnings": context.warnings(),
-    }))
+    });
+    attach_sampler_report(&mut payload, sampler)?;
+
+    Ok(payload)
 }
 
 /// Builds a contact sheet from timeline times.
@@ -218,6 +266,7 @@ pub(super) async fn run_grid_mode(
     columns: usize,
     rows: usize,
     times: &[f64],
+    sampler: Option<&SamplerContext<'_>>,
 ) -> FrameProbeResult<serde_json::Value> {
     let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
     ensure_times_inside_sequence(sequence, times)?;
@@ -251,6 +300,7 @@ pub(super) async fn run_grid_mode(
             row: index / columns,
             col: index % columns,
             timeline_sec: *time,
+            reason: sampler.and_then(|sampler| sampler.reason(index)),
         });
     }
 
@@ -265,7 +315,7 @@ pub(super) async fn run_grid_mode(
     )
     .await?;
 
-    Ok(serde_json::json!({
+    let mut payload = serde_json::json!({
         "status": "ok",
         "mode": "grid",
         "sheet": {
@@ -283,7 +333,10 @@ pub(super) async fn run_grid_mode(
             "cells": cells,
         },
         "warnings": context.warnings(),
-    }))
+    });
+    attach_sampler_report(&mut payload, sampler)?;
+
+    Ok(payload)
 }
 
 /// The preview render cache, as far as a read-only probe is concerned.
@@ -492,6 +545,7 @@ impl<'a> TimelineFrameContext<'a> {
                     height: result.height,
                     source: FrameSource::Source,
                     fell_back_to_composite: Some(false),
+                    reason: None,
                 };
                 self.warn_if_fast_mode_hides_content(time_sec);
 
@@ -513,6 +567,7 @@ impl<'a> TimelineFrameContext<'a> {
             height,
             source,
             fell_back_to_composite: fell_back.then_some(true),
+            reason: None,
         })
     }
 

@@ -380,7 +380,11 @@ fn two_input_transitions_on<'a>(
 /// One message per cause rather than one message for all of them: "it is not on
 /// a visible video track" is actively misleading advice for a title, which is on
 /// a perfectly visible video track and simply is not a picture.
-fn picture_refusal_reason(clip: &Clip, track: &Track) -> Option<&'static str> {
+///
+/// Shared with [`collect_transition_spans`](crate::core::timeline::collect_transition_spans)
+/// so the inspection surface refuses exactly what the render refuses, in the
+/// same words.
+pub(crate) fn picture_refusal_reason(clip: &Clip, track: &Track) -> Option<&'static str> {
     if !matches!(track.kind, TrackKind::Video) {
         return Some("it is not on a video track, so there is no picture to blend");
     }

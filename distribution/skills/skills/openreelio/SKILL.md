@@ -57,6 +57,20 @@ transforms and blends, exactly what export produces — and reuses an already
 rendered preview-cache segment when one covers the time. `--mode fast` is the
 opt-in cheap look at the raw footage; it shows none of the edit.
 
+**Do not compute the times yourself.** `frame extract` samples the edit's own
+events: `--affected` for exactly the seconds the last apply changed (the step to
+run straight after `command execute` or `plan execute`), `--at-cuts` for both
+sides of every cut, `--at-transitions`, `--at-captions`, `--at-markers`,
+`--per-shot`, `--around <SEC>`. Add `--grid auto` and the whole answer comes
+back as one contact sheet whose cells name their timecode and the reason they
+were chosen; `--limit <N>` caps how many frames that is. Uniform `--between`
+sampling lands on no event at all — keep it for a whole-render overview.
+
+```bash
+openreelio-cli plan execute  --path ./demo --file cut.json
+openreelio-cli frame extract --path ./demo --affected --grid auto   --label-cells --out ./look.jpg
+```
+
 ## Setup
 
 Install the CLI, point it at a project, and confirm the media toolchain.

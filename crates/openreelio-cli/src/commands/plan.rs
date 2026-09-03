@@ -467,6 +467,12 @@ fn applied_not_saved_report(
         "appliedNotSaved": true,
         "stepsApplied": applied["stepsExecuted"].clone(),
         "error": save_error.to_string(),
+        // The steps really are applied, so the ranges they changed still say
+        // where to look; only the snapshot is behind. The ranges are measured
+        // against one sequence, so the sequence has to come with them —
+        // without it the caller cannot tell which timeline they index.
+        "sequenceId": applied["sequenceId"].clone(),
+        "affectedRanges": applied["affectedRanges"].clone(),
         "stepResults": applied["stepResults"].clone(),
     })
 }
@@ -720,6 +726,21 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> PlanValidation {
     }
 }
 
+/// Applies an edit plan atomically, reporting where on the timeline it landed.
+///
+/// Every step result carries `affectedRanges` — the stretches of timeline that
+/// step changed — and the success envelope carries their union, so a caller
+/// knows which seconds are worth rendering without diffing the project itself.
+///
+/// Ranges are measured against one sequence, resolved once from the plan (see
+/// [`resolve_plan_sequence_id`]); a step that edits a different sequence
+/// reports no ranges rather than ranges read off the wrong timeline.
+///
+/// On failure the plan is rolled back. When the rollback completes, nothing it
+/// touched stayed changed: every step result and the top-level union then report
+/// an empty `affectedRanges`, because there is no longer anywhere to look. When
+/// it does not (`rollbackIncomplete: true`), the applied steps keep their ranges
+/// and the top-level union names them — see [`rolled_back_report`].
 pub(crate) fn apply_edit_plan(
     project: &mut openreelio_core::ActiveProject,
     plan: &EditPlan,
@@ -727,6 +748,8 @@ pub(crate) fn apply_edit_plan(
     let mut results = Vec::new();
     let mut succeeded = 0;
     let mut applied_op_ids: Vec<String> = Vec::new();
+    let target_sequence_id = resolve_plan_sequence_id(&project.state, plan);
+    let mut step_ranges: Vec<Vec<openreelio_core::TimeRange>> = Vec::new();
 
     // Rollback unwinds the executor's in-memory undo stack, and that stack is
     // capped for interactive use — far below the plan step cap. Without this,
@@ -742,15 +765,23 @@ pub(crate) fn apply_edit_plan(
 
     let sorted_steps = topological_sort(&plan.steps)?;
     for step in sorted_steps {
+        let before = openreelio_core::commands::SequenceSnapshot::capture(
+            &project.state,
+            &target_sequence_id,
+        );
         match execute_step(project, step, &step_results) {
             Ok(result) => {
+                let affected =
+                    before.affected_ranges(&project.state, &target_sequence_id, &result.changes);
                 results.push(serde_json::json!({
                     "stepId": step.id,
                     "status": "ok",
                     "opId": result.op_id,
                     "createdIds": result.created_ids,
                     "deletedIds": result.deleted_ids,
+                    "affectedRanges": affected,
                 }));
+                step_ranges.push(affected);
                 step_results.insert(
                     step.id.clone(),
                     openreelio_core::ai::StepResult {
@@ -774,6 +805,7 @@ pub(crate) fn apply_edit_plan(
                     "stepId": step.id,
                     "status": "error",
                     "error": e.to_string(),
+                    "affectedRanges": [],
                 }));
                 let mut rollback_failures = Vec::new();
                 for _ in 0..succeeded {
@@ -809,27 +841,112 @@ pub(crate) fn apply_edit_plan(
                     }
                 }
 
-                return Ok(serde_json::json!({
-                    "status": "error",
-                    "message": format!("Plan failed at step '{}': {}", step.id, e),
-                    "planId": plan.id,
-                    "failedStep": step.id,
-                    "error": e.to_string(),
-                    "rolledBack": succeeded,
-                    "rollbackIncomplete": !rollback_failures.is_empty(),
-                    "rollbackFailures": rollback_failures,
-                    "stepResults": results,
-                }));
+                return Ok(rolled_back_report(
+                    &plan.id,
+                    &step.id,
+                    &e.to_string(),
+                    &target_sequence_id,
+                    results,
+                    step_ranges,
+                    succeeded,
+                    rollback_failures,
+                ));
             }
         }
     }
+
+    let affected_ranges = openreelio_core::commands::union_ranges(step_ranges);
+    super::command::record_affected_ranges(
+        &project.path,
+        &target_sequence_id,
+        applied_op_ids,
+        &affected_ranges,
+    );
 
     Ok(serde_json::json!({
         "status": "ok",
         "planId": plan.id,
         "stepsExecuted": succeeded,
+        "sequenceId": (!target_sequence_id.is_empty()).then_some(target_sequence_id.as_str()),
+        "affectedRanges": affected_ranges,
         "stepResults": results,
     }))
+}
+
+/// Report for a plan that failed at a step and was rolled back.
+///
+/// Whether the ranges survive is decided by whether the rollback *worked*, and
+/// nothing else. A clean rollback puts every applied step back, so the ranges
+/// those steps reported no longer name anything changed and every one of them is
+/// blanked — sending an inspector to a frame that never differed is worse than
+/// sending it nowhere.
+///
+/// An incomplete rollback is the opposite case: an operation that could not be
+/// undone or discarded stays applied and comes back on the next open, so the
+/// project really is changed. Blanking the ranges there — which is what this
+/// used to do, because the ranges were cleared *before* the rollback ran and
+/// never restored — reported `affectedRanges: []` alongside
+/// `rollbackIncomplete: true`, telling the caller in one breath that the project
+/// was mutated and that nothing on the timeline moved. The union of the applied
+/// steps' ranges is the only honest answer to "where do I look now", so it is
+/// reported at the top level and each step keeps its own.
+#[allow(clippy::too_many_arguments)]
+fn rolled_back_report(
+    plan_id: &str,
+    failed_step: &str,
+    error: &str,
+    sequence_id: &str,
+    mut step_results: Vec<serde_json::Value>,
+    step_ranges: Vec<Vec<openreelio_core::TimeRange>>,
+    rolled_back: usize,
+    rollback_failures: Vec<String>,
+) -> serde_json::Value {
+    let rollback_incomplete = !rollback_failures.is_empty();
+
+    let affected_ranges = if rollback_incomplete {
+        serde_json::json!(openreelio_core::commands::union_ranges(step_ranges))
+    } else {
+        for entry in &mut step_results {
+            entry["affectedRanges"] = serde_json::json!([]);
+        }
+        serde_json::json!([])
+    };
+
+    serde_json::json!({
+        "status": "error",
+        "message": format!("Plan failed at step '{failed_step}': {error}"),
+        "planId": plan_id,
+        "failedStep": failed_step,
+        "error": error,
+        "rolledBack": rolled_back,
+        "rollbackIncomplete": rollback_incomplete,
+        "rollbackFailures": rollback_failures,
+        "sequenceId": (!sequence_id.is_empty()).then_some(sequence_id),
+        "affectedRanges": affected_ranges,
+        "stepResults": step_results,
+    })
+}
+
+/// Picks the sequence a plan's affected ranges are measured against.
+///
+/// The first step that names an existing `sequenceId` as a plain string wins;
+/// a plan that names none falls back to the active sequence. A `$fromStep`
+/// reference is skipped rather than guessed at, since its value is not settled
+/// until the referenced step runs.
+///
+/// Returns an empty string when nothing can be resolved — a project with no
+/// active sequence — which yields empty ranges rather than an error.
+fn resolve_plan_sequence_id(
+    state: &openreelio_core::project::ProjectState,
+    plan: &EditPlan,
+) -> String {
+    plan.steps
+        .iter()
+        .filter_map(|step| step.payload.get("sequenceId").and_then(|id| id.as_str()))
+        .find(|sequence_id| state.sequences.contains_key(*sequence_id))
+        .map(str::to_string)
+        .or_else(|| state.active_sequence_id.clone())
+        .unwrap_or_default()
 }
 
 /// Execute a single plan step by dispatching to the appropriate command.
@@ -1299,12 +1416,88 @@ mod tests {
         );
     }
 
+    /// One applied step's result, carrying the range it changed.
+    fn applied_step(step_id: &str, start_sec: f64, end_sec: f64) -> serde_json::Value {
+        serde_json::json!({
+            "stepId": step_id,
+            "status": "ok",
+            "affectedRanges": [{ "startSec": start_sec, "endSec": end_sec }],
+        })
+    }
+
+    #[test]
+    fn should_blank_every_range_when_the_rollback_completed() {
+        let report = rolled_back_report(
+            "plan-1",
+            "doomed",
+            "no such clip",
+            "sequence-1",
+            vec![
+                applied_step("a", 1.0, 3.0),
+                serde_json::json!({ "stepId": "doomed", "status": "error", "affectedRanges": [] }),
+            ],
+            vec![vec![openreelio_core::TimeRange::new(1.0, 3.0)]],
+            1,
+            Vec::new(),
+        );
+
+        assert_eq!(report["rollbackIncomplete"], false);
+        assert_eq!(report["affectedRanges"], serde_json::json!([]));
+        for entry in report["stepResults"].as_array().expect("stepResults") {
+            assert_eq!(
+                entry["affectedRanges"],
+                serde_json::json!([]),
+                "a step that was put back points nowhere: {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_keep_the_ranges_when_the_rollback_did_not_complete() {
+        // The project is still mutated, so reporting no ranges said "nothing
+        // moved" about a timeline that had. The union is where to look.
+        let report = rolled_back_report(
+            "plan-1",
+            "doomed",
+            "no such clip",
+            "sequence-1",
+            vec![
+                applied_step("a", 1.0, 3.0),
+                applied_step("b", 5.0, 6.0),
+                serde_json::json!({ "stepId": "doomed", "status": "error", "affectedRanges": [] }),
+            ],
+            vec![
+                vec![openreelio_core::TimeRange::new(1.0, 3.0)],
+                vec![openreelio_core::TimeRange::new(5.0, 6.0)],
+            ],
+            2,
+            vec!["undo failed".to_string()],
+        );
+
+        assert_eq!(report["rollbackIncomplete"], true);
+        assert_eq!(report["sequenceId"], "sequence-1");
+        assert_eq!(
+            report["affectedRanges"],
+            serde_json::json!([
+                { "startSec": 1.0, "endSec": 3.0 },
+                { "startSec": 5.0, "endSec": 6.0 },
+            ])
+        );
+        assert_eq!(
+            report["stepResults"][0]["affectedRanges"],
+            serde_json::json!([{ "startSec": 1.0, "endSec": 3.0 }]),
+            "an applied step that stayed applied keeps its own ranges"
+        );
+    }
+
     #[test]
     fn should_report_an_applied_but_unsaved_plan_without_inviting_a_retry() {
         let applied = serde_json::json!({
             "status": "ok",
             "planId": "plan-1",
             "stepsExecuted": 2,
+            "sequenceId": "sequence-1",
+            "affectedRanges": [{ "startSec": 1.0, "endSec": 3.0 }],
             "stepResults": [{ "stepId": "a" }, { "stepId": "b" }],
         });
 
@@ -1319,6 +1512,10 @@ mod tests {
         assert_eq!(report["stepsApplied"], 2);
         assert_eq!(report["planId"], "plan-1");
         assert_eq!(report["stepResults"], applied["stepResults"]);
+        // The ranges are measured against one sequence, so both travel or
+        // neither does: without the id they index a timeline nobody named.
+        assert_eq!(report["sequenceId"], "sequence-1");
+        assert_eq!(report["affectedRanges"], applied["affectedRanges"]);
         let message = report["message"].as_str().unwrap();
         assert!(message.contains("disk is full"), "{message}");
         assert!(

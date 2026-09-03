@@ -3049,7 +3049,13 @@ pub(super) fn apply_audio_mix_settings(
     current_label
 }
 
-pub(super) const TIMELINE_EPSILON_SEC: f64 = 0.001;
+/// Tolerance for treating two timeline instants as the same one (1 millisecond).
+///
+/// Shared beyond the render module so the timeline's own "does a clip start
+/// where this one ends" question is answered with the tolerance the stitcher
+/// answers it with; a looser or tighter one there would report a blend the
+/// renderer refuses, or hide one it places.
+pub(crate) const TIMELINE_EPSILON_SEC: f64 = 0.001;
 
 /// One stretch of picture on the timeline, ready to be concatenated.
 ///

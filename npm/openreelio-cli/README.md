@@ -70,8 +70,9 @@ openreelio-cli timeline undo  --path ./demo
 
 # 4. See the result, not just the JSON
 #    Contact-sheet times must land inside the sequence, so read its end first.
-END=$(openreelio-cli timeline clips --path ./demo \
-  | pick '.clips.reduce((m, c) => Math.max(m, c.timelineInSec + c.durationSec), 0)')
+#    `timeline info` reports it directly, along with fps, editPoints (cut times),
+#    markers and transition spans - no reducing over the clip list.
+END=$(openreelio-cli timeline info --path ./demo | pick '.durationSec')
 openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 "$END" --out ./frames/sheet.jpg
 openreelio-cli render start --path ./demo --proxy --output ./out/proxy.mp4 --progress
 
@@ -81,6 +82,19 @@ openreelio-cli verify --path ./demo --file ./out/proxy.mp4
 
 Clip-scoped verbs (`split`, `trim`, `move`, `speed`, `remove`) all need
 `--track` as well as `--clip`; `timeline clips` prints both.
+
+Every mutating verb reports where the edit landed. `command execute` and
+`plan execute` return `affectedRanges` - a sorted `[{startSec, endSec}]` list
+covering everything that moved, ripple shifts included - so the sheet or partial
+render that checks the result can be aimed at those seconds instead of the whole
+timeline. The last successful apply's union is also written to
+`<project>/.openreelio/cache/agent/last_affected_ranges.json`, which is what
+`frame extract --affected` reads:
+
+```bash
+openreelio-cli plan execute  --path ./demo --file cut.json
+openreelio-cli frame extract --path ./demo --affected --grid auto --out ./look.jpg
+```
 
 `verify --file` expects a render of the whole sequence, which is why step 4
 renders without `--start`/`--end`. Add them when you only want to eyeball a
@@ -109,6 +123,13 @@ segment where one exists — and each still reports whether it came from the
 `cache`, a fresh `composite` render, or (with the opt-in `--mode fast`) the
 clip's own `source` media.
 
+It also picks the times for you, so no cut arithmetic is needed: `--affected`
+(the seconds the last apply changed), `--at-cuts`, `--at-transitions`,
+`--at-captions`, `--at-markers`, `--per-shot`, `--around <SEC>`. Add
+`--grid auto` for one contact sheet whose cells carry their timecode and the
+`reason` they were sampled, and `--limit <N>` to cap how many frames come back.
+Uniform `--between` sampling lands on no event at all — keep it for an overview.
+
 ### MCP server
 
 `openreelio-cli` is also an MCP server over stdio, so MCP-capable agents can use
@@ -125,8 +146,10 @@ command log and stays undoable.
 
 The read tools cover the whole perception loop, so a vision-capable host closes
 it without shelling out: `openreelio.frame.extract` returns stills and contact
-sheets **inline** as MCP `image` blocks, and `openreelio.verify` returns the
-deterministic QC report. Both are available without any write grant.
+sheets **inline** as MCP `image` blocks — including the samplers, so
+`{ "affected": true, "grid": "auto" }` after an apply is one image of exactly
+what changed — and `openreelio.verify` returns the deterministic QC report. Both
+are available without any write grant.
 
 MCP registry identifier:
 

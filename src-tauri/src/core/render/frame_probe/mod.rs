@@ -26,18 +26,25 @@
 //! just to find the diagnostics.
 
 mod file;
+mod sampler;
 mod sheet;
 mod timeline;
 
+pub use sampler::{
+    auto_grid, Sample, SampleReason, SamplerReport, SamplerSpec, DEFAULT_AROUND_COUNT,
+    DEFAULT_AROUND_SPAN_SEC,
+};
 pub use sheet::{
     ensure_sheet_dimensions_in_range, MAX_CELL_SIZE_PX, MAX_SHEET_DIMENSION_PX, MIN_CELL_SIZE_PX,
 };
 pub use timeline::{FrameSource, MIN_COMPOSITE_WINDOW_SEC};
 
 use super::ImageFormat;
+use crate::core::commands::load_last_affected_ranges;
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::project::ProjectState;
 use crate::core::timeline::Sequence;
+use sampler::{SamplerInputs, SamplerOutcome};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -129,6 +136,44 @@ pub struct FrameProbeRequest {
     pub cell_height: Option<u32>,
     /// Burn each cell's index and timecode into the contact sheet.
     pub label_cells: bool,
+    /// Sample both sides of every cut.
+    pub at_cuts: bool,
+    /// Sample the start, cut and end of every two-input transition.
+    pub at_transitions: bool,
+    /// Sample the middle of every caption and text span.
+    pub at_captions: bool,
+    /// Sample every sequence marker.
+    pub at_markers: bool,
+    /// Sample the middle of every shot.
+    pub per_shot: bool,
+    /// Sample a window centred on this timeline time, in seconds.
+    pub around: Option<f64>,
+    /// Half-width of the `around` window in seconds.
+    pub span: Option<f64>,
+    /// Number of samples the `around` window produces.
+    pub around_count: Option<usize>,
+    /// Sample the ranges the last successful apply changed.
+    pub affected: bool,
+    /// Largest number of samples a sampler keeps.
+    pub limit: Option<usize>,
+}
+
+impl FrameProbeRequest {
+    /// The samplers this request asked for.
+    fn sampler_spec(&self) -> SamplerSpec {
+        SamplerSpec {
+            at_cuts: self.at_cuts,
+            at_transitions: self.at_transitions,
+            at_captions: self.at_captions,
+            at_markers: self.at_markers,
+            per_shot: self.per_shot,
+            around: self.around,
+            span: self.span,
+            around_count: self.around_count,
+            affected: self.affected,
+            limit: self.limit,
+        }
+    }
 }
 
 /// The project a timeline probe reads.
@@ -210,6 +255,37 @@ enum Selection {
         rows: usize,
         times: Vec<f64>,
     },
+    /// Times an event-driven sampler will choose once the sequence is known.
+    ///
+    /// Resolved late on purpose: a request is validated before the project is
+    /// opened, and the cuts, captions and markers a sampler reads only exist
+    /// after `ops.jsonl` has been replayed. Keeping the spec here preserves
+    /// that ordering — [`FrameProbePlan::resolve`] still spawns nothing and
+    /// reads nothing.
+    Sampled {
+        spec: SamplerSpec,
+        /// Contact-sheet layout, or `None` for a batch of stills.
+        grid: Option<GridLayout>,
+    },
+}
+
+/// How a contact sheet's layout was requested.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GridLayout {
+    /// `auto`: the layout follows however many samples there turn out to be.
+    Auto,
+    /// An explicit `COLSxROWS`.
+    Fixed { columns: usize, rows: usize },
+}
+
+/// Parses a `--grid` value, which is either `auto` or `COLSxROWS`.
+fn parse_grid_layout(raw: &str) -> FrameProbeResult<GridLayout> {
+    if raw.trim().eq_ignore_ascii_case("auto") {
+        return Ok(GridLayout::Auto);
+    }
+
+    let (columns, rows) = parse_grid_spec(raw)?;
+    Ok(GridLayout::Fixed { columns, rows })
 }
 
 /// Validates that a time value in seconds is non-negative.
@@ -257,7 +333,12 @@ fn ensure_time_range_ordered(
 /// what makes cut-boundary sheets possible, since the agent already knows the
 /// cut times from `timeline clips`.
 fn resolve_grid_selection(request: &FrameProbeRequest, grid: &str) -> FrameProbeResult<Selection> {
-    let (columns, rows) = parse_grid_spec(grid)?;
+    let (columns, rows) = match parse_grid_layout(grid)? {
+        GridLayout::Fixed { columns, rows } => (columns, rows),
+        // `auto` sizes itself from the samples, and without a sampler the only
+        // other list whose length is known here is `--times`.
+        GridLayout::Auto => return resolve_auto_grid_selection(request),
+    };
     let capacity = columns.checked_mul(rows).ok_or_else(|| {
         FrameProbeError::new(format!(
             "Invalid value for --grid: {}x{} is too large",
@@ -294,6 +375,36 @@ fn resolve_grid_selection(request: &FrameProbeRequest, grid: &str) -> FrameProbe
         // dead rows. Keep only the rows the samples reach.
         rows: times.len().div_ceil(columns),
         times,
+    })
+}
+
+/// Resolves `--grid auto` for a caller who listed the times themselves.
+///
+/// `auto` exists so a caller does not have to know how many samples an event
+/// sampler will find. A `--between` sweep has no such unknown — the caller
+/// chose the count — so it still states its own layout.
+fn resolve_auto_grid_selection(request: &FrameProbeRequest) -> FrameProbeResult<Selection> {
+    let Some(listed) = request.times.as_deref() else {
+        return Err(FrameProbeError::new(
+            "--grid auto sizes the sheet from its samples, so it needs a sampler (--at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around, --affected) or --times. With --between, pass an explicit --grid COLSxROWS."
+                .to_string(),
+        ));
+    };
+    if listed.is_empty() {
+        return Err(FrameProbeError::new(
+            "--times requires at least one value".to_string(),
+        ));
+    }
+    for time in listed {
+        ensure_time_non_negative(*time, "times")?;
+    }
+
+    let (columns, rows) = auto_grid(listed.len())?;
+
+    Ok(Selection::Grid {
+        columns,
+        rows,
+        times: listed.to_vec(),
     })
 }
 
@@ -402,7 +513,67 @@ fn ensure_grid_only_flags_unused(request: &FrameProbeRequest) -> FrameProbeResul
     )))
 }
 
+/// Selectors that name the times themselves, and so cannot be combined with a
+/// sampler that derives them.
+const SAMPLER_EXCLUSIVE_FLAGS: [&str; 6] = [
+    "--time",
+    "--times",
+    "--between",
+    "--count",
+    "--asset",
+    "--file",
+];
+
+/// Rejects a sampler combined with a selector that already names its times.
+///
+/// Samplers union with each other, but not with a hand-written list: a request
+/// carrying both is ambiguous about which times the pictures are of, and
+/// silently preferring either one hides the other from the caller.
+fn ensure_sampler_selectors_unused(request: &FrameProbeRequest) -> FrameProbeResult<()> {
+    let present: Vec<&str> = [
+        request.time.is_some(),
+        request.times.is_some(),
+        request.between.is_some(),
+        request.count.is_some(),
+        request.asset.is_some(),
+        request.file.is_some(),
+    ]
+    .iter()
+    .zip(SAMPLER_EXCLUSIVE_FLAGS)
+    .filter_map(|(used, flag)| used.then_some(flag))
+    .collect();
+
+    if present.is_empty() {
+        return Ok(());
+    }
+
+    Err(FrameProbeError::new(format!(
+        "A sampler chooses its own times, so it cannot be combined with {}. Drop the sampler flags, or drop {}.",
+        present.join(", "),
+        present.join(" and ")
+    )))
+}
+
 fn resolve_selection(request: &FrameProbeRequest) -> FrameProbeResult<Selection> {
+    let spec = request.sampler_spec();
+    if spec.is_active() {
+        ensure_sampler_selectors_unused(request)?;
+        ensure_grid_only_flags_unused(request)?;
+        let grid = match request.grid.as_deref() {
+            Some(raw) => Some(parse_grid_layout(raw)?),
+            None => None,
+        };
+        return Ok(Selection::Sampled { spec, grid });
+    }
+
+    let orphaned = spec.orphaned_modifiers();
+    if !orphaned.is_empty() {
+        return Err(FrameProbeError::new(format!(
+            "{} only shapes a sampler. Add one of --at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around <SEC> or --affected, or drop the flag.",
+            orphaned.join(", ")
+        )));
+    }
+
     ensure_grid_only_flags_unused(request)?;
 
     if let Some(grid) = &request.grid {
@@ -443,7 +614,7 @@ fn resolve_selection(request: &FrameProbeRequest) -> FrameProbeResult<Selection>
     }
 
     Err(FrameProbeError::new(
-        "Nothing to extract: pass --time, --times, --grid, or --asset with --source-time"
+        "Nothing to extract: pass a sampler (--affected, --at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around <SEC>), or --time, --times, --grid, or --asset with --source-time"
             .to_string(),
     ))
 }
@@ -538,6 +709,7 @@ impl FrameProbePlan {
                     self.mode,
                     &[time],
                     false,
+                    None,
                 )
                 .await
             }
@@ -550,6 +722,7 @@ impl FrameProbePlan {
                     self.mode,
                     times,
                     true,
+                    None,
                 )
                 .await
             }
@@ -567,11 +740,174 @@ impl FrameProbePlan {
                     columns,
                     rows,
                     times,
+                    None,
                 )
                 .await
             }
+            Selection::Sampled { ref spec, grid } => {
+                let outcome = run_samplers(project, &self.request, spec)?;
+                let times: Vec<f64> = outcome
+                    .samples
+                    .iter()
+                    .map(|sample| sample.time_sec)
+                    .collect();
+                let reasons: Vec<SampleReason> =
+                    outcome.samples.iter().map(|sample| sample.reason).collect();
+                let context = timeline::SamplerContext {
+                    reasons: &reasons,
+                    report: &outcome.report,
+                };
+
+                match grid {
+                    Some(layout) => {
+                        let (columns, rows) =
+                            resolve_sampled_grid(layout, times.len(), &self.request)?;
+                        timeline::run_grid_mode(
+                            project,
+                            runner,
+                            &self.request,
+                            self.format,
+                            self.mode,
+                            columns,
+                            rows,
+                            &times,
+                            Some(&context),
+                        )
+                        .await
+                    }
+                    None => {
+                        timeline::run_timeline_mode(
+                            project,
+                            runner,
+                            &self.request,
+                            self.format,
+                            self.mode,
+                            &times,
+                            true,
+                            Some(&context),
+                        )
+                        .await
+                    }
+                }
+            }
         }
     }
+}
+
+/// Runs the samplers against the opened project's sequence.
+fn run_samplers(
+    project: &FrameProbeProject<'_>,
+    request: &FrameProbeRequest,
+    spec: &SamplerSpec,
+) -> FrameProbeResult<SamplerOutcome> {
+    let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
+    let affected_ranges = if spec.affected {
+        resolve_affected_ranges(project, &sequence_id)?
+    } else {
+        Vec::new()
+    };
+
+    sampler::run(
+        spec,
+        &SamplerInputs {
+            sequence,
+            effects: &project.state.effects,
+            affected_ranges: &affected_ranges,
+        },
+    )
+}
+
+/// Reads the ranges the last successful apply changed.
+///
+/// The hand-off file is written by every mutating verb, so its absence means no
+/// edit has been applied to this project through the CLI or the MCP server yet —
+/// which is a different problem from an empty edit, and the message has to say
+/// which one the caller is looking at.
+///
+/// A record whose last operation is not the project's current one is refused
+/// rather than used. The file is a hand-off, not a history: an undo, a redo, or
+/// an edit applied by a surface that does not record one leaves it describing a
+/// state the project has left, and the sampler would then point confidently at
+/// the wrong seconds — the one failure mode `--affected` exists to remove.
+fn resolve_affected_ranges(
+    project: &FrameProbeProject<'_>,
+    sequence_id: &str,
+) -> FrameProbeResult<Vec<crate::core::TimeRange>> {
+    let Some(record) = load_last_affected_ranges(project.path) else {
+        return Err(FrameProbeError::new(
+            "--affected reads the ranges the last edit changed, and this project has none recorded. Apply an edit with `command execute` or `plan execute` first, or pass --between <START> <END> to sweep the timeline instead."
+                .to_string(),
+        ));
+    };
+    if record.sequence_id != sequence_id {
+        return Err(FrameProbeError::new(format!(
+            "The last recorded edit changed sequence '{}', not '{}'. Extract from that sequence with --sequence {}, apply an edit to this one first, or pass --between <START> <END>.",
+            record.sequence_id, sequence_id, record.sequence_id
+        )));
+    }
+    if record.op_ids.last().map(String::as_str) != project.state.last_op_id.as_deref() {
+        return Err(FrameProbeError::new(format!(
+            "The recorded hand-off ends at operation {}, but this project is at {}, so the last edit was not recorded: run the edit through `command execute` or `plan execute`, or pass --between <START> <END>.",
+            describe_op_id(record.op_ids.last().map(String::as_str)),
+            describe_op_id(project.state.last_op_id.as_deref()),
+        )));
+    }
+    if record.affected_ranges.is_empty() {
+        return Err(FrameProbeError::new(format!(
+            "The last recorded edit on sequence '{}' moved nothing on the timeline, so --affected has nothing to look at. Pass --between <START> <END>, or a sampler such as --at-cuts.",
+            sequence_id
+        )));
+    }
+
+    Ok(record.affected_ranges)
+}
+
+/// Names an operation id for a message, or says there is none.
+fn describe_op_id(op_id: Option<&str>) -> String {
+    match op_id {
+        Some(op_id) => format!("'{op_id}'"),
+        None => "no operation at all".to_string(),
+    }
+}
+
+/// Chooses the contact-sheet layout for a sampler's times.
+///
+/// An explicit grid is honoured but not padded: rows no sample reaches are
+/// dropped exactly as they are for `--times`, so the sheet that is measured is
+/// the sheet that gets built.
+fn resolve_sampled_grid(
+    layout: GridLayout,
+    count: usize,
+    request: &FrameProbeRequest,
+) -> FrameProbeResult<(usize, usize)> {
+    let (columns, rows) = match layout {
+        GridLayout::Auto => auto_grid(count)?,
+        GridLayout::Fixed { columns, rows } => {
+            let capacity = columns.checked_mul(rows).ok_or_else(|| {
+                FrameProbeError::new(format!(
+                    "Invalid value for --grid: {}x{} is too large",
+                    columns, rows
+                ))
+            })?;
+            if capacity > MAX_GRID_CELLS {
+                return Err(FrameProbeError::new(format!(
+                    "Invalid value for --grid: {}x{} needs {} cells, more than the maximum of {}",
+                    columns, rows, capacity, MAX_GRID_CELLS
+                )));
+            }
+            if count > capacity {
+                return Err(FrameProbeError::new(format!(
+                    "The samplers selected {} times, more than the {}x{} grid holds ({}). Add --limit {}, or ask for a bigger grid.",
+                    count, columns, rows, capacity, capacity
+                )));
+            }
+            (columns, count.div_ceil(columns))
+        }
+    };
+
+    ensure_sheet_dimensions_in_range(columns, rows, request.cell_width, request.cell_height)?;
+
+    Ok((columns, rows))
 }
 
 /// Rejects contact-sheet cell dimensions outside the supported range.
@@ -658,6 +994,9 @@ pub(super) struct FrameEntry {
     /// it, and it still answers a different question: `source` says what
     /// produced the picture, this says whether `fast` could keep its promise.
     pub fell_back_to_composite: Option<bool>,
+    /// Why a sampler chose this time; absent when the caller named it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SampleReason>,
 }
 
 /// One contact-sheet cell, mapping a grid position back to a timeline time.
@@ -668,6 +1007,9 @@ pub(super) struct GridCell {
     pub row: usize,
     pub col: usize,
     pub timeline_sec: f64,
+    /// Why a sampler chose this cell's time; absent when the caller named it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SampleReason>,
 }
 
 /// One still extracted from a rendered file, in that file's own timebase.
@@ -697,16 +1039,19 @@ pub(super) struct FileGridCell {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Last timeline position the sequence has any content at.
+/// Last timeline position the sequence renders any content at.
+///
+/// Delegates to [`Sequence::output_duration`] — the length the render pipeline
+/// pads its output to — because a still is extracted by rendering a window and
+/// the window is snapped against that length. Measuring the clips directly here
+/// looked equivalent but was not: it kept clips on tracks the export drops, so
+/// a muted twenty-second music bed made a four-second edit report twenty
+/// seconds. Every time then snapped against a different length than the
+/// renderer used, and two samples a frame apart could resolve to one frame —
+/// `cutBefore` and `cutAfter` returning the same picture, which reads as a cut
+/// that is not there.
 fn sequence_duration_sec(sequence: &Sequence) -> f64 {
-    sequence
-        .tracks
-        .iter()
-        .flat_map(|track| track.clips.iter())
-        .filter(|clip| clip.enabled)
-        .map(|clip| clip.place.timeline_out_sec())
-        .filter(|end| end.is_finite())
-        .fold(0.0_f64, f64::max)
+    sequence.output_duration()
 }
 
 /// Rejects requested times the sequence has no content at.
@@ -1115,6 +1460,168 @@ mod tests {
         remove_stale_output(&target).expect("stale output is removed");
         assert!(!target.exists());
         remove_stale_output(&target).expect("a missing output is not an error");
+    }
+
+    #[test]
+    fn resolve_selection_should_defer_a_sampler_until_the_sequence_is_known() {
+        let mut request = grid_request("3x2", None);
+        request.grid = None;
+        request.between = None;
+        request.at_cuts = true;
+        request.affected = true;
+
+        let Selection::Sampled { spec, grid } =
+            resolve_selection(&request).expect("a sampler resolves without a project")
+        else {
+            panic!("Expected a deferred sampler selection");
+        };
+        assert!(spec.at_cuts && spec.affected);
+        assert!(grid.is_none(), "no --grid means a batch of stills");
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_a_sampler_combined_with_an_explicit_time_list() {
+        let mut request = grid_request("3x2", None);
+        request.grid = None;
+        request.between = None;
+        request.times = Some(vec![1.0, 2.0]);
+        request.at_cuts = true;
+
+        let message = resolve_selection(&request)
+            .expect_err("a sampler and a hand-written list describe different pictures")
+            .to_string();
+
+        assert!(
+            message.contains("--times") && message.contains("sampler"),
+            "Error should name the conflicting selector, got: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_a_sampler_over_a_rendered_file() {
+        let mut request = grid_request("3x2", None);
+        request.grid = None;
+        request.between = None;
+        request.file = Some(PathBuf::from("render.mp4"));
+        request.per_shot = true;
+
+        assert!(
+            resolve_selection(&request).is_err(),
+            "a rendered file has no timeline to sample"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_limit_without_a_sampler_to_shape() {
+        let mut request = grid_request("3x2", None);
+        request.grid = None;
+        request.between = None;
+        request.time = Some(1.0);
+        request.limit = Some(4);
+
+        let message = resolve_selection(&request)
+            .expect_err("a budget nothing reads is a budget nothing honours")
+            .to_string();
+
+        assert!(
+            message.contains("--limit") && message.contains("--at-cuts"),
+            "Error should name the flag and a sampler to pair it with, got: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_carry_an_auto_grid_through_to_the_sampler() {
+        let mut request = grid_request("3x2", None);
+        request.grid = Some("AUTO".to_string());
+        request.between = None;
+        request.at_markers = true;
+
+        let Selection::Sampled { grid, .. } =
+            resolve_selection(&request).expect("auto resolves alongside a sampler")
+        else {
+            panic!("Expected a deferred sampler selection");
+        };
+        assert_eq!(grid, Some(GridLayout::Auto));
+    }
+
+    #[test]
+    fn resolve_selection_should_size_an_auto_grid_from_a_listed_time_count() {
+        let mut request = grid_request("3x2", None);
+        request.grid = Some("auto".to_string());
+        request.between = None;
+        request.times = Some(vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+
+        let Selection::Grid { columns, rows, .. } =
+            resolve_selection(&request).expect("auto sizes itself from the list")
+        else {
+            panic!("Expected a grid selection");
+        };
+        assert_eq!((columns, rows), (3, 2), "five samples fill a 3-wide sheet");
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_an_auto_grid_over_a_sampled_range() {
+        let mut request = grid_request("auto", None);
+
+        let message = resolve_selection(&request.clone())
+            .expect_err("--between already fixes its own count")
+            .to_string();
+        assert!(
+            message.contains("--between") && message.contains("COLSxROWS"),
+            "Error should point at an explicit layout, got: {message}"
+        );
+
+        request.between = None;
+        assert!(resolve_selection(&request).is_err());
+    }
+
+    #[test]
+    fn resolve_sampled_grid_should_refuse_more_samples_than_an_explicit_grid_holds() {
+        let request = FrameProbeRequest {
+            out: PathBuf::from("sheet.jpg"),
+            ..FrameProbeRequest::default()
+        };
+
+        let message = resolve_sampled_grid(
+            GridLayout::Fixed {
+                columns: 2,
+                rows: 2,
+            },
+            6,
+            &request,
+        )
+        .expect_err("six samples cannot fill four cells")
+        .to_string();
+
+        assert!(
+            message.contains("--limit") && message.contains('6'),
+            "Error should name the count and the way out, got: {message}"
+        );
+        assert_eq!(
+            resolve_sampled_grid(
+                GridLayout::Fixed {
+                    columns: 3,
+                    rows: 3
+                },
+                4,
+                &request
+            )
+            .expect("a short list drops the rows it does not reach"),
+            (3, 2)
+        );
+    }
+
+    #[test]
+    fn parse_grid_layout_should_accept_auto_and_explicit_layouts() {
+        assert_eq!(parse_grid_layout(" Auto ").unwrap(), GridLayout::Auto);
+        assert_eq!(
+            parse_grid_layout("4x3").unwrap(),
+            GridLayout::Fixed {
+                columns: 4,
+                rows: 3
+            }
+        );
+        assert!(parse_grid_layout("automatic").is_err());
     }
 
     #[test]

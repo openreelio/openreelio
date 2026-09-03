@@ -58,6 +58,8 @@ openreelio-cli analysis build-selects  --path ./demo --query "crowd cheer" \
 ## Look at frames
 
 ```bash
+openreelio-cli frame extract --path ./demo --affected --grid auto --out changed.jpg
+openreelio-cli frame extract --path ./demo --at-cuts --grid auto --out cuts.jpg
 openreelio-cli frame extract --path ./demo --time 12.5 --out frame.png
 openreelio-cli frame extract --path ./demo --times 2,8,14 --out ./stills/
 openreelio-cli frame extract --path ./demo --asset <ASSET_ID> --source-time 3.0 --out src.png
@@ -95,13 +97,50 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   `--format` contradicting a `.png`/`.jpg` extension is rejected instead of
   quietly writing somewhere else.
 
-**Contact sheets.** `--grid COLSxROWS` with either `--between START END
-[--count N]` (uniform sampling) or `--times a,b,c` (explicit list, kept in the
-order given) writes one sheet and returns
-`sheet.cells[{index,row,col,timelineSec}]`, mapping every cell a vision model
-comments on back to a timecode. Capped at 100 cells, and at 8000 px on either
-finished edge — an oversized combination is rejected before any cell is
+**Samplers: let the edit choose the times.** Rather than reading `timeline info`
+and assembling a `--times` list, ask for the events:
+
+| Flag | Samples | `reason` on each frame/cell |
+| ---- | ------- | --------------------------- |
+| `--affected` | every range the last applied edit changed: its start, its middle, its last frame, and both sides of each cut inside it | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
+| `--at-cuts` | every cut, twice: the outgoing shot's last frame at `cut − 1.5/fps` and the incoming shot's first at the cut itself | `cutBefore` `cutAfter` |
+| `--at-transitions` | each two-input blend's start, cut and end | `transitionStart` `transitionCut` `transitionEnd` |
+| `--at-captions` | the middle of every caption span and text clip | `captionMid` `textMid` |
+| `--at-markers` | every sequence marker | `marker` |
+| `--per-shot` | the middle of every enabled, non-text clip on the video tracks the export includes | `shotMid` |
+| `--around <SEC>` | a window around one time — `--span` (default 0.5 s) and `--around-count` (default 5) | `around` |
+
+- The offset before a cut is a frame and a half, not a frame: seeks resolve
+  **forward**, so a smaller backoff lands on the incoming shot and both samples
+  show the same picture.
+- Samplers combine as a union, deduplicate to the microsecond, and sort
+  ascending. They cannot be combined with `--time`, `--times`, `--between`,
+  `--count`, `--asset` or `--file`, which name their own times.
+- `--limit <N>` thins an oversized selection evenly, keeping its first and last
+  entry.
+- The payload gains `sampler: {kinds, candidates, selected, limited,
+  affectedRanges?}`, so a thinned list is visible rather than looking like a
+  short timeline.
+- `--affected` reads
+  `<project>/.openreelio/cache/agent/last_affected_ranges.json`, written by every
+  successful mutating verb: `command execute`, `plan execute`, and the
+  `timeline`, `text` and `caption` edit verbs. With no record, one naming another
+  sequence, or one that does not end at the project's current operation, it
+  errors and says what to do — it never guesses.
+- Without `--grid` a sampler writes a batch of stills, so `--out` must be a
+  directory.
+
+**Contact sheets.** `--grid COLSxROWS` with either a sampler, `--between START
+END [--count N]` (uniform sampling) or `--times a,b,c` (explicit list, kept in
+the order given) writes one sheet and returns
+`sheet.cells[{index,row,col,timelineSec,reason?}]`, mapping every cell a vision
+model comments on back to a timecode. Capped at 100 cells, and at 8000 px on
+either finished edge — an oversized combination is rejected before any cell is
 extracted.
+
+- `--grid auto` picks the layout from the sample count: 1 column for a single
+  sample, 2 for two, 3 up to 9, 4 up to 16, then 6. It needs a sampler or `--times`, since
+  `--between` already fixes its own count.
 
 - `--label-cells` burns each cell's index and *requested* timecode into the
   image, so the mapping survives without the JSON — use it beyond a 3×3.
@@ -126,4 +165,5 @@ rejected with the sequence's real duration in the message — the `0 30` above
 assumes a sequence at least 30 s long, so check `timeline info` first.
 
 Single and batch extraction return
-`frames[{index,timeSec,sourceTimeSec,clipId,assetId,path,width,height}]`.
+`frames[{index,timeSec,sourceTimeSec,clipId,assetId,path,width,height}]`, plus
+`reason` on every frame a sampler chose.

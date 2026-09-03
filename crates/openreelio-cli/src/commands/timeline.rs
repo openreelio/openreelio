@@ -264,12 +264,22 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
                 })
                 .collect();
 
-            output::print_json_pretty(&serde_json::json!({
+            // The inspection summary answers "where do I look" — duration,
+            // frame rate, cut times, marker times, transition spans and the
+            // caption/text spans — so an agent stops reconstructing those from
+            // `timeline clips` by hand. It is merged alongside the existing
+            // keys, never in place of them.
+            let summary =
+                openreelio_core::timeline::inspection_summary(seq, &project.state.effects);
+            let mut info = serde_json::json!({
                 "sequenceId": seq_id,
                 "name": seq.name,
                 "tracks": tracks,
                 "trackCount": seq.tracks.len(),
-            }))
+            });
+            merge_summary(&mut info, &summary)?;
+
+            output::print_json_pretty(&info)
         }
 
         TimelineAction::Clips {
@@ -362,16 +372,18 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             // insert. For audio-less assets this behaves identically to a plain
             // clip insert.
             let cmd = InsertMediaCommand::new(&seq_id, &track, &asset, at);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Insert failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "createdIds": result.created_ids,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -386,16 +398,18 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = RemoveClipCommand::new(&seq_id, &track, &clip);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Remove failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "deletedIds": result.deleted_ids,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -419,15 +433,17 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             if let Some(ref target_track) = new_track {
                 cmd = cmd.to_track(target_track);
             }
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Move failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -447,15 +463,17 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             let cmd = TrimClipCommand::new(
                 &seq_id, &track, &clip, source_in, source_out, None, // timeline_in
             );
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Trim failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -472,16 +490,18 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = SplitClipCommand::new(&seq_id, &track, &clip, at);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Split failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "createdIds": result.created_ids,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -499,15 +519,17 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = SetClipSpeedCommand::new(&seq_id, &track, &clip, speed, reverse);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Set speed failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -533,16 +555,18 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
                 }
             };
             let cmd = AddTrackCommand::new(&seq_id, &name, track_kind);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Add track failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "createdIds": result.created_ids,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -555,16 +579,18 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = RemoveTrackCommand::new(&seq_id, &track);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Remove track failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "deletedIds": result.deleted_ids,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -593,4 +619,23 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             }))
         }
     }
+}
+
+/// Merges a serialized [`openreelio_core::timeline::InspectionSummary`] into an
+/// existing JSON object.
+///
+/// Additive by contract: every key the summary contributes is new, so an
+/// existing reader of `timeline info` keeps every field it already parsed.
+fn merge_summary(
+    target: &mut serde_json::Value,
+    summary: &openreelio_core::timeline::InspectionSummary,
+) -> anyhow::Result<()> {
+    let serde_json::Value::Object(fields) = serde_json::to_value(summary)? else {
+        anyhow::bail!("Inspection summary did not serialize to a JSON object");
+    };
+    let Some(object) = target.as_object_mut() else {
+        anyhow::bail!("Timeline info payload is not a JSON object");
+    };
+    object.extend(fields);
+    Ok(())
 }

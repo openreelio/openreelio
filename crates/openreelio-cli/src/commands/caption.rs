@@ -1128,17 +1128,19 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 .with_text(&text)
                 .with_style(style)
                 .with_position(position);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Add caption failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "createdIds": result.created_ids,
                 "trackId": track_id,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -1193,16 +1195,18 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 .with_time_range(start, end)
                 .with_style(style)
                 .with_position(position);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Update caption failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "trackId": track_id,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -1222,17 +1226,19 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             };
 
             let cmd = DeleteCaptionCommand::new(&seq_id, &track_id, &id);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Remove caption failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "deletedIds": result.deleted_ids,
                 "trackId": track_id,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -1303,6 +1309,12 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             let (track_id, created_track) =
                 ensure_caption_track(&mut project, &seq_id, track.as_deref())?;
 
+            // One recorder for the whole import: the ranges a caller wants are
+            // the stretch the imported cues cover, not the last cue's span. A
+            // failed import returns before `finish`, so a rolled-back import
+            // records nothing — there is nowhere to look.
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+
             let mut created_ids = Vec::new();
             if matches!(format, CaptionFileFormat::TranscriptJson) {
                 let mut segments: Vec<GeneratedCaptionSegment> = captions
@@ -1339,7 +1351,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                     .with_style(style.clone())
                     .with_position(position.clone());
 
-                match project.executor.execute(Box::new(cmd), &mut project.state) {
+                match edit.execute(&mut project, Box::new(cmd)) {
                     Ok(result) => {
                         created_ids = result.created_ids;
                     }
@@ -1363,7 +1375,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                     .with_style(style.clone())
                     .with_position(position.clone());
 
-                    match project.executor.execute(Box::new(cmd), &mut project.state) {
+                    match edit.execute(&mut project, Box::new(cmd)) {
                         Ok(result) => {
                             if let Some(created_id) = result.created_ids.first() {
                                 created_ids.push(created_id.clone());
@@ -1395,18 +1407,15 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
 
             if let Some(language) = &language {
                 let cmd = SetCaptionTrackLanguageCommand::new(&seq_id, &track_id, language);
-                project
-                    .executor
-                    .execute(Box::new(cmd), &mut project.state)
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "Caption import succeeded, but setting track language failed: {}",
-                            error
-                        )
-                    })?;
+                edit.execute(&mut project, Box::new(cmd)).map_err(|error| {
+                    anyhow::anyhow!(
+                        "Caption import succeeded, but setting track language failed: {}",
+                        error
+                    )
+                })?;
             }
 
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
@@ -1416,6 +1425,8 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 "format": format.as_str(),
                 "language": language,
                 "source": subtitle_path.display().to_string(),
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
