@@ -56,6 +56,7 @@ use openreelio_core::commands::SplitClipCommand;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
 use openreelio_core::fs::is_network_path;
 use openreelio_core::ipc::CommandPayload;
+use openreelio_core::qc::verify::VerifyRequest;
 #[cfg(test)]
 use openreelio_core::render::frame_probe::frame_cache_dir;
 use openreelio_core::render::frame_probe::{
@@ -2142,27 +2143,23 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
         .map(|requested| confine_to_project(project_path, "file", &requested))
         .transpose()?;
 
-    let args = verify::VerifyArgs {
-        path: project_path.clone(),
+    let request = VerifyRequest {
         sequence: optional_string_argument(&arguments, "sequenceId")?,
         file,
         structural_only,
         checks: optional_string_array_argument(&arguments, "checks")?,
         skip: optional_string_array_argument(&arguments, "skip")?,
-        target_lufs: None,
-        max_true_peak: None,
-        duration_tolerance_sec: None,
         fail_on: optional_string_argument(&arguments, "failOn")?
             .unwrap_or_else(|| DEFAULT_VERIFY_FAIL_ON.to_string()),
         timeout_sec: VERIFY_MEASURE_TIMEOUT_SEC,
-        json_pretty: false,
+        ..Default::default()
     };
 
     // The exit code is dropped on purpose: the report already carries `status`,
     // `passed`, and the per-check outcomes an MCP client acts on, and a JSON-RPC
     // result has nowhere honest to put a process code.
-    let (report, _exit_code) =
-        verify::run_verify(args).map_err(|error| ToolError::Execution(error.to_string()))?;
+    let (report, _exit_code) = verify::run_verify(project_path, request)
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
     Ok(report)
 }
 
