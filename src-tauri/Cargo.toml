@@ -141,8 +141,13 @@ open = { version = "5", optional = true }
 trash = "5"
 tempfile = "3"
 
+# Frame stills travel to agents as inline base64, on every build: the frame
+# probe's artifact helpers are part of the Tauri-free core the CLI links, which
+# is built without `ai-providers`. Keeping this optional would leave the core's
+# only encoder behind a feature the core never turns on.
+base64 = "0.22"
+
 # FFmpeg bundler and AI providers (optional)
-base64 = { version = "0.22", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json", "multipart"], optional = true }
 sha2 = { version = "0.10", optional = true }
 zip = { version = "2.2", optional = true }
@@ -201,7 +206,7 @@ whisper-openblas = ["whisper", "whisper-rs/openblas"]
 # Enable Meilisearch full-text search
 meilisearch = ["dep:meilisearch-sdk", "dep:futures", "dep:reqwest"]
 # Enable AI providers (OpenAI, Anthropic, Ollama)
-ai-providers = ["dep:base64", "dep:reqwest"]
+ai-providers = ["dep:reqwest"]
 # Full AI bundle (for production builds with all features)
 ai-full = ["whisper", "meilisearch", "ai-providers"]
 # Development build with all features enabled (for contributors)

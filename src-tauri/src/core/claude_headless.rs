@@ -117,10 +117,24 @@ pub enum ClaudeHeadlessStreamEvent {
     Exit { exit_code: Option<i32> },
 }
 
+/// One inline image content block a tool result carries.
+///
+/// MCP (2025-06-18) carries pictures as `{ type: "image", data, mimeType }`
+/// where `data` is raw base64 with no `data:` URI prefix.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct McpImageBlock {
+    /// Base64-encoded image bytes, with no `data:` URI prefix.
+    pub data: String,
+    /// IANA media type of `data`, for example `image/jpeg`.
+    pub mime_type: String,
+}
+
 /// Response body for `respond_openreelio_mcp_call`.
 ///
 /// The MCP server wraps this uniformly as
-/// `{ content: [{ type: "text", text }], isError }` for the `tools/call` result.
+/// `{ content: [{ type: "text", text }, ...images], isError }` for the
+/// `tools/call` result.
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenReelioMcpCallResponse {
@@ -128,6 +142,12 @@ pub struct OpenReelioMcpCallResponse {
     pub text: String,
     /// Whether the tool call resulted in an error.
     pub is_error: bool,
+    /// Pictures the tool produced, attached alongside the text.
+    ///
+    /// Defaulted so a caller that returns only text — every tool but the frame
+    /// probe — keeps serialising exactly as it did before images existed.
+    #[serde(default)]
+    pub images: Vec<McpImageBlock>,
 }
 
 /// Builds the Tauri event name that carries a session's stream events.
@@ -305,10 +325,24 @@ pub fn write_mcp_config_file(path: &Path, mcp_url: &str, token: &str) -> Result<
 }
 
 /// Wraps a frontend tool-call response as an MCP `tools/call` result payload of
-/// the shape `{ content: [{ type: "text", text }], isError }`.
+/// the shape `{ content: [{ type: "text", text }, ...images], isError }`.
+///
+/// This is the single choke point every `tools/call` result passes through, so
+/// it is also where pictures enter the protocol. The text block stays first and
+/// stays unconditional: a client that reads only text sees exactly what it saw
+/// before, and a tool that attaches no image serialises unchanged.
 pub fn wrap_tool_result(response: OpenReelioMcpCallResponse) -> Value {
+    let mut content = vec![json!({ "type": "text", "text": response.text })];
+    content.extend(response.images.into_iter().map(|image| {
+        json!({
+            "type": "image",
+            "data": image.data,
+            "mimeType": image.mime_type,
+        })
+    }));
+
     json!({
-        "content": [{ "type": "text", "text": response.text }],
+        "content": content,
         "isError": response.is_error,
     })
 }
@@ -481,8 +515,60 @@ mod tests {
         let wrapped = wrap_tool_result(OpenReelioMcpCallResponse {
             text: "ok".to_string(),
             is_error: false,
+            images: Vec::new(),
         });
+        assert_eq!(wrapped["content"][0]["type"], "text");
         assert_eq!(wrapped["content"][0]["text"], "ok");
+        // A text-only tool must serialise exactly as it did before images
+        // existed, or every non-frame tool changes shape at once.
+        assert_eq!(
+            wrapped["content"].as_array().map(Vec::len),
+            Some(1),
+            "a tool that attaches no image must carry one block"
+        );
+        assert_eq!(wrapped["isError"], false);
+    }
+
+    #[test]
+    fn omitted_images_default_to_none_for_existing_callers() {
+        // The frontend bridge predates the field, so a response without it has
+        // to keep deserialising rather than failing the whole tool call.
+        let response: OpenReelioMcpCallResponse =
+            serde_json::from_value(json!({ "text": "ok", "isError": false }))
+                .expect("a response without images still parses");
+
+        assert!(response.images.is_empty());
+    }
+
+    #[test]
+    fn wraps_tool_result_images_after_the_text_block() {
+        let wrapped = wrap_tool_result(OpenReelioMcpCallResponse {
+            text: "{\"frames\":2}".to_string(),
+            is_error: false,
+            images: vec![
+                McpImageBlock {
+                    data: "AAAA".to_string(),
+                    mime_type: "image/jpeg".to_string(),
+                },
+                McpImageBlock {
+                    data: "BBBB".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+            ],
+        });
+
+        let content = wrapped["content"].as_array().expect("content blocks");
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "{\"frames\":2}");
+        // Order is the caller's: an image block that lost its place would put a
+        // still against the wrong description of it.
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["data"], "AAAA");
+        assert_eq!(content[1]["mimeType"], "image/jpeg");
+        assert_eq!(content[2]["type"], "image");
+        assert_eq!(content[2]["data"], "BBBB");
+        assert_eq!(content[2]["mimeType"], "image/png");
         assert_eq!(wrapped["isError"], false);
     }
 

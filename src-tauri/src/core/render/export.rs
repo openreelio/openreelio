@@ -1564,7 +1564,7 @@ pub struct BatchItemResult {
 // =============================================================================
 
 /// Image format for single-frame export
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageFormat {
     /// PNG (lossless, with alpha support)
@@ -7013,7 +7013,7 @@ impl ExportEngine {
         Ok(FrameExportResult {
             output_path: settings.output_path.clone(),
             file_size,
-            format: settings.format.clone(),
+            format: settings.format,
             width,
             height,
         })

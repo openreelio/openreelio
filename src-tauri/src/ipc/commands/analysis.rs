@@ -104,7 +104,11 @@ struct ResolvedAssetContext {
     active_sequence_id: Option<String>,
 }
 
-async fn resolve_project_snapshot(
+/// Clones the open project's path and replayed state, releasing the lock.
+///
+/// Every command that then awaits FFmpeg works from this snapshot, so the lock
+/// is never held across a subprocess.
+pub(crate) async fn resolve_project_snapshot(
     state: &State<'_, AppState>,
 ) -> Result<(PathBuf, ProjectState), String> {
     let guard = state.project.lock().await;
@@ -115,7 +119,8 @@ async fn resolve_project_snapshot(
     Ok((project.path.clone(), project.state.clone()))
 }
 
-async fn resolve_ffmpeg_runner(
+/// Clones the resolved FFmpeg runner, releasing the read lock.
+pub(crate) async fn resolve_ffmpeg_runner(
     ffmpeg_state: &State<'_, SharedFFmpegState>,
 ) -> Result<FFmpegRunner, String> {
     let ffmpeg = ffmpeg_state.read().await;

@@ -81,6 +81,9 @@ pub mod interchange;
 // Export destination picker (native save dialog + session-scoped allow-list)
 pub mod export_dialog;
 
+// Frame probe (stills and contact sheets of the composited edit, for agents)
+pub mod frame_probe;
+
 // Transcript-based editing commands (S35-001)
 pub mod transcript_editing;
 
@@ -130,6 +133,9 @@ pub use interchange::*;
 
 // Re-export export destination picker
 pub use export_dialog::*;
+
+// Re-export frame probe commands
+pub use frame_probe::*;
 
 // Re-export transcript editing commands
 pub use transcript_editing::*;

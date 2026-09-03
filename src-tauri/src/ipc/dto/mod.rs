@@ -4,6 +4,8 @@
 //! Keep it free of `tauri` dependencies so we can validate serialization and
 //! cross-layer type stability with normal `cargo test`.
 
+pub mod frame_probe;
+
 use serde::Serialize;
 
 /// Serializes a serde value expected to become a JSON string.

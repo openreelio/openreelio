@@ -25,11 +25,17 @@
 //! The shape is uniform on purpose, so a caller never has to branch on the mode
 //! just to find the diagnostics.
 
+mod artifacts;
 mod file;
 mod sampler;
 mod sheet;
 mod timeline;
 
+pub use artifacts::{
+    allocate_frame_output, encode_inline_image, frame_cache_dir, frame_image_paths,
+    image_mime_type, inline_frame_images, prune_frame_cache, FrameArtifact, FrameOutput,
+    InlineImage, MAX_CACHED_FRAME_DIRECTORIES, MAX_INLINE_FRAME_STILLS,
+};
 pub use sampler::{
     auto_grid, Sample, SampleReason, SamplerReport, SamplerSpec, DEFAULT_AROUND_COUNT,
     DEFAULT_AROUND_SPAN_SEC,
@@ -1099,7 +1105,11 @@ fn resolve_sequence<'a>(
     Ok((sequence_id, sequence))
 }
 
-fn parse_image_format(raw: &str) -> FrameProbeResult<ImageFormat> {
+/// Parses a caller-stated output image format.
+///
+/// Public so every surface — clap, MCP JSON, the in-app IPC bridge — accepts
+/// the same spellings and refuses the rest in the same words.
+pub fn parse_image_format(raw: &str) -> FrameProbeResult<ImageFormat> {
     match raw.trim().to_lowercase().as_str() {
         "png" => Ok(ImageFormat::Png),
         "jpeg" | "jpg" => Ok(ImageFormat::Jpeg),

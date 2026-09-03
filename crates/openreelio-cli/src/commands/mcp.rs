@@ -43,12 +43,22 @@ use crate::{
     commands::{help_json, plan, transcription, verify},
     output,
 };
+// Decoding the images a tool returned is a test-only concern now that the
+// encoding itself lives in the core's frame-probe artifacts.
+#[cfg(test)]
 use base64::Engine as _;
 use clap::Args;
 #[cfg(test)]
 use openreelio_core::commands::SplitClipCommand;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
 use openreelio_core::ipc::CommandPayload;
+#[cfg(test)]
+use openreelio_core::render::frame_probe::frame_cache_dir;
+use openreelio_core::render::frame_probe::{
+    allocate_frame_output, inline_frame_images, FrameArtifact, FrameOutput,
+    MAX_CACHED_FRAME_DIRECTORIES, MAX_INLINE_FRAME_STILLS,
+};
+use openreelio_core::render::ImageFormat;
 use openreelio_core::style::{
     caption_pack_ids, text_preset_keys, transition_recipe_ids, TextPresetCategory, TEXT_PRESETS,
 };
@@ -65,27 +75,6 @@ const VERIFY_MEASURE_TIMEOUT_SEC: u64 = 600;
 /// Severity threshold `openreelio.verify` applies when the caller names none,
 /// matching the `verify --fail-on` default.
 const DEFAULT_VERIFY_FAIL_ON: &str = "error";
-
-/// Largest number of individual stills `openreelio.frame.extract` returns.
-///
-/// Every still is inlined as base64 into one JSON-RPC response and from there
-/// into the caller's model context, so an unbounded batch produces a reply no
-/// client can carry. A contact sheet is the cheap way to see more moments than
-/// this at once — it costs one image however many cells it holds.
-const MAX_INLINE_FRAME_STILLS: usize = 12;
-
-/// Newest frame-cache entries kept after a successful extraction.
-///
-/// Sixteen covers the recent history of a judge loop — the last few sheets and
-/// still batches an agent may want to point another tool at — without letting a
-/// long session leave the whole cut on disk inside the user's project.
-const MAX_CACHED_FRAME_DIRECTORIES: usize = 16;
-
-/// Name format for a frame-cache entry.
-///
-/// Microsecond precision keeps concurrent judgements from colliding, and the
-/// fixed width is what makes a lexicographic sort an age sort during pruning.
-const FRAME_CACHE_STAMP: &str = "%Y%m%dT%H%M%S%6fZ";
 
 #[derive(Args)]
 pub struct McpAction {
@@ -228,7 +217,8 @@ fn policy_mode(state: &McpServerState) -> &'static str {
 /// and the operator can delete. That write is disclosed separately as
 /// `cacheWrites` rather than folded in here, because a client deciding whether
 /// to trust the server with an edit is asking about the command log. The cache
-/// bounds itself — see [`prune_frame_cache`] — so the disclosure is of a fixed
+/// bounds itself — see `openreelio_core::render::frame_probe::prune_frame_cache`
+/// — so the disclosure is of a fixed
 /// footprint rather than of unbounded growth.
 fn filesystem_access(state: &McpServerState) -> &'static str {
     if state.project.is_none() {
@@ -2642,25 +2632,44 @@ fn run_frame_extract_tool(
         }
     };
 
-    // Created only once every argument, path, and media check has passed, so a
-    // rejected request leaves no directory behind at all.
-    let directory = create_frame_cache_directory(project_path)?;
-    let out = frame_output_path(&directory, &request);
-    let args = request.into_extract_args(project_path.clone(), out, file, sequence_id);
+    // Allocated only once every argument, path, and media check has passed, so
+    // a rejected request leaves no directory behind at all.
+    let output = frame_output_slot(project_path, &request)?;
+    let args = request.into_extract_args(
+        project_path.clone(),
+        output.out().to_path_buf(),
+        file,
+        sequence_id,
+    );
 
-    match extract_inline_frames(args, project.as_ref()) {
-        Ok(output) => {
-            prune_frame_cache(project_path);
-            Ok(output)
-        }
-        Err(error) => {
-            // Nothing usable came back, so this call's directory is residue:
-            // FFmpeg and the sequence-bounds check both run after the mkdir, and
-            // an empty entry per failed probe is how the cache grows fastest.
-            discard_frame_cache_directory(&directory);
-            Err(error)
-        }
-    }
+    extract_inline_frames(args, project.as_ref()).map_err(|error| {
+        // Nothing usable came back, so this call's directory is residue: FFmpeg
+        // and the sequence-bounds check both run after the mkdir, and an empty
+        // entry per failed probe is how the cache grows fastest.
+        output.discard();
+        error
+    })
+}
+
+/// Reserves the cache entry this extraction writes into.
+///
+/// The images are encoded for a vision model rather than for archival, so the
+/// stills are JPEG — see `into_extract_args`, which forces the same format on
+/// the probe.
+fn frame_output_slot(
+    project_path: &Path,
+    request: &FrameExtractRequest,
+) -> Result<FrameOutput, ToolError> {
+    let artifact = if request.is_grid() {
+        FrameArtifact::Sheet
+    } else if request.times.is_some() || request.has_sampler() {
+        FrameArtifact::Batch
+    } else {
+        FrameArtifact::Still
+    };
+
+    allocate_frame_output(project_path, artifact, ImageFormat::Jpeg)
+        .map_err(|error| ToolError::Execution(error.to_string()))
 }
 
 /// Runs the extraction and reads its images back for the wire.
@@ -2680,152 +2689,16 @@ fn extract_inline_frames(
         None => frame::run_extract(args),
     }
     .map_err(|error| ToolError::Execution(error.to_string()))?;
-    let images = inline_frame_images(&payload)?;
+    let images = inline_frame_images(&payload, MAX_INLINE_FRAME_STILLS)
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+        .into_iter()
+        .map(|image| ToolImage {
+            data: image.data,
+            mime_type: image.mime_type,
+        })
+        .collect();
 
     Ok(ToolOutput::with_images(payload, images))
-}
-
-/// Root of the frame cache for a project.
-fn frame_cache_root(project_path: &Path) -> PathBuf {
-    project_path
-        .join(".openreelio")
-        .join("cache")
-        .join("frames")
-}
-
-/// Creates the directory this extraction writes into, inside the project's own
-/// cache.
-///
-/// The caller never names an output path: an MCP argument that decided where
-/// bytes land would make a read-only server an arbitrary-write primitive. A
-/// timestamped directory under `.openreelio/cache/frames/` keeps concurrent
-/// judgements from overwriting each other's evidence, and puts every image in a
-/// place that is safe to delete.
-fn create_frame_cache_directory(project_path: &Path) -> Result<PathBuf, ToolError> {
-    let directory = frame_cache_root(project_path)
-        .join(chrono::Utc::now().format(FRAME_CACHE_STAMP).to_string());
-    std::fs::create_dir_all(&directory).map_err(|error| {
-        ToolError::Execution(format!(
-            "Failed to create the frame cache directory '{}': {error}",
-            directory.display()
-        ))
-    })?;
-
-    Ok(directory)
-}
-
-/// Chooses what this extraction writes inside its cache directory.
-fn frame_output_path(directory: &Path, request: &FrameExtractRequest) -> PathBuf {
-    if request.is_grid() {
-        return directory.join("sheet.jpg");
-    }
-    if request.times.is_some() || request.has_sampler() {
-        // A batch writes one file per time, so the extraction is handed the
-        // directory and names the stills itself.
-        return directory.to_path_buf();
-    }
-
-    directory.join("frame.jpg")
-}
-
-/// Removes a cache directory whose extraction produced nothing usable.
-///
-/// Recursive because a failure can land mid-batch: the directory was created
-/// microseconds earlier for this call alone, so whatever is in it belongs to the
-/// extraction that just failed. Best-effort — a leftover directory is not worth
-/// replacing the real error with a housekeeping one.
-fn discard_frame_cache_directory(directory: &Path) {
-    let _ = std::fs::remove_dir_all(directory);
-}
-
-/// Keeps the frame cache to its most recent [`MAX_CACHED_FRAME_DIRECTORIES`]
-/// entries.
-///
-/// The images are already inline in the response, so the on-disk copy exists
-/// only for a follow-up call that wants the path. Without a bound, a judge loop
-/// deposits every frame it ever looked at into the user's project directory.
-/// Best-effort: an extraction whose images are already in hand must not fail
-/// because the cache could not be tidied.
-fn prune_frame_cache(project_path: &Path) {
-    let Ok(entries) = std::fs::read_dir(frame_cache_root(project_path)) else {
-        return;
-    };
-
-    let mut directories: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
-        .map(|entry| entry.path())
-        .collect();
-    if directories.len() <= MAX_CACHED_FRAME_DIRECTORIES {
-        return;
-    }
-
-    // Entry names are fixed-width UTC timestamps, so sorting them by name sorts
-    // them by age.
-    directories.sort();
-    let stale = directories.len() - MAX_CACHED_FRAME_DIRECTORIES;
-    for directory in directories.into_iter().take(stale) {
-        let _ = std::fs::remove_dir_all(directory);
-    }
-}
-
-/// Reads back the images an extraction wrote and encodes them for the wire.
-///
-/// The paths come from the payload rather than from the request, so the blocks
-/// can never describe a file the extraction did not actually produce.
-fn inline_frame_images(payload: &Value) -> Result<Vec<ToolImage>, ToolError> {
-    let paths: Vec<PathBuf> = match payload.pointer("/sheet/path").and_then(Value::as_str) {
-        Some(sheet) => vec![PathBuf::from(sheet)],
-        None => payload
-            .get("frames")
-            .and_then(Value::as_array)
-            .map(|frames| {
-                frames
-                    .iter()
-                    .filter_map(|frame| frame.get("path").and_then(Value::as_str))
-                    .map(PathBuf::from)
-                    .collect()
-            })
-            .unwrap_or_default(),
-    };
-
-    paths.iter().map(|path| encode_inline_image(path)).collect()
-}
-
-fn encode_inline_image(path: &Path) -> Result<ToolImage, ToolError> {
-    let mime_type = image_mime_type(path)?;
-    let bytes = std::fs::read(path).map_err(|error| {
-        ToolError::Execution(format!(
-            "Failed to read the extracted frame '{}': {error}",
-            path.display()
-        ))
-    })?;
-
-    Ok(ToolImage {
-        data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        mime_type,
-    })
-}
-
-/// Names the image type from what was actually written.
-///
-/// Derived from the file rather than assumed, so the block's `mimeType` cannot
-/// drift from its `data` if the extraction's output format ever changes.
-fn image_mime_type(path: &Path) -> Result<String, ToolError> {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_lowercase)
-        .as_deref()
-    {
-        Some("jpg" | "jpeg") => Ok("image/jpeg".to_string()),
-        Some("png") => Ok("image/png".to_string()),
-        Some("tif" | "tiff") => Ok("image/tiff".to_string()),
-        _ => Err(ToolError::Execution(format!(
-            "Extracted frame '{}' has no recognised image type",
-            path.display()
-        ))),
-    }
 }
 
 fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
@@ -5285,7 +5158,7 @@ mod tests {
         .expect_err("a fake render cannot be extracted from");
         assert!(matches!(error, ToolError::Execution(_)));
 
-        let cache_root = frame_cache_root(&project_path);
+        let cache_root = frame_cache_dir(&project_path);
         let leftovers = std::fs::read_dir(&cache_root)
             .map(|entries| entries.flatten().count())
             .unwrap_or(0);
@@ -5310,50 +5183,9 @@ mod tests {
         .expect_err("a grid past the cell cap must be refused");
 
         assert!(
-            !frame_cache_root(&project_path).exists(),
+            !frame_cache_dir(&project_path).exists(),
             "a refused request must not touch the cache at all"
         );
-    }
-
-    #[test]
-    fn should_keep_only_the_newest_frame_cache_entries() {
-        let temp_dir = tempfile::TempDir::new().expect("temp dir");
-        let project_path = temp_dir.path().join("frame_prune_project");
-        let cache_root = frame_cache_root(&project_path);
-
-        // Names are fixed-width UTC stamps, so the ordering under test is the
-        // one real entries get.
-        let stamps: Vec<String> = (0..MAX_CACHED_FRAME_DIRECTORIES + 4)
-            .map(|index| format!("20260816T120000{index:06}Z"))
-            .collect();
-        for stamp in &stamps {
-            let entry = cache_root.join(stamp);
-            std::fs::create_dir_all(&entry).expect("cache entry");
-            std::fs::write(entry.join("sheet.jpg"), b"sheet bytes").expect("cache image");
-        }
-
-        prune_frame_cache(&project_path);
-
-        let mut remaining: Vec<String> = std::fs::read_dir(&cache_root)
-            .expect("cache root")
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .collect();
-        remaining.sort();
-        assert_eq!(remaining.len(), MAX_CACHED_FRAME_DIRECTORIES);
-        assert_eq!(
-            remaining,
-            stamps[stamps.len() - MAX_CACHED_FRAME_DIRECTORIES..].to_vec(),
-            "pruning must keep the newest entries, not an arbitrary set"
-        );
-    }
-
-    #[test]
-    fn should_tolerate_pruning_a_cache_that_does_not_exist_yet() {
-        let temp_dir = tempfile::TempDir::new().expect("temp dir");
-        // The first extraction on a project prunes before anything was cached,
-        // and housekeeping must never be able to fail a successful call.
-        prune_frame_cache(&temp_dir.path().join("never_extracted_project"));
     }
 
     #[test]

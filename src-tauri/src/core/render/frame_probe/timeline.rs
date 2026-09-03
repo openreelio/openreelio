@@ -221,7 +221,7 @@ pub(super) async fn run_timeline_mode(
         project,
         sequence,
         &sequence_id,
-        format.clone(),
+        format,
         request.max_width.unwrap_or(DEFAULT_MAX_WIDTH),
         mode,
     );
@@ -236,7 +236,7 @@ pub(super) async fn run_timeline_mode(
         let output_path = if batch {
             request.out.join(batch_frame_name(*time, &format))
         } else {
-            resolve_single_output_path(&request.out, *time, format.clone())?
+            resolve_single_output_path(&request.out, *time, format)?
         };
         let mut frame = context.extract(index, *time, &output_path).await?;
         frame.reason = sampler.and_then(|sampler| sampler.reason(index));
@@ -521,7 +521,7 @@ impl<'a> TimelineFrameContext<'a> {
             if let Some((clip, _)) = fast_clip {
                 let settings = FrameExportSettings {
                     time_sec,
-                    format: self.format.clone(),
+                    format: self.format,
                     output_path: output_path.to_path_buf(),
                     quality: None,
                     max_width: Some(self.max_width),
