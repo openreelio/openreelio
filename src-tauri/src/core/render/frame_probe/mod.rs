@@ -25,11 +25,17 @@
 //! The shape is uniform on purpose, so a caller never has to branch on the mode
 //! just to find the diagnostics.
 
+mod artifacts;
 mod file;
 mod sampler;
 mod sheet;
 mod timeline;
 
+pub use artifacts::{
+    allocate_frame_output, encode_inline_image, frame_cache_dir, frame_image_paths,
+    image_mime_type, inline_frame_images, prune_frame_cache, FrameArtifact, FrameOutput,
+    InlineImage, MAX_CACHED_FRAME_DIRECTORIES, MAX_INLINE_FRAME_STILLS,
+};
 pub use sampler::{
     auto_grid, Sample, SampleReason, SamplerReport, SamplerSpec, DEFAULT_AROUND_COUNT,
     DEFAULT_AROUND_SPAN_SEC,
@@ -40,10 +46,11 @@ pub use sheet::{
 pub use timeline::{FrameSource, MIN_COMPOSITE_WINDOW_SEC};
 
 use super::ImageFormat;
-use crate::core::commands::load_last_affected_ranges;
+use crate::core::commands::{load_last_affected_ranges, RecordSource};
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::project::ProjectState;
 use crate::core::timeline::Sequence;
+use crate::core::TimeRange;
 use sampler::{SamplerInputs, SamplerOutcome};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -154,6 +161,15 @@ pub struct FrameProbeRequest {
     pub around_count: Option<usize>,
     /// Sample the ranges the last successful apply changed.
     pub affected: bool,
+    /// Operation id the `affected` record must end at.
+    ///
+    /// The hand-off file is one slot every surface overwrites, so "the last
+    /// edit" is only the caller's own edit while nothing else has applied one.
+    /// Naming the operation the caller's apply ended at turns that assumption
+    /// into a check.
+    pub after_op: Option<String>,
+    /// Sample these ranges, named by the caller rather than read from the record.
+    pub ranges: Option<Vec<TimeRange>>,
     /// Largest number of samples a sampler keeps.
     pub limit: Option<usize>,
 }
@@ -171,6 +187,7 @@ impl FrameProbeRequest {
             span: self.span,
             around_count: self.around_count,
             affected: self.affected,
+            ranges: self.ranges.clone(),
             limit: self.limit,
         }
     }
@@ -386,7 +403,7 @@ fn resolve_grid_selection(request: &FrameProbeRequest, grid: &str) -> FrameProbe
 fn resolve_auto_grid_selection(request: &FrameProbeRequest) -> FrameProbeResult<Selection> {
     let Some(listed) = request.times.as_deref() else {
         return Err(FrameProbeError::new(
-            "--grid auto sizes the sheet from its samples, so it needs a sampler (--at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around, --affected) or --times. With --between, pass an explicit --grid COLSxROWS."
+            "--grid auto sizes the sheet from its samples, so it needs a sampler (--at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around, --affected, --range) or --times. With --between, pass an explicit --grid COLSxROWS."
                 .to_string(),
         ));
     };
@@ -554,7 +571,66 @@ fn ensure_sampler_selectors_unused(request: &FrameProbeRequest) -> FrameProbeRes
     )))
 }
 
+/// Rejects a `ranges` list the sampler could not sample.
+///
+/// Every value is checked before anything is opened, because a malformed range
+/// is a caller mistake and the answer to it is a message, not a picture of the
+/// wrong seconds. `start == end` is allowed: that is how a marker's own instant
+/// is expressed, and the sampler gives it a single middle sample.
+fn ensure_ranges_valid(ranges: &[TimeRange]) -> FrameProbeResult<()> {
+    if ranges.is_empty() {
+        return Err(FrameProbeError::new(
+            "ranges requires at least one [start, end] range".to_string(),
+        ));
+    }
+
+    for range in ranges {
+        ensure_time_non_negative(range.start_sec, "ranges start")?;
+        ensure_time_non_negative(range.end_sec, "ranges end")?;
+        // Ordered but not strictly: unlike `--between`, which has to have width
+        // to sample across, a range may be a single instant.
+        if range.end_sec < range.start_sec {
+            return Err(FrameProbeError::new(format!(
+                "Invalid time range: --ranges start ({}) must not be after --ranges end ({})",
+                range.start_sec, range.end_sec
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Rejects `ranges` and `affected` asked for together, and `after_op` asked for
+/// without `affected`.
+///
+/// The two range sources answer the same question from different authorities —
+/// what the caller says it changed, and what the project's hand-off record says
+/// the last apply changed. Sampling their union would report one set of
+/// pictures as though both authorities agreed on them; if they disagree, that
+/// is exactly what the caller needs told.
+fn ensure_range_sources_coherent(request: &FrameProbeRequest) -> FrameProbeResult<()> {
+    if request.ranges.is_some() && request.affected {
+        return Err(FrameProbeError::new(
+            "--range names the ranges to sample and --affected reads the ones the last edit recorded; pass one or the other. Use --range when you already hold the ranges your own edit reported, and --affected --after-op <OP> when you do not."
+                .to_string(),
+        ));
+    }
+    if request.after_op.is_some() && !request.affected {
+        return Err(FrameProbeError::new(
+            "--after-op names the operation the recorded hand-off must end at, so it only means something with --affected."
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn resolve_selection(request: &FrameProbeRequest) -> FrameProbeResult<Selection> {
+    ensure_range_sources_coherent(request)?;
+    if let Some(ranges) = request.ranges.as_deref() {
+        ensure_ranges_valid(ranges)?;
+    }
+
     let spec = request.sampler_spec();
     if spec.is_active() {
         ensure_sampler_selectors_unused(request)?;
@@ -569,7 +645,7 @@ fn resolve_selection(request: &FrameProbeRequest) -> FrameProbeResult<Selection>
     let orphaned = spec.orphaned_modifiers();
     if !orphaned.is_empty() {
         return Err(FrameProbeError::new(format!(
-            "{} only shapes a sampler. Add one of --at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around <SEC> or --affected, or drop the flag.",
+            "{} only shapes a sampler. Add one of --at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around <SEC>, --affected or --range <START> <END>, or drop the flag.",
             orphaned.join(", ")
         )));
     }
@@ -614,7 +690,7 @@ fn resolve_selection(request: &FrameProbeRequest) -> FrameProbeResult<Selection>
     }
 
     Err(FrameProbeError::new(
-        "Nothing to extract: pass a sampler (--affected, --at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around <SEC>), or --time, --times, --grid, or --asset with --source-time"
+        "Nothing to extract: pass a sampler (--affected, --range <START> <END>, --at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around <SEC>), or --time, --times, --grid, or --asset with --source-time"
             .to_string(),
     ))
 }
@@ -640,12 +716,7 @@ impl FrameProbePlan {
     /// Every guard the CLI relies on lives here rather than in its clap layer,
     /// because clap validates only the CLI's own callers.
     pub fn resolve(request: FrameProbeRequest) -> FrameProbeResult<Self> {
-        let selection = resolve_selection(&request)?;
-        let format = resolve_image_format(request.format.as_deref(), &request.out)?;
-        let mode = TimelineMode::resolve(request.mode.as_deref())?;
-        ensure_cell_size_in_range(&request)?;
-        ensure_max_width_in_range(&request)?;
-        ensure_sheet_fits(&request, &selection)?;
+        let (selection, format, mode) = Self::check(&request)?;
 
         Ok(Self {
             request,
@@ -653,6 +724,33 @@ impl FrameProbePlan {
             format,
             mode,
         })
+    }
+
+    /// Runs every guard [`resolve`](Self::resolve) runs, without consuming the
+    /// request.
+    ///
+    /// For a caller that has to know a request is servable *before* it acquires
+    /// something on the request's behalf. The GUI reserves a frame-cache entry
+    /// for every extraction, and reserving one also prunes the cache — so
+    /// allocating first meant a malformed request evicted a legitimate entry to
+    /// make room for a directory nothing was ever written into.
+    pub fn validate(request: &FrameProbeRequest) -> FrameProbeResult<()> {
+        Self::check(request).map(|_| ())
+    }
+
+    /// The guards themselves, shared by [`resolve`](Self::resolve) and
+    /// [`validate`](Self::validate) so the two can never disagree.
+    fn check(
+        request: &FrameProbeRequest,
+    ) -> FrameProbeResult<(Selection, ImageFormat, TimelineMode)> {
+        let selection = resolve_selection(request)?;
+        let format = resolve_image_format(request.format.as_deref(), &request.out)?;
+        let mode = TimelineMode::resolve(request.mode.as_deref())?;
+        ensure_cell_size_in_range(request)?;
+        ensure_max_width_in_range(request)?;
+        ensure_sheet_fits(request, &selection)?;
+
+        Ok((selection, format, mode))
     }
 
     /// Whether serving this plan needs the project opened.
@@ -745,7 +843,7 @@ impl FrameProbePlan {
                 .await
             }
             Selection::Sampled { ref spec, grid } => {
-                let outcome = run_samplers(project, &self.request, spec)?;
+                let (outcome, warnings) = run_samplers(project, &self.request, spec)?;
                 let times: Vec<f64> = outcome
                     .samples
                     .iter()
@@ -756,6 +854,7 @@ impl FrameProbePlan {
                 let context = timeline::SamplerContext {
                     reasons: &reasons,
                     report: &outcome.report,
+                    warnings: &warnings,
                 };
 
                 match grid {
@@ -795,47 +894,72 @@ impl FrameProbePlan {
 }
 
 /// Runs the samplers against the opened project's sequence.
+///
+/// Returns the sampler outcome alongside any warnings the range resolution
+/// raised — a hand-off record that turned out to describe somebody else's edit
+/// is not a failure, but it is something the caller has to be told before it
+/// judges the pictures as its own.
 fn run_samplers(
     project: &FrameProbeProject<'_>,
     request: &FrameProbeRequest,
     spec: &SamplerSpec,
-) -> FrameProbeResult<SamplerOutcome> {
+) -> FrameProbeResult<(SamplerOutcome, Vec<String>)> {
     let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
-    let affected_ranges = if spec.affected {
-        resolve_affected_ranges(project, &sequence_id)?
+    let (affected_ranges, warnings) = if spec.affected {
+        resolve_affected_ranges(project, &sequence_id, request.after_op.as_deref())?
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
-    sampler::run(
+    let outcome = sampler::run(
         spec,
         &SamplerInputs {
             sequence,
             effects: &project.state.effects,
             affected_ranges: &affected_ranges,
         },
-    )
+    )?;
+
+    Ok((outcome, warnings))
 }
 
 /// Reads the ranges the last successful apply changed.
 ///
 /// The hand-off file is written by every mutating verb, so its absence means no
-/// edit has been applied to this project through the CLI or the MCP server yet —
-/// which is a different problem from an empty edit, and the message has to say
-/// which one the caller is looking at.
+/// edit has been applied to this project yet — which is a different problem
+/// from an empty edit, and the message has to say which one the caller is
+/// looking at.
 ///
 /// A record whose last operation is not the project's current one is refused
 /// rather than used. The file is a hand-off, not a history: an undo, a redo, or
 /// an edit applied by a surface that does not record one leaves it describing a
 /// state the project has left, and the sampler would then point confidently at
 /// the wrong seconds — the one failure mode `--affected` exists to remove.
+///
+/// # Whose edit
+///
+/// The record is a single slot, and the app's own edit path writes it too. A
+/// caller that applied an edit, and then had a person drag a clip in the app
+/// before it looked, would find a record that passes every check above and
+/// describes the *person's* edit. Two answers to that, in order of certainty:
+///
+/// - `after_op` names the operation the caller's own apply ended at. The record
+///   must end there, so an edit that landed in between is a refusal naming both
+///   operations rather than a confident picture of the wrong seconds.
+/// - passing the ranges outright (`--range`, `ranges`) skips the record
+///   entirely, which is what a caller that already holds them should do.
+///
+/// Without `after_op` the record is used as before, and a record the app's own
+/// edit path wrote is reported as a warning on the payload: the pictures are of
+/// a real edit, just not necessarily of the caller's.
 fn resolve_affected_ranges(
     project: &FrameProbeProject<'_>,
     sequence_id: &str,
-) -> FrameProbeResult<Vec<crate::core::TimeRange>> {
+    after_op: Option<&str>,
+) -> FrameProbeResult<(Vec<crate::core::TimeRange>, Vec<String>)> {
     let Some(record) = load_last_affected_ranges(project.path) else {
         return Err(FrameProbeError::new(
-            "--affected reads the ranges the last edit changed, and this project has none recorded. Apply an edit with `command execute` or `plan execute` first, or pass --between <START> <END> to sweep the timeline instead."
+            "--affected reads the ranges the last edit changed, and this project has none recorded. Apply an edit first — `command execute`, `plan execute`, the other editing verbs and the app's own edit commands all record where one landed — or pass --range <START> <END> with the ranges your edit reported, or --between <START> <END> to sweep the timeline instead."
                 .to_string(),
         ));
     };
@@ -845,12 +969,21 @@ fn resolve_affected_ranges(
             record.sequence_id, sequence_id, record.sequence_id
         )));
     }
-    if record.op_ids.last().map(String::as_str) != project.state.last_op_id.as_deref() {
+    let record_op = record.op_ids.last().map(String::as_str);
+    if record_op != project.state.last_op_id.as_deref() {
         return Err(FrameProbeError::new(format!(
-            "The recorded hand-off ends at operation {}, but this project is at {}, so the last edit was not recorded: run the edit through `command execute` or `plan execute`, or pass --between <START> <END>.",
-            describe_op_id(record.op_ids.last().map(String::as_str)),
+            "The recorded hand-off ends at operation {}, but this project is at {}, so the last edit was not recorded — an undo or a redo leaves it describing a state the project has left. Re-apply the edit, or pass --between <START> <END>.",
+            describe_op_id(record_op),
             describe_op_id(project.state.last_op_id.as_deref()),
         )));
+    }
+    if let Some(expected) = after_op {
+        if record_op != Some(expected) {
+            return Err(FrameProbeError::new(format!(
+                "The recorded hand-off ends at operation {}, but --after-op expected '{expected}'. Another edit was applied after yours — the record is a single slot every surface overwrites — so these ranges are not the ones you asked about. Pass --range <START> <END> with the ranges your own edit reported, or re-apply and look again.",
+                describe_op_id(record_op),
+            )));
+        }
     }
     if record.affected_ranges.is_empty() {
         return Err(FrameProbeError::new(format!(
@@ -859,7 +992,15 @@ fn resolve_affected_ranges(
         )));
     }
 
-    Ok(record.affected_ranges)
+    let mut warnings = Vec::new();
+    if after_op.is_none() && record.source == RecordSource::Gui {
+        warnings.push(format!(
+            "These ranges were recorded by the app's own edit path — an interactive edit in the timeline, at operation {} — not by an apply this caller made. Pass afterOp with the operation your edit ended at to have that checked, or pass the ranges outright.",
+            describe_op_id(record_op),
+        ));
+    }
+
+    Ok((record.affected_ranges, warnings))
 }
 
 /// Names an operation id for a message, or says there is none.
@@ -1099,7 +1240,11 @@ fn resolve_sequence<'a>(
     Ok((sequence_id, sequence))
 }
 
-fn parse_image_format(raw: &str) -> FrameProbeResult<ImageFormat> {
+/// Parses a caller-stated output image format.
+///
+/// Public so every surface — clap, MCP JSON, the in-app IPC bridge — accepts
+/// the same spellings and refuses the rest in the same words.
+pub fn parse_image_format(raw: &str) -> FrameProbeResult<ImageFormat> {
     match raw.trim().to_lowercase().as_str() {
         "png" => Ok(ImageFormat::Png),
         "jpeg" | "jpg" => Ok(ImageFormat::Jpeg),
@@ -1477,6 +1622,190 @@ mod tests {
         };
         assert!(spec.at_cuts && spec.affected);
         assert!(grid.is_none(), "no --grid means a batch of stills");
+    }
+
+    /// A project sitting at `last_op_id`, with one sequence to measure against.
+    fn project_at_op(last_op_id: &str) -> (ProjectState, String) {
+        let mut state = ProjectState::new("Hand-off");
+        let sequence_id = state
+            .sequences
+            .keys()
+            .next()
+            .cloned()
+            .expect("a new project has a sequence");
+        state.last_op_id = Some(last_op_id.to_string());
+        (state, sequence_id)
+    }
+
+    /// The race the hand-off record cannot resolve on its own.
+    ///
+    /// An agent applies a plan (`op-a`), a person drags a clip in the app
+    /// (`op-b`, overwriting the single-slot record), and the agent then asks for
+    /// "the last edit". Every check the record supports passes — the sequence
+    /// matches and the record ends at the project's current operation — so the
+    /// ranges come back, and they are the *person's*. This is exactly why
+    /// `--after-op` and `--range` exist, and both are asserted here.
+    #[test]
+    fn resolve_affected_ranges_should_flag_and_refuse_another_surfaces_edit() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (state, sequence_id) = project_at_op("op-b");
+
+        // The agent's own apply recorded op-a; the interactive edit that landed
+        // afterwards overwrote it.
+        crate::core::commands::record_affected_ranges(
+            dir.path(),
+            &sequence_id,
+            vec!["op-b".to_string()],
+            &[TimeRange::new(12.0, 14.0)],
+            RecordSource::Gui,
+        )
+        .expect("the hand-off is written");
+
+        let project = FrameProbeProject {
+            path: dir.path(),
+            state: &state,
+        };
+
+        // Without `after_op` the ranges are served — they are a real edit — but
+        // the caller is told whose.
+        let (ranges, warnings) = resolve_affected_ranges(&project, &sequence_id, None)
+            .expect("the record passes every check it supports");
+        assert_eq!(ranges, vec![TimeRange::new(12.0, 14.0)]);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the caller must be told, got {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("interactive edit") && warnings[0].contains("op-b"),
+            "the warning should say whose edit and which operation, got: {}",
+            warnings[0]
+        );
+
+        // With it, the mismatch is a refusal that names both operations.
+        let message = resolve_affected_ranges(&project, &sequence_id, Some("op-a"))
+            .expect_err("these are not the ranges the caller asked about")
+            .to_string();
+        assert!(
+            message.contains("'op-b'") && message.contains("'op-a'"),
+            "the refusal should name the recorded and the expected operation, got: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_affected_ranges_should_accept_the_callers_own_operation_silently() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (state, sequence_id) = project_at_op("op-a");
+
+        crate::core::commands::record_affected_ranges(
+            dir.path(),
+            &sequence_id,
+            vec!["op-a".to_string()],
+            &[TimeRange::new(1.0, 2.0)],
+            RecordSource::AgentPlan,
+        )
+        .expect("the hand-off is written");
+
+        let project = FrameProbeProject {
+            path: dir.path(),
+            state: &state,
+        };
+
+        let (ranges, warnings) = resolve_affected_ranges(&project, &sequence_id, Some("op-a"))
+            .expect("the record is the caller's own apply");
+        assert_eq!(ranges, vec![TimeRange::new(1.0, 2.0)]);
+        assert!(
+            warnings.is_empty(),
+            "an agent's own apply needs no warning, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_carry_named_ranges_through_as_a_sampler() {
+        let mut request = grid_request("3x2", None);
+        request.grid = None;
+        request.between = None;
+        request.ranges = Some(vec![TimeRange::new(1.0, 2.0), TimeRange::new(5.0, 5.0)]);
+
+        let Selection::Sampled { spec, .. } =
+            resolve_selection(&request).expect("named ranges resolve without a project")
+        else {
+            panic!("Expected a deferred sampler selection");
+        };
+        assert_eq!(spec.kinds(), vec!["ranges".to_string()]);
+        assert!(
+            !spec.affected,
+            "named ranges must not read the hand-off record"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_named_ranges_alongside_the_recorded_ones() {
+        let mut request = grid_request("3x2", None);
+        request.grid = None;
+        request.between = None;
+        request.ranges = Some(vec![TimeRange::new(1.0, 2.0)]);
+        request.affected = true;
+
+        let message = resolve_selection(&request)
+            .expect_err("two authorities on the same question cannot both be honoured")
+            .to_string();
+
+        assert!(
+            message.contains("--range") && message.contains("--affected"),
+            "Error should name both sources, got: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_a_malformed_range() {
+        let mut request = grid_request("3x2", None);
+        request.grid = None;
+        request.between = None;
+
+        request.ranges = Some(Vec::new());
+        assert!(
+            resolve_selection(&request).is_err(),
+            "an empty list names no seconds to look at"
+        );
+
+        // Built field by field rather than through `TimeRange::new`, which
+        // silently swaps a reversed pair: the caller has to be told instead.
+        request.ranges = Some(vec![TimeRange {
+            start_sec: 5.0,
+            end_sec: 2.0,
+        }]);
+        let message = resolve_selection(&request)
+            .expect_err("a reversed range is a caller mistake, not a picture")
+            .to_string();
+        assert!(
+            message.contains("ranges start") && message.contains("ranges end"),
+            "Error should name the offending values, got: {message}"
+        );
+
+        request.ranges = Some(vec![TimeRange {
+            start_sec: -1.0,
+            end_sec: 2.0,
+        }]);
+        assert!(resolve_selection(&request).is_err());
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_after_op_without_the_record_it_checks() {
+        let mut request = grid_request("3x2", None);
+        request.grid = None;
+        request.between = None;
+        request.at_cuts = true;
+        request.after_op = Some("op-1".to_string());
+
+        let message = resolve_selection(&request)
+            .expect_err("there is no record to check against without --affected")
+            .to_string();
+
+        assert!(
+            message.contains("--after-op") && message.contains("--affected"),
+            "Error should name the flag it needs, got: {message}"
+        );
     }
 
     #[test]

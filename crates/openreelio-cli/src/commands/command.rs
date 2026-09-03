@@ -6,9 +6,7 @@
 
 use crate::output;
 use clap::Subcommand;
-use openreelio_core::commands::{
-    save_last_affected_ranges, LastAffectedRanges, SequenceSnapshot, StateChange,
-};
+use openreelio_core::commands::{payload_string, StateChange};
 use openreelio_core::ipc::CommandPayload;
 use openreelio_core::TimeRange;
 use std::path::{Path, PathBuf};
@@ -69,42 +67,43 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
 
             let mut project = super::load_project(&path)?;
-            // The before-image has to be taken while the state still holds it:
-            // the ranges an edit changed are the diff across the mutation, and
-            // a ripple move shifts clips no `StateChange` entry names.
+            // Which timeline the edit is measured against has to be settled
+            // before it runs: the ranges are a diff across the mutation, and a
+            // ripple move shifts clips no `StateChange` entry names.
             let sequence_id = named_sequence_id.or_else(|| {
-                infer_sequence_id(
+                openreelio_core::commands::infer_sequence_id(
                     &project.state,
                     named_effect_id.as_deref(),
                     named_clip_id.as_deref(),
                 )
             });
-            let before = SequenceSnapshot::capture(
-                &project.state,
-                sequence_id.as_deref().unwrap_or_default(),
-            );
 
             let command = typed_payload.build_command(&project.path);
-            let result = project
-                .executor
-                .execute(command, &mut project.state)
-                .map_err(|error| anyhow::anyhow!("Command '{}' failed: {}", command_type, error))?;
-            let affected_ranges = match sequence_id.as_deref() {
+            // Through the same recorder every other mutating verb uses, so this
+            // one cannot drift from them about what `--affected` will point at.
+            // A payload naming no timeline — an asset import, a `CreateSequence`
+            // — has nothing to diff and nothing to hand off, and says so by
+            // reporting no sequence rather than guessing at the active one.
+            let (result, affected_ranges) = match sequence_id.as_deref() {
                 Some(sequence_id) => {
-                    before.affected_ranges(&project.state, sequence_id, &result.changes)
+                    let mut recorder = super::EditRecorder::begin(&project, sequence_id);
+                    let result = recorder.execute(&mut project, command).map_err(|error| {
+                        anyhow::anyhow!("Command '{}' failed: {}", command_type, error)
+                    })?;
+                    let affected_ranges = recorder.finish(&mut project)?;
+                    (result, affected_ranges)
                 }
-                None => Vec::new(),
+                None => {
+                    let result = project
+                        .executor
+                        .execute(command, &mut project.state)
+                        .map_err(|error| {
+                            anyhow::anyhow!("Command '{}' failed: {}", command_type, error)
+                        })?;
+                    super::save_project(&mut project)?;
+                    (result, Vec::new())
+                }
             };
-            super::save_project(&mut project)?;
-
-            if let Some(sequence_id) = sequence_id.as_deref() {
-                record_affected_ranges(
-                    &project.path,
-                    sequence_id,
-                    vec![result.op_id.clone()],
-                    &affected_ranges,
-                );
-            }
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
@@ -171,52 +170,6 @@ fn read_payload(
     Ok(value)
 }
 
-/// Reads a plain-string field from a payload, if it carries one.
-fn payload_string(payload: &serde_json::Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-}
-
-/// Finds the sequence a payload acts on when it does not name one.
-///
-/// `UpdateEffect`, `UpdateMask` and `RemoveMask` address an effect and never a
-/// sequence, so the sequence is whichever one holds a clip carrying that effect.
-/// Falling back to the *active* sequence instead reported the whole timeline of
-/// a sequence the command had not touched, which is worse than reporting
-/// nothing: an agent cannot tell a confident wrong answer from a right one.
-///
-/// `None` when the payload names nothing that identifies a sequence — a
-/// `CreateSequence`, an asset import — and the caller then reports no sequence
-/// and no ranges rather than guessing.
-fn infer_sequence_id(
-    state: &openreelio_core::project::ProjectState,
-    effect_id: Option<&str>,
-    clip_id: Option<&str>,
-) -> Option<String> {
-    if effect_id.is_none() && clip_id.is_none() {
-        return None;
-    }
-
-    state
-        .sequences
-        .iter()
-        .find(|(_, sequence)| {
-            sequence
-                .tracks
-                .iter()
-                .flat_map(|track| track.clips.iter())
-                .any(|clip| {
-                    clip_id.is_some_and(|clip_id| clip.id == clip_id)
-                        || effect_id.is_some_and(|effect_id| {
-                            clip.effects.iter().any(|held| held == effect_id)
-                        })
-                })
-        })
-        .map(|(sequence_id, _)| sequence_id.clone())
-}
-
 /// Writes the where-to-look hand-off for the next inspection step.
 ///
 /// Best effort by design: the edit is already durable in the ops log, so a
@@ -234,12 +187,14 @@ pub(crate) fn record_affected_ranges(
     op_ids: Vec<String>,
     affected_ranges: &[TimeRange],
 ) {
-    if sequence_id.is_empty() || affected_ranges.is_empty() {
-        return;
-    }
-
-    let record = LastAffectedRanges::new(sequence_id.to_string(), op_ids, affected_ranges.to_vec());
-    if let Err(error) = save_last_affected_ranges(project_dir, &record) {
+    if let Err(error) = openreelio_core::commands::record_affected_ranges(
+        project_dir,
+        sequence_id,
+        op_ids,
+        affected_ranges,
+        // Everything this binary applies is headless, the MCP server included.
+        openreelio_core::commands::RecordSource::Cli,
+    ) {
         eprintln!("warning: could not record the affected ranges: {error}");
     }
 }
@@ -295,70 +250,6 @@ fn to_camel_case(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openreelio_core::project::ProjectState;
-    use openreelio_core::timeline::{Clip, Sequence, SequenceFormat, Track};
-
-    /// A project holding two sequences, the effect living on the second one.
-    ///
-    /// Returns `(state, active_sequence_id, other_sequence_id)`.
-    fn two_sequence_state(effect_id: &str) -> (ProjectState, String, String) {
-        let mut state = ProjectState::new("Two sequences");
-        let active_id = state
-            .sequences
-            .keys()
-            .next()
-            .cloned()
-            .expect("the default sequence");
-        state.active_sequence_id = Some(active_id.clone());
-
-        let mut other = Sequence::new("Second", SequenceFormat::youtube_1080());
-        let mut track = Track::new_video("V1");
-        let mut clip = Clip::new("asset-a");
-        clip.effects.push(effect_id.to_string());
-        let clip_id = clip.id.clone();
-        track.clips.push(clip);
-        other.tracks.push(track);
-        let other_id = other.id.clone();
-        state.sequences.insert(other_id.clone(), other);
-
-        assert_ne!(active_id, other_id);
-        assert!(!clip_id.is_empty());
-        (state, active_id, other_id)
-    }
-
-    #[test]
-    fn should_measure_an_effect_edit_against_the_sequence_that_holds_the_effect() {
-        // `UpdateEffect` names no sequence. Measuring it against the *active*
-        // one reported that timeline's every second for an edit on another.
-        let (state, active_id, other_id) = two_sequence_state("fx-1");
-
-        let resolved = infer_sequence_id(&state, Some("fx-1"), None);
-
-        assert_eq!(resolved.as_deref(), Some(other_id.as_str()));
-        assert_ne!(resolved.as_deref(), Some(active_id.as_str()));
-    }
-
-    #[test]
-    fn should_measure_a_clip_edit_against_the_sequence_that_holds_the_clip() {
-        let (state, _active_id, other_id) = two_sequence_state("fx-1");
-        let clip_id = state.sequences[&other_id].tracks[0].clips[0].id.clone();
-
-        assert_eq!(
-            infer_sequence_id(&state, None, Some(&clip_id)).as_deref(),
-            Some(other_id.as_str())
-        );
-    }
-
-    #[test]
-    fn should_resolve_no_sequence_for_a_payload_that_names_nothing() {
-        // A `CreateSequence` payload names no sequence, no effect and no clip.
-        // Reporting the active sequence there claimed an edit landed somewhere
-        // it did not.
-        let (state, _active_id, _other_id) = two_sequence_state("fx-1");
-
-        assert_eq!(infer_sequence_id(&state, None, None), None);
-        assert_eq!(infer_sequence_id(&state, Some("fx-unknown"), None), None);
-    }
 
     #[test]
     fn should_report_change_fields_in_the_camel_case_the_cli_promises() {

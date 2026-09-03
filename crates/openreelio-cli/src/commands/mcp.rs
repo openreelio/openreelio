@@ -14,14 +14,17 @@
 //! read-only server into a whole-disk existence oracle and an outbound-connection
 //! primitive.
 //!
-//! Confinement is enforced at the FFmpeg boundary, not only at the argument
-//! boundary. A path that arrives as project state rather than as a tool argument
-//! — an asset URI — is confined too ([`confine_asset_media`]), because project
-//! state is data the server reads, not a grant: it can come from a foreign
-//! project the operator pointed the server at, or from an `UpdateAsset` an
-//! approved plan applied. The practical consequence is that media living outside
-//! the project directory is not transcribable through MCP; ingest it into the
-//! project workspace first.
+//! A path that arrives as project state rather than as a tool argument — an
+//! asset URI — is checked too ([`confine_asset_media`]), but against a
+//! different rule: **locality, not location**. The app imports media by
+//! reference and leaves it where the user put it, so requiring project-relative
+//! media would refuse every GUI-authored project whose footage lives on a
+//! camera dump or a shared drive — while protecting nothing, because the
+//! sequence those same assets are cut into is already rendered and exported
+//! from wherever the media lies. What is enforced is that this server must not
+//! be the thing that reaches off-host: a UNC or network URI is refused
+//! lexically, before anything stats it, and media that is not readable here is
+//! refused rather than handed to FFmpeg.
 //!
 //! The one deliberate exception is the grant-gated plan surface: commands such as
 //! `ImportAsset` name media anywhere the operator's user can read, because pulling
@@ -43,16 +46,28 @@ use crate::{
     commands::{help_json, plan, transcription, verify},
     output,
 };
+// Decoding the images a tool returned is a test-only concern now that the
+// encoding itself lives in the core's frame-probe artifacts.
+#[cfg(test)]
 use base64::Engine as _;
 use clap::Args;
 #[cfg(test)]
 use openreelio_core::commands::SplitClipCommand;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
+use openreelio_core::fs::is_network_path;
 use openreelio_core::ipc::CommandPayload;
+#[cfg(test)]
+use openreelio_core::render::frame_probe::frame_cache_dir;
+use openreelio_core::render::frame_probe::{
+    allocate_frame_output, inline_frame_images, FrameArtifact, FrameOutput,
+    MAX_CACHED_FRAME_DIRECTORIES, MAX_INLINE_FRAME_STILLS,
+};
+use openreelio_core::render::ImageFormat;
 use openreelio_core::style::{
     caption_pack_ids, text_preset_keys, transition_recipe_ids, TextPresetCategory, TEXT_PRESETS,
 };
 use openreelio_core::timeline::TrackKind;
+use openreelio_core::TimeRange;
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Component, Path, PathBuf};
@@ -65,27 +80,6 @@ const VERIFY_MEASURE_TIMEOUT_SEC: u64 = 600;
 /// Severity threshold `openreelio.verify` applies when the caller names none,
 /// matching the `verify --fail-on` default.
 const DEFAULT_VERIFY_FAIL_ON: &str = "error";
-
-/// Largest number of individual stills `openreelio.frame.extract` returns.
-///
-/// Every still is inlined as base64 into one JSON-RPC response and from there
-/// into the caller's model context, so an unbounded batch produces a reply no
-/// client can carry. A contact sheet is the cheap way to see more moments than
-/// this at once — it costs one image however many cells it holds.
-const MAX_INLINE_FRAME_STILLS: usize = 12;
-
-/// Newest frame-cache entries kept after a successful extraction.
-///
-/// Sixteen covers the recent history of a judge loop — the last few sheets and
-/// still batches an agent may want to point another tool at — without letting a
-/// long session leave the whole cut on disk inside the user's project.
-const MAX_CACHED_FRAME_DIRECTORIES: usize = 16;
-
-/// Name format for a frame-cache entry.
-///
-/// Microsecond precision keeps concurrent judgements from colliding, and the
-/// fixed width is what makes a lexicographic sort an age sort during pruning.
-const FRAME_CACHE_STAMP: &str = "%Y%m%dT%H%M%S%6fZ";
 
 #[derive(Args)]
 pub struct McpAction {
@@ -219,8 +213,11 @@ fn policy_mode(state: &McpServerState) -> &'static str {
 /// Names what the server may do to the *project* — its state and command log.
 ///
 /// Mutating tools write the project through the command log, so a server that
-/// advertises them must not report read-only access. Reads never reach outside
-/// the project directory in any mode (see [`confine_to_project`]).
+/// advertises them must not report read-only access. A path the *client* names
+/// never reaches outside the project directory in any mode (see
+/// [`confine_to_project`]); the project's own media is read wherever the
+/// project says it lives, as long as it is on this machine (see
+/// [`confine_asset_media`]), because that is what importing by reference means.
 ///
 /// `project-readonly` is a claim about project state, not about every byte under
 /// the directory: `openreelio.frame.extract` writes the stills it returns into
@@ -228,7 +225,8 @@ fn policy_mode(state: &McpServerState) -> &'static str {
 /// and the operator can delete. That write is disclosed separately as
 /// `cacheWrites` rather than folded in here, because a client deciding whether
 /// to trust the server with an edit is asking about the command log. The cache
-/// bounds itself — see [`prune_frame_cache`] — so the disclosure is of a fixed
+/// bounds itself — see `openreelio_core::render::frame_probe::prune_frame_cache`
+/// — so the disclosure is of a fixed
 /// footprint rather than of unbounded growth.
 fn filesystem_access(state: &McpServerState) -> &'static str {
     if state.project.is_none() {
@@ -760,7 +758,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.frame.extract",
             "OpenReelio frame extract",
-            &format!("See the edit — and above all, see what you just changed. Right after applying an edit, call this with affected:true and grid:'auto': it samples only the seconds that moved and returns them as ONE contact sheet whose cells[] name their timecode and their reason. Other event samplers answer the other standing questions without any arithmetic: atCuts for continuity (each cut gives the outgoing shot's last frame and the incoming shot's first), atTransitions for a blend's start/cut/end, atCaptions for readability (pass cellWidth 640 or more so the words are legible), atMarkers, perShot for coverage, and around+span for one moment in detail. Samplers combine, and 'limit' caps how many frames come back. Reach for 'between' — evenly spaced midpoints that land on no event at all — only when nothing event-driven fits. Timeline stills show the COMPOSITED edit by default: captions, text, transforms and blends, exactly what export produces. Without 'grid' the result is up to {MAX_INLINE_FRAME_STILLS} separate stills; with it, one sheet. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' reads an already rendered video instead of the timeline, must be inside the project directory, and takes no sampler."),
+            &format!("See the edit — and above all, see what you just changed. Right after applying an edit, call this with the affectedRanges it reported as ranges and grid:'auto': it samples only the seconds that moved and returns them as ONE contact sheet whose cells[] name their timecode and their reason. (affected:true reads the last recorded edit instead, which is a shared slot — pair it with afterOp when you use it.) Other event samplers answer the other standing questions without any arithmetic: atCuts for continuity (each cut gives the outgoing shot's last frame and the incoming shot's first), atTransitions for a blend's start/cut/end, atCaptions for readability (pass cellWidth 640 or more so the words are legible), atMarkers, perShot for coverage, and around+span for one moment in detail. Samplers combine, and 'limit' caps how many frames come back. Reach for 'between' — evenly spaced midpoints that land on no event at all — only when nothing event-driven fits. Timeline stills show the COMPOSITED edit by default: captions, text, transforms and blends, exactly what export produces. Without 'grid' the result is up to {MAX_INLINE_FRAME_STILLS} separate stills; with it, one sheet. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' reads an already rendered video instead of the timeline, must be inside the project directory, and takes no sampler."),
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -784,7 +782,25 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     },
                     "affected": {
                         "type": "boolean",
-                        "description": "Sample the timeline ranges the LAST applied edit changed: each range's start, its middle, its last frame, and both sides of every cut inside it. This is the post-apply look: run it straight after plan.apply or a mutating tool. Errors when nothing has been applied to this sequence yet, or when the last edit was on another sequence."
+                        "description": "Sample the timeline ranges the LAST applied edit changed: each range's start, its middle, its last frame, and both sides of every cut inside it. This is the post-apply look: run it straight after plan.apply or a mutating tool. The record is one slot every surface overwrites, including edits made in the app itself, so pass 'afterOp' with the operation id your own apply reported — or pass 'ranges' outright, which needs no record at all. Errors when nothing has been applied to this sequence yet, or when the last edit was on another sequence."
+                    },
+                    "afterOp": {
+                        "type": "string",
+                        "description": "Operation id the recorded hand-off must end at, from your own apply ('opId' / the last of plan.apply's 'operationIds'). Only with 'affected'. An edit applied after yours makes this a refusal naming both operations instead of a confident picture of somebody else's seconds."
+                    },
+                    "ranges": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "startSec": { "type": "number", "minimum": 0 },
+                                "endSec": { "type": "number", "minimum": 0 }
+                            },
+                            "required": ["startSec", "endSec"],
+                            "additionalProperties": false
+                        },
+                        "minItems": 1,
+                        "description": "Sample these timeline ranges — the same samples 'affected' takes, over ranges you name. Pass the 'affectedRanges' your own edit reported: no record is read, so nothing another surface does in between can redirect the look. Cannot be combined with 'affected'."
                     },
                     "atCuts": {
                         "type": "boolean",
@@ -1138,27 +1154,34 @@ fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Va
     Ok(output)
 }
 
-/// Confines one asset's media file to the served project directory.
+/// Checks one asset's media before FFmpeg is asked to read it.
 ///
-/// The asset URI is project state rather than a tool argument, so it bypasses the
-/// confinement [`confine_to_project`] applies to client-supplied paths — yet it
-/// reaches FFmpeg exactly like one, through
-/// [`Asset::resolved_path`](openreelio_core::assets::Asset::resolved_path). A
-/// project whose state names media outside the served directory would otherwise
-/// turn a read-only tool into a whole-disk read, and a UNC URI would make the
-/// server open an outbound connection. Project state is not a grant: it can be
-/// a foreign project the operator pointed the server at, or one an approved
-/// `UpdateAsset`/`ImportAsset` rewrote.
+/// Deliberately *not* a project-directory confinement, unlike the rule
+/// [`confine_to_project`] applies to client-supplied paths. The app imports
+/// media by reference: the file stays where the user put it, and
+/// [`Asset::resolved_path`](openreelio_core::assets::Asset::resolved_path)
+/// hands back that original absolute path. Requiring it to live inside the
+/// project refused every project the GUI ever authored — the ordinary case,
+/// footage on a camera dump or a shared drive — while protecting nothing, since
+/// the sequence those assets are cut into is already rendered, previewed and
+/// exported from wherever the media lies.
 ///
-/// The error names the asset, never the resolved path, so a rejection cannot be
-/// read as an existence oracle for whatever the URI pointed at.
+/// What is enforced is what this server itself adds: it must not be the thing
+/// that reaches off-host. A UNC or network path is refused lexically, before
+/// anything stats it, because on Windows the stat *is* the outbound SMB
+/// connection and the NTLM handshake that leaks with it. Media that is not
+/// readable here is refused too, so the client is told the footage is missing
+/// rather than reading an FFmpeg error about a file it cannot see.
+///
+/// Neither error names the resolved path: a rejection must not be readable as
+/// an existence oracle for whatever the URI pointed at.
 fn confine_asset_media(
     project: &openreelio_core::ActiveProject,
     asset_id: &str,
 ) -> Result<(), ToolError> {
     let Some(asset) = project.state.assets.get(asset_id) else {
         // A missing asset is the transcription command's error to report, with
-        // its own wording; there is no path to confine here.
+        // its own wording; there is no path to check here.
         return Ok(());
     };
 
@@ -1166,24 +1189,30 @@ fn confine_asset_media(
     // prefix. Stripping it here is what tells an ordinary drive path apart from a
     // real UNC share, which keeps its prefix and is rejected below.
     let media_path = strip_verbatim_prefix(&asset.resolved_path(&project.path));
-    match confine_to_project(&project.path, "asset media", &media_path.to_string_lossy()) {
-        Ok(_) => Ok(()),
-        // A project directory that cannot be resolved is an environment failure,
-        // not a policy decision, and keeps its own wording.
-        Err(error @ ToolError::Execution(_)) => Err(error),
-        Err(_) => Err(ToolError::PermissionDenied(format!(
-            "Asset '{asset_id}' resolves to media outside the served project directory; the MCP server only reads media inside the project it was started on"
-        ))),
+    if is_network_path(&media_path.to_string_lossy()) {
+        return Err(ToolError::PermissionDenied(format!(
+            "Asset '{asset_id}' resolves to media on a UNC or network path; this server only reads local media"
+        )));
     }
+    if !media_path.exists() {
+        // An environment failure rather than a policy decision, and worded as
+        // one: the operator's fix is to reconnect the drive, not to move the
+        // file into the project.
+        return Err(ToolError::Execution(format!(
+            "Asset '{asset_id}' has no readable media on this machine"
+        )));
+    }
+
+    Ok(())
 }
 
-/// Confines every asset a sequence mixdown will read.
+/// Checks every asset a sequence's render will read.
 ///
-/// The mixdown builds a render graph over the whole sequence, so confinement is
-/// checked for every asset the sequence references rather than for the audible
-/// subset alone: which layers survive muting and trimming is the render graph's
-/// decision, and a scope violation anywhere in the sequence is worth refusing
-/// before FFmpeg is spawned at all.
+/// The render graph covers the whole sequence, so every asset it references is
+/// checked rather than the audible or visible subset alone: which layers
+/// survive muting and trimming is the graph's decision, and media this machine
+/// cannot read — or must not reach for — is worth refusing before FFmpeg is
+/// spawned at all.
 fn confine_sequence_media(
     project: &openreelio_core::ActiveProject,
     sequence_id: &str,
@@ -2167,6 +2196,8 @@ struct FrameExtractRequest {
     span: Option<f64>,
     around_count: Option<usize>,
     affected: bool,
+    after_op: Option<String>,
+    ranges: Option<Vec<TimeRange>>,
     limit: Option<usize>,
 }
 
@@ -2193,6 +2224,8 @@ impl FrameExtractRequest {
             span: optional_positive_number(arguments, "span")?,
             around_count: optional_positive_count(arguments, "aroundCount")?,
             affected: optional_bool_argument(arguments, "affected")?.unwrap_or(false),
+            after_op: optional_string_argument(arguments, "afterOp")?,
+            ranges: optional_time_ranges_argument(arguments, "ranges")?,
             limit: optional_positive_count(arguments, "limit")?,
         };
 
@@ -2220,13 +2253,15 @@ impl FrameExtractRequest {
             || self.per_shot
             || self.around.is_some()
             || self.affected
+            || self.ranges.is_some()
     }
 
     fn validate(&self) -> Result<(), ToolError> {
+        self.validate_range_sources()?;
         self.validate_sampler_combination()?;
         if self.time.is_none() && self.times.is_none() && !self.is_grid() && !self.has_sampler() {
             return Err(ToolError::InvalidArguments(
-                "Nothing to extract: pass affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around, time, times, or grid"
+                "Nothing to extract: pass affected, ranges, atCuts, atTransitions, atCaptions, atMarkers, perShot, around, time, times, or grid"
                     .to_string(),
             ));
         }
@@ -2256,6 +2291,30 @@ impl FrameExtractRequest {
         self.validate_cell_geometry()?;
         self.validate_still_width()?;
         self.validate_selection_size()
+    }
+
+    /// Rejects the two range sources asked for together, and `afterOp` asked
+    /// for without `affected`.
+    ///
+    /// `ranges` is what the caller says its own edit changed; `affected` is
+    /// what the project's hand-off record says the last edit changed. They are
+    /// different authorities on the same question, and sampling their union
+    /// would report one set of pictures as though both agreed.
+    fn validate_range_sources(&self) -> Result<(), ToolError> {
+        if self.ranges.is_some() && self.affected {
+            return Err(ToolError::InvalidArguments(
+                "ranges names the ranges to sample and affected reads the ones the last edit recorded; pass one or the other. Use ranges when you already hold what your own apply reported, and affected with afterOp when you do not."
+                    .to_string(),
+            ));
+        }
+        if self.after_op.is_some() && !self.affected {
+            return Err(ToolError::InvalidArguments(
+                "afterOp names the operation the recorded hand-off must end at, so it only means something with affected"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Rejects a sampler paired with a selector that already names its times.
@@ -2300,7 +2359,7 @@ impl FrameExtractRequest {
         }
 
         Err(ToolError::InvalidArguments(format!(
-            "{} only shapes a sampler; add affected, atCuts, atTransitions, atCaptions, atMarkers, perShot or around",
+            "{} only shapes a sampler; add affected, ranges, atCuts, atTransitions, atCaptions, atMarkers, perShot or around",
             orphaned.join(", ")
         )))
     }
@@ -2512,7 +2571,7 @@ impl FrameExtractRequest {
         }
 
         Err(ToolError::InvalidArguments(
-            "grid 'auto' sizes the sheet from its samples, so it needs a sampler (affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around) or times. With between, state the layout as COLSxROWS."
+            "grid 'auto' sizes the sheet from its samples, so it needs a sampler (affected, ranges, atCuts, atTransitions, atCaptions, atMarkers, perShot, around) or times. With between, state the layout as COLSxROWS."
                 .to_string(),
         ))
     }
@@ -2557,6 +2616,17 @@ impl FrameExtractRequest {
             span: self.span,
             around_count: self.around_count,
             affected: self.affected,
+            after_op: self.after_op,
+            // `ExtractArgs` carries the CLI's own shape — the flat pairs clap
+            // collects from a repeated `--range START END` — so the parsed
+            // ranges are flattened back into it rather than the struct growing
+            // a second spelling of the same argument.
+            range: self.ranges.map(|ranges| {
+                ranges
+                    .into_iter()
+                    .flat_map(|range| [range.start_sec, range.end_sec])
+                    .collect()
+            }),
             // A batch of stills travels inline, so an unbounded sampler would
             // build a response no host can carry. The cap is applied as the
             // caller's own budget when they state none.
@@ -2585,6 +2655,60 @@ fn optional_positive_number(arguments: &Value, key: &str) -> Result<Option<f64>,
         .ok_or_else(|| {
             ToolError::InvalidArguments(format!("{key} must be a positive number when provided"))
         })
+}
+
+/// Reads an optional list of `{startSec, endSec}` timeline ranges.
+///
+/// Every value is checked here rather than left to the engine so a malformed
+/// range is an argument error the client can fix, in the same words for every
+/// entry. `startSec == endSec` is accepted: that is how a marker's own instant
+/// is expressed, and the sampler gives it a single sample.
+fn optional_time_ranges_argument(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<Vec<TimeRange>>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    let entries = value.as_array().ok_or_else(|| {
+        ToolError::InvalidArguments(format!(
+            "{key} must be an array of {{startSec, endSec}} objects"
+        ))
+    })?;
+    if entries.is_empty() {
+        return Err(ToolError::InvalidArguments(format!(
+            "{key} requires at least one range"
+        )));
+    }
+
+    let mut ranges = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let read = |field: &str| {
+            entry
+                .get(field)
+                .and_then(Value::as_f64)
+                .filter(|number| number.is_finite() && *number >= 0.0)
+                .ok_or_else(|| {
+                    ToolError::InvalidArguments(format!(
+                        "{key} entries need a finite, non-negative {field}"
+                    ))
+                })
+        };
+        let start_sec = read("startSec")?;
+        let end_sec = read("endSec")?;
+        if end_sec < start_sec {
+            return Err(ToolError::InvalidArguments(format!(
+                "{key} entries need endSec at or after startSec (got {start_sec} to {end_sec})"
+            )));
+        }
+        ranges.push(TimeRange { start_sec, end_sec });
+    }
+
+    Ok(Some(ranges))
 }
 
 /// Reads an optional whole count of at least one.
@@ -2642,25 +2766,44 @@ fn run_frame_extract_tool(
         }
     };
 
-    // Created only once every argument, path, and media check has passed, so a
-    // rejected request leaves no directory behind at all.
-    let directory = create_frame_cache_directory(project_path)?;
-    let out = frame_output_path(&directory, &request);
-    let args = request.into_extract_args(project_path.clone(), out, file, sequence_id);
+    // Allocated only once every argument, path, and media check has passed, so
+    // a rejected request leaves no directory behind at all.
+    let output = frame_output_slot(project_path, &request)?;
+    let args = request.into_extract_args(
+        project_path.clone(),
+        output.out().to_path_buf(),
+        file,
+        sequence_id,
+    );
 
-    match extract_inline_frames(args, project.as_ref()) {
-        Ok(output) => {
-            prune_frame_cache(project_path);
-            Ok(output)
-        }
-        Err(error) => {
-            // Nothing usable came back, so this call's directory is residue:
-            // FFmpeg and the sequence-bounds check both run after the mkdir, and
-            // an empty entry per failed probe is how the cache grows fastest.
-            discard_frame_cache_directory(&directory);
-            Err(error)
-        }
-    }
+    extract_inline_frames(args, project.as_ref()).map_err(|error| {
+        // Nothing usable came back, so this call's directory is residue: FFmpeg
+        // and the sequence-bounds check both run after the mkdir, and an empty
+        // entry per failed probe is how the cache grows fastest.
+        output.discard();
+        error
+    })
+}
+
+/// Reserves the cache entry this extraction writes into.
+///
+/// The images are encoded for a vision model rather than for archival, so the
+/// stills are JPEG — see `into_extract_args`, which forces the same format on
+/// the probe.
+fn frame_output_slot(
+    project_path: &Path,
+    request: &FrameExtractRequest,
+) -> Result<FrameOutput, ToolError> {
+    let artifact = if request.is_grid() {
+        FrameArtifact::Sheet
+    } else if request.times.is_some() || request.has_sampler() {
+        FrameArtifact::Batch
+    } else {
+        FrameArtifact::Still
+    };
+
+    allocate_frame_output(project_path, artifact, ImageFormat::Jpeg)
+        .map_err(|error| ToolError::Execution(error.to_string()))
 }
 
 /// Runs the extraction and reads its images back for the wire.
@@ -2680,152 +2823,16 @@ fn extract_inline_frames(
         None => frame::run_extract(args),
     }
     .map_err(|error| ToolError::Execution(error.to_string()))?;
-    let images = inline_frame_images(&payload)?;
+    let images = inline_frame_images(&payload, MAX_INLINE_FRAME_STILLS)
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+        .into_iter()
+        .map(|image| ToolImage {
+            data: image.data,
+            mime_type: image.mime_type,
+        })
+        .collect();
 
     Ok(ToolOutput::with_images(payload, images))
-}
-
-/// Root of the frame cache for a project.
-fn frame_cache_root(project_path: &Path) -> PathBuf {
-    project_path
-        .join(".openreelio")
-        .join("cache")
-        .join("frames")
-}
-
-/// Creates the directory this extraction writes into, inside the project's own
-/// cache.
-///
-/// The caller never names an output path: an MCP argument that decided where
-/// bytes land would make a read-only server an arbitrary-write primitive. A
-/// timestamped directory under `.openreelio/cache/frames/` keeps concurrent
-/// judgements from overwriting each other's evidence, and puts every image in a
-/// place that is safe to delete.
-fn create_frame_cache_directory(project_path: &Path) -> Result<PathBuf, ToolError> {
-    let directory = frame_cache_root(project_path)
-        .join(chrono::Utc::now().format(FRAME_CACHE_STAMP).to_string());
-    std::fs::create_dir_all(&directory).map_err(|error| {
-        ToolError::Execution(format!(
-            "Failed to create the frame cache directory '{}': {error}",
-            directory.display()
-        ))
-    })?;
-
-    Ok(directory)
-}
-
-/// Chooses what this extraction writes inside its cache directory.
-fn frame_output_path(directory: &Path, request: &FrameExtractRequest) -> PathBuf {
-    if request.is_grid() {
-        return directory.join("sheet.jpg");
-    }
-    if request.times.is_some() || request.has_sampler() {
-        // A batch writes one file per time, so the extraction is handed the
-        // directory and names the stills itself.
-        return directory.to_path_buf();
-    }
-
-    directory.join("frame.jpg")
-}
-
-/// Removes a cache directory whose extraction produced nothing usable.
-///
-/// Recursive because a failure can land mid-batch: the directory was created
-/// microseconds earlier for this call alone, so whatever is in it belongs to the
-/// extraction that just failed. Best-effort — a leftover directory is not worth
-/// replacing the real error with a housekeeping one.
-fn discard_frame_cache_directory(directory: &Path) {
-    let _ = std::fs::remove_dir_all(directory);
-}
-
-/// Keeps the frame cache to its most recent [`MAX_CACHED_FRAME_DIRECTORIES`]
-/// entries.
-///
-/// The images are already inline in the response, so the on-disk copy exists
-/// only for a follow-up call that wants the path. Without a bound, a judge loop
-/// deposits every frame it ever looked at into the user's project directory.
-/// Best-effort: an extraction whose images are already in hand must not fail
-/// because the cache could not be tidied.
-fn prune_frame_cache(project_path: &Path) {
-    let Ok(entries) = std::fs::read_dir(frame_cache_root(project_path)) else {
-        return;
-    };
-
-    let mut directories: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
-        .map(|entry| entry.path())
-        .collect();
-    if directories.len() <= MAX_CACHED_FRAME_DIRECTORIES {
-        return;
-    }
-
-    // Entry names are fixed-width UTC timestamps, so sorting them by name sorts
-    // them by age.
-    directories.sort();
-    let stale = directories.len() - MAX_CACHED_FRAME_DIRECTORIES;
-    for directory in directories.into_iter().take(stale) {
-        let _ = std::fs::remove_dir_all(directory);
-    }
-}
-
-/// Reads back the images an extraction wrote and encodes them for the wire.
-///
-/// The paths come from the payload rather than from the request, so the blocks
-/// can never describe a file the extraction did not actually produce.
-fn inline_frame_images(payload: &Value) -> Result<Vec<ToolImage>, ToolError> {
-    let paths: Vec<PathBuf> = match payload.pointer("/sheet/path").and_then(Value::as_str) {
-        Some(sheet) => vec![PathBuf::from(sheet)],
-        None => payload
-            .get("frames")
-            .and_then(Value::as_array)
-            .map(|frames| {
-                frames
-                    .iter()
-                    .filter_map(|frame| frame.get("path").and_then(Value::as_str))
-                    .map(PathBuf::from)
-                    .collect()
-            })
-            .unwrap_or_default(),
-    };
-
-    paths.iter().map(|path| encode_inline_image(path)).collect()
-}
-
-fn encode_inline_image(path: &Path) -> Result<ToolImage, ToolError> {
-    let mime_type = image_mime_type(path)?;
-    let bytes = std::fs::read(path).map_err(|error| {
-        ToolError::Execution(format!(
-            "Failed to read the extracted frame '{}': {error}",
-            path.display()
-        ))
-    })?;
-
-    Ok(ToolImage {
-        data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        mime_type,
-    })
-}
-
-/// Names the image type from what was actually written.
-///
-/// Derived from the file rather than assumed, so the block's `mimeType` cannot
-/// drift from its `data` if the extraction's output format ever changes.
-fn image_mime_type(path: &Path) -> Result<String, ToolError> {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_lowercase)
-        .as_deref()
-    {
-        Some("jpg" | "jpeg") => Ok("image/jpeg".to_string()),
-        Some("png") => Ok("image/png".to_string()),
-        Some("tif" | "tiff") => Ok("image/tiff".to_string()),
-        _ => Err(ToolError::Execution(format!(
-            "Extracted frame '{}' has no recognised image type",
-            path.display()
-        ))),
-    }
 }
 
 fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
@@ -4637,9 +4644,9 @@ mod tests {
     /// Builds a project whose single clip is backed by a real decodable video
     /// living inside the project directory.
     ///
-    /// In-project media is not a convenience here: `confine_sequence_media`
-    /// rejects anything else, so a fixture with outside media could only ever
-    /// test the rejection.
+    /// In-project media is a convenience only: `confine_sequence_media` accepts
+    /// media anywhere local, and keeping the fixture inside the temp project
+    /// keeps everything one test wrote in one directory.
     fn project_with_real_media(temp_dir: &tempfile::TempDir, name: &str) -> Option<PathBuf> {
         let ffmpeg = ffmpeg_for_tests()?;
         let media_path = temp_dir.path().join(name).join("clip.mp4");
@@ -5011,6 +5018,73 @@ mod tests {
     }
 
     #[test]
+    fn should_sample_the_ranges_the_caller_names_without_reading_the_record() {
+        // What a client sends straight after an apply: the `affectedRanges` the
+        // apply itself reported. No hand-off file is read, so nothing another
+        // surface does in between can redirect the look.
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "ranges": [{ "startSec": 1.0, "endSec": 2.5 }, { "startSec": 9.0, "endSec": 9.0 }],
+            "grid": "auto"
+        }))
+        .expect("named ranges are a sampler in their own right");
+
+        assert!(!request.affected, "no record is consulted");
+        let args = request.into_extract_args(
+            PathBuf::from("project"),
+            PathBuf::from("project/sheet.jpg"),
+            None,
+            Some("seq".to_string()),
+        );
+        // Flattened into the CLI's own repeated `--range START END` shape.
+        assert_eq!(args.range, Some(vec![1.0, 2.5, 9.0, 9.0]));
+    }
+
+    #[test]
+    fn should_refuse_named_ranges_alongside_the_recorded_ones() {
+        let error = FrameExtractRequest::parse(&serde_json::json!({
+            "ranges": [{ "startSec": 1.0, "endSec": 2.5 }],
+            "affected": true
+        }))
+        .expect_err("two authorities on the same ranges cannot both be honoured");
+
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected an argument refusal");
+        };
+        assert!(
+            message.contains("affected") && message.contains("ranges"),
+            "the refusal must name both sources: {message}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_malformed_ranges_and_an_orphaned_after_op() {
+        for arguments in [
+            serde_json::json!({ "ranges": [] }),
+            serde_json::json!({ "ranges": [{ "startSec": 2.0, "endSec": 1.0 }] }),
+            serde_json::json!({ "ranges": [{ "startSec": -1.0, "endSec": 1.0 }] }),
+            serde_json::json!({ "ranges": [{ "startSec": 1.0 }] }),
+            serde_json::json!({ "ranges": "1.0,2.0" }),
+            // `afterOp` checks the record `affected` reads; without it there is
+            // no record in play to check.
+            serde_json::json!({ "atCuts": true, "afterOp": "op-1" }),
+        ] {
+            let error = FrameExtractRequest::parse(&arguments)
+                .expect_err(&format!("{arguments} must be refused"));
+            assert!(
+                matches!(error, ToolError::InvalidArguments(_)),
+                "{arguments} must be an argument refusal, got {error:?}"
+            );
+        }
+
+        let checked = FrameExtractRequest::parse(&serde_json::json!({
+            "affected": true,
+            "afterOp": "op-1"
+        }))
+        .expect("afterOp belongs with affected");
+        assert_eq!(checked.after_op.as_deref(), Some("op-1"));
+    }
+
+    #[test]
     fn should_accept_a_sampler_with_an_explicit_grid() {
         // A sampler is its own time source, and `between`/`times` are refused
         // alongside one — so demanding them here rejected the only shape a
@@ -5285,7 +5359,7 @@ mod tests {
         .expect_err("a fake render cannot be extracted from");
         assert!(matches!(error, ToolError::Execution(_)));
 
-        let cache_root = frame_cache_root(&project_path);
+        let cache_root = frame_cache_dir(&project_path);
         let leftovers = std::fs::read_dir(&cache_root)
             .map(|entries| entries.flatten().count())
             .unwrap_or(0);
@@ -5310,50 +5384,9 @@ mod tests {
         .expect_err("a grid past the cell cap must be refused");
 
         assert!(
-            !frame_cache_root(&project_path).exists(),
+            !frame_cache_dir(&project_path).exists(),
             "a refused request must not touch the cache at all"
         );
-    }
-
-    #[test]
-    fn should_keep_only_the_newest_frame_cache_entries() {
-        let temp_dir = tempfile::TempDir::new().expect("temp dir");
-        let project_path = temp_dir.path().join("frame_prune_project");
-        let cache_root = frame_cache_root(&project_path);
-
-        // Names are fixed-width UTC stamps, so the ordering under test is the
-        // one real entries get.
-        let stamps: Vec<String> = (0..MAX_CACHED_FRAME_DIRECTORIES + 4)
-            .map(|index| format!("20260816T120000{index:06}Z"))
-            .collect();
-        for stamp in &stamps {
-            let entry = cache_root.join(stamp);
-            std::fs::create_dir_all(&entry).expect("cache entry");
-            std::fs::write(entry.join("sheet.jpg"), b"sheet bytes").expect("cache image");
-        }
-
-        prune_frame_cache(&project_path);
-
-        let mut remaining: Vec<String> = std::fs::read_dir(&cache_root)
-            .expect("cache root")
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .collect();
-        remaining.sort();
-        assert_eq!(remaining.len(), MAX_CACHED_FRAME_DIRECTORIES);
-        assert_eq!(
-            remaining,
-            stamps[stamps.len() - MAX_CACHED_FRAME_DIRECTORIES..].to_vec(),
-            "pruning must keep the newest entries, not an arbitrary set"
-        );
-    }
-
-    #[test]
-    fn should_tolerate_pruning_a_cache_that_does_not_exist_yet() {
-        let temp_dir = tempfile::TempDir::new().expect("temp dir");
-        // The first extraction on a project prunes before anything was cached,
-        // and housekeeping must never be able to fail a successful call.
-        prune_frame_cache(&temp_dir.path().join("never_extracted_project"));
     }
 
     #[test]
@@ -5452,6 +5485,8 @@ mod tests {
             span: None,
             around_count: None,
             affected: false,
+            after_op: None,
+            range: None,
             limit: None,
         };
 
@@ -5660,35 +5695,21 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_to_transcribe_an_asset_whose_media_lives_outside_the_project() {
+    fn should_read_media_the_app_imported_from_outside_the_project() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let outside_media = temp_dir.path().join("outside.mp4");
         let (project_path, sequence_id, asset_id) =
             project_with_media_asset(&temp_dir, "outside_media_project", &outside_media);
 
-        let state = McpServerState {
-            project: Some(project_path),
-            ..Default::default()
-        };
-
-        // Both transcription modes reach FFmpeg with this asset's path, so both
-        // have to refuse before FFmpeg is spawned — the refusal must not depend
-        // on whether Whisper happens to be compiled in on this build.
-        for arguments in [
-            serde_json::json!({ "assetId": asset_id }),
-            serde_json::json!({ "sequenceAudio": true, "sequenceId": sequence_id }),
-        ] {
-            let error = generate_transcription(&state, arguments.clone())
-                .expect_err(&format!("{arguments} must be refused"));
-            assert!(
-                matches!(error, ToolError::PermissionDenied(_)),
-                "{arguments} must be denied by policy, got {error:?}"
-            );
-            assert!(
-                !error.to_string().contains("outside.mp4"),
-                "the refusal must not echo the out-of-scope path: {error}"
-            );
-        }
+        // The GUI imports media by reference and leaves it where the user put
+        // it, so this is what an ordinary project looks like. Refusing it made
+        // every GUI-authored project untranscribable and unlookable-at through
+        // this server, while protecting nothing: the same media is already
+        // rendered and exported from where it lies.
+        let project = super::super::load_project(&project_path).expect("load project");
+        confine_asset_media(&project, &asset_id).expect("external media must be accepted");
+        confine_sequence_media(&project, &sequence_id)
+            .expect("a sequence of external media must be accepted");
     }
 
     #[test]
@@ -5709,16 +5730,16 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_transcription_for_asset_uris_that_leave_the_project_lexically() {
+    fn should_refuse_transcription_for_asset_uris_that_leave_the_machine() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let inside_media = temp_dir.path().join("hostile_uri_project").join("clip.mp4");
         let (project_path, _sequence_id, asset_id) =
             project_with_media_asset(&temp_dir, "hostile_uri_project", &inside_media);
 
         // The command layer refuses these, so they can only arrive on a project
-        // written by something else. Confinement is what makes that harmless.
+        // written by something else. Locality is what makes that harmless: the
+        // server must never be the thing that opens an outbound connection.
         for hostile_uri in [
-            "http://attacker.example/probe.mp4",
             "\\\\attacker.example\\share\\probe.mp4",
             "//attacker.example/share/probe.mp4",
         ] {
@@ -5731,33 +5752,58 @@ mod tests {
                 matches!(error, ToolError::PermissionDenied(_)),
                 "'{hostile_uri}' must be denied by policy, got {error:?}"
             );
+            assert!(
+                !error.to_string().contains("attacker.example"),
+                "the refusal must not echo the path: {error}"
+            );
         }
+
+        // A URL is not a share, so it is not a policy refusal — but it names no
+        // media on this machine either, and is refused before FFmpeg sees it.
+        let mut project = super::super::load_project(&project_path).expect("load project");
+        project.state.assets.get_mut(&asset_id).expect("asset").uri =
+            "http://attacker.example/probe.mp4".to_string();
+        let error = confine_asset_media(&project, &asset_id).expect_err("a URL must be refused");
+        assert!(
+            !error.to_string().contains("attacker.example"),
+            "the refusal must not echo the path: {error}"
+        );
     }
 
     #[test]
-    fn should_refuse_transcription_for_relative_paths_that_traverse_out_of_the_project() {
+    fn should_refuse_transcription_for_media_that_is_not_on_this_machine() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let inside_media = temp_dir
             .path()
-            .join("traversal_uri_project")
+            .join("missing_media_project")
             .join("clip.mp4");
-        let outside_media = temp_dir.path().join("outside.mp4");
-        std::fs::write(&outside_media, b"fake video bytes").expect("outside fixture");
-        let (project_path, _sequence_id, asset_id) =
-            project_with_media_asset(&temp_dir, "traversal_uri_project", &inside_media);
+        let (project_path, sequence_id, asset_id) =
+            project_with_media_asset(&temp_dir, "missing_media_project", &inside_media);
 
-        // `Asset::resolved_path` joins `relative_path` onto the project root with
-        // no traversal check of its own.
-        let mut project = super::super::load_project(&project_path).expect("load project");
-        let asset = project.state.assets.get_mut(&asset_id).expect("asset");
-        asset.relative_path = Some("../outside.mp4".to_string());
+        // A disconnected drive, or footage moved after import: FFmpeg would
+        // report it as a decode failure halfway through, so it is caught here
+        // and named as what it is — without saying where the file was looked for.
+        std::fs::remove_file(&inside_media).expect("remove the media fixture");
 
-        let error =
-            confine_asset_media(&project, &asset_id).expect_err("traversal must be refused");
-        assert!(
-            matches!(error, ToolError::PermissionDenied(_)),
-            "traversal must be denied by policy, got {error:?}"
-        );
+        let state = McpServerState {
+            project: Some(project_path),
+            ..Default::default()
+        };
+        for arguments in [
+            serde_json::json!({ "assetId": asset_id }),
+            serde_json::json!({ "sequenceAudio": true, "sequenceId": sequence_id }),
+        ] {
+            let error = generate_transcription(&state, arguments.clone())
+                .expect_err(&format!("{arguments} must be refused"));
+            assert!(
+                error.to_string().contains("no readable media"),
+                "{arguments} must say the media is missing, got {error:?}"
+            );
+            assert!(
+                !error.to_string().contains("clip.mp4"),
+                "the refusal must not echo the resolved path: {error}"
+            );
+        }
     }
 
     /// Class guard for RC-E: every MCP surface that turns a client-influenced
@@ -5837,22 +5883,33 @@ mod tests {
         assert!(matches!(error, ToolError::PermissionDenied(_)));
 
         // 3. `openreelio.transcription.generate` — a path that arrives as project
-        //    state, confined by `confine_asset_media` before FFmpeg is spawned.
-        let outside_media = temp_dir.path().join("class_guard_outside.mp4");
+        //    state, checked by `confine_asset_media` before FFmpeg is spawned.
+        //    The rule there is locality, not location — media merely living
+        //    outside the project is ordinary and must keep working — so the
+        //    check is exercised with media this machine cannot read. Refusing an
+        //    off-host UNC path is covered by
+        //    `should_refuse_transcription_for_asset_uris_that_leave_the_machine`,
+        //    which can hand the confinement a URI the command layer refuses to
+        //    store.
+        let unreadable_media = temp_dir.path().join("class_guard_unreadable.mp4");
         let (media_project, _, asset_id) =
-            project_with_media_asset(&temp_dir, "class_guard_media", &outside_media);
+            project_with_media_asset(&temp_dir, "class_guard_media", &unreadable_media);
+        std::fs::remove_file(&unreadable_media).expect("remove the media fixture");
         let media_state = McpServerState {
             project: Some(media_project),
             ..Default::default()
         };
         let error =
             generate_transcription(&media_state, serde_json::json!({ "assetId": asset_id }))
-                .expect_err("transcription must confine its media path");
-        assert!(matches!(error, ToolError::PermissionDenied(_)));
+                .expect_err("transcription must check its media path");
+        assert!(
+            error.to_string().contains("no readable media"),
+            "the media check must run before FFmpeg, got {error:?}"
+        );
 
         // 3b. `openreelio.frame.extract` reaches FFmpeg through *both* kinds of
-        //     path, so both are confined: `file` as a tool argument, and the
-        //     sequence's own media as project state.
+        //     path, so both are checked: `file` as a tool argument, confined to
+        //     the project, and the sequence's own media as project state.
         let error = run_frame_extract_tool(
             &verify_state,
             serde_json::json!({ "time": 0.0, "file": "../outside.mp4" }),
@@ -5861,8 +5918,11 @@ mod tests {
         assert!(matches!(error, ToolError::PermissionDenied(_)));
 
         let error = run_frame_extract_tool(&media_state, serde_json::json!({ "time": 0.0 }))
-            .expect_err("frame extract must confine the sequence's media");
-        assert!(matches!(error, ToolError::PermissionDenied(_)));
+            .expect_err("frame extract must check the sequence's media");
+        assert!(
+            error.to_string().contains("no readable media"),
+            "the media check must run before FFmpeg, got {error:?}"
+        );
 
         // 4. Documented exception: plan payload paths are NOT confined to the
         //    project, because importing external footage is the point of the

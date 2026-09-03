@@ -353,7 +353,11 @@ fn build_export_settings(
         "mp4_draft" | "mp4_h264_720p" | "draft" => {
             ExportSettings::from_preset(ExportPreset::Mp4Draft, output_path)
         }
-        "proxy_480p" | "proxy" => ExportSettings::proxy(output_path, canvas, start_time, end_time),
+        // Which ids mean "proxy" is core's answer, so the CLI and the desktop
+        // render commands cannot accept different spellings.
+        id if openreelio_core::render::is_proxy_preset_id(id) => {
+            ExportSettings::proxy(output_path, canvas, start_time, end_time)
+        }
         "webm_vp9_1080p" | "webm_vp9" | "webm" => {
             ExportSettings::from_preset(ExportPreset::WebmVp9, output_path)
         }

@@ -86,11 +86,11 @@ pub enum SampleReason {
     Marker,
     /// The middle of one shot.
     ShotMid,
-    /// The start of a range the last apply changed.
+    /// The start of a changed range — the last apply's, or a named one.
     AffectedStart,
-    /// The middle of a range the last apply changed.
+    /// The middle of a changed range — the last apply's, or a named one.
     AffectedMid,
-    /// The last frame of a range the last apply changed.
+    /// The last frame of a changed range — the last apply's, or a named one.
     AffectedEnd,
     /// A sample from an explicit `--around` window.
     Around,
@@ -165,6 +165,14 @@ pub struct SamplerSpec {
     pub around_count: Option<usize>,
     /// Sample the ranges the last successful apply changed.
     pub affected: bool,
+    /// Sample the ranges the caller named outright.
+    ///
+    /// The same sampler `affected` runs, over ranges that arrive with the
+    /// request instead of being read from the project's hand-off file. A caller
+    /// that already holds the ranges its own apply reported — the in-app bridge
+    /// does, from `plan_apply` — states them here and never has to trust a slot
+    /// another surface can overwrite between the edit and the look.
+    pub ranges: Option<Vec<TimeRange>>,
     /// Largest number of samples to keep; the rest are thinned out evenly.
     pub limit: Option<usize>,
 }
@@ -183,6 +191,7 @@ impl SamplerSpec {
             || self.per_shot
             || self.around.is_some()
             || self.affected
+            || self.ranges.is_some()
     }
 
     /// The samplers asked for, in the order they are applied.
@@ -199,6 +208,7 @@ impl SamplerSpec {
             (self.per_shot, "perShot"),
             (self.around.is_some(), "around"),
             (self.affected, "affected"),
+            (self.ranges.is_some(), "ranges"),
         ] {
             if active {
                 kinds.push(name.to_string());
@@ -234,6 +244,10 @@ pub struct SamplerInputs<'a> {
     /// The project's whole effect table; only referenced ids are read.
     pub effects: &'a HashMap<EffectId, Effect>,
     /// Ranges the last successful apply changed, empty unless `affected` is set.
+    ///
+    /// Read from the project's hand-off file by the caller. Ignored when the
+    /// spec names its own [`ranges`](SamplerSpec::ranges), which the two are
+    /// never allowed to do at once.
     pub affected_ranges: &'a [TimeRange],
 }
 
@@ -253,7 +267,11 @@ pub struct SamplerReport {
     pub selected: usize,
     /// Whether `limit` dropped anything.
     pub limited: bool,
-    /// The affected ranges that were read, when `affected` ran.
+    /// The ranges that were sampled, when `affected` or `ranges` ran.
+    ///
+    /// Echoed back whichever way they arrived — read from the hand-off record,
+    /// or named by the caller — so the picture can be checked against the
+    /// seconds it claims to be of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub affected_ranges: Option<Vec<TimeRange>>,
 }
@@ -316,11 +334,18 @@ pub fn run(spec: &SamplerSpec, inputs: &SamplerInputs<'_>) -> FrameProbeResult<S
             )?,
         );
     }
-    if spec.affected {
+    // `affected` and `ranges` are the same sampler over ranges that arrived by
+    // different routes, and the request layer refuses both at once — so at most
+    // one of these is ever a non-empty list.
+    let sampled_ranges: &[TimeRange] = match spec.ranges.as_deref() {
+        Some(ranges) => ranges,
+        None => inputs.affected_ranges,
+    };
+    if spec.affected || spec.ranges.is_some() {
         extend_rebased(
             &mut raw,
             &mut next_group,
-            affected(inputs.affected_ranges, sequence, fps),
+            affected(sampled_ranges, sequence, fps),
         );
     }
 
@@ -362,7 +387,8 @@ pub fn run(spec: &SamplerSpec, inputs: &SamplerInputs<'_>) -> FrameProbeResult<S
             candidates: candidate_count,
             selected: samples.len(),
             limited,
-            affected_ranges: spec.affected.then(|| inputs.affected_ranges.to_vec()),
+            affected_ranges: (spec.affected || spec.ranges.is_some())
+                .then(|| sampled_ranges.to_vec()),
         },
         samples,
     })
@@ -583,7 +609,12 @@ pub fn around(
         .collect())
 }
 
-/// Samples the ranges the last successful apply changed.
+/// Samples the ranges an edit changed, however the caller named them.
+///
+/// Serves both `affected` — ranges read from the project's hand-off record —
+/// and `ranges`, which the caller states outright; the two produce the same
+/// samples and the same reasons, because they are the same question asked with
+/// more or less certainty about whose edit it is.
 ///
 /// Each range gets its edges, its middle and every cut inside it: the edges show
 /// how the change joins what surrounds it, the middle shows the change itself,
@@ -1589,5 +1620,47 @@ mod tests {
         .expect("the recorded range produces times");
 
         assert_eq!(outcome.report.affected_ranges, Some(ranges));
+    }
+
+    #[test]
+    fn run_should_sample_named_ranges_exactly_as_recorded_ones() {
+        let seq = two_shot_sequence();
+        let effects = HashMap::new();
+        let ranges = vec![TimeRange::new(2.0, 6.0)];
+
+        let named = run(
+            &SamplerSpec {
+                ranges: Some(ranges.clone()),
+                ..SamplerSpec::default()
+            },
+            &SamplerInputs {
+                sequence: &seq,
+                effects: &effects,
+                // Deliberately empty: named ranges must not fall back to the
+                // record, which is the whole point of naming them.
+                affected_ranges: &[],
+            },
+        )
+        .expect("named ranges produce times");
+
+        let recorded = run(
+            &SamplerSpec {
+                affected: true,
+                ..SamplerSpec::default()
+            },
+            &SamplerInputs {
+                sequence: &seq,
+                effects: &effects,
+                affected_ranges: &ranges,
+            },
+        )
+        .expect("the recorded range produces times");
+
+        assert_eq!(
+            named.samples, recorded.samples,
+            "the two range sources must produce the same pictures"
+        );
+        assert_eq!(named.report.kinds, vec!["ranges".to_string()]);
+        assert_eq!(named.report.affected_ranges, Some(ranges));
     }
 }

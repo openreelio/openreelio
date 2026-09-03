@@ -381,6 +381,10 @@ fn build_agent_plan_failure(
         rollback_report: None,
         error_message: Some(error_message.into()),
         execution_time_ms: start.elapsed().as_millis() as u64,
+        // Nothing was applied, so there is nowhere to look and no timeline to
+        // name.
+        sequence_id: None,
+        affected_ranges: Vec::new(),
     }
 }
 

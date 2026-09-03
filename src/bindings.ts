@@ -625,6 +625,19 @@ async exportFrame(sequenceId: string, timeSec: number, format: string, outputPat
 }
 },
 /**
+ * Extracts stills or a contact sheet of the composited edit for an in-app agent.
+ * 
+ * Output always lands in the project's own frame cache; `inline` decides
+ * whether the bytes come back with the paths.
+ */
+async extractTimelineFrames(request: TimelineFrameProbeRequestDto) : Promise<Result<TimelineFrameProbeResultDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("extract_timeline_frames", { request }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Exports audio only from a sequence (no video).
  * 
  * Renders all audio tracks mixed down to a single audio file.
@@ -3352,7 +3365,23 @@ errorMessage?: string | null;
 /**
  * Total execution time in milliseconds
  */
-executionTimeMs: number }
+executionTimeMs: number; 
+/**
+ * Sequence the affected ranges are measured against, when one is known.
+ * 
+ * Resolved once for the whole plan: a step that edits a different sequence
+ * contributes no ranges rather than ranges read off the wrong timeline.
+ */
+sequenceId?: string | null; 
+/**
+ * Stretches of that sequence's timeline the plan changed, as a union.
+ * 
+ * A plan that failed and rolled back cleanly reports none — there is no
+ * longer anywhere to look. A plan whose rollback was incomplete keeps the
+ * applied steps' ranges, because the project really is changed and that
+ * union is the only honest answer to "where do I look now".
+ */
+affectedRanges?: TimeRange[] }
 /**
  * Persisted orchestration run for an agent session.
  */
@@ -4824,7 +4853,23 @@ createdIds: string[];
 /**
  * IDs of entities deleted by this command
  */
-deletedIds: string[] }
+deletedIds: string[]; 
+/**
+ * Sequence the affected ranges are measured against, when one is known.
+ * 
+ * `None` for a command that identifies no timeline — a `CreateSequence`,
+ * an asset import — where reporting the active sequence would send an
+ * inspection step to a timeline the command never touched.
+ */
+sequenceId: string | null; 
+/**
+ * Stretches of that sequence's timeline this command changed.
+ * 
+ * Sorted, disjoint, and measured as a diff across the apply, so a ripple
+ * move is reported in full rather than as the one clip that was named.
+ * Empty when nothing on the timeline moved.
+ */
+affectedRanges: TimeRange[] }
 /**
  * Persisted compaction record DTO aligned with the frontend session kernel vocabulary.
  */
@@ -6406,6 +6451,21 @@ assetId: string;
  */
 sourceTimeSec: number }
 /**
+ * One inline image content block a tool result carries.
+ * 
+ * MCP (2025-06-18) carries pictures as `{ type: "image", data, mimeType }`
+ * where `data` is raw base64 with no `data:` URI prefix.
+ */
+export type McpImageBlock = { 
+/**
+ * Base64-encoded image bytes, with no `data:` URI prefix.
+ */
+data: string; 
+/**
+ * IANA media type of `data`, for example `image/jpeg`.
+ */
+mimeType: string }
+/**
  * Media information extracted by FFprobe.
  */
 export type MediaInfo = { 
@@ -6559,7 +6619,8 @@ boundingBox?: BoundingBox | null }
  * Response body for `respond_openreelio_mcp_call`.
  * 
  * The MCP server wraps this uniformly as
- * `{ content: [{ type: "text", text }], isError }` for the `tools/call` result.
+ * `{ content: [{ type: "text", text }, ...images], isError }` for the
+ * `tools/call` result.
  */
 export type OpenReelioMcpCallResponse = { 
 /**
@@ -6569,7 +6630,14 @@ text: string;
 /**
  * Whether the tool call resulted in an error.
  */
-isError: boolean }
+isError: boolean; 
+/**
+ * Pictures the tool produced, attached alongside the text.
+ * 
+ * Defaulted so a caller that returns only text — every tool but the frame
+ * probe — keeps serialising exactly as it did before images existed.
+ */
+images?: McpImageBlock[] }
 /**
  * Payload for Overwrite Edit (replaces content in time range — trims/removes overlapping clips).
  */
@@ -8941,6 +9009,10 @@ duration: number;
  */
 editMode: ThreePointEditMode }
 /**
+ * Time range
+ */
+export type TimeRange = { startSec: number; endSec: number }
+/**
  * A complete time remap curve for variable-speed playback.
  * 
  * When active on a clip, this replaces the constant `speed` field.
@@ -8971,6 +9043,168 @@ sourceTime: number;
  * How to interpolate to the next keyframe
  */
 interpolation?: KeyframeInterpolation }
+/**
+ * One image an extraction produced.
+ */
+export type TimelineFrameImageDto = { 
+/**
+ * Where the image was written, inside the project's frame cache.
+ */
+path: string; 
+/**
+ * IANA media type of the file, for example `image/jpeg`.
+ */
+mimeType: string; 
+/**
+ * Base64 image bytes with no `data:` prefix; present only when `inline`.
+ */
+data: string | null }
+/**
+ * What to extract, as the in-app agent bridge expresses it.
+ * 
+ * Mirrors [`FrameProbeRequest`] field for field, minus `out`: where the images
+ * land is the app's decision, not the caller's. `inline` is the one addition —
+ * it asks for the bytes back, not just the paths.
+ */
+export type TimelineFrameProbeRequestDto = { 
+/**
+ * Sequence to read; the project's active sequence when absent.
+ */
+sequence?: string | null; 
+/**
+ * Timeline time in seconds.
+ */
+time?: number | null; 
+/**
+ * Timeline times in seconds; a batch of stills, or a contact sheet's cells.
+ */
+times?: number[] | null; 
+/**
+ * Contact sheet grid as `COLSxROWS`, or `auto` to size it from the samples.
+ */
+grid?: string | null; 
+/**
+ * Time range a `grid` request samples, as `[start, end]`.
+ */
+between?: number[] | null; 
+/**
+ * Number of grid samples; the grid's capacity when absent.
+ */
+count?: number | null; 
+/**
+ * Contact sheet cell width in pixels.
+ */
+cellWidth?: number | null; 
+/**
+ * Contact sheet cell height in pixels.
+ */
+cellHeight?: number | null; 
+/**
+ * Burn each cell's index and timecode into the contact sheet.
+ */
+labelCells?: boolean; 
+/**
+ * Timeline extraction mode, `composite` (default) or `fast`.
+ */
+mode?: string | null; 
+/**
+ * Maximum output width in pixels; aspect ratio is preserved, never upscaled.
+ */
+maxWidth?: number | null; 
+/**
+ * Output image format, `png` or `jpeg`. Ignored shape-wise when `inline`.
+ */
+format?: string | null; 
+/**
+ * Rendered video inside the project to read instead of the timeline.
+ */
+file?: string | null; 
+/**
+ * Asset to extract from, in the asset's own media timebase.
+ */
+asset?: string | null; 
+/**
+ * Time inside the asset's own media, in seconds.
+ */
+sourceTime?: number | null; 
+/**
+ * Sample both sides of every cut.
+ */
+atCuts?: boolean; 
+/**
+ * Sample the start, cut and end of every two-input transition.
+ */
+atTransitions?: boolean; 
+/**
+ * Sample the middle of every caption and text span.
+ */
+atCaptions?: boolean; 
+/**
+ * Sample every sequence marker.
+ */
+atMarkers?: boolean; 
+/**
+ * Sample the middle of every shot the export draws.
+ */
+perShot?: boolean; 
+/**
+ * Sample a window centred on this timeline time, in seconds.
+ */
+around?: number | null; 
+/**
+ * Half-width of the `around` window in seconds.
+ */
+span?: number | null; 
+/**
+ * Number of samples the `around` window produces.
+ */
+aroundCount?: number | null; 
+/**
+ * Sample the timeline ranges the last applied edit changed.
+ */
+affected?: boolean; 
+/**
+ * Operation id the `affected` record must end at.
+ * 
+ * The record is one slot every surface overwrites, so `affected` alone
+ * means "the last edit anyone applied". Naming the operation the caller's
+ * own apply ended at — `plan_apply` and `execute_command` both report it —
+ * makes a record left by somebody else's edit a refusal instead of a
+ * confident picture of the wrong seconds.
+ */
+afterOp?: string | null; 
+/**
+ * Sample these timeline ranges, named outright.
+ * 
+ * What the in-app bridge uses: `plan_apply` already answers with the
+ * `affectedRanges` its own apply changed, so the ranges never have to make
+ * the round trip through a file another surface can overwrite.
+ */
+ranges?: TimeRange[] | null; 
+/**
+ * Largest number of sampler times to keep.
+ */
+limit?: number | null; 
+/**
+ * Carry the image bytes back as base64, not just their paths.
+ */
+inline?: boolean }
+/**
+ * A finished frame probe.
+ */
+export type TimelineFrameProbeResultDto = { 
+/**
+ * The probe's own JSON report — the same object the CLI prints.
+ * 
+ * Passed through verbatim rather than re-typed, so the timecodes, sampler
+ * reasons and warnings an agent reasons over are identical on both
+ * surfaces and cannot drift as the engine grows.
+ */
+payload: JsonValue; 
+/**
+ * The images the payload names, in payload order.
+ */
+images: TimelineFrameImageDto[] }
 export type TimelineRangeSummary = { timelineInSec: number; timelineOutSec: number; durationSec: number }
 export type TimelineSourceMappingEntry = { timelineSec: number; timelineOffsetSec: number; sourceSec?: number | null; frameIndex?: number | null; insideClip: boolean; reason: string }
 export type ToggleTrackLockPayload = { sequenceId: string; trackId: string; locked: boolean }

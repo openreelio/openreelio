@@ -19,8 +19,9 @@ openreelio-cli state history --path ./demo
 
 # For each candidate plan (candidate-a.json, candidate-b.json, …):
 openreelio-cli plan execute  --path ./demo --file candidate-a.json
-# Look at what the plan actually changed, before spending a render on it
-openreelio-cli frame extract --path ./demo --affected --grid auto \
+# Look at what the plan actually changed, before spending a render on it:
+# one --range per entry in the affectedRanges the plan just reported
+openreelio-cli frame extract --path ./demo --range <START> <END> --grid auto \
   --label-cells --out ./judge/a-affected.jpg
 openreelio-cli render start  --path ./demo --proxy --output ./judge/a.mp4 --progress
 openreelio-cli frame extract --path ./demo --file ./judge/a.mp4 \
@@ -76,8 +77,8 @@ the sequence and pick the times themselves, on the timeline (samplers need a
 timeline, so they do not combine with `--file`):
 
 ```bash
-# Exactly the seconds the last applied edit changed — the post-apply look
-openreelio-cli frame extract --path ./demo --affected --grid auto \
+# Exactly the seconds the apply reported changing — the post-apply look
+openreelio-cli frame extract --path ./demo --range <START> <END> --grid auto \
   --label-cells --out ./judge/a-affected.jpg
 
 # Both sides of every cut, at the right offsets, in one call
@@ -91,7 +92,8 @@ openreelio-cli frame extract --path ./demo --at-captions --grid auto \
 
 | Sampler | Picks | Reasons reported |
 | ------- | ----- | ---------------- |
-| `--affected` | every range the last apply changed: start, middle, last frame, and both sides of each cut inside it | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
+| `--range START END` (repeatable) | every range you name — the `affectedRanges` the apply returned: start, middle, last frame, and both sides of each cut inside it | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
+| `--affected` | the same, over the last *recorded* edit's ranges rather than ranges you name | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
 | `--at-cuts` | both sides of every cut | `cutBefore` `cutAfter` |
 | `--at-transitions` | each blend's start, cut and end | `transitionStart` `transitionCut` `transitionEnd` |
 | `--at-captions` | the middle of every caption and text span | `captionMid` `textMid` |
@@ -107,10 +109,17 @@ sizes the sheet from the sample count (1 column for a single sample, 2 for two,
 3 up to 9, 4 up to 16, then 6), which is why none of the calls above states a
 layout.
 
-`--affected` reads `<project>/.openreelio/cache/agent/last_affected_ranges.json`,
-written by every successful mutating verb — `command execute`, `plan execute`,
-and the `timeline`, `text` and `caption` edit verbs, which all report the same
-union on their own `affectedRanges` response. If nothing has been applied to the
+Every mutating verb — `command execute`, `plan execute`, and the `timeline`,
+`text` and `caption` edit verbs — reports `affectedRanges` and its op ids on its
+own response, so `--range` needs nothing from disk. `--affected` reads
+`<project>/.openreelio/cache/agent/last_affected_ranges.json` instead, which
+those verbs write **and so does the app's own edit path**: it is a shared slot,
+so an interactive edit made in the timeline between your apply and your look
+replaces it. Such a record is still served, with a warning that the ranges belong
+to an interactive edit — pass `--after-op <OP_ID>` (your `command execute`'s
+`opId`, or the last of `plan execute`'s `operationIds`) to have it refused
+instead, naming both operations. In a best-of-N loop the app may well be open on
+the same project, so that pin matters here. If nothing has been applied to the
 sequence yet, or the record does not end at the project's current operation
 (an undo, a redo, an edit applied by something that records no hand-off), the
 sampler says so rather than guessing — re-apply, or fall back to `--between`.
@@ -170,16 +179,21 @@ read tool, available without `--allow-write`.
 // tools/call → openreelio.frame.extract — the whole render, as one sheet
 { "file": "judge/a.mp4", "grid": "4x3", "between": [0, 90], "labelCells": true }
 
-// tools/call → openreelio.frame.extract — what the last apply changed
-{ "affected": true, "grid": "auto", "labelCells": true }
+// tools/call → openreelio.frame.extract — the ranges plan.apply just reported
+{ "ranges": [{ "startSec": 4, "endSec": 9.5 }], "grid": "auto", "labelCells": true }
+
+// tools/call → openreelio.frame.extract — the last recorded edit, pinned to your op
+{ "affected": true, "afterOp": "<OP_ID>", "grid": "auto", "labelCells": true }
 
 // tools/call → openreelio.frame.extract — continuity at every cut
 { "atCuts": true, "grid": "auto", "limit": 12, "labelCells": true }
 ```
 
-The samplers carry the same names in camelCase — `affected`, `atCuts`,
-`atTransitions`, `atCaptions`, `atMarkers`, `perShot`, `around` (with `span`
-and `aroundCount`), plus `limit` and `grid: "auto"`.
+The samplers carry the same names in camelCase — `ranges`
+(`[{startSec, endSec}]`, exactly what `openreelio.plan.apply` returns as
+`affectedRanges`), `affected` (with `afterOp`), `atCuts`, `atTransitions`,
+`atCaptions`, `atMarkers`, `perShot`, `around` (with `span` and `aroundCount`),
+plus `limit` and `grid: "auto"`.
 
 Two differences from the CLI form:
 
@@ -250,7 +264,7 @@ The winner's weaknesses become the next fix loop's worklist.
 | Step | Cost | Use for |
 | ---- | ---- | ------- |
 | `verify --structural-only` | free, no FFmpeg | pacing stats; disqualifying broken candidates early |
-| `frame extract --affected --grid auto` | cheap | seeing what an apply just did, before rendering |
+| `frame extract --range START END --grid auto` | cheap | seeing what an apply just did, before rendering |
 | timeline sheet (`--grid`, fast mode) | cheap | rough structure before rendering anything |
 | `render start --proxy --start/--end` + `--file` sheet | moderate | judging one range of one candidate |
 | full proxy render + `--file` sheet + `verify --file` | the judging unit | scoring a candidate |

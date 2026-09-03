@@ -105,6 +105,13 @@ pub(super) struct SamplerContext<'a> {
     pub reasons: &'a [SampleReason],
     /// The sampler run's own arithmetic.
     pub report: &'a SamplerReport,
+    /// What the caller has to be told about where the times came from.
+    ///
+    /// Empty for every sampler that derives its times from the sequence itself.
+    /// `affected` is the exception: its ranges come from a record another
+    /// surface can have written, and a caller about to judge its own edit from
+    /// those pictures needs saying so.
+    pub warnings: &'a [String],
 }
 
 impl SamplerContext<'_> {
@@ -114,7 +121,13 @@ impl SamplerContext<'_> {
     }
 }
 
-/// Adds the sampler report to a finished payload.
+/// Adds the sampler report to a finished payload, and its warnings to the
+/// payload's own warning list.
+///
+/// The sampler's warnings join the render's rather than living in the sampler
+/// block: a caller already reads `warnings` for everything that would make the
+/// picture misleading, and where the times came from belongs in exactly that
+/// list.
 fn attach_sampler_report(
     payload: &mut serde_json::Value,
     sampler: Option<&SamplerContext<'_>>,
@@ -129,6 +142,21 @@ fn attach_sampler_report(
         FrameProbeError::new(format!("Failed to report the sampler result: {}", error))
     })?;
     object.insert("sampler".to_string(), report);
+
+    if !sampler.warnings.is_empty() {
+        if let Some(warnings) = object
+            .entry("warnings")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+        {
+            warnings.extend(
+                sampler
+                    .warnings
+                    .iter()
+                    .map(|warning| serde_json::Value::String(warning.clone())),
+            );
+        }
+    }
 
     Ok(())
 }
@@ -221,7 +249,7 @@ pub(super) async fn run_timeline_mode(
         project,
         sequence,
         &sequence_id,
-        format.clone(),
+        format,
         request.max_width.unwrap_or(DEFAULT_MAX_WIDTH),
         mode,
     );
@@ -236,7 +264,7 @@ pub(super) async fn run_timeline_mode(
         let output_path = if batch {
             request.out.join(batch_frame_name(*time, &format))
         } else {
-            resolve_single_output_path(&request.out, *time, format.clone())?
+            resolve_single_output_path(&request.out, *time, format)?
         };
         let mut frame = context.extract(index, *time, &output_path).await?;
         frame.reason = sampler.and_then(|sampler| sampler.reason(index));
@@ -521,7 +549,7 @@ impl<'a> TimelineFrameContext<'a> {
             if let Some((clip, _)) = fast_clip {
                 let settings = FrameExportSettings {
                     time_sec,
-                    format: self.format.clone(),
+                    format: self.format,
                     output_path: output_path.to_path_buf(),
                     quality: None,
                     max_width: Some(self.max_width),

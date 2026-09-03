@@ -9,14 +9,15 @@ use tauri::State;
 use crate::core::{
     analysis::ducking::{generate_duck_keyframes, AudioDuckingParams, SpeechRegion},
     commands::{
-        ApplyAudioDuckingCommand, CreateAdjustmentLayerCommand, CreateCompoundClipCommand,
-        CreateSequenceCommand, UnnestCompoundClipCommand,
+        infer_sequence_id, payload_string, ApplyAudioDuckingCommand, CommandResult,
+        CreateAdjustmentLayerCommand, CreateCompoundClipCommand, CreateSequenceCommand,
+        EditRecording, RecordSource, UnnestCompoundClipCommand,
     },
     timeline::Sequence,
-    CoreError,
+    CoreError, TimeRange,
 };
 use crate::ipc::payloads::{validate_command_payload_against_project_state, CommandPayload};
-use crate::AppState;
+use crate::{ActiveProject, AppState};
 
 // =============================================================================
 // DTOs
@@ -32,6 +33,65 @@ pub struct CommandResultDto {
     pub created_ids: Vec<String>,
     /// IDs of entities deleted by this command
     pub deleted_ids: Vec<String>,
+    /// Sequence the affected ranges are measured against, when one is known.
+    ///
+    /// `None` for a command that identifies no timeline — a `CreateSequence`,
+    /// an asset import — where reporting the active sequence would send an
+    /// inspection step to a timeline the command never touched.
+    pub sequence_id: Option<String>,
+    /// Stretches of that sequence's timeline this command changed.
+    ///
+    /// Sorted, disjoint, and measured as a diff across the apply, so a ripple
+    /// move is reported in full rather than as the one clip that was named.
+    /// Empty when nothing on the timeline moved.
+    pub affected_ranges: Vec<TimeRange>,
+}
+
+/// Applies one command and records where on the timeline it landed.
+///
+/// The before-image has to be taken while the state still holds it — the ranges
+/// are a diff across the mutation, and a ripple move shifts clips no reported
+/// change names — so every mutating command in this module goes through here
+/// rather than calling the executor directly. Recording the hand-off is what
+/// makes a later `extract_timeline_frames { affected: true }` mean "the last
+/// edit" instead of failing outright, which is what it did while nothing in the
+/// app wrote the file.
+fn execute_recorded(
+    project: &mut ActiveProject,
+    sequence_id: Option<&str>,
+    command: Box<dyn crate::core::commands::Command>,
+) -> Result<(CommandResult, Vec<TimeRange>), CoreError> {
+    let Some(sequence_id) = sequence_id else {
+        // Nothing identifies a timeline, so there is nowhere to look and
+        // nothing to hand off.
+        return project
+            .executor
+            .execute(command, &mut project.state)
+            .map(|result| (result, Vec::new()));
+    };
+
+    // Tagged as the app's own edit path: the hand-off record is a single slot,
+    // and a later `affected: true` has to be able to tell an interactive edit
+    // from the asking agent's own apply.
+    let mut recording = EditRecording::begin(&project.state, sequence_id, RecordSource::Gui);
+    let result = project.executor.execute(command, &mut project.state)?;
+    recording.observe(&result);
+    let ranges = recording.finish(&project.path, &project.state);
+
+    Ok((result, ranges))
+}
+
+impl CommandResultDto {
+    /// Builds the result an executed command reports.
+    fn new(result: CommandResult, sequence_id: Option<String>, ranges: Vec<TimeRange>) -> Self {
+        Self {
+            op_id: result.op_id,
+            created_ids: result.created_ids,
+            deleted_ids: result.deleted_ids,
+            sequence_id,
+            affected_ranges: ranges,
+        }
+    }
 }
 
 /// Result of an undo or redo operation.
@@ -162,29 +222,38 @@ pub async fn execute_command(
         .ensure_no_external_changes()
         .map_err(|e| e.to_ipc_error())?;
 
+    // Read off the raw payload before it is consumed: the typed command does
+    // not carry the ids back out, and the sequence has to be known before the
+    // before-image is taken.
+    let named_sequence_id = payload_string(&payload, "sequenceId");
+    let named_effect_id = payload_string(&payload, "effectId");
+    let named_clip_id = payload_string(&payload, "clipId");
+
     // Strict validation via CommandPayload::parse
     let typed_command = CommandPayload::parse(command_type, payload)?;
 
     // Build the Command trait object from the validated payload
     let command = typed_command.build_command(&project.path);
 
-    let result = project
-        .executor
-        .execute(command, &mut project.state)
-        .map_err(|e| e.to_ipc_error())?;
+    let sequence_id = named_sequence_id.or_else(|| {
+        infer_sequence_id(
+            &project.state,
+            named_effect_id.as_deref(),
+            named_clip_id.as_deref(),
+        )
+    });
+    let (result, affected_ranges) =
+        execute_recorded(project, sequence_id.as_deref(), command).map_err(|e| e.to_ipc_error())?;
 
     tracing::debug!(
         command_type = %command_type_for_log,
         op_id = %result.op_id,
+        affected_ranges = affected_ranges.len(),
         elapsed_ms = started_at.elapsed().as_millis(),
         "execute_command completed"
     );
 
-    Ok(CommandResultDto {
-        op_id: result.op_id,
-        created_ids: result.created_ids,
-        deleted_ids: result.deleted_ids,
-    })
+    Ok(CommandResultDto::new(result, sequence_id, affected_ranges))
 }
 
 /// Undoes the last command
@@ -547,16 +616,14 @@ pub async fn apply_audio_ducking(
         keyframes,
     ));
 
-    let result = project
-        .executor
-        .execute(command, &mut project.state)
-        .map_err(|e| e.to_ipc_error())?;
+    let (result, affected_ranges) =
+        execute_recorded(project, Some(&sequence_id), command).map_err(|e| e.to_ipc_error())?;
 
-    Ok(CommandResultDto {
-        op_id: result.op_id,
-        created_ids: result.created_ids,
-        deleted_ids: result.deleted_ids,
-    })
+    Ok(CommandResultDto::new(
+        result,
+        Some(sequence_id),
+        affected_ranges,
+    ))
 }
 
 // =============================================================================
@@ -592,16 +659,15 @@ pub async fn create_compound_clip(
         command = command.with_name(&name);
     }
 
-    let result = project
-        .executor
-        .execute(Box::new(command), &mut project.state)
-        .map_err(|e| e.to_ipc_error())?;
+    let (result, affected_ranges) =
+        execute_recorded(project, Some(&args.sequence_id), Box::new(command))
+            .map_err(|e| e.to_ipc_error())?;
 
-    Ok(CommandResultDto {
-        op_id: result.op_id,
-        created_ids: result.created_ids,
-        deleted_ids: result.deleted_ids,
-    })
+    Ok(CommandResultDto::new(
+        result,
+        Some(args.sequence_id),
+        affected_ranges,
+    ))
 }
 
 /// Arguments for unnesting a compound clip.
@@ -628,16 +694,15 @@ pub async fn unnest_compound_clip(
 
     let command = UnnestCompoundClipCommand::new(&args.sequence_id, &args.track_id, &args.clip_id);
 
-    let result = project
-        .executor
-        .execute(Box::new(command), &mut project.state)
-        .map_err(|e| e.to_ipc_error())?;
+    let (result, affected_ranges) =
+        execute_recorded(project, Some(&args.sequence_id), Box::new(command))
+            .map_err(|e| e.to_ipc_error())?;
 
-    Ok(CommandResultDto {
-        op_id: result.op_id,
-        created_ids: result.created_ids,
-        deleted_ids: result.deleted_ids,
-    })
+    Ok(CommandResultDto::new(
+        result,
+        Some(args.sequence_id),
+        affected_ranges,
+    ))
 }
 
 /// Arguments for creating an adjustment layer.
@@ -675,16 +740,15 @@ pub async fn create_adjustment_layer(
         command = command.with_name(&name);
     }
 
-    let result = project
-        .executor
-        .execute(Box::new(command), &mut project.state)
-        .map_err(|e| e.to_ipc_error())?;
+    let (result, affected_ranges) =
+        execute_recorded(project, Some(&args.sequence_id), Box::new(command))
+            .map_err(|e| e.to_ipc_error())?;
 
-    Ok(CommandResultDto {
-        op_id: result.op_id,
-        created_ids: result.created_ids,
-        deleted_ids: result.deleted_ids,
-    })
+    Ok(CommandResultDto::new(
+        result,
+        Some(args.sequence_id),
+        affected_ranges,
+    ))
 }
 
 // =============================================================================

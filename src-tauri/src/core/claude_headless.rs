@@ -6,6 +6,7 @@
 //! data types and small helpers so they compile in the core crate.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -117,10 +118,24 @@ pub enum ClaudeHeadlessStreamEvent {
     Exit { exit_code: Option<i32> },
 }
 
+/// One inline image content block a tool result carries.
+///
+/// MCP (2025-06-18) carries pictures as `{ type: "image", data, mimeType }`
+/// where `data` is raw base64 with no `data:` URI prefix.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct McpImageBlock {
+    /// Base64-encoded image bytes, with no `data:` URI prefix.
+    pub data: String,
+    /// IANA media type of `data`, for example `image/jpeg`.
+    pub mime_type: String,
+}
+
 /// Response body for `respond_openreelio_mcp_call`.
 ///
 /// The MCP server wraps this uniformly as
-/// `{ content: [{ type: "text", text }], isError }` for the `tools/call` result.
+/// `{ content: [{ type: "text", text }, ...images], isError }` for the
+/// `tools/call` result.
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenReelioMcpCallResponse {
@@ -128,6 +143,12 @@ pub struct OpenReelioMcpCallResponse {
     pub text: String,
     /// Whether the tool call resulted in an error.
     pub is_error: bool,
+    /// Pictures the tool produced, attached alongside the text.
+    ///
+    /// Defaulted so a caller that returns only text — every tool but the frame
+    /// probe — keeps serialising exactly as it did before images existed.
+    #[serde(default)]
+    pub images: Vec<McpImageBlock>,
 }
 
 /// Builds the Tauri event name that carries a session's stream events.
@@ -304,11 +325,72 @@ pub fn write_mcp_config_file(path: &Path, mcp_url: &str, token: &str) -> Result<
     Ok(())
 }
 
+/// Prefix Claude namespaces this server's tools with.
+///
+/// The loopback server registers bare names and Claude asks for the prefixed
+/// ones, so anything that reasons about a tool *name* has to accept both
+/// spellings or it will silently only ever match one host.
+pub const CLAUDE_MCP_TOOL_PREFIX: &str = "mcp__openreelio__";
+
+/// Time a `tools/call` may take before the loopback server gives up on it.
+///
+/// Generous, because the wait covers a human: the frontend shows an approval
+/// dialog and only answers once someone acts on it.
+pub const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Time a `tools/call` that runs a render may take.
+///
+/// A proxy render of a range is FFmpeg work on top of the same approval wait,
+/// and a cut long enough to be worth judging routinely outruns the default
+/// budget. Timing it out reports a failed tool call for a render that is still
+/// running and will finish, which is the one answer an agent cannot recover
+/// from — it re-plans around a step it thinks did not happen.
+pub const MCP_RENDER_CALL_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// The budget one `tools/call` is given, chosen by which tool was called.
+///
+/// `tool_name` may arrive bare (as the loopback server registers it) or
+/// prefixed (as Claude spells it); both resolve to the same budget so the two
+/// hosts cannot disagree about how long a render is allowed to take.
+///
+/// The bare name is matched *exactly*. A suffix match handed the render budget
+/// to any tool whose name happened to end that way — `my_render_proxy`, a
+/// differently prefixed host — which is a fifteen-minute wait granted to a tool
+/// nobody sized it for.
+pub fn tool_call_timeout(tool_name: &str) -> Duration {
+    let bare = tool_name
+        .strip_prefix(CLAUDE_MCP_TOOL_PREFIX)
+        .unwrap_or(tool_name);
+
+    if bare == RENDER_PROXY_TOOL {
+        return MCP_RENDER_CALL_TIMEOUT;
+    }
+
+    MCP_CALL_TIMEOUT
+}
+
+/// Bare name of the one tool that renders, and so is given the longer budget.
+const RENDER_PROXY_TOOL: &str = "render_proxy";
+
 /// Wraps a frontend tool-call response as an MCP `tools/call` result payload of
-/// the shape `{ content: [{ type: "text", text }], isError }`.
+/// the shape `{ content: [{ type: "text", text }, ...images], isError }`.
+///
+/// This is the single choke point every `tools/call` result passes through, so
+/// it is also where pictures enter the protocol. The text block stays first and
+/// stays unconditional: a client that reads only text sees exactly what it saw
+/// before, and a tool that attaches no image serialises unchanged.
 pub fn wrap_tool_result(response: OpenReelioMcpCallResponse) -> Value {
+    let mut content = vec![json!({ "type": "text", "text": response.text })];
+    content.extend(response.images.into_iter().map(|image| {
+        json!({
+            "type": "image",
+            "data": image.data,
+            "mimeType": image.mime_type,
+        })
+    }));
+
     json!({
-        "content": [{ "type": "text", "text": response.text }],
+        "content": content,
         "isError": response.is_error,
     })
 }
@@ -481,8 +563,89 @@ mod tests {
         let wrapped = wrap_tool_result(OpenReelioMcpCallResponse {
             text: "ok".to_string(),
             is_error: false,
+            images: Vec::new(),
         });
+        assert_eq!(wrapped["content"][0]["type"], "text");
         assert_eq!(wrapped["content"][0]["text"], "ok");
+        // A text-only tool must serialise exactly as it did before images
+        // existed, or every non-frame tool changes shape at once.
+        assert_eq!(
+            wrapped["content"].as_array().map(Vec::len),
+            Some(1),
+            "a tool that attaches no image must carry one block"
+        );
+        assert_eq!(wrapped["isError"], false);
+    }
+
+    #[test]
+    fn tool_call_timeout_gives_a_render_its_own_budget() {
+        // Bare as the loopback server registers it, prefixed as Claude spells
+        // it: both hosts have to land on the same budget.
+        assert_eq!(tool_call_timeout("render_proxy"), MCP_RENDER_CALL_TIMEOUT);
+        assert_eq!(
+            tool_call_timeout("mcp__openreelio__render_proxy"),
+            MCP_RENDER_CALL_TIMEOUT
+        );
+
+        // Everything else keeps the default, which is sized for a human
+        // answering an approval dialog rather than for FFmpeg.
+        for tool in [
+            "project_state",
+            "frame_extract",
+            "plan_apply",
+            "mcp__openreelio__timeline_snapshot",
+            // Matched exactly, not as a suffix or a prefix: only the tool that
+            // actually renders gets the longer budget.
+            "render_proxy_status",
+            "my_render_proxy",
+            "mcp__other__render_proxy",
+        ] {
+            assert_eq!(tool_call_timeout(tool), MCP_CALL_TIMEOUT, "{tool}");
+        }
+
+        assert!(MCP_RENDER_CALL_TIMEOUT > MCP_CALL_TIMEOUT);
+    }
+
+    #[test]
+    fn omitted_images_default_to_none_for_existing_callers() {
+        // The frontend bridge predates the field, so a response without it has
+        // to keep deserialising rather than failing the whole tool call.
+        let response: OpenReelioMcpCallResponse =
+            serde_json::from_value(json!({ "text": "ok", "isError": false }))
+                .expect("a response without images still parses");
+
+        assert!(response.images.is_empty());
+    }
+
+    #[test]
+    fn wraps_tool_result_images_after_the_text_block() {
+        let wrapped = wrap_tool_result(OpenReelioMcpCallResponse {
+            text: "{\"frames\":2}".to_string(),
+            is_error: false,
+            images: vec![
+                McpImageBlock {
+                    data: "AAAA".to_string(),
+                    mime_type: "image/jpeg".to_string(),
+                },
+                McpImageBlock {
+                    data: "BBBB".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+            ],
+        });
+
+        let content = wrapped["content"].as_array().expect("content blocks");
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "{\"frames\":2}");
+        // Order is the caller's: an image block that lost its place would put a
+        // still against the wrong description of it.
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["data"], "AAAA");
+        assert_eq!(content[1]["mimeType"], "image/jpeg");
+        assert_eq!(content[2]["type"], "image");
+        assert_eq!(content[2]["data"], "BBBB");
+        assert_eq!(content[2]["mimeType"], "image/png");
         assert_eq!(wrapped["isError"], false);
     }
 

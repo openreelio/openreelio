@@ -104,7 +104,11 @@ struct ResolvedAssetContext {
     active_sequence_id: Option<String>,
 }
 
-async fn resolve_project_snapshot(
+/// Clones the open project's path and replayed state, releasing the lock.
+///
+/// Every command that then awaits FFmpeg works from this snapshot, so the lock
+/// is never held across a subprocess.
+pub(crate) async fn resolve_project_snapshot(
     state: &State<'_, AppState>,
 ) -> Result<(PathBuf, ProjectState), String> {
     let guard = state.project.lock().await;
@@ -115,14 +119,27 @@ async fn resolve_project_snapshot(
     Ok((project.path.clone(), project.state.clone()))
 }
 
-async fn resolve_ffmpeg_runner(
+/// Clones the resolved FFmpeg runner for clip analysis, releasing the read lock.
+pub(crate) async fn resolve_ffmpeg_runner(
     ffmpeg_state: &State<'_, SharedFFmpegState>,
+) -> Result<FFmpegRunner, String> {
+    resolve_ffmpeg_runner_for(ffmpeg_state, "clip analysis").await
+}
+
+/// Clones the resolved FFmpeg runner, releasing the read lock.
+///
+/// `activity` names what the caller was about to do, and it is the whole reason
+/// this takes a parameter: "FFmpeg is not available for clip analysis" told a
+/// user whose frame extraction failed to go looking at the wrong feature.
+pub(crate) async fn resolve_ffmpeg_runner_for(
+    ffmpeg_state: &State<'_, SharedFFmpegState>,
+    activity: &str,
 ) -> Result<FFmpegRunner, String> {
     let ffmpeg = ffmpeg_state.read().await;
     ffmpeg
         .runner()
         .cloned()
-        .ok_or_else(|| "FFmpeg is not available for clip analysis".to_string())
+        .ok_or_else(|| format!("FFmpeg is not available for {activity}"))
 }
 
 async fn resolve_asset_context(

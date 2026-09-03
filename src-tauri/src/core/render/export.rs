@@ -948,6 +948,33 @@ impl ExportSettings {
         }
     }
 
+    /// Builds settings from a preset identifier, the proxy profile included.
+    ///
+    /// [`ExportPreset::from_legacy_id`] answers for the fixed-frame presets
+    /// only. The proxy is not one of them — it is fitted to the sequence canvas
+    /// rather than to a frame the enum could name — so it is routed first, and
+    /// routing it *here* rather than at each call site is what stops a surface
+    /// from advertising `proxy_480p` and then rejecting it as unknown.
+    ///
+    /// `canvas` is only read for the proxy profile; every other preset carries
+    /// its own frame.
+    pub fn from_preset_id(
+        preset: &str,
+        output_path: PathBuf,
+        canvas: &Canvas,
+        start_time: Option<f64>,
+        end_time: Option<f64>,
+    ) -> Result<Self, ExportError> {
+        if is_proxy_preset_id(preset) {
+            return Ok(Self::proxy(output_path, canvas, start_time, end_time));
+        }
+
+        let mut settings = Self::from_preset(ExportPreset::from_legacy_id(preset)?, output_path);
+        settings.start_time = start_time;
+        settings.end_time = end_time;
+        Ok(settings)
+    }
+
     /// Create proxy render settings optimized for machine inspection and fast turnaround.
     ///
     /// Proxy renders exist so an agent (or a human) can look at what the timeline
@@ -1564,7 +1591,7 @@ pub struct BatchItemResult {
 // =============================================================================
 
 /// Image format for single-frame export
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageFormat {
     /// PNG (lossless, with alpha support)
@@ -1676,6 +1703,30 @@ pub fn scaled_frame_dimensions(
     let out_height = (even_steps * 2).max(2).min(u32::MAX as u64) as u32;
 
     (out_width, out_height)
+}
+
+/// Whether a preset identifier names the 480p proxy profile.
+///
+/// The proxy is deliberately not an [`ExportPreset`] variant: it is built from
+/// the sequence canvas (see [`ExportSettings::proxy`]) rather than from a fixed
+/// frame, so [`ExportSettings::from_preset`] cannot produce it and
+/// [`ExportPreset::from_legacy_id`] rejects its id.
+///
+/// Every surface that accepts a preset id asks here rather than keeping its own
+/// spelling list. Keeping two lists is how `proxy_480p` came to be a documented
+/// preset the CLI served and the desktop render commands refused as unknown.
+///
+/// Matching follows `from_legacy_id`: case-insensitive, and hyphens and spaces
+/// read as underscores.
+pub fn is_proxy_preset_id(preset: &str) -> bool {
+    matches!(
+        preset
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str(),
+        "proxy" | "proxy_480p"
+    )
 }
 
 /// Longest edge a 480p-class proxy frame may occupy, in pixels.
@@ -7013,7 +7064,7 @@ impl ExportEngine {
         Ok(FrameExportResult {
             output_path: settings.output_path.clone(),
             file_size,
-            format: settings.format.clone(),
+            format: settings.format,
             width,
             height,
         })
@@ -11515,6 +11566,69 @@ mod tests {
         assert_eq!(settings.fps, None);
         assert_eq!(settings.encoder_speed.as_deref(), Some("ultrafast"));
         assert!(!settings.two_pass);
+    }
+
+    /// Feature: Proxy render preset
+    /// Scenario: should be reachable by the id every surface advertises
+    #[test]
+    fn from_preset_id_should_serve_the_proxy_profile() {
+        // The desktop render commands used to resolve a preset id through
+        // `ExportPreset::from_legacy_id` alone, which has no proxy arm — so the
+        // preset the CLI documents came back as "Unknown export preset".
+        assert!(ExportPreset::from_legacy_id("proxy_480p").is_err());
+
+        for id in ["proxy_480p", "proxy", "Proxy-480p", " PROXY_480P "] {
+            let settings = ExportSettings::from_preset_id(
+                id,
+                PathBuf::from("proxy.mp4"),
+                &Canvas::new(1080, 1920),
+                Some(2.0),
+                Some(5.0),
+            )
+            .unwrap_or_else(|error| panic!("'{id}' must resolve to the proxy profile: {error}"));
+
+            // Fitted to the sequence rather than to a fixed 854x480 frame: a
+            // vertical edit pillarboxed into landscape is useless to look at.
+            assert_eq!(settings.width, Some(480), "{id}");
+            assert_eq!(settings.height, Some(854), "{id}");
+            assert_eq!(settings.crf, Some(30), "{id}");
+            assert_eq!(settings.encoder_speed.as_deref(), Some("ultrafast"), "{id}");
+            assert_eq!(settings.start_time, Some(2.0), "{id}");
+            assert_eq!(settings.end_time, Some(5.0), "{id}");
+        }
+    }
+
+    /// Feature: Proxy render preset
+    /// Scenario: should not change how any other preset resolves
+    #[test]
+    fn from_preset_id_should_leave_every_other_preset_alone() {
+        let settings = ExportSettings::from_preset_id(
+            "mp4_draft",
+            PathBuf::from("draft.mp4"),
+            &Canvas::new(1080, 1920),
+            Some(1.0),
+            Some(4.0),
+        )
+        .expect("a fixed-frame preset still resolves");
+
+        let expected =
+            ExportSettings::from_preset(ExportPreset::Mp4Draft, PathBuf::from("draft.mp4"));
+        assert_eq!(settings.width, expected.width);
+        assert_eq!(settings.height, expected.height);
+        assert_eq!(settings.crf, expected.crf);
+        assert_eq!(settings.encoder_speed, expected.encoder_speed);
+        // The range is the one thing a preset id does not carry.
+        assert_eq!(settings.start_time, Some(1.0));
+        assert_eq!(settings.end_time, Some(4.0));
+
+        assert!(ExportSettings::from_preset_id(
+            "not_a_preset",
+            PathBuf::from("out.mp4"),
+            &Canvas::new(1920, 1080),
+            None,
+            None,
+        )
+        .is_err());
     }
 
     /// Feature: Proxy render preset
