@@ -164,6 +164,51 @@ describe('openreelio.frame_extract', () => {
     expect(responseText(response)).toContain('between');
     expect(invoke).not.toHaveBeenCalled();
   });
+
+  it('should forward the affectedRanges an apply handed back', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      payload: { status: 'ok', mode: 'grid', sheet: { path: 'sheet.jpg' } },
+      images: [{ path: 'sheet.jpg', mimeType: 'image/jpeg', data: IMAGE_BASE64 }],
+    });
+
+    const ranges = [
+      { startSec: 2, endSec: 6 },
+      { startSec: 11.5, endSec: 12 },
+    ];
+    const response = await callTool('frame_extract', { ranges, grid: 'auto', labelCells: true });
+
+    expect(response.success).toBe(true);
+    expect(invoke).toHaveBeenCalledWith(
+      'extract_timeline_frames',
+      expect.objectContaining({
+        request: expect.objectContaining({ ranges, grid: 'auto', labelCells: true }),
+      }),
+    );
+  });
+
+  it('should pin an affected hand-off to the op the apply ended at', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      payload: { status: 'ok', mode: 'grid', sheet: { path: 'sheet.jpg' } },
+      images: [],
+    });
+
+    await callTool('frame_extract', { affected: true, afterOp: ' op-42 ', grid: 'auto' });
+
+    expect(invoke).toHaveBeenCalledWith(
+      'extract_timeline_frames',
+      expect.objectContaining({
+        request: expect.objectContaining({ affected: true, afterOp: 'op-42' }),
+      }),
+    );
+  });
+
+  it('should reject ranges that are not { startSec, endSec } pairs', async () => {
+    const response = await callTool('frame_extract', { ranges: [{ startSec: 1 }] });
+
+    expect(response.success).toBe(false);
+    expect(responseText(response)).toContain('ranges');
+    expect(invoke).not.toHaveBeenCalled();
+  });
 });
 
 describe('openreelio.render_proxy', () => {
@@ -663,6 +708,118 @@ describe('executeOpenReelioAgentToolCall', () => {
   });
 });
 
+describe('openreelio.command_execute inspection hand-off', () => {
+  const APPROVING_CONTEXT: OpenReelioCodexToolContext = {
+    ...CONTEXT,
+    approvalDecisionProvider: () => 'accept',
+  };
+
+  /** Answer every backend call one approved command makes; `planResult` is the apply's report. */
+  function stubApprovedCommand(planResult: Record<string, unknown>): void {
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      switch (command) {
+        case 'get_project_state':
+          return Promise.resolve({ activeSequenceId: 'seq-1', assets: [], sequences: [] });
+        case 'validate_command_payload':
+          return Promise.resolve(null);
+        case 'create_external_agent_approval_token':
+          return Promise.resolve({
+            token: 'approval-token',
+            tokenId: 'token-1',
+            projectId: 'project-1',
+            runtimeId: 'codex',
+          });
+        case 'execute_agent_plan':
+          return Promise.resolve(planResult);
+        default:
+          return Promise.reject(new Error(`unexpected command '${command}'`));
+      }
+    });
+  }
+
+  async function applySplitClip(): Promise<{ nextStep?: string; affectedRanges?: unknown }> {
+    const state = await handleOpenReelioCodexDynamicToolCall(
+      callRequest('project_state'),
+      APPROVING_CONTEXT,
+    );
+    if (!state) {
+      throw new Error('Expected a project_state response');
+    }
+    const { contextToken } = JSON.parse(responseText(state)) as { contextToken: string };
+
+    const response = await handleOpenReelioCodexDynamicToolCall(
+      callRequest('command_execute', {
+        commandType: 'SplitClip',
+        payload: { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', splitTime: 4 },
+        contextToken,
+      }),
+      APPROVING_CONTEXT,
+    );
+    if (!response) {
+      throw new Error('Expected a command_execute response');
+    }
+    return JSON.parse(responseText(response)) as { nextStep?: string; affectedRanges?: unknown };
+  }
+
+  it('should hand the ranges it changed back as a frame_extract request', async () => {
+    stubApprovedCommand({
+      planId: 'plan-1',
+      success: true,
+      totalSteps: 1,
+      stepsCompleted: 1,
+      stepResults: [{ stepId: 'step-1', success: true, durationMs: 1, operationId: 'op-7' }],
+      operationIds: ['op-7'],
+      executionTimeMs: 1,
+      affectedRanges: [{ startSec: 2, endSec: 6 }],
+    });
+
+    const result = await applySplitClip();
+
+    expect(result.affectedRanges).toEqual([{ startSec: 2, endSec: 6 }]);
+    expect(result.nextStep).toContain('openreelio.frame_extract');
+    expect(result.nextStep).toContain('ranges: [{"startSec":2,"endSec":6}]');
+    expect(result.nextStep).toContain("grid: 'auto', labelCells: true");
+    expect(result.nextStep).toContain("affected: true, afterOp: 'op-7'");
+  });
+
+  it('should omit the afterOp option when the apply reported no op id', async () => {
+    stubApprovedCommand({
+      planId: 'plan-1',
+      success: true,
+      totalSteps: 1,
+      stepsCompleted: 1,
+      stepResults: [{ stepId: 'step-1', success: true, durationMs: 1 }],
+      operationIds: [],
+      executionTimeMs: 1,
+      affectedRanges: [{ startSec: 0, endSec: 1.5 }],
+    });
+
+    const result = await applySplitClip();
+
+    expect(result.nextStep).toContain('ranges: [{"startSec":0,"endSec":1.5}]');
+    expect(result.nextStep).not.toContain('afterOp');
+  });
+
+  it('should fall back to the recorded hand-off when no ranges came back', async () => {
+    stubApprovedCommand({
+      planId: 'plan-1',
+      success: true,
+      totalSteps: 1,
+      stepsCompleted: 1,
+      stepResults: [{ stepId: 'step-1', success: true, durationMs: 1, operationId: 'op-7' }],
+      operationIds: ['op-7'],
+      executionTimeMs: 1,
+    });
+
+    const result = await applySplitClip();
+
+    expect(result.affectedRanges).toBeUndefined();
+    expect(result.nextStep).toContain("affected: true, grid: 'auto', labelCells: true");
+    expect(result.nextStep).toContain("atCuts: true, grid: 'auto'");
+    expect(result.nextStep).not.toContain('ranges:');
+  });
+});
+
 describe('developer instructions', () => {
   const instructions = buildOpenReelioCodexDeveloperInstructions({
     projectId: 'project-1',
@@ -671,7 +828,9 @@ describe('developer instructions', () => {
 
   it('should tell the agent to look at the edit after applying it', () => {
     expect(instructions).toContain('openreelio.frame_extract');
+    expect(instructions).toContain("ranges: <affectedRanges>, grid: 'auto'");
     expect(instructions).toContain("affected: true, grid: 'auto'");
+    expect(instructions).toContain("afterOp: <the result's last operationId>");
     expect(instructions).toContain('atCaptions: true');
     expect(instructions).toContain('perShot: true');
     expect(instructions).toContain('openreelio.render_proxy');
@@ -731,10 +890,22 @@ interface FrameProbeRecipe {
   span?: number;
   limit?: number;
   affected?: boolean;
+  afterOp?: string;
+  ranges?: Array<{ startSec: number; endSec: number }>;
 }
 
 const SAMPLER_EXCLUSIVE_KEYS = ['time', 'times', 'between', 'count', 'asset', 'file'] as const;
 const GRID_ONLY_KEYS = ['between', 'count', 'cellWidth', 'cellHeight', 'labelCells'] as const;
+/** Samplers `ranges` replaces rather than joins: it names the windows outright. */
+const RANGES_EXCLUSIVE_KEYS = [
+  'atCuts',
+  'atTransitions',
+  'atCaptions',
+  'atMarkers',
+  'perShot',
+  'affected',
+  'around',
+] as const;
 
 /**
  * Mirror of the three request checks the Rust frame probe applies, so a recipe
@@ -752,12 +923,22 @@ function frameProbeRejection(recipe: FrameProbeRecipe): string | null {
     recipe.atMarkers ||
     recipe.perShot ||
     recipe.affected ||
+    recipe.ranges !== undefined ||
     recipe.around !== undefined,
   );
 
   const named = SAMPLER_EXCLUSIVE_KEYS.filter((key) => recipe[key] !== undefined);
   if (samplerActive && named.length > 0) {
     return `a sampler cannot be combined with ${named.join(', ')}`;
+  }
+
+  if (recipe.ranges !== undefined) {
+    const clashing = RANGES_EXCLUSIVE_KEYS.filter(
+      (key) => recipe[key] !== undefined && recipe[key] !== false,
+    );
+    if (clashing.length > 0) {
+      return `ranges cannot be combined with ${clashing.join(', ')}`;
+    }
   }
 
   const gridOnly = GRID_ONLY_KEYS.filter(
@@ -780,8 +961,16 @@ function frameProbeRejection(recipe: FrameProbeRecipe): string | null {
 /** Every frame_extract request the developer instructions spell out. */
 const INSTRUCTION_RECIPES: Array<{ text: string; request: FrameProbeRecipe }> = [
   {
+    text: "ranges: <affectedRanges>, grid: 'auto', labelCells: true",
+    request: { ranges: [{ startSec: 2, endSec: 6 }], grid: 'auto', labelCells: true },
+  },
+  {
     text: "affected: true, grid: 'auto', labelCells: true",
     request: { affected: true, grid: 'auto', labelCells: true },
+  },
+  {
+    text: "afterOp: <the result's last operationId>",
+    request: { affected: true, grid: 'auto', afterOp: 'op-42' },
   },
   { text: "atCuts: true, grid: 'auto'", request: { atCuts: true, grid: 'auto' } },
   {
@@ -812,10 +1001,27 @@ describe('frameProbeRejection', () => {
     );
   });
 
+  it('should treat ranges as a sampler that stands on its own', () => {
+    const ranges = [{ startSec: 2, endSec: 6 }];
+    expect(frameProbeRejection({ ranges, times: [1] })).toContain('sampler cannot be combined');
+    expect(frameProbeRejection({ ranges, file: 'draft.mp4' })).toContain(
+      'sampler cannot be combined',
+    );
+    expect(frameProbeRejection({ ranges, between: [0, 5] })).toContain(
+      'sampler cannot be combined',
+    );
+    expect(frameProbeRejection({ ranges, affected: true })).toContain('ranges cannot be combined');
+    expect(frameProbeRejection({ ranges, atCuts: true })).toContain('ranges cannot be combined');
+  });
+
   it('should accept a sampler sheet and a file sweep', () => {
     expect(frameProbeRejection({ atCuts: true, grid: 'auto' })).toBeNull();
     expect(frameProbeRejection({ file: 'draft.mp4', between: [0, 5], grid: '4x3' })).toBeNull();
     expect(frameProbeRejection({ times: [1, 2], grid: 'auto' })).toBeNull();
+    expect(
+      frameProbeRejection({ ranges: [{ startSec: 2, endSec: 6 }], grid: 'auto', labelCells: true }),
+    ).toBeNull();
+    expect(frameProbeRejection({ affected: true, afterOp: 'op-42', grid: 'auto' })).toBeNull();
   });
 });
 

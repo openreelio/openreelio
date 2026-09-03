@@ -873,10 +873,38 @@ const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
       minimum: 1,
       description: 'Number of samples the around window produces.',
     },
+    ranges: {
+      type: 'array',
+      minItems: 1,
+      items: {
+        type: 'object',
+        required: ['startSec', 'endSec'],
+        properties: {
+          startSec: {
+            type: 'number',
+            minimum: 0,
+            description: 'Range start in timeline seconds.',
+          },
+          endSec: {
+            type: 'number',
+            minimum: 0,
+            description: 'Range end in timeline seconds.',
+          },
+        },
+        additionalProperties: false,
+      },
+      description:
+        "The preferred way to look at what you changed: the affectedRanges a plan_apply or command_execute result returned, handed straight back. The sampler looks at each range's start, its cuts, its middle and its end. Cannot be combined with affected, time, times, between, file, or another sampler.",
+    },
     affected: {
       type: 'boolean',
       description:
-        "Sample exactly the timeline ranges the last applied edit changed. Errors when no edit recorded a hand-off; fall back to atCuts: true, grid: 'auto', or around: <edited time>, span: 1, grid: 'auto'.",
+        "Sample exactly the timeline ranges the last applied edit changed, read from the hand-off that edit recorded. Prefer ranges when the apply result handed you affectedRanges. Errors when no edit recorded a hand-off; fall back to atCuts: true, grid: 'auto', or around: <edited time>, span: 1, grid: 'auto'.",
+    },
+    afterOp: {
+      type: 'string',
+      description:
+        'With affected: true, refuse a hand-off that does not end at this op id, so an edit the user made after yours cannot be read as your own. Pass the last operationId the apply result returned.',
     },
     limit: {
       type: 'integer',
@@ -1038,7 +1066,7 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
     namespace: 'openreelio',
     name: 'frame_extract',
     description:
-      'Look at the edit. Returns pictures of the composited timeline — captions, text, transforms and blends, exactly what export produces — as stills or one labelled contact sheet, plus the JSON that maps every cell back to its timecode and the reason it was sampled. Do not compute the times yourself: use affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, or around. At most 12 separate stills come back inline; a contact sheet is one image.',
+      'Look at the edit. Returns pictures of the composited timeline — captions, text, transforms and blends, exactly what export produces — as stills or one labelled contact sheet, plus the JSON that maps every cell back to its timecode and the reason it was sampled. Do not compute the times yourself: pass the affectedRanges an apply returned as ranges, or use affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, or around. At most 12 separate stills come back inline; a contact sheet is one image.',
     inputSchema: FRAME_EXTRACT_SCHEMA,
   },
   {
@@ -1147,10 +1175,11 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Shell and filesystem tools are secondary; prefer OpenReelio tools for video-editing state and mutations.',
     '',
     'Look at the edit before you report on it:',
-    "- After every openreelio.plan_apply or openreelio.command_execute, call openreelio.frame_extract with affected: true, grid: 'auto', labelCells: true, and look at the picture before you say what changed. If affected reports no recorded hand-off, sample the seconds you edited instead: atCuts: true, grid: 'auto', or around: <edited time>, span: 1, grid: 'auto'.",
+    "- After every openreelio.plan_apply or openreelio.command_execute, look at the picture before you say what changed: hand the affectedRanges the result returned straight to openreelio.frame_extract as ranges: <affectedRanges>, grid: 'auto', labelCells: true.",
+    "- When a result carried no affectedRanges, ask the probe to read the hand-off itself with affected: true, grid: 'auto', labelCells: true, pinned to your own edit with afterOp: <the result's last operationId>. If affected reports no recorded hand-off, sample the seconds you edited instead: atCuts: true, grid: 'auto', or around: <edited time>, span: 1, grid: 'auto'.",
     "- For caption or text edits, inspect with atCaptions: true, grid: 'auto', cellWidth: 640 so the burned-in words are legible.",
     "- Before finishing a task, sweep the whole cut once with perShot: true, grid: 'auto', limit: 24.",
-    "- Do not compute inspection times yourself. frame_extract samples the edit's own events (affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around); uniform between sampling lands on no event and is for whole-timeline overviews only.",
+    "- Do not compute inspection times yourself. frame_extract samples the edit's own events (ranges, affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around); uniform between sampling lands on no event and is for whole-timeline overviews only.",
     "- cellWidth, cellHeight, labelCells and between only apply to a contact sheet and are rejected without grid. grid: 'auto' sizes itself from a sampler or times, so between always needs an explicit grid such as '4x3'.",
     '- frame_extract shows the composited edit by default. Only pass mode: "fast" when you deliberately want the raw footage without captions, text or effects.',
     `- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, and keep the range under ${RENDER_PROXY_MAX_RANGE_SEC}s. Then inspect its outputPath with openreelio.frame_extract { file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true } — file times are relative to the file, and samplers are not available with file.`,
@@ -1757,8 +1786,26 @@ async function extractFramesToolCall(
   };
 }
 
+/** One timeline range the `ranges` sampler looks at. */
+interface FrameProbeRange {
+  startSec: number;
+  endSec: number;
+}
+
+/**
+ * The `extract_timeline_frames` request as this bridge sends it.
+ *
+ * `ranges` and `afterOp` belong to the probe's request contract but are not in
+ * the generated bindings yet, so they are declared here rather than by
+ * hand-editing `src/bindings.ts`.
+ */
+type FrameProbeRequest = TimelineFrameProbeRequestDto & {
+  ranges?: FrameProbeRange[] | null;
+  afterOp?: string | null;
+};
+
 /** Translate tool arguments into the frame-probe request DTO. */
-function buildFrameProbeRequest(args: CodexJsonObject): TimelineFrameProbeRequestDto {
+function buildFrameProbeRequest(args: CodexJsonObject): FrameProbeRequest {
   const between = readNumberArrayArg(args, 'between', 'frame_extract');
   if (between && between.length !== 2) {
     throw new Error('OpenReelio frame_extract requires between to be [start, end].');
@@ -1783,12 +1830,45 @@ function buildFrameProbeRequest(args: CodexJsonObject): TimelineFrameProbeReques
     around: getFiniteNumberArg(args, 'around', 'frame_extract') ?? null,
     span: getFiniteNonNegativeNumberArg(args, 'span', 'frame_extract') ?? null,
     aroundCount: getFiniteNonNegativeNumberArg(args, 'aroundCount', 'frame_extract') ?? null,
+    ranges: readFrameProbeRanges(args, 'frame_extract'),
     affected: args.affected === true,
+    afterOp: getString(args, 'afterOp')?.trim() || null,
     limit: getFiniteNonNegativeNumberArg(args, 'limit', 'frame_extract') ?? null,
     // The bridge exists to put the picture in front of the model; a path alone
     // is unreadable to it.
     inline: true,
   };
+}
+
+/**
+ * Read the `ranges` sampler argument: the `affectedRanges` an apply handed back,
+ * passed through to the probe unchanged.
+ *
+ * Shape is checked here rather than left to the probe so a malformed hand-back
+ * fails with the field name in the message instead of an IPC-level rejection.
+ */
+function readFrameProbeRanges(args: CodexJsonObject, toolName: string): FrameProbeRange[] | null {
+  const value = args.ranges;
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(
+      `OpenReelio ${toolName} requires ranges to be a non-empty array of { startSec, endSec }.`,
+    );
+  }
+
+  return value.map((entry) => {
+    const range = asObject(entry);
+    const startSec = range ? asFiniteNumber(range.startSec) : null;
+    const endSec = range ? asFiniteNumber(range.endSec) : null;
+    if (startSec === null || endSec === null) {
+      throw new Error(
+        `OpenReelio ${toolName} requires every ranges entry to be { startSec, endSec } in seconds.`,
+      );
+    }
+    return { startSec, endSec };
+  });
 }
 
 function readNumberArrayArg(args: CodexJsonObject, key: string, toolName: string): number[] | null {
@@ -2460,17 +2540,44 @@ async function executeApprovedCommand(
  * follow-up — so their absence is normal and must not be mistaken for "the edit
  * changed nothing".
  */
-function readAffectedRanges(result: AgentPlanResult): unknown {
+function readAffectedRanges(result: AgentPlanResult): unknown[] | undefined {
   const ranges = (result as unknown as Record<string, unknown>).affectedRanges;
   return Array.isArray(ranges) && ranges.length > 0 ? ranges : undefined;
 }
 
 /**
+ * The op this apply ended at, which `afterOp` pins the hand-off to.
+ *
+ * `operationIds` is the executor's own ordered list, so it is read first; the
+ * per-step ids are the fallback for a result that only reports them there.
+ */
+function readLastOperationId(result: AgentPlanResult): string | undefined {
+  for (let index = result.operationIds.length - 1; index >= 0; index -= 1) {
+    const operationId = result.operationIds[index]?.trim();
+    if (operationId) {
+      return operationId;
+    }
+  }
+
+  for (let index = result.stepResults.length - 1; index >= 0; index -= 1) {
+    const operationId = result.stepResults[index]?.operationId?.trim();
+    if (operationId) {
+      return operationId;
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * Tell the agent where to look now that the edit is applied.
  *
- * The fallback is spelled out as a request the frame probe accepts: `between`
- * is rejected without an explicit `COLSxROWS` grid, so the recovery path an
- * agent reads under pressure must not name it.
+ * When the apply reported the ranges it touched, they are inlined so the agent
+ * can hand them straight back rather than re-deriving them — and `afterOp` is
+ * offered alongside `affected` so a user edit landing in between cannot be
+ * mistaken for this one. The fallback is spelled out as a request the frame
+ * probe accepts: `between` is rejected without an explicit `COLSxROWS` grid, so
+ * the recovery path an agent reads under pressure must not name it.
  */
 function buildInspectionNextStep(
   result: AgentPlanResult,
@@ -2480,10 +2587,20 @@ function buildInspectionNextStep(
     return undefined;
   }
   const tool = toolIdFor(runtimeId, 'frame_extract');
-  const look = `Look at what changed: ${tool} { affected: true, grid: 'auto', labelCells: true }.`;
-  return readAffectedRanges(result)
-    ? look
-    : `${look} If no hand-off is recorded, sample the edited seconds instead: { atCuts: true, grid: 'auto' }, or { around: <edited time>, span: 1, grid: 'auto' }.`;
+  const editedSeconds =
+    "sample the edited seconds instead: { atCuts: true, grid: 'auto' }, or { around: <edited time>, span: 1, grid: 'auto' }.";
+
+  const ranges = readAffectedRanges(result);
+  if (!ranges) {
+    return `Look at what changed: ${tool} { affected: true, grid: 'auto', labelCells: true }. If no hand-off is recorded, ${editedSeconds}`;
+  }
+
+  const operationId = readLastOperationId(result);
+  const handOff = operationId
+    ? ` Or let the probe read the hand-off itself: { affected: true, afterOp: '${operationId}', grid: 'auto', labelCells: true }.`
+    : '';
+
+  return `Look at what changed: ${tool} { ranges: ${JSON.stringify(ranges)}, grid: 'auto', labelCells: true }.${handOff} If neither is accepted, ${editedSeconds}`;
 }
 
 async function validateCommandToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
