@@ -6,10 +6,7 @@ import {
   executeOpenReelioAgentToolCall,
   type OpenReelioAgentToolCallResult,
 } from './adapters/openreelioCodexTools';
-import type {
-  ExternalAgentApprovalDecision,
-  ExternalAgentApprovalDecisionProvider,
-} from './types';
+import type { ExternalAgentApprovalDecision, ExternalAgentApprovalDecisionProvider } from './types';
 
 /**
  * Tauri event name carrying loopback MCP tool-call requests from the Claude
@@ -59,10 +56,7 @@ export interface OpenReelioMcpSessionContext {
 
 type TauriListen = <T>(event: string, handler: (event: Event<T>) => void) => Promise<UnlistenFn>;
 
-type RespondMcpCall = (
-  callId: string,
-  response: OpenReelioAgentToolCallResult,
-) => Promise<void>;
+type RespondMcpCall = (callId: string, response: OpenReelioAgentToolCallResult) => Promise<void>;
 
 async function defaultRespond(
   callId: string,
@@ -71,6 +65,9 @@ async function defaultRespond(
   const result = await commands.respondOpenreelioMcpCall(callId, {
     text: response.text,
     isError: response.isError,
+    // Pictures travel as their own MCP content blocks. Omitted entirely when
+    // there are none, so every text-only tool serialises exactly as before.
+    ...(response.images && response.images.length > 0 ? { images: response.images } : {}),
   });
   if (result.status === 'error') {
     throw new Error(result.error);
@@ -113,10 +110,7 @@ export class OpenReelioMcpBridge {
    * the bridge is receiving before Claude spawns and issues its first tool call.
    * Safe to call repeatedly for the same `serverId`.
    */
-  async registerMcpSession(
-    serverId: string,
-    context: OpenReelioMcpSessionContext,
-  ): Promise<void> {
+  async registerMcpSession(serverId: string, context: OpenReelioMcpSessionContext): Promise<void> {
     this.sessions.set(serverId, context);
     await this.ensureSubscribed();
   }

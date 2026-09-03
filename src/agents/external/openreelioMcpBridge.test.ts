@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import type { Event, UnlistenFn } from '@tauri-apps/api/event';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -8,6 +9,11 @@ import {
   type OpenReelioMcpCancelEvent,
   type OpenReelioMcpSessionContext,
 } from './openreelioMcpBridge';
+import type { OpenReelioAgentToolCallResult } from './adapters/openreelioCodexTools';
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(),
+}));
 
 type BridgeListen = NonNullable<OpenReelioMcpBridgeDependencies['listen']>;
 type PayloadHandler = (event: Event<unknown>) => void;
@@ -87,6 +93,63 @@ describe('OpenReelioMcpBridge', () => {
     expect(callId).toBe('call-1');
     expect(response.isError).toBe(true);
     expect(response.text).toContain('unknown-server');
+  });
+
+  it('should forward a tool result to the backend without an images field when there are none', async () => {
+    const store = new Map<string, PayloadHandler>();
+    const { listen } = makeRecordingListen(store);
+    vi.mocked(invoke).mockResolvedValue(null);
+    // No `respond` dependency: this exercises the real backend hand-off.
+    const bridge = new OpenReelioMcpBridge({ listen });
+
+    await bridge.registerMcpSession('server-1', SESSION_CONTEXT);
+    store.get('openreelio:mcp:call')?.(
+      makeEvent<OpenReelioMcpCallEvent>({
+        callId: 'call-1',
+        serverId: 'unknown-server',
+        sessionId: null,
+        tool: 'project_state',
+        args: {},
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('respond_openreelio_mcp_call', expect.anything());
+    });
+
+    const [, args] = vi.mocked(invoke).mock.calls[0] as [string, { response: unknown }];
+    expect(args.response).toEqual({ text: expect.any(String), isError: true });
+    expect(args.response).not.toHaveProperty('images');
+  });
+
+  it('should forward the pictures a tool produced alongside its text', async () => {
+    const store = new Map<string, PayloadHandler>();
+    const { listen } = makeRecordingListen(store);
+    vi.mocked(invoke).mockResolvedValue(null);
+    const bridge = new OpenReelioMcpBridge({ listen });
+
+    await bridge.registerMcpSession('server-1', SESSION_CONTEXT);
+    // `defaultRespond` is private, so it is reached through the bridge's own
+    // respond path with a result that carries images.
+    const respond = (
+      bridge as unknown as {
+        respond: (callId: string, response: OpenReelioAgentToolCallResult) => Promise<void>;
+      }
+    ).respond;
+
+    await respond('call-2', {
+      text: '{"status":"ok"}',
+      isError: false,
+      images: [{ data: 'Zm9vYmFy', mimeType: 'image/jpeg' }],
+    });
+
+    expect(invoke).toHaveBeenCalledWith('respond_openreelio_mcp_call', {
+      callId: 'call-2',
+      response: {
+        text: '{"status":"ok"}',
+        isError: false,
+        images: [{ data: 'Zm9vYmFy', mimeType: 'image/jpeg' }],
+      },
+    });
   });
 
   it('should ignore a cancel for a call that is no longer in flight', async () => {

@@ -363,6 +363,34 @@ function matchesResolveGenerationJobPath(path: string): boolean {
   );
 }
 
+/**
+ * The frame probe answers at the top level rather than under `data`: its report
+ * is the CLI's own JSON, passed through verbatim so both surfaces describe one
+ * artifact.
+ */
+function matchesFrameExtractPath(path: string): boolean {
+  return (
+    path === 'status' ||
+    path === 'imageCount' ||
+    /^images(?:\[\d+\])?(?:\.(?:path|mimeType))?$/.test(path) ||
+    path === 'payload' ||
+    /^payload\.(?:status|mode|count)$/.test(path) ||
+    /^payload\.warnings(?:\[\d+\])?$/.test(path) ||
+    /^payload\.frames(?:\[\d+\])?(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(path) ||
+    /^payload\.sheet(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(path) ||
+    /^payload\.sheet\.cells(?:\[\d+\])?(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(path) ||
+    /^payload\.sampler(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(path)
+  );
+}
+
+function matchesRenderProxyPath(path: string): boolean {
+  return (
+    /^(?:status|jobId|sequenceId|preset|requestedPreset|start|end|outputPath|durationSec|fileSize|encodingTimeSec|message|nextStep)$/.test(
+      path,
+    ) || /^warnings(?:\[\d+\])?$/.test(path)
+  );
+}
+
 export const TOOL_OUTPUT_CONTRACTS: Record<string, ToolOutputContract> = {
   get_timeline_info: {
     summary:
@@ -497,6 +525,18 @@ export const TOOL_OUTPUT_CONTRACTS: Record<string, ToolOutputContract> = {
       'returns submitted generation metadata under data.* including data.jobId, data.pendingTimeline.*, and data.nextAction',
     examples: ['data.jobId', 'data.pendingTimeline.markerId', 'data.nextAction'],
     validatePath: matchesGenerateTimelineMediaPath,
+  },
+  frame_extract: {
+    summary:
+      'returns the pictures themselves as image content blocks, plus a JSON report naming payload.mode (timeline/grid/file/asset), payload.frames[n].path/timelineSec/source/reason for stills, payload.sheet.path/cols/rows/cells[n] for a contact sheet, payload.sampler.* for why each time was chosen, and images[n].path/mimeType for the files on disk',
+    examples: ['payload.frames[0].timelineSec', 'payload.sheet.cells[0].reason', 'images[0].path'],
+    validatePath: matchesFrameExtractPath,
+  },
+  render_proxy: {
+    summary:
+      'returns the finished draft render under status (ok/failed/cancelled/timeout) with outputPath, jobId, durationSec, fileSize, encodingTimeSec, optional warnings[n], and a nextStep pointing at frame_extract',
+    examples: ['outputPath', 'jobId', 'durationSec'],
+    validatePath: matchesRenderProxyPath,
   },
   resolve_generation_job: {
     summary:

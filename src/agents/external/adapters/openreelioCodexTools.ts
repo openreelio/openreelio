@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 import {
   commands,
@@ -11,15 +12,18 @@ import {
   type PlanRiskLevel,
   type ProjectInfo,
   type ProjectStateDto,
+  type RenderLifecycleEvent,
   type SemanticTemporalEditAction,
   type SemanticTemporalEditPlan,
   type SemanticTemporalEditPlanOptions,
   type StockMediaImportResult,
   type StockMediaSearchResult,
+  type TimelineFrameProbeRequestDto,
   type TranscriptionOptionsDto,
   type TranscriptionResultDto,
   type TranscriptionStatusDto,
 } from '@/bindings';
+import type { RenderCompleteEvent } from '@/components/features/export/types';
 
 import { hasActiveTimeRemap, type TimeRemapCurve } from '@/types';
 import { TEXT_PRESETS } from '@/data/textPresets';
@@ -770,6 +774,124 @@ const STOCK_MEDIA_IMPORT_SCHEMA: CodexJsonObject = {
   additionalProperties: false,
 };
 
+const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  properties: {
+    time: {
+      type: 'number',
+      description: 'Timeline time in seconds for a single still.',
+    },
+    times: {
+      type: 'array',
+      items: { type: 'number' },
+      description:
+        'Timeline times in seconds: one still each, or the cells of a contact sheet when grid is set.',
+    },
+    grid: {
+      type: 'string',
+      description:
+        "Contact sheet layout as COLSxROWS, or 'auto' to size it from the samples. A sheet is ONE image, so it is the cheap way to look at many moments.",
+    },
+    between: {
+      type: 'array',
+      items: { type: 'number' },
+      description:
+        '[start, end] timeline seconds a grid samples uniformly. Uniform sampling lands on no edit event, so prefer an event sampler when one fits.',
+    },
+    cellWidth: {
+      type: 'number',
+      description: 'Contact sheet cell width in pixels; raise it when reading burned-in text.',
+    },
+    cellHeight: {
+      type: 'number',
+      description: 'Contact sheet cell height in pixels.',
+    },
+    labelCells: {
+      type: 'boolean',
+      description: "Burn each cell's index and timecode into the contact sheet.",
+    },
+    mode: {
+      type: 'string',
+      enum: ['composite', 'fast'],
+      description:
+        "'composite' (default) renders the whole stack — captions, text, transforms, blends — exactly as export does; 'fast' is the cheap topmost-clip-only look that shows none of the edit.",
+    },
+    maxWidth: {
+      type: 'number',
+      description: 'Maximum output width in pixels. Aspect ratio is preserved and never upscaled.',
+    },
+    file: {
+      type: 'string',
+      description:
+        'Rendered video inside the project directory to read instead of the timeline, such as the outputPath returned by openreelio.render_proxy. Cells then map back as fileSec.',
+    },
+    atCuts: {
+      type: 'boolean',
+      description: 'Sample both sides of every cut.',
+    },
+    atTransitions: {
+      type: 'boolean',
+      description: 'Sample the start, cut and end of every two-input transition.',
+    },
+    atCaptions: {
+      type: 'boolean',
+      description: 'Sample the middle of every caption and text span.',
+    },
+    atMarkers: {
+      type: 'boolean',
+      description: 'Sample every sequence marker.',
+    },
+    perShot: {
+      type: 'boolean',
+      description: 'Sample the middle of every shot the export draws — the coverage sweep.',
+    },
+    around: {
+      type: 'number',
+      description: 'Sample a window centred on this timeline time, in seconds.',
+    },
+    span: {
+      type: 'number',
+      description: 'Half-width of the around window in seconds.',
+    },
+    aroundCount: {
+      type: 'number',
+      description: 'Number of samples the around window produces.',
+    },
+    affected: {
+      type: 'boolean',
+      description:
+        'Sample exactly the timeline ranges the last applied edit changed. Errors when no edit recorded a hand-off; fall back to atCuts or between around the edited time.',
+    },
+    limit: {
+      type: 'number',
+      description:
+        'Largest number of sampler times to keep. At most 12 separate stills come back inline, so pass grid for anything wider.',
+    },
+  },
+  additionalProperties: false,
+};
+
+const RENDER_PROXY_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['start', 'end'],
+  properties: {
+    start: {
+      type: 'number',
+      description: 'Range start in timeline seconds. Must be non-negative and below end.',
+    },
+    end: {
+      type: 'number',
+      description: 'Range end in timeline seconds.',
+    },
+    preset: {
+      type: 'string',
+      description:
+        'Render preset id. Defaults to proxy_480p, which the desktop host serves with its fast 720p draft preset. Pass a desktop preset id such as mp4_draft, youtube_1080p, or prores for a specific format.',
+    },
+  },
+  additionalProperties: false,
+};
+
 export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
   {
     namespace: 'openreelio',
@@ -879,8 +1001,22 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
     namespace: 'openreelio',
     name: 'preview_describe',
     description:
-      'Read preview/playback state and whether raw frame inspection is available through the OpenReelio bridge.',
+      'Read preview/playback state and which media inspection paths the OpenReelio bridge exposes.',
     inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'frame_extract',
+    description:
+      'Look at the edit. Returns pictures of the composited timeline — captions, text, transforms and blends, exactly what export produces — as stills or one labelled contact sheet, plus the JSON that maps every cell back to its timecode and the reason it was sampled. Do not compute the times yourself: use affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, or around. At most 12 separate stills come back inline; a contact sheet is one image.',
+    inputSchema: FRAME_EXTRACT_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'render_proxy',
+    description:
+      'Render a fast draft of one timeline range into the project cache and wait for it to finish. Use it only for motion and pacing questions a still cannot answer, then inspect the returned outputPath with openreelio.frame_extract. Full-quality renders are for delivery, not for checking work.',
+    inputSchema: RENDER_PROXY_SCHEMA,
   },
   {
     namespace: 'openreelio',
@@ -980,6 +1116,15 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Do not use shell or filesystem tools to mutate OpenReelio project state; OpenReelio edits must go through the command log.',
     '- Shell and filesystem tools are secondary; prefer OpenReelio tools for video-editing state and mutations.',
     '',
+    'Look at the edit before you report on it:',
+    "- After every openreelio.plan_apply or openreelio.command_execute, call openreelio.frame_extract with affected: true, grid: 'auto', labelCells: true, and look at the picture before you say what changed. If affected reports no recorded hand-off, sample the seconds you edited instead: atCuts: true, or between: [start, end] around the edited time.",
+    '- For caption or text edits, inspect with atCaptions: true and cellWidth: 640 so the burned-in words are legible.',
+    "- Before finishing a task, sweep the whole cut once with perShot: true, grid: 'auto', limit: 24.",
+    "- Do not compute inspection times yourself. frame_extract samples the edit's own events (affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around); uniform between sampling lands on no event and is for whole-timeline overviews only.",
+    '- frame_extract shows the composited edit by default. Only pass mode: "fast" when you deliberately want the raw footage without captions, text or effects.',
+    "- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, then inspect its outputPath with openreelio.frame_extract { file: outputPath, atCuts: true, grid: 'auto' }. Never full-render to check your work.",
+    '- Never claim a cut, caption, overlay, or transition looks right without having extracted a frame that shows it.',
+    '',
     'Available OpenReelio dynamic tools:',
     OPENREELIO_CODEX_DYNAMIC_TOOLS.map((tool) => `- openreelio.${tool.name}`).join('\n'),
   ].join('\n');
@@ -1058,6 +1203,14 @@ export async function handleOpenReelioCodexDynamicToolCall(
         return toolResponse(await buildDiagnosticsResponse());
       case 'preview_describe':
         return toolResponse(await buildPreviewDescription());
+      case 'frame_extract': {
+        const result = await extractFramesToolCall(toolCall.arguments);
+        return toolResponseWithImages(result.value, result.images, result.value.status === 'ok');
+      }
+      case 'render_proxy': {
+        const result = await renderProxyToolCall(toolCall.arguments, context);
+        return toolResponse(result, result.status === 'ok');
+      }
       case 'command_schema':
         return toolResponse(buildCommandSchema());
       case 'command_validate': {
@@ -1105,14 +1258,27 @@ export async function handleOpenReelioCodexDynamicToolCall(
 }
 
 /**
+ * One picture a tool produced, in the raw form MCP carries it: base64 bytes
+ * with no `data:` URI prefix, plus their media type.
+ */
+export interface OpenReelioToolCallImage {
+  data: string;
+  mimeType: string;
+}
+
+/**
  * Result of invoking an OpenReelio dynamic tool via {@link executeOpenReelioAgentToolCall}.
  *
  * `text` is a JSON-encoded payload suitable for an MCP `tools/call` text result;
- * `isError` mirrors the tool's failure state.
+ * `isError` mirrors the tool's failure state. `images` carries any pictures the
+ * tool produced as separate content blocks — they must never be folded into
+ * `text`, because a base64 blob in a text field is unreadable to the model and
+ * costs a fortune in tokens.
  */
 export interface OpenReelioAgentToolCallResult {
   text: string;
   isError: boolean;
+  images?: OpenReelioToolCallImage[];
 }
 
 /**
@@ -1161,22 +1327,50 @@ export async function executeOpenReelioAgentToolCall(
     };
   }
 
+  const images = collectToolCallResponseImages(response);
+
   return {
     text: flattenToolCallResponseText(response),
     isError: !response.success,
+    ...(images.length > 0 ? { images } : {}),
   };
 }
 
 /**
- * Collapse a dynamic-tool response's content items into a single text payload.
- * Text items are concatenated; non-text items (e.g. images) are represented by
- * their JSON so no information is silently dropped.
+ * Collapse a dynamic-tool response's TEXT content items into a single payload.
+ *
+ * Image items are skipped outright rather than JSON-stringified: they are
+ * carried separately by {@link collectToolCallResponseImages}, and serialising a
+ * `data:` URL here would inline a base64 blob into the model's text context.
  */
 function flattenToolCallResponseText(response: CodexDynamicToolCallResponse): string {
-  const parts = response.contentItems.map((item) =>
-    isCodexDynamicToolCallOutputTextItem(item) ? item.text : JSON.stringify(item),
-  );
-  return parts.join('\n');
+  return response.contentItems
+    .filter(isCodexDynamicToolCallOutputTextItem)
+    .map((item) => item.text)
+    .join('\n');
+}
+
+/**
+ * Recover the raw base64 blocks behind a response's `inputImage` data URLs, so
+ * an MCP host that speaks `{ type: "image", data, mimeType }` can carry them.
+ * An item whose URL is not a base64 data URL is dropped: there is nothing to
+ * hand an MCP client, and its paths are already named in the text payload.
+ */
+function collectToolCallResponseImages(
+  response: CodexDynamicToolCallResponse,
+): OpenReelioToolCallImage[] {
+  const images: OpenReelioToolCallImage[] = [];
+  for (const item of response.contentItems) {
+    if (isCodexDynamicToolCallOutputTextItem(item)) {
+      continue;
+    }
+    const match = /^data:([^;,]+);base64,(.+)$/s.exec(item.imageUrl);
+    if (!match) {
+      continue;
+    }
+    images.push({ mimeType: match[1], data: match[2] });
+  }
+  return images;
 }
 
 function normalizeOpenReelioDynamicToolCall(
@@ -1463,13 +1657,398 @@ async function buildPreviewDescription(): Promise<CodexJsonObject> {
       panY: previewState.panY,
     },
     mediaInspection: {
-      rawFrameAccess: true,
+      frameExtraction: 'openreelio.frame_extract',
+      rangeRender: 'openreelio.render_proxy',
       transcriptAccess: transcriptionAvailable,
       waveformAccess: false,
       message:
-        'Use openreelio.clip_analyze for indexed frame samples, openreelio.clip_describe for semantic clip-local frame evidence, and openreelio.transcription_generate for speech-to-text subtitle timing. Waveform inspection is not exposed through this Codex bridge yet.',
+        'Use openreelio.frame_extract to actually see the composited edit as stills or a contact sheet, openreelio.render_proxy for a draft of a range when motion matters, openreelio.clip_analyze for indexed frame samples, openreelio.clip_describe for semantic clip-local frame evidence, and openreelio.transcription_generate for speech-to-text subtitle timing. Waveform inspection is not exposed through this bridge yet.',
     },
   };
+}
+
+/** Outcome of a `frame_extract` call: the JSON to show, and the pictures to attach. */
+interface FrameExtractToolCallResult {
+  value: CodexJsonObject & { status: string };
+  images: OpenReelioToolCallImage[];
+}
+
+/**
+ * Timeline frame probe: the bridge's eyes on the composited edit.
+ *
+ * Always asks for the bytes inline — the whole point is that the model sees the
+ * frame, not a path it cannot open — and returns the probe's own report
+ * verbatim so the timecodes and sampler reasons match the CLI's.
+ */
+async function extractFramesToolCall(
+  args: CodexJsonObject | null,
+): Promise<FrameExtractToolCallResult> {
+  const request = buildFrameProbeRequest(args ?? {});
+
+  const result = await commands.extractTimelineFrames(request);
+  if (result.status === 'error') {
+    return {
+      value: { status: 'error', message: result.error },
+      images: [],
+    };
+  }
+
+  const images: OpenReelioToolCallImage[] = [];
+  const references: CodexJsonObject[] = [];
+  for (const image of result.data.images) {
+    references.push({ path: image.path, mimeType: image.mimeType });
+    if (image.data) {
+      images.push({ data: image.data, mimeType: image.mimeType });
+    }
+  }
+
+  return {
+    value: {
+      status: 'ok',
+      imageCount: images.length,
+      images: references,
+      payload: stripInlineImageBytes(result.data.payload),
+    },
+    images,
+  };
+}
+
+/** Translate tool arguments into the frame-probe request DTO. */
+function buildFrameProbeRequest(args: CodexJsonObject): TimelineFrameProbeRequestDto {
+  const between = readNumberArrayArg(args, 'between', 'frame_extract');
+  if (between && between.length !== 2) {
+    throw new Error('OpenReelio frame_extract requires between to be [start, end].');
+  }
+
+  return {
+    time: getFiniteNumberArg(args, 'time', 'frame_extract') ?? null,
+    times: readNumberArrayArg(args, 'times', 'frame_extract'),
+    grid: getString(args, 'grid')?.trim() || null,
+    between,
+    cellWidth: getFiniteNonNegativeNumberArg(args, 'cellWidth', 'frame_extract') ?? null,
+    cellHeight: getFiniteNonNegativeNumberArg(args, 'cellHeight', 'frame_extract') ?? null,
+    labelCells: args.labelCells === true,
+    mode: getString(args, 'mode')?.trim() || null,
+    maxWidth: getFiniteNonNegativeNumberArg(args, 'maxWidth', 'frame_extract') ?? null,
+    file: getString(args, 'file')?.trim() || null,
+    atCuts: args.atCuts === true,
+    atTransitions: args.atTransitions === true,
+    atCaptions: args.atCaptions === true,
+    atMarkers: args.atMarkers === true,
+    perShot: args.perShot === true,
+    around: getFiniteNumberArg(args, 'around', 'frame_extract') ?? null,
+    span: getFiniteNonNegativeNumberArg(args, 'span', 'frame_extract') ?? null,
+    aroundCount: getFiniteNonNegativeNumberArg(args, 'aroundCount', 'frame_extract') ?? null,
+    affected: args.affected === true,
+    limit: getFiniteNonNegativeNumberArg(args, 'limit', 'frame_extract') ?? null,
+    // The bridge exists to put the picture in front of the model; a path alone
+    // is unreadable to it.
+    inline: true,
+  };
+}
+
+function readNumberArrayArg(args: CodexJsonObject, key: string, toolName: string): number[] | null {
+  const value = args[key];
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'number')) {
+    throw new Error(`OpenReelio ${toolName} requires ${key} to be an array of numbers.`);
+  }
+  return value as number[];
+}
+
+/**
+ * Drop any inline image bytes from a probe report before it is serialised as
+ * text. The report names paths rather than bytes today, so this is a guard
+ * rather than a transformation: an image block is recognised by carrying both a
+ * `mimeType` and a `data` string, and only that `data` is removed.
+ */
+function stripInlineImageBytes(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripInlineImageBytes);
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const source = value as Record<string, unknown>;
+  const stripped: Record<string, unknown> = {};
+  const isImageBlock = typeof source.mimeType === 'string' && typeof source.data === 'string';
+  for (const [key, entry] of Object.entries(source)) {
+    if (isImageBlock && key === 'data') {
+      continue;
+    }
+    stripped[key] = stripInlineImageBytes(entry);
+  }
+  return stripped;
+}
+
+/**
+ * How long the bridge waits for a draft render before giving up and cancelling
+ * the job. A range draft is minutes at worst; anything longer is a stuck
+ * encoder, and leaving the agent blocked on it helps nobody.
+ */
+const RENDER_PROXY_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * The same budget for a Claude session, kept under the loopback MCP server's
+ * own 300s `tools/call` timeout (`MCP_CALL_TIMEOUT`).
+ *
+ * Past that point the backend answers Claude with a timeout error and discards
+ * whatever the frontend eventually says, so a longer wait here would not buy
+ * the agent an answer — it would only hide the outcome behind a response nobody
+ * reads.
+ */
+const RENDER_PROXY_MCP_TIMEOUT_MS = 4.5 * 60 * 1000;
+
+/** The wait budget for the runtime this call came from. */
+function resolveRenderProxyTimeoutMs(context: OpenReelioCodexToolContext): number {
+  return context.runtimeId === 'claude_code'
+    ? RENDER_PROXY_MCP_TIMEOUT_MS
+    : RENDER_PROXY_TIMEOUT_MS;
+}
+
+/** Preset id the tool documents, matching the CLI's `--proxy` shorthand. */
+const RENDER_PROXY_DEFAULT_PRESET = 'proxy_480p';
+
+/**
+ * Preset the desktop render command is actually given for a proxy request.
+ *
+ * `ExportPreset::from_legacy_id` — the only preset table `render_range` knows —
+ * has no `proxy_480p` arm; that id lives in the CLI's own table. Until the
+ * desktop path learns it, a proxy request is served by the host's fast draft
+ * preset and the substitution is reported rather than hidden.
+ */
+const RENDER_PROXY_HOST_PRESET = 'mp4_draft';
+
+/** Preset ids that mean "a fast draft to look at", not a specific format. */
+const RENDER_PROXY_PRESET_ALIASES = new Set(['proxy', 'proxy_480p']);
+
+/** Terminal state of a range render, as the bridge reports it. */
+interface RenderProxyOutcome {
+  status: 'ok' | 'failed' | 'cancelled' | 'timeout';
+  outputPath?: string;
+  durationSec?: number;
+  fileSize?: number;
+  encodingTimeSec?: number;
+  message?: string;
+}
+
+/** Distinguishes one bridge render from the next within a millisecond. */
+let renderProxyOutputSequence = 0;
+
+/**
+ * Render one timeline range to a draft file inside the project and wait for it.
+ *
+ * The output lands in the project's own cache directory, which is both an
+ * allowed export root and inside the directory `frame_extract --file` confines
+ * to — so the render the agent just made is a render it can immediately look at.
+ */
+async function renderProxyToolCall(
+  args: CodexJsonObject | null,
+  context: OpenReelioCodexToolContext,
+): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio render_proxy requires object arguments.');
+  }
+
+  const start = getFiniteNonNegativeNumberArg(args, 'start', 'render_proxy', true) ?? 0;
+  const end = getFiniteNonNegativeNumberArg(args, 'end', 'render_proxy', true) ?? 0;
+  if (end <= start) {
+    return {
+      status: 'error',
+      message: `OpenReelio render_proxy requires end (${end}) to be greater than start (${start}).`,
+    };
+  }
+
+  const requestedPreset = getString(args, 'preset')?.trim() || RENDER_PROXY_DEFAULT_PRESET;
+  const warnings: string[] = [];
+  let preset = requestedPreset;
+  if (RENDER_PROXY_PRESET_ALIASES.has(requestedPreset.toLowerCase())) {
+    preset = RENDER_PROXY_HOST_PRESET;
+    warnings.push(
+      `The desktop render path does not accept the '${requestedPreset}' preset, so this draft was rendered with '${RENDER_PROXY_HOST_PRESET}' instead.`,
+    );
+  }
+
+  const [projectInfo, projectState] = await Promise.all([
+    readOptionalProjectInfo(),
+    readOptionalProjectState(),
+  ]);
+  const projectPath = projectInfo?.path?.trim();
+  if (!projectPath) {
+    return {
+      status: 'error',
+      message:
+        'OpenReelio render_proxy needs an open project with a directory on disk. Read openreelio.project_state first.',
+    };
+  }
+
+  const sequenceId = projectState?.activeSequenceId;
+  if (!sequenceId) {
+    return {
+      status: 'error',
+      message:
+        'OpenReelio render_proxy needs an active sequence. Read openreelio.timeline_snapshot first.',
+    };
+  }
+
+  const outputPath = buildAgentRenderOutputPath(projectPath);
+  const render = await startRangeRenderAndWait({
+    sequenceId,
+    outputPath,
+    preset,
+    start,
+    end,
+    timeoutMs: resolveRenderProxyTimeoutMs(context),
+  });
+
+  return {
+    status: render.outcome.status,
+    jobId: render.jobId,
+    sequenceId,
+    preset,
+    requestedPreset,
+    start,
+    end,
+    outputPath: render.outcome.outputPath ?? outputPath,
+    durationSec: render.outcome.durationSec,
+    fileSize: render.outcome.fileSize,
+    encodingTimeSec: render.outcome.encodingTimeSec,
+    message: render.outcome.message,
+    warnings: warnings.length > 0 ? warnings : undefined,
+    nextStep:
+      render.outcome.status === 'ok'
+        ? "Look at the render: openreelio.frame_extract { file: outputPath, atCuts: true, grid: 'auto' }."
+        : undefined,
+  };
+}
+
+/** Build the cache path a bridge-initiated render writes to. */
+function buildAgentRenderOutputPath(projectPath: string): string {
+  const separator = projectPath.includes('\\') && !projectPath.includes('/') ? '\\' : '/';
+  const root = projectPath.replace(/[\\/]+$/, '');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  renderProxyOutputSequence += 1;
+  return [
+    root,
+    '.openreelio',
+    'cache',
+    'renders',
+    'agent',
+    `proxy-${stamp}-${renderProxyOutputSequence}.mp4`,
+  ].join(separator);
+}
+
+interface RangeRenderRequest {
+  sequenceId: string;
+  outputPath: string;
+  preset: string;
+  start: number;
+  end: number;
+  timeoutMs: number;
+}
+
+/**
+ * Start a range render and resolve once it reaches a terminal state.
+ *
+ * The desktop render registry is cancel-only — there is no status to poll — so
+ * completion is observed through events. Both subscriptions are established
+ * before the render is started, and a terminal event that arrives before the
+ * job id is known is buffered rather than lost.
+ *
+ * `render-complete` carries the measurements worth reporting; `render-lifecycle`
+ * is what separates a failure from a cancellation, which the flat
+ * `render-error` event cannot do.
+ */
+async function startRangeRenderAndWait(
+  request: RangeRenderRequest,
+): Promise<{ jobId: string | null; outcome: RenderProxyOutcome }> {
+  const buffered = new Map<string, RenderProxyOutcome>();
+  let jobId: string | null = null;
+  let settle: ((outcome: RenderProxyOutcome) => void) | null = null;
+  const terminal = new Promise<RenderProxyOutcome>((resolve) => {
+    settle = resolve;
+  });
+
+  const deliver = (eventJobId: string, outcome: RenderProxyOutcome): void => {
+    if (jobId === null) {
+      if (!buffered.has(eventJobId)) {
+        buffered.set(eventJobId, outcome);
+      }
+      return;
+    }
+    if (eventJobId === jobId) {
+      settle?.(outcome);
+    }
+  };
+
+  const unlisteners = await Promise.all([
+    listen<RenderCompleteEvent>('render-complete', (event) => {
+      deliver(event.payload.jobId, {
+        status: 'ok',
+        outputPath: event.payload.outputPath,
+        durationSec: event.payload.durationSec,
+        fileSize: event.payload.fileSize,
+        encodingTimeSec: event.payload.encodingTimeSec,
+      });
+    }),
+    listen<RenderLifecycleEvent>('render-lifecycle', (event) => {
+      const { state } = event.payload;
+      if (state !== 'failed' && state !== 'cancelled') {
+        return;
+      }
+      deliver(event.payload.jobId, {
+        status: state,
+        message: event.payload.message ?? undefined,
+      });
+    }),
+  ]);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const started = await commands.renderRange(
+      request.sequenceId,
+      request.outputPath,
+      request.preset,
+      null,
+      request.start,
+      request.end,
+    );
+    if (started.status === 'error') {
+      return { jobId: null, outcome: { status: 'failed', message: started.error } };
+    }
+
+    jobId = started.data.jobId;
+    const early = buffered.get(jobId);
+    if (early) {
+      return { jobId, outcome: early };
+    }
+
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), request.timeoutMs);
+    });
+    const settled = await Promise.race([terminal, timeout]);
+    if (settled === 'timeout') {
+      await commands.cancelRender(jobId);
+      return {
+        jobId,
+        outcome: {
+          status: 'timeout',
+          message: `The range render did not finish within ${Math.round(
+            request.timeoutMs / 1000,
+          )}s and was cancelled. Render a shorter range.`,
+        },
+      };
+    }
+    return { jobId, outcome: settled };
+  } finally {
+    clearTimeout(timer);
+    for (const unlisten of unlisteners) {
+      unlisten();
+    }
+  }
 }
 
 async function insertMediaToolCall(
@@ -1709,9 +2288,33 @@ async function executeApprovedCommand(
     commandType,
     approval: buildApprovalExecutionSummary(execution),
     result: execution.result,
+    affectedRanges: readAffectedRanges(execution.result),
+    nextStep: buildInspectionNextStep(execution.result),
     targeting: payloadNormalization.notes.length > 0 ? payloadNormalization.notes : undefined,
     refresh,
   };
+}
+
+/**
+ * Surface the timeline ranges an apply reports it changed, when it reports any.
+ *
+ * The desktop plan executor does not carry them yet — that is a backend
+ * follow-up — so their absence is normal and must not be mistaken for "the edit
+ * changed nothing".
+ */
+function readAffectedRanges(result: AgentPlanResult): unknown {
+  const ranges = (result as unknown as Record<string, unknown>).affectedRanges;
+  return Array.isArray(ranges) && ranges.length > 0 ? ranges : undefined;
+}
+
+/** Tell the agent where to look now that the edit is applied. */
+function buildInspectionNextStep(result: AgentPlanResult): string | undefined {
+  if (!result.success) {
+    return undefined;
+  }
+  return readAffectedRanges(result)
+    ? "Look at what changed: openreelio.frame_extract { affected: true, grid: 'auto', labelCells: true }."
+    : "Look at what changed: openreelio.frame_extract { affected: true, grid: 'auto', labelCells: true }. If no hand-off is recorded, sample the edited seconds instead with atCuts or between.";
 }
 
 async function validateCommandToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
@@ -1871,6 +2474,8 @@ async function applyApprovedPlan(
     planId: validation.plan.id,
     approval: buildApprovalExecutionSummary(execution),
     result: execution.result,
+    affectedRanges: readAffectedRanges(execution.result),
+    nextStep: buildInspectionNextStep(execution.result),
     targeting: validation.normalizationNotes.length > 0 ? validation.normalizationNotes : undefined,
     refresh,
   };
@@ -4312,6 +4917,34 @@ function toolResponse(value: unknown, success = true): CodexDynamicToolCallRespo
     contentItems: [
       {
         type: 'inputText',
+        text: JSON.stringify(value, null, 2),
+      },
+    ],
+    success,
+  };
+}
+
+/**
+ * Build a dynamic-tool response that carries pictures alongside its JSON.
+ *
+ * Images come first so the host renders them before the text that explains
+ * them, and each is a `data:` URL because that is the only image form the Codex
+ * app-server dynamic-tool protocol accepts. `value` must already be free of
+ * base64 bytes: the picture travels once, as a picture.
+ */
+function toolResponseWithImages(
+  value: unknown,
+  images: readonly OpenReelioToolCallImage[],
+  success = true,
+): CodexDynamicToolCallResponse {
+  return {
+    contentItems: [
+      ...images.map((image) => ({
+        type: 'inputImage' as const,
+        imageUrl: `data:${image.mimeType};base64,${image.data}`,
+      })),
+      {
+        type: 'inputText' as const,
         text: JSON.stringify(value, null, 2),
       },
     ],
