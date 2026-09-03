@@ -22,6 +22,7 @@ import {
   type TranscriptionOptionsDto,
   type TranscriptionResultDto,
   type TranscriptionStatusDto,
+  type VerifySequenceRequestDto,
 } from '@/bindings';
 import type { RenderCompleteEvent } from '@/components/features/export/types';
 
@@ -950,6 +951,54 @@ const RENDER_PROXY_SCHEMA: CodexJsonObject = {
   additionalProperties: false,
 };
 
+const VERIFY_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  properties: {
+    file: {
+      type: 'string',
+      description:
+        'Rendered video inside the project to measure, such as the outputPath render_proxy returned. Without it only the structural checks run and FFmpeg is never invoked. Measured times are file-relative and are compared against timeline times, so this should be a render of the whole sequence from timeline zero.',
+    },
+    structuralOnly: {
+      type: 'boolean',
+      description: 'Run the structural checks only and never touch FFmpeg.',
+    },
+    checks: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Run only these check ids, as report.checks names them.',
+    },
+    skip: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Skip these check ids.',
+    },
+    targetLufs: {
+      type: 'number',
+      description: 'Integrated loudness target in LUFS. Needs file.',
+    },
+    maxTruePeak: {
+      type: 'number',
+      description: 'Highest acceptable true peak in dBTP. Needs file.',
+    },
+    durationToleranceSec: {
+      type: 'number',
+      description: 'Divergence tolerated between the rendered file and the sequence, in seconds.',
+    },
+    failOn: {
+      type: 'string',
+      description:
+        "Lowest severity that fails the run: 'info', 'warning', 'error' (the default) or 'critical'.",
+    },
+    timeoutSec: {
+      type: 'integer',
+      minimum: 1,
+      description: 'Timeout for the rendered-file measurement pass, in seconds.',
+    },
+  },
+  additionalProperties: false,
+};
+
 export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
   {
     namespace: 'openreelio',
@@ -1078,6 +1127,13 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
   },
   {
     namespace: 'openreelio',
+    name: 'verify',
+    description:
+      'Judge the edit by the deterministic QC rules every OpenReelio surface applies — the same report `openreelio-cli verify` prints. Structural checks always run; the rendered measurements (black, freeze, silence, EBU R128 loudness, true peak) need a file inside the project, such as the outputPath render_proxy returned. exitCode 0 means the report passed, 1 that the failOn threshold was breached and there is something to fix, 2 that the tool could not run and the verdict is incomplete. Every violation carries the timeRange to look at with frame_extract, and an auto-fixable one carries a suggestedFix EditScript ready for plan_apply.',
+    inputSchema: VERIFY_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
     name: 'command_schema',
     description:
       'Read the supported OpenReelio event-sourced edit command types, text/caption workflows, and payload conventions.',
@@ -1184,6 +1240,8 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- frame_extract shows the composited edit by default. Only pass mode: "fast" when you deliberately want the raw footage without captions, text or effects.',
     `- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, and keep the range under ${RENDER_PROXY_MAX_RANGE_SEC}s. Then inspect its outputPath with openreelio.frame_extract { file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true } — file times are relative to the file, and samplers are not available with file.`,
     '- Never claim a cut, caption, overlay, or transition looks right without having extracted a frame that shows it.',
+    '- Before you report a task done, run openreelio.verify with no arguments for the structural checks, and after an openreelio.render_proxy run openreelio.verify { file: outputPath } so the black, freeze, silence, loudness and true-peak measurements run too.',
+    "- Read the verify exitCode: 0 passed, 1 means a check failed and there is something to fix before reporting done, 2 means verify itself could not run — report that as a tool problem, never as a clean edit. Look at a violation's timeRange with openreelio.frame_extract { ranges: <the violation timeRanges>, grid: 'auto', labelCells: true }, and apply a suggestedFix through openreelio.plan_apply only after reviewing it.",
     '',
     'Available OpenReelio dynamic tools:',
     OPENREELIO_CODEX_DYNAMIC_TOOLS.map((tool) => `- openreelio.${tool.name}`).join('\n'),
@@ -1269,6 +1327,10 @@ export async function handleOpenReelioCodexDynamicToolCall(
       }
       case 'render_proxy': {
         const result = await renderProxyToolCall(toolCall.arguments, context);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'verify': {
+        const result = await verifyToolCall(toolCall.arguments, context);
         return toolResponse(result, result.status === 'ok');
       }
       case 'command_schema':
@@ -1883,6 +1945,21 @@ function readNumberArrayArg(args: CodexJsonObject, key: string, toolName: string
 }
 
 /**
+ * Read an argument that names ids, rejecting a malformed one here so the
+ * message carries the field name rather than surfacing as an IPC rejection.
+ */
+function readStringArrayArg(args: CodexJsonObject, key: string, toolName: string): string[] | null {
+  const value = args[key];
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    throw new Error(`OpenReelio ${toolName} requires ${key} to be an array of strings.`);
+  }
+  return value as string[];
+}
+
+/**
  * Drop any inline image bytes from a probe report before it is serialised as
  * text. The report names paths rather than bytes today, so this is a guard
  * rather than a transformation: an image block is recognised by carrying both a
@@ -2100,7 +2177,10 @@ async function renderProxyToolCall(
       ? `Look at the render: ${toolIdFor(
           context.runtimeId,
           'frame_extract',
-        )} { file: outputPath, between: [0, ${roundSeconds(durationSec)}], grid: '4x3', labelCells: true }. File times are relative to the file, and samplers are not available with file.`
+        )} { file: outputPath, between: [0, ${roundSeconds(durationSec)}], grid: '4x3', labelCells: true }. File times are relative to the file, and samplers are not available with file. Then measure it: ${toolIdFor(
+          context.runtimeId,
+          'verify',
+        )} { file: outputPath }.`
       : undefined,
   };
 }
@@ -2287,6 +2367,176 @@ function cancelRunningRender(jobId: string): RenderProxyOutcome {
     status: 'cancelled',
     message: 'The draft render was cancelled before it finished.',
   };
+}
+
+/**
+ * Largest number of violation ranges the `verify` hand-off spells out.
+ *
+ * The pointer exists to be handed straight back to the frame probe, and a
+ * contact sheet of every finding in a long report is neither readable nor
+ * cheap. Past this many, the report itself is where the rest is read.
+ */
+const VERIFY_NEXT_STEP_MAX_RANGES = 8;
+
+/** One violation window, as the QC report spells it. */
+interface VerifyViolationRange {
+  startSec: number;
+  endSec: number;
+}
+
+/** What a verify report offers the agent to act on next. */
+interface VerifyFindings {
+  ranges: VerifyViolationRange[];
+  totalRanges: number;
+  hasSuggestedFix: boolean;
+}
+
+/**
+ * Deterministic QC over the edit, and over a render when one is named.
+ *
+ * The report travels back verbatim so the checks, violations and suggested
+ * fixes an agent reasons over are the ones the CLI and MCP surfaces print, and
+ * `exitCode` is kept alongside as the one-glance verdict a loop branches on:
+ * `2` is the tool failing rather than the edit, so only that one is reported as
+ * a failed tool call.
+ */
+async function verifyToolCall(
+  args: CodexJsonObject | null,
+  context: OpenReelioCodexToolContext,
+): Promise<CodexJsonObject> {
+  const result = await commands.verifySequence(buildVerifyRequest(args ?? {}));
+  if (result.status === 'error') {
+    return { status: 'error', message: result.error };
+  }
+
+  const { payload, exitCode } = result.data;
+  return {
+    status: exitCode === 2 ? 'error' : 'ok',
+    exitCode,
+    passed: exitCode === 0,
+    report: payload,
+    nextStep: buildVerifyNextStep(payload, exitCode, context.runtimeId),
+  };
+}
+
+/** Translate tool arguments into the verify request DTO. */
+function buildVerifyRequest(args: CodexJsonObject): VerifySequenceRequestDto {
+  return {
+    file: getString(args, 'file')?.trim() || null,
+    structuralOnly: args.structuralOnly === true,
+    checks: readStringArrayArg(args, 'checks', 'verify'),
+    skip: readStringArrayArg(args, 'skip', 'verify'),
+    targetLufs: getFiniteNumberArg(args, 'targetLufs', 'verify') ?? null,
+    maxTruePeak: getFiniteNumberArg(args, 'maxTruePeak', 'verify') ?? null,
+    durationToleranceSec:
+      getFiniteNonNegativeNumberArg(args, 'durationToleranceSec', 'verify') ?? null,
+    failOn: getString(args, 'failOn')?.trim() || null,
+    timeoutSec: getFiniteNonNegativeNumberArg(args, 'timeoutSec', 'verify') ?? null,
+  };
+}
+
+/**
+ * Tell the agent where to look now that the report is in.
+ *
+ * A verdict an agent cannot act on is a verdict it will paraphrase instead of
+ * fixing, so the windows the checks flagged are inlined as a frame-probe
+ * request it can hand straight back, and an auto-fixable finding is named with
+ * the tool that applies it. `ranges` stands alone as a sampler, so the request
+ * spelled here is one the probe accepts.
+ */
+function buildVerifyNextStep(
+  payload: unknown,
+  exitCode: number,
+  runtimeId: OpenReelioCodexToolContext['runtimeId'],
+): string | undefined {
+  const findings = collectVerifyFindings(payload);
+  const steps: string[] = [];
+
+  if (findings.ranges.length > 0) {
+    const truncated =
+      findings.totalRanges > findings.ranges.length
+        ? ` Only the first ${findings.ranges.length} of ${findings.totalRanges} flagged ranges are listed; read report.checks for the rest.`
+        : '';
+    steps.push(
+      `Look at what the report flagged: ${toolIdFor(
+        runtimeId,
+        'frame_extract',
+      )} { ranges: ${JSON.stringify(findings.ranges)}, grid: 'auto', labelCells: true }.${truncated}`,
+    );
+  }
+
+  if (findings.hasSuggestedFix) {
+    steps.push(
+      `A violation carries an executable suggestedFix EditScript: review it against what you see, then apply it with ${toolIdFor(
+        runtimeId,
+        'plan_apply',
+      )}.`,
+    );
+  }
+
+  if (steps.length === 0) {
+    return exitCode === 2
+      ? 'The run did not complete, so this is not a verdict on the edit. Read report.errors and report the tool problem.'
+      : undefined;
+  }
+
+  return steps.join(' ');
+}
+
+/**
+ * Gather the windows and fixes a report offers, wherever it puts them.
+ *
+ * Violations are read from every check as well as from a top-level list, so a
+ * report that groups them either way yields the same hand-off, and identical
+ * windows are collapsed rather than sampled twice.
+ */
+function collectVerifyFindings(payload: unknown): VerifyFindings {
+  const report = asObject(payload);
+  const violations: CodexJsonObject[] = [...readViolationList(report?.violations)];
+  for (const check of Array.isArray(report?.checks) ? report.checks : []) {
+    violations.push(...readViolationList(asObject(check)?.violations));
+  }
+
+  const ranges: VerifyViolationRange[] = [];
+  const seen = new Set<string>();
+  let hasSuggestedFix = false;
+  for (const violation of violations) {
+    if (violation.suggestedFix !== undefined && violation.suggestedFix !== null) {
+      hasSuggestedFix = true;
+    }
+
+    const timeRange = asObject(violation.timeRange);
+    const startSec = timeRange ? asFiniteNumber(timeRange.startSec) : null;
+    const endSec = timeRange ? asFiniteNumber(timeRange.endSec) : null;
+    if (startSec === null || endSec === null) {
+      continue;
+    }
+
+    const range = { startSec: roundSeconds(startSec), endSec: roundSeconds(endSec) };
+    const key = `${range.startSec}:${range.endSec}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    ranges.push(range);
+  }
+
+  return {
+    ranges: ranges.slice(0, VERIFY_NEXT_STEP_MAX_RANGES),
+    totalRanges: ranges.length,
+    hasSuggestedFix,
+  };
+}
+
+/** Read a report field that should hold violation objects, tolerating anything else. */
+function readViolationList(value: unknown): CodexJsonObject[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => asObject(entry))
+    .filter((entry): entry is CodexJsonObject => entry !== null);
 }
 
 async function insertMediaToolCall(
