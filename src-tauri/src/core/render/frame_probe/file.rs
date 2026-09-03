@@ -162,6 +162,13 @@ pub(super) async fn run_file_mode(
         Selection::AssetTime { .. } => Err(FrameProbeError::new(
             "--file reads a rendered video, so it cannot be combined with --asset".to_string(),
         )),
+        // Unreachable through `resolve_selection`, which refuses the pair up
+        // front; restated here so the refusal survives a future caller that
+        // builds a `Selection` some other way.
+        Selection::Sampled { .. } => Err(FrameProbeError::new(
+            "--file reads a rendered video and has no timeline to sample, so it cannot be combined with --at-cuts, --at-transitions, --at-captions, --at-markers, --per-shot, --around or --affected. Sample the timeline instead, or pass --times/--between for the file."
+                .to_string(),
+        )),
         Selection::SingleTime(time) => {
             source.ensure_times_inside(std::slice::from_ref(time))?;
             let output_path = resolve_single_output_path(&request.out, *time, format)?;

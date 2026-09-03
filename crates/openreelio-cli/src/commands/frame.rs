@@ -22,9 +22,25 @@ use openreelio_core::ActiveProject;
 use std::path::PathBuf;
 
 pub use openreelio_core::render::frame_probe::{
-    DEFAULT_MAX_WIDTH, MAX_CELL_SIZE_PX, MAX_GRID_CELLS, MAX_SHEET_DIMENSION_PX,
-    MAX_STILL_WIDTH_PX, MIN_CELL_SIZE_PX, MIN_STILL_WIDTH_PX,
+    DEFAULT_AROUND_COUNT, DEFAULT_AROUND_SPAN_SEC, DEFAULT_MAX_WIDTH, MAX_CELL_SIZE_PX,
+    MAX_GRID_CELLS, MAX_SHEET_DIMENSION_PX, MAX_STILL_WIDTH_PX, MIN_CELL_SIZE_PX,
+    MIN_STILL_WIDTH_PX,
 };
+
+/// Selectors that name the extraction times outright.
+///
+/// A sampler derives its own times, so clap refuses the pair the same way it
+/// refuses `--time` with `--times` — and the engine restates the refusal for
+/// callers that never run through clap.
+const SAMPLER_CONFLICTS: [&str; 7] = [
+    "time",
+    "times",
+    "between",
+    "count",
+    "asset",
+    "source_time",
+    "file",
+];
 
 #[derive(Subcommand)]
 pub enum FrameAction {
@@ -79,7 +95,7 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub format: Option<String>,
 
-    /// Contact sheet grid as COLSxROWS (requires --between or --times)
+    /// Contact sheet grid as COLSxROWS, or 'auto' to size the sheet from a sampler or --times
     #[arg(long)]
     pub grid: Option<String>,
 
@@ -102,6 +118,46 @@ pub struct ExtractArgs {
     /// Burn each cell's index and timecode into the contact sheet
     #[arg(long, requires = "grid")]
     pub label_cells: bool,
+
+    /// Sample both sides of every cut: the outgoing shot's last frame and the incoming shot's first
+    #[arg(long, conflicts_with_all = SAMPLER_CONFLICTS)]
+    pub at_cuts: bool,
+
+    /// Sample the start, cut and end of every two-input transition
+    #[arg(long, conflicts_with_all = SAMPLER_CONFLICTS)]
+    pub at_transitions: bool,
+
+    /// Sample the middle of every caption and text span
+    #[arg(long, conflicts_with_all = SAMPLER_CONFLICTS)]
+    pub at_captions: bool,
+
+    /// Sample every sequence marker
+    #[arg(long, conflicts_with_all = SAMPLER_CONFLICTS)]
+    pub at_markers: bool,
+
+    /// Sample the middle of every shot on the video tracks the export includes
+    #[arg(long, conflicts_with_all = SAMPLER_CONFLICTS)]
+    pub per_shot: bool,
+
+    /// Sample a window centred on this timeline time, in seconds
+    #[arg(long, conflicts_with_all = SAMPLER_CONFLICTS)]
+    pub around: Option<f64>,
+
+    /// Half-width of the --around window in seconds (default: 0.5)
+    #[arg(long, requires = "around")]
+    pub span: Option<f64>,
+
+    /// Number of --around samples (default: 5)
+    #[arg(long, requires = "around")]
+    pub around_count: Option<usize>,
+
+    /// Sample the timeline ranges the last applied edit changed
+    #[arg(long, conflicts_with_all = SAMPLER_CONFLICTS)]
+    pub affected: bool,
+
+    /// Largest number of sampler times to keep; the rest are thinned out evenly
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 impl ExtractArgs {
@@ -128,6 +184,16 @@ impl ExtractArgs {
             cell_width: self.cell_width,
             cell_height: self.cell_height,
             label_cells: self.label_cells,
+            at_cuts: self.at_cuts,
+            at_transitions: self.at_transitions,
+            at_captions: self.at_captions,
+            at_markers: self.at_markers,
+            per_shot: self.per_shot,
+            around: self.around,
+            span: self.span,
+            around_count: self.around_count,
+            affected: self.affected,
+            limit: self.limit,
         }
     }
 }
@@ -233,4 +299,12 @@ pub fn ensure_sheet_dimensions_in_range(
 /// Parses a `COLSxROWS` grid specification.
 pub fn parse_grid_spec(raw: &str) -> anyhow::Result<(usize, usize)> {
     Ok(openreelio_core::render::frame_probe::parse_grid_spec(raw)?)
+}
+
+/// Chooses a contact-sheet layout for a known number of samples.
+///
+/// Shared with the MCP surface so `grid: "auto"` means the same shape there as
+/// it does on the command line.
+pub fn auto_grid(count: usize) -> anyhow::Result<(usize, usize)> {
+    Ok(openreelio_core::render::frame_probe::auto_grid(count)?)
 }

@@ -19,6 +19,9 @@ openreelio-cli state history --path ./demo
 
 # For each candidate plan (candidate-a.json, candidate-b.json, …):
 openreelio-cli plan execute  --path ./demo --file candidate-a.json
+# Look at what the plan actually changed, before spending a render on it
+openreelio-cli frame extract --path ./demo --affected --grid auto \
+  --label-cells --out ./judge/a-affected.jpg
 openreelio-cli render start  --path ./demo --proxy --output ./judge/a.mp4 --progress
 openreelio-cli frame extract --path ./demo --file ./judge/a.mp4 \
   --grid 4x3 --between 0 <RENDER_END> --label-cells --out ./judge/a-sheet.jpg
@@ -65,43 +68,83 @@ shows the same pixels `verify --file` measured, so scores and measurements
 describe one artifact. In `--file` mode cells map back as `fileSec` (the
 render's own timebase).
 
-Cut-boundary sheets beat uniform sheets for continuity judging: read the cut
-times straight from `timeline info` — `editPoints` is the sorted list of clip
-boundaries (including `0`), and `fps`/`fpsRatio` give the timebase the offsets
-below are derived from — then sample the frame **before** each cut at
-`cut − 1.5/fps` and the frame **after** it at the cut time itself. `timeline info`
-also reports `markers` (the beats a plan asked you to check), `transitions`
-(each blend's `startSec`/`endSec`, centred on `cutSec` — sample inside that span
-to see the blend rather than either shot), and `captionSpans`/`textSpans`.
-Reducing over `timeline clips` to rebuild any of this is the step that goes
-wrong.
+## Let the sampler choose the times
 
-When you are judging an edit you just applied, `command execute` and
-`plan execute` already told you where it landed: their `affectedRanges`
-(`[{startSec, endSec}]`) is the list of stretches to sample, and the same union
-is on disk at `<project>/.openreelio/cache/agent/last_affected_ranges.json`.
+Cut-boundary sheets beat uniform sheets for continuity judging — and you no
+longer assemble one by hand. `frame extract` takes **event samplers** that read
+the sequence and pick the times themselves, on the timeline (samplers need a
+timeline, so they do not combine with `--file`):
 
-The offsets are asymmetric on purpose. `frame extract` seeks with `-ss` before
+```bash
+# Exactly the seconds the last applied edit changed — the post-apply look
+openreelio-cli frame extract --path ./demo --affected --grid auto \
+  --label-cells --out ./judge/a-affected.jpg
+
+# Both sides of every cut, at the right offsets, in one call
+openreelio-cli frame extract --path ./demo --at-cuts --grid auto \
+  --label-cells --out ./judge/a-cuts.jpg
+
+# Captions and titles, on the frame they are settled in
+openreelio-cli frame extract --path ./demo --at-captions --grid auto \
+  --cell-width 640 --out ./judge/a-captions.jpg
+```
+
+| Sampler | Picks | Reasons reported |
+| ------- | ----- | ---------------- |
+| `--affected` | every range the last apply changed: start, middle, last frame, and both sides of each cut inside it | `affectedStart` `affectedMid` `affectedEnd` `cutBefore` `cutAfter` |
+| `--at-cuts` | both sides of every cut | `cutBefore` `cutAfter` |
+| `--at-transitions` | each blend's start, cut and end | `transitionStart` `transitionCut` `transitionEnd` |
+| `--at-captions` | the middle of every caption and text span | `captionMid` `textMid` |
+| `--at-markers` | every sequence marker | `marker` |
+| `--per-shot` | the middle of every shot | `shotMid` |
+| `--around <SEC>` | a window around one time (`--span`, `--around-count`) | `around` |
+
+Samplers combine as a union, are deduplicated and sorted, and every frame or
+cell carries its `reason`. The payload also gains a `sampler` block —
+`{kinds, candidates, selected, limited, affectedRanges?}` — so a thinned
+selection is visible rather than looking like a short timeline. `--grid auto`
+sizes the sheet from the sample count (2 columns up to 2 samples, 3 up to 9,
+4 up to 16, then 6), which is why none of the calls above states a layout.
+
+`--affected` reads `<project>/.openreelio/cache/agent/last_affected_ranges.json`,
+written by every successful `command execute` and `plan execute`; the same union
+is on those commands' own `affectedRanges` response. If nothing has been applied
+to the sequence yet, the sampler says so rather than guessing — apply first, or
+fall back to `--between`.
+
+`timeline info` still reports the raw signals (`editPoints`, `fps`/`fpsRatio`,
+`markers`, `transitions`, `captionSpans`, `textSpans`), and you need them for one
+case the samplers cannot serve: a `--file` sheet, which reads a rendered artifact
+and has no timeline to sample. There, keep passing `--times`.
+
+**Why the cut offsets are asymmetric.** `frame extract` seeks with `-ss` before
 `-i`, which resolves **forward**: it returns the first frame whose PTS is ≥ the
 requested time. So the cut time itself already gives the incoming shot, while
 `cut − 1.5/fps` is the only offset guaranteed to land on the last outgoing frame
 at every timebase. A symmetric `±0.04 s` is not: at 24 fps one frame is 0.0417 s,
 so `cut − 0.04` resolves forward across the cut and both cells show the incoming
-shot — a sheet that looks like a valid before/after and is not.
-
-At 25 fps (1.5/fps = 0.06) with cuts at 5.0 / 9.2 / 14.2:
-
-```bash
-openreelio-cli timeline info --path ./demo    # cut times = editPoints, fps, transitions
-openreelio-cli frame extract  --path ./demo --file ./judge/a.mp4 \
-  --grid 6x2 --times 4.94,5.0,9.14,9.2,14.14,14.2 \
-  --label-cells --out ./judge/a-cuts.jpg
-```
+shot — a sheet that looks like a valid before/after and is not. `--at-cuts`
+applies the correct offset from the sequence's own fps; when you compute times
+by hand for a `--file` sheet, take the fps from the render (`verify --file`
+reports it) rather than assuming one.
 
 `--label-cells` burns the **requested** time, not the decoded frame's PTS, so a
 label is proof of which cell you are looking at, never proof that the frame came
-from the side of the cut you wanted. Derive the offsets from the render's real
-fps (`verify --file` reports it) rather than reusing these numbers.
+from the side of the cut you wanted.
+
+### How many frames
+
+1. **Event-driven first.** A sampler returns as many frames as the edit has
+   events — usually few, always on something. Start there.
+2. **`--limit <N>` for a budget.** Over the limit the list is thinned evenly,
+   keeping its first and last entry, and `sampler.limited` reports it. Use it on
+   `--per-shot` and `--at-cuts` over a long sequence.
+3. **`--between` last.** Evenly spaced midpoints land on no event at all. They
+   answer "what is the overall shape", which is exactly what the whole-render
+   overview sheet is for — not continuity, not readability, not "what changed".
+
+A sheet costs one image whatever its cell count, so prefer `--grid auto` over a
+batch of separate stills whenever more than a couple of frames come back.
 
 Use `--cell-width 640 --cell-height 360` when captions or fine composition must
 be legible; the default 320×180 cells are for structure, not for reading text.
@@ -117,9 +160,19 @@ this: `openreelio.frame.extract` takes the same selectors and returns the sheet
 read tool, available without `--allow-write`.
 
 ```jsonc
-// tools/call → openreelio.frame.extract
+// tools/call → openreelio.frame.extract — the whole render, as one sheet
 { "file": "judge/a.mp4", "grid": "4x3", "between": [0, 90], "labelCells": true }
+
+// tools/call → openreelio.frame.extract — what the last apply changed
+{ "affected": true, "grid": "auto", "labelCells": true }
+
+// tools/call → openreelio.frame.extract — continuity at every cut
+{ "atCuts": true, "grid": "auto", "limit": 12, "labelCells": true }
 ```
+
+The samplers carry the same names in camelCase — `affected`, `atCuts`,
+`atTransitions`, `atCaptions`, `atMarkers`, `perShot`, `around` (with `span`
+and `aroundCount`), plus `limit` and `grid: "auto"`.
 
 Two differences from the CLI form:
 
@@ -131,10 +184,11 @@ Two differences from the CLI form:
   entries and drops the entry an extraction failed in, so a long judge loop does
   not accumulate inside the project.
 - The caps are on cells **and** on pixels: at most 100 cells, at most 12 stills
-  in a `times` batch, cells of 64–1024 px, a finished sheet no larger than
-  8000 px on either edge, and `maxWidth` at most 3840 px. Anything past those is
-  refused as an argument error before a frame is extracted. Prefer a sheet — it
-  costs one image whatever its cell count.
+  in a `times` batch or a sampler batch without `grid`, cells of 64–1024 px, a
+  finished sheet no larger than 8000 px on either edge, and `maxWidth` at most
+  3840 px. Anything past those is refused as an argument error before a frame is
+  extracted. Prefer a sheet — it costs one image whatever its cell count, and
+  `grid: "auto"` keeps a sampler to one image however many events it found.
 
 The Bash + Read path above remains correct for CLI agents; nothing about the
 rubric or the offsets changes.
@@ -150,8 +204,8 @@ the visual scores.
 | Deliverable | `verify --file` | Gate, not a score: any error-or-worse finding disqualifies the candidate before judging. |
 | Pacing      | `shot.length_stats` (median, p90, count) + `shot.cut_rhythm` | Shot lengths match the brief's tempo; no unmotivated outliers. |
 | Hook        | First-row cells of the sheet | Something happens in the first seconds: motion, a face, a claim — not a slate or dead air. |
-| Continuity  | Cut-boundary sheet | Cuts land on action or rest; no jump-cut jitter, no mid-gesture amputation. |
-| Readability | ≥640-wide cells | Captions and text legible, inside safe areas, not fighting the background. |
+| Continuity  | `--at-cuts --grid auto` sheet | Cuts land on action or rest; no jump-cut jitter, no mid-gesture amputation. |
+| Readability | `--at-captions --grid auto --cell-width 640` | Captions and text legible, inside safe areas, not fighting the background. |
 | Composition | Full sheet | Subjects framed intentionally; no accidental crops; a consistent look across cells. |
 
 Judge pointwise against this rubric — score each candidate alone, then compare
@@ -189,6 +243,7 @@ The winner's weaknesses become the next fix loop's worklist.
 | Step | Cost | Use for |
 | ---- | ---- | ------- |
 | `verify --structural-only` | free, no FFmpeg | pacing stats; disqualifying broken candidates early |
+| `frame extract --affected --grid auto` | cheap | seeing what an apply just did, before rendering |
 | timeline sheet (`--grid`, fast mode) | cheap | rough structure before rendering anything |
 | `render start --proxy --start/--end` + `--file` sheet | moderate | judging one range of one candidate |
 | full proxy render + `--file` sheet + `verify --file` | the judging unit | scoring a candidate |

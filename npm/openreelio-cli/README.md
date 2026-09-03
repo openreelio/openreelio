@@ -88,7 +88,13 @@ Every mutating verb reports where the edit landed. `command execute` and
 covering everything that moved, ripple shifts included - so the sheet or partial
 render that checks the result can be aimed at those seconds instead of the whole
 timeline. The last successful apply's union is also written to
-`<project>/.openreelio/cache/agent/last_affected_ranges.json`.
+`<project>/.openreelio/cache/agent/last_affected_ranges.json`, which is what
+`frame extract --affected` reads:
+
+```bash
+openreelio-cli plan execute  --path ./demo --file cut.json
+openreelio-cli frame extract --path ./demo --affected --grid auto --out ./look.jpg
+```
 
 `verify --file` expects a render of the whole sequence, which is why step 4
 renders without `--start`/`--end`. Add them when you only want to eyeball a
@@ -117,6 +123,13 @@ segment where one exists — and each still reports whether it came from the
 `cache`, a fresh `composite` render, or (with the opt-in `--mode fast`) the
 clip's own `source` media.
 
+It also picks the times for you, so no cut arithmetic is needed: `--affected`
+(the seconds the last apply changed), `--at-cuts`, `--at-transitions`,
+`--at-captions`, `--at-markers`, `--per-shot`, `--around <SEC>`. Add
+`--grid auto` for one contact sheet whose cells carry their timecode and the
+`reason` they were sampled, and `--limit <N>` to cap how many frames come back.
+Uniform `--between` sampling lands on no event at all — keep it for an overview.
+
 ### MCP server
 
 `openreelio-cli` is also an MCP server over stdio, so MCP-capable agents can use
@@ -133,8 +146,10 @@ command log and stays undoable.
 
 The read tools cover the whole perception loop, so a vision-capable host closes
 it without shelling out: `openreelio.frame.extract` returns stills and contact
-sheets **inline** as MCP `image` blocks, and `openreelio.verify` returns the
-deterministic QC report. Both are available without any write grant.
+sheets **inline** as MCP `image` blocks — including the samplers, so
+`{ "affected": true, "grid": "auto" }` after an apply is one image of exactly
+what changed — and `openreelio.verify` returns the deterministic QC report. Both
+are available without any write grant.
 
 MCP registry identifier:
 
