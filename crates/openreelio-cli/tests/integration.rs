@@ -10255,3 +10255,401 @@ fn test_frame_extract_ignores_a_cached_segment_the_edit_moved_past() {
         "a segment whose plan moved must be re-rendered, not served: {after_move}"
     );
 }
+
+// =============================================================================
+// Where-to-look signals (timeline info + affected ranges)
+// =============================================================================
+
+/// Reads an `affectedRanges` array as `(startSec, endSec)` pairs.
+fn affected_pairs(value: &serde_json::Value) -> Vec<(f64, f64)> {
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("expected an affectedRanges array, got: {value}"))
+        .iter()
+        .map(|range| {
+            (
+                range["startSec"].as_f64().expect("startSec"),
+                range["endSec"].as_f64().expect("endSec"),
+            )
+        })
+        .collect()
+}
+
+/// Reads the last-apply hand-off record a mutating verb writes.
+fn last_affected_record(path: &str) -> serde_json::Value {
+    let record_path = std::path::Path::new(path)
+        .join(".openreelio")
+        .join("cache")
+        .join("agent")
+        .join("last_affected_ranges.json");
+    let contents = std::fs::read_to_string(&record_path)
+        .unwrap_or_else(|error| panic!("{}: {error}", record_path.display()));
+    serde_json::from_str(&contents).unwrap()
+}
+
+/// Adds a caption track and returns its id.
+fn add_caption_track(path: &str) -> String {
+    let track = run_cli_ok(&[
+        "timeline",
+        "add-track",
+        "--path",
+        path,
+        "--kind",
+        "caption",
+        "--name",
+        "Captions",
+    ]);
+    track["createdIds"][0].as_str().unwrap().to_string()
+}
+
+/// Feature: where-to-look signals on timeline reads
+/// Scenario: an agent asks the timeline where the interesting times are
+///
+/// Every signal here used to have to be reconstructed by hand from
+/// `timeline clips`: the length, the frame rate the times are quantised to,
+/// the cut times, the marker times and the caption spans. Reconstructing them
+/// is exactly the step that goes wrong, so they are asserted as one contract.
+#[test]
+fn test_timeline_info_reports_duration_fps_markers_and_spans() {
+    let (_dir, path, _asset_id, _track_id) =
+        create_project_with_placed_dummy("timeline_info_signals");
+    let sequence_id = active_sequence(&path);
+    let caption_track_id = add_caption_track(&path);
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "CreateCaption",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": caption_track_id,
+            "text": "Watch this",
+            "startSec": 1.0,
+            "endSec": 3.0,
+        })
+        .to_string(),
+    ]);
+
+    let marker = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "AddMarker",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "time": 1.5,
+            "label": "Hook",
+        })
+        .to_string(),
+    ]);
+    // A marker moves no picture, so it is reported as the instant it names.
+    assert_eq!(affected_pairs(&marker["affectedRanges"]), vec![(1.5, 1.5)]);
+
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+
+    // The dummy asset carries no probed duration, so the clip takes the
+    // timeline's default length; what matters is that both durations agree
+    // with the clip that is actually there.
+    let duration = info["durationSec"].as_f64().expect("durationSec");
+    assert!(duration > 3.0, "{info}");
+    assert_eq!(info["outputDurationSec"].as_f64(), Some(duration));
+
+    assert_eq!(info["fps"].as_f64(), Some(30.0));
+    assert_eq!(info["fpsRatio"]["num"], 30);
+    assert_eq!(info["fpsRatio"]["den"], 1);
+    assert_eq!(info["canvas"]["width"], 1920);
+    assert_eq!(info["canvas"]["height"], 1080);
+
+    let edit_points: Vec<f64> = info["editPoints"]
+        .as_array()
+        .expect("editPoints")
+        .iter()
+        .map(|point| point.as_f64().expect("edit point"))
+        .collect();
+    assert_eq!(edit_points.first(), Some(&0.0));
+    assert!(edit_points.contains(&1.0), "{edit_points:?}");
+    assert!(edit_points.contains(&3.0), "{edit_points:?}");
+    assert!(edit_points.contains(&duration), "{edit_points:?}");
+
+    assert_eq!(info["markers"][0]["timeSec"].as_f64(), Some(1.5));
+    assert_eq!(info["markers"][0]["label"], "Hook");
+
+    assert_eq!(info["captionSpans"][0]["startSec"].as_f64(), Some(1.0));
+    assert_eq!(info["captionSpans"][0]["endSec"].as_f64(), Some(3.0));
+    assert_eq!(info["captionSpans"][0]["text"], "Watch this");
+    assert_eq!(
+        info["captionSpans"][0]["trackId"],
+        caption_track_id.as_str()
+    );
+
+    assert_eq!(info["transitions"].as_array().map(Vec::len), Some(0));
+    assert_eq!(info["inspectionHints"]["markerCount"], 1);
+    assert_eq!(info["inspectionHints"]["captionCount"], 1);
+    assert_eq!(info["inspectionHints"]["transitionCount"], 0);
+    // 1.0 and 3.0 are interior; the head at 0 and the tail are not cuts.
+    assert_eq!(info["inspectionHints"]["cutCount"], 2);
+
+    // Additive: the keys `timeline info` already published are untouched.
+    assert_eq!(info["sequenceId"], sequence_id.as_str());
+    assert!(info["trackCount"].as_u64().unwrap() >= 2);
+}
+
+/// Feature: where-to-look signals on timeline reads
+/// Scenario: a dissolve reports the stretch it blends across
+///
+/// A transition hangs on the outgoing clip and blends *around* the cut, so its
+/// span is neither clip's boundary — the one signal a caller genuinely cannot
+/// derive from a clip list.
+#[test]
+fn test_timeline_info_reports_a_transition_span_centred_on_the_cut() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("timeline_info_transition");
+    let path = project_path(&dir, "timeline_info_transition");
+
+    let dark = dir.path().join("dark.mp4");
+    let light = dir.path().join("light.mp4");
+    if !create_solid_tone_source(&dark, "black", 440, 8) {
+        return;
+    }
+    if !create_solid_tone_source(&light, "white", 880, 8) {
+        return;
+    }
+
+    let (sequence_id, track_id, outgoing_clip) =
+        place_two_shot_timeline(&path, [&dark, &light], 2.0);
+    add_dissolve(&path, &sequence_id, &track_id, &outgoing_clip);
+
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+    let transitions = info["transitions"].as_array().expect("transitions");
+    assert_eq!(transitions.len(), 1, "{info}");
+
+    let span = &transitions[0];
+    let cut_sec = TRANSITION_SHOT_SEC;
+    let half = TRANSITION_DISSOLVE_SEC / 2.0;
+    assert_eq!(span["clipId"], outgoing_clip.as_str());
+    assert_eq!(span["trackId"], track_id.as_str());
+    assert_eq!(span["effectType"], "cross_dissolve");
+    assert_eq!(span["cutSec"].as_f64(), Some(cut_sec));
+    assert_eq!(span["startSec"].as_f64(), Some(cut_sec - half));
+    assert_eq!(span["endSec"].as_f64(), Some(cut_sec + half));
+    assert_eq!(span["durationSec"].as_f64(), Some(TRANSITION_DISSOLVE_SEC));
+    assert_eq!(info["inspectionHints"]["transitionCount"], 1);
+}
+
+/// Feature: affected ranges on mutating verbs
+/// Scenario: a move reports where the clip was and where it now is
+///
+/// Both halves matter: the old span is where the picture changed by losing the
+/// clip, the new span is where it changed by gaining it.
+#[test]
+fn test_command_execute_reports_the_union_of_the_old_and_new_span() {
+    let (_dir, path, _asset_id, track_id) = create_project_with_placed_dummy("affected_move");
+    let sequence_id = active_sequence(&path);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip = &clips["clips"][0];
+    let clip_id = clip["id"].as_str().unwrap().to_string();
+    let original_start = clip["timelineInSec"].as_f64().expect("timelineInSec");
+    let original_end = original_start + clip["durationSec"].as_f64().expect("durationSec");
+
+    let moved_start = original_end + 10.0;
+    let result = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "MoveClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "newTimelineIn": moved_start,
+        })
+        .to_string(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sequenceId"], sequence_id.as_str());
+    assert_eq!(
+        affected_pairs(&result["affectedRanges"]),
+        vec![
+            (original_start, original_end),
+            (moved_start, moved_start + (original_end - original_start))
+        ]
+    );
+
+    // The raw change list rides along, so a caller can see what moved as well
+    // as where.
+    let change_types: Vec<String> = result["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|change| change["type"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        change_types.iter().any(|kind| kind == "clipModified"),
+        "{change_types:?}"
+    );
+    // camelCase throughout, like every other key the CLI prints.
+    assert_eq!(result["changes"][0]["clipId"], clip_id.as_str());
+
+    // The hand-off file part B's sampler reads.
+    let record = last_affected_record(&path);
+    assert_eq!(record["sequenceId"], sequence_id.as_str());
+    assert_eq!(record["opIds"][0], result["opId"]);
+    assert_eq!(
+        affected_pairs(&record["affectedRanges"]),
+        affected_pairs(&result["affectedRanges"])
+    );
+}
+
+/// Feature: affected ranges on mutating verbs
+/// Scenario: a plan reports each step's ranges and their union
+#[test]
+fn test_plan_execute_reports_step_and_total_affected_ranges() {
+    let dir = create_temp_project("plan_affected_ranges");
+    let path = project_path(&dir, "plan_affected_ranges");
+    let sequence_id = active_sequence(&path);
+    let caption_track_id = add_caption_track(&path);
+
+    let plan_file = write_plan(
+        &dir,
+        "affected.json",
+        serde_json::json!({
+            "id": "affected_plan",
+            "steps": [
+                {
+                    "id": "caption",
+                    "commandType": "CreateCaption",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": caption_track_id,
+                        "text": "Look here",
+                        "startSec": 1.0,
+                        "endSec": 3.0
+                    },
+                    "dependsOn": []
+                },
+                {
+                    "id": "marker",
+                    "commandType": "AddMarker",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "time": 5.0,
+                        "label": "Beat"
+                    },
+                    "dependsOn": ["caption"]
+                }
+            ]
+        }),
+    );
+
+    let (stdout, stderr, code) =
+        run_cli_exit(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sequenceId"], sequence_id.as_str());
+    assert_eq!(
+        affected_pairs(&result["stepResults"][0]["affectedRanges"]),
+        vec![(1.0, 3.0)]
+    );
+    assert_eq!(
+        affected_pairs(&result["stepResults"][1]["affectedRanges"]),
+        vec![(5.0, 5.0)]
+    );
+    assert_eq!(
+        affected_pairs(&result["affectedRanges"]),
+        vec![(1.0, 3.0), (5.0, 5.0)]
+    );
+
+    let record = last_affected_record(&path);
+    assert_eq!(record["sequenceId"], sequence_id.as_str());
+    assert_eq!(record["opIds"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        affected_pairs(&record["affectedRanges"]),
+        vec![(1.0, 3.0), (5.0, 5.0)]
+    );
+    assert!(record["recordedAt"]
+        .as_str()
+        .is_some_and(|at| !at.is_empty()));
+}
+
+/// Feature: affected ranges on mutating verbs
+/// Scenario: a rolled-back plan points nowhere
+///
+/// A step that applied and was then undone changed nothing in the end, so
+/// reporting the range it briefly touched would send an inspector to a frame
+/// that never differed.
+#[test]
+fn test_failed_plan_reports_no_affected_ranges() {
+    let dir = create_temp_project("plan_affected_rollback");
+    let path = project_path(&dir, "plan_affected_rollback");
+    let sequence_id = active_sequence(&path);
+    let caption_track_id = add_caption_track(&path);
+
+    let plan_file = write_plan(
+        &dir,
+        "rollback_affected.json",
+        serde_json::json!({
+            "id": "rollback_affected_plan",
+            "steps": [
+                {
+                    "id": "caption",
+                    "commandType": "CreateCaption",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": caption_track_id,
+                        "text": "Gone again",
+                        "startSec": 1.0,
+                        "endSec": 3.0
+                    },
+                    "dependsOn": []
+                },
+                {
+                    "id": "doomed",
+                    "commandType": "SplitClip",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": "no-such-track",
+                        "clipId": "no-such-clip",
+                        "splitTime": 1.0
+                    },
+                    "dependsOn": ["caption"]
+                }
+            ]
+        }),
+    );
+
+    let (stdout, stderr, code) =
+        run_cli_exit(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["failedStep"], "doomed");
+    assert_eq!(result["rolledBack"], 1);
+    assert!(
+        affected_pairs(&result["affectedRanges"]).is_empty(),
+        "{result}"
+    );
+    for step in result["stepResults"].as_array().expect("stepResults") {
+        assert!(
+            affected_pairs(&step["affectedRanges"]).is_empty(),
+            "a rolled-back step must point nowhere: {step}"
+        );
+    }
+}

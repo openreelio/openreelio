@@ -467,6 +467,9 @@ fn applied_not_saved_report(
         "appliedNotSaved": true,
         "stepsApplied": applied["stepsExecuted"].clone(),
         "error": save_error.to_string(),
+        // The steps really are applied, so the ranges they changed still say
+        // where to look; only the snapshot is behind.
+        "affectedRanges": applied["affectedRanges"].clone(),
         "stepResults": applied["stepResults"].clone(),
     })
 }
@@ -720,6 +723,19 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> PlanValidation {
     }
 }
 
+/// Applies an edit plan atomically, reporting where on the timeline it landed.
+///
+/// Every step result carries `affectedRanges` — the stretches of timeline that
+/// step changed — and the success envelope carries their union, so a caller
+/// knows which seconds are worth rendering without diffing the project itself.
+///
+/// Ranges are measured against one sequence, resolved once from the plan (see
+/// [`resolve_plan_sequence_id`]); a step that edits a different sequence
+/// reports no ranges rather than ranges read off the wrong timeline.
+///
+/// On failure the plan is rolled back, so nothing it touched stayed changed:
+/// every step result and the top-level union then report an empty
+/// `affectedRanges`, because there is no longer anywhere to look.
 pub(crate) fn apply_edit_plan(
     project: &mut openreelio_core::ActiveProject,
     plan: &EditPlan,
@@ -727,6 +743,8 @@ pub(crate) fn apply_edit_plan(
     let mut results = Vec::new();
     let mut succeeded = 0;
     let mut applied_op_ids: Vec<String> = Vec::new();
+    let target_sequence_id = resolve_plan_sequence_id(&project.state, plan);
+    let mut step_ranges: Vec<Vec<openreelio_core::TimeRange>> = Vec::new();
 
     // Rollback unwinds the executor's in-memory undo stack, and that stack is
     // capped for interactive use — far below the plan step cap. Without this,
@@ -742,15 +760,23 @@ pub(crate) fn apply_edit_plan(
 
     let sorted_steps = topological_sort(&plan.steps)?;
     for step in sorted_steps {
+        let before = openreelio_core::commands::SequenceSnapshot::capture(
+            &project.state,
+            &target_sequence_id,
+        );
         match execute_step(project, step, &step_results) {
             Ok(result) => {
+                let affected =
+                    before.affected_ranges(&project.state, &target_sequence_id, &result.changes);
                 results.push(serde_json::json!({
                     "stepId": step.id,
                     "status": "ok",
                     "opId": result.op_id,
                     "createdIds": result.created_ids,
                     "deletedIds": result.deleted_ids,
+                    "affectedRanges": affected,
                 }));
+                step_ranges.push(affected);
                 step_results.insert(
                     step.id.clone(),
                     openreelio_core::ai::StepResult {
@@ -774,7 +800,13 @@ pub(crate) fn apply_edit_plan(
                     "stepId": step.id,
                     "status": "error",
                     "error": e.to_string(),
+                    "affectedRanges": [],
                 }));
+                // The rollback below puts every applied step back, so the
+                // ranges those steps reported no longer name anything changed.
+                for entry in &mut results {
+                    entry["affectedRanges"] = serde_json::json!([]);
+                }
                 let mut rollback_failures = Vec::new();
                 for _ in 0..succeeded {
                     if let Err(undo_err) = project.executor.undo(&mut project.state) {
@@ -818,18 +850,51 @@ pub(crate) fn apply_edit_plan(
                     "rolledBack": succeeded,
                     "rollbackIncomplete": !rollback_failures.is_empty(),
                     "rollbackFailures": rollback_failures,
+                    "affectedRanges": [],
                     "stepResults": results,
                 }));
             }
         }
     }
 
+    let affected_ranges = openreelio_core::commands::union_ranges(step_ranges);
+    super::command::record_affected_ranges(
+        &project.path,
+        &target_sequence_id,
+        applied_op_ids,
+        &affected_ranges,
+    );
+
     Ok(serde_json::json!({
         "status": "ok",
         "planId": plan.id,
         "stepsExecuted": succeeded,
+        "sequenceId": (!target_sequence_id.is_empty()).then_some(target_sequence_id.as_str()),
+        "affectedRanges": affected_ranges,
         "stepResults": results,
     }))
+}
+
+/// Picks the sequence a plan's affected ranges are measured against.
+///
+/// The first step that names an existing `sequenceId` as a plain string wins;
+/// a plan that names none falls back to the active sequence. A `$fromStep`
+/// reference is skipped rather than guessed at, since its value is not settled
+/// until the referenced step runs.
+///
+/// Returns an empty string when nothing can be resolved — a project with no
+/// active sequence — which yields empty ranges rather than an error.
+fn resolve_plan_sequence_id(
+    state: &openreelio_core::project::ProjectState,
+    plan: &EditPlan,
+) -> String {
+    plan.steps
+        .iter()
+        .filter_map(|step| step.payload.get("sequenceId").and_then(|id| id.as_str()))
+        .find(|sequence_id| state.sequences.contains_key(*sequence_id))
+        .map(str::to_string)
+        .or_else(|| state.active_sequence_id.clone())
+        .unwrap_or_default()
 }
 
 /// Execute a single plan step by dispatching to the appropriate command.

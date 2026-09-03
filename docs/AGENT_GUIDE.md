@@ -152,6 +152,16 @@ not `--in` / `--out`.
 `timelineInSec`, `durationSec`, `sourceInSec`, `sourceOutSec` and `speed` —
 enough to compute any subsequent edit without dumping full state.
 
+`timeline info` answers *where to look* without any arithmetic over the clip
+list: `durationSec` (editing length) and `outputDurationSec` (render length),
+`fps` plus the exact `fpsRatio`, `canvas`, `editPoints` (the sorted cut times,
+including `0`), `markers`, `transitions`, `captionSpans`, `textSpans`, and an
+`inspectionHints` count summary. Read the cut times from `editPoints` rather
+than reducing over `timeline clips`, and read blend spans from `transitions`:
+a transition hangs on the outgoing clip and is rendered over
+`[cutSec − durationSec/2, cutSec + durationSec/2]`, which is not any clip
+boundary the clip list prints.
+
 ### The escape hatch: `command execute`
 
 The convenience verbs cover the common cuts. Everything the editor can do —
@@ -168,6 +178,18 @@ openreelio-cli command execute  --path ./demo --type SplitClip \
 Payloads are camelCase JSON objects. Use `--payload-file <FILE>` instead of
 `--payload` when the JSON is large or shell quoting is awkward. `command
 validate` runs the same strict parser without touching the project.
+
+Every mutating verb answers *where the edit landed*. `command execute` and
+`plan execute` both report `affectedRanges` — a sorted, merged list of
+`{startSec, endSec}` measured against `sequenceId` — so the next `frame extract`
+or `render start --start/--end` can be aimed at the seconds that actually
+changed instead of the whole timeline. The ranges are computed by diffing the
+sequence, so a ripple edit reports every clip it shifted, not only the ids in
+`changes`; a dissolve reports the stretch it blends across, centred on the cut.
+`plan execute` reports them per step as well as in total, and a rolled-back plan
+reports an empty list because nothing stayed changed. The last successful
+apply's ranges are also written to
+`<project>/.openreelio/cache/agent/last_affected_ranges.json`.
 
 ### Transitions
 

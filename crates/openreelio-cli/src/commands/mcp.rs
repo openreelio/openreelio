@@ -622,7 +622,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.timeline.snapshot",
             "OpenReelio timeline snapshot",
-            "Read active timeline tracks, clips, markers, and duration summary.",
+            "Read the timeline: tracks, clips, markers, and the where-to-look signals for each sequence — durationSec/outputDurationSec, fps and fpsRatio, canvas, editPoints (cut times), markers, transitions (each blend span centred on its cut, which no clip boundary gives you), and inspectionHints counts.",
             serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         ),
         tool(
@@ -1416,12 +1416,27 @@ fn build_timeline_snapshot(state: &McpServerState) -> Result<Value, ToolError> {
                     })
                 })
                 .collect();
+            // Where-to-look signals: duration, frame rate, cut times, marker
+            // times and transition spans. A transition blends across the cut
+            // rather than along a clip, so no reader can derive its span from
+            // the clip list below it.
+            let summary =
+                openreelio_core::timeline::inspection_summary(sequence, &project.state.effects);
             serde_json::json!({
                 "id": sequence_id,
                 "name": sequence.name,
                 "isActive": active_sequence_id.as_deref() == Some(sequence_id.as_str()),
                 "trackCount": tracks.len(),
                 "markerCount": sequence.markers.len(),
+                "durationSec": summary.duration_sec,
+                "outputDurationSec": summary.output_duration_sec,
+                "fps": summary.fps,
+                "fpsRatio": summary.fps_ratio,
+                "canvas": summary.canvas,
+                "editPoints": summary.edit_points,
+                "markers": summary.markers,
+                "transitions": summary.transitions,
+                "inspectionHints": summary.inspection_hints,
                 "tracks": tracks,
             })
         })
@@ -3936,6 +3951,20 @@ mod tests {
         assert_eq!(result["status"], "ok");
         assert_eq!(result["planId"], "approved-plan");
         assert_eq!(result["stepsExecuted"], 1);
+
+        // The where-to-look signal rides along with the shared plan applier, so
+        // an MCP client gets the same answer as `plan execute` without the CLI
+        // envelope. An empty list is the right answer for a bare AddTrack — an
+        // empty track shows nothing — but the keys have to be there.
+        assert_eq!(result["sequenceId"], sequence_id.as_str());
+        assert!(
+            result["affectedRanges"].is_array(),
+            "plan.apply must report affectedRanges: {result}"
+        );
+        assert!(
+            result["stepResults"][0]["affectedRanges"].is_array(),
+            "every step result must report affectedRanges: {result}"
+        );
 
         let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
         let sequence = reopened

@@ -65,9 +65,21 @@ shows the same pixels `verify --file` measured, so scores and measurements
 describe one artifact. In `--file` mode cells map back as `fileSec` (the
 render's own timebase).
 
-Cut-boundary sheets beat uniform sheets for continuity judging: read each
-clip's `timelineInSec` from `timeline clips`, and sample the frame **before**
-each cut at `cut − 1.5/fps` and the frame **after** it at the cut time itself.
+Cut-boundary sheets beat uniform sheets for continuity judging: read the cut
+times straight from `timeline info` — `editPoints` is the sorted list of clip
+boundaries (including `0`), and `fps`/`fpsRatio` give the timebase the offsets
+below are derived from — then sample the frame **before** each cut at
+`cut − 1.5/fps` and the frame **after** it at the cut time itself. `timeline info`
+also reports `markers` (the beats a plan asked you to check), `transitions`
+(each blend's `startSec`/`endSec`, centred on `cutSec` — sample inside that span
+to see the blend rather than either shot), and `captionSpans`/`textSpans`.
+Reducing over `timeline clips` to rebuild any of this is the step that goes
+wrong.
+
+When you are judging an edit you just applied, `command execute` and
+`plan execute` already told you where it landed: their `affectedRanges`
+(`[{startSec, endSec}]`) is the list of stretches to sample, and the same union
+is on disk at `<project>/.openreelio/cache/agent/last_affected_ranges.json`.
 
 The offsets are asymmetric on purpose. `frame extract` seeks with `-ss` before
 `-i`, which resolves **forward**: it returns the first frame whose PTS is ≥ the
@@ -80,7 +92,7 @@ shot — a sheet that looks like a valid before/after and is not.
 At 25 fps (1.5/fps = 0.06) with cuts at 5.0 / 9.2 / 14.2:
 
 ```bash
-openreelio-cli timeline clips --path ./demo    # cut times = clip starts > 0
+openreelio-cli timeline info --path ./demo    # cut times = editPoints, fps, transitions
 openreelio-cli frame extract  --path ./demo --file ./judge/a.mp4 \
   --grid 6x2 --times 4.94,5.0,9.14,9.2,14.14,14.2 \
   --label-cells --out ./judge/a-cuts.jpg

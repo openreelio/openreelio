@@ -926,12 +926,24 @@ pub fn is_text_clip(clip: &Clip) -> bool {
 
 /// Gets the TextClipData from a text clip's effect.
 pub fn get_text_data(clip: &Clip, state: &ProjectState) -> Option<TextClipData> {
+    get_text_data_from_effects(clip, &state.effects)
+}
+
+/// Gets the TextClipData from a text clip's effect, given only the effect table.
+///
+/// The same read as [`get_text_data`], for callers that hold an effect map
+/// rather than a whole [`ProjectState`] — the timeline inspection summary, for
+/// one, which is built from a sequence and its effects alone.
+pub fn get_text_data_from_effects(
+    clip: &Clip,
+    effects: &std::collections::HashMap<EffectId, Effect>,
+) -> Option<TextClipData> {
     if !is_text_clip(clip) {
         return None;
     }
 
     for effect_id in &clip.effects {
-        if let Some(effect) = state.effects.get(effect_id) {
+        if let Some(effect) = effects.get(effect_id) {
             if effect.effect_type == EffectType::TextOverlay {
                 return Some(extract_text_data_from_clip_effect(effect, clip));
             }

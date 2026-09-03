@@ -70,8 +70,9 @@ openreelio-cli timeline undo  --path ./demo
 
 # 4. See the result, not just the JSON
 #    Contact-sheet times must land inside the sequence, so read its end first.
-END=$(openreelio-cli timeline clips --path ./demo \
-  | pick '.clips.reduce((m, c) => Math.max(m, c.timelineInSec + c.durationSec), 0)')
+#    `timeline info` reports it directly, along with fps, editPoints (cut times),
+#    markers and transition spans - no reducing over the clip list.
+END=$(openreelio-cli timeline info --path ./demo | pick '.durationSec')
 openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 "$END" --out ./frames/sheet.jpg
 openreelio-cli render start --path ./demo --proxy --output ./out/proxy.mp4 --progress
 
@@ -81,6 +82,13 @@ openreelio-cli verify --path ./demo --file ./out/proxy.mp4
 
 Clip-scoped verbs (`split`, `trim`, `move`, `speed`, `remove`) all need
 `--track` as well as `--clip`; `timeline clips` prints both.
+
+Every mutating verb reports where the edit landed. `command execute` and
+`plan execute` return `affectedRanges` - a sorted `[{startSec, endSec}]` list
+covering everything that moved, ripple shifts included - so the sheet or partial
+render that checks the result can be aimed at those seconds instead of the whole
+timeline. The last successful apply's union is also written to
+`<project>/.openreelio/cache/agent/last_affected_ranges.json`.
 
 `verify --file` expects a render of the whole sequence, which is why step 4
 renders without `--start`/`--end`. Add them when you only want to eyeball a

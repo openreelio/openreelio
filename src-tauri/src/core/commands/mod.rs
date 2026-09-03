@@ -3,6 +3,7 @@
 //! Defines the Command system, the core of Event Sourcing.
 //! All editing operations are performed through Commands in this module.
 
+mod affected;
 mod asset;
 mod caption;
 mod clip;
@@ -18,6 +19,7 @@ mod text;
 mod track;
 mod traits;
 
+pub use affected::*;
 pub use asset::*;
 pub use caption::*;
 pub use clip::*;

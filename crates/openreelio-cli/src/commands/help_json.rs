@@ -212,7 +212,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli analysis build-selects --path ./project --query \"crowd cheer\" --track-name \"Source Selects\" --limit 6 --padding-sec 0.25 --gap-sec 0.25 --apply"
             },
             "timeline.info": {
-                "description": "Display timeline structure (tracks, clip counts)",
+                "description": "Display timeline structure (tracks, clip counts) plus the where-to-look signals for the sequence: 'durationSec' (editing length) and 'outputDurationSec' (render length), 'fps' with the exact 'fpsRatio', 'canvas', 'editPoints' (sorted clip boundaries including 0 — the cut times, so do not recompute them from timeline clips), 'markers', 'transitions' (each two-input blend as {clipId,trackId,effectId,effectType,cutSec,startSec,endSec,durationSec} centred on the cut, which is not any clip boundary), 'captionSpans' and 'textSpans' with their words, and an 'inspectionHints' count summary",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" }
@@ -592,7 +592,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli text list --path ./project"
             },
             "plan.execute": {
-                "description": "Execute a plan file atomically. The whole plan is validated before anything is mutated, so an invalid payload never takes the project through a rollback. Exits 0 when applied and saved, 1 when the plan was rejected or a step failed and the rollback completed cleanly, and 2 when the tool could not run, the rollback was incomplete ('rollbackIncomplete': true, with 'rollbackFailures'), or the plan applied but could not be saved ('appliedNotSaved': true). An 'appliedNotSaved' report means the steps are already durable: re-running the plan would apply it twice. A failure report names 'failedStep' and 'error'. Plans are capped at 1000 steps",
+                "description": "Execute a plan file atomically. Every step result and the success envelope report 'affectedRanges' — the [{startSec,endSec}] stretches of timeline the plan changed, measured against 'sequenceId' — and the union is also written to <project>/.openreelio/cache/agent/last_affected_ranges.json; a rolled-back plan reports empty ranges, because nothing stayed changed. The whole plan is validated before anything is mutated, so an invalid payload never takes the project through a rollback. Exits 0 when applied and saved, 1 when the plan was rejected or a step failed and the rollback completed cleanly, and 2 when the tool could not run, the rollback was incomplete ('rollbackIncomplete': true, with 'rollbackFailures'), or the plan applied but could not be saved ('appliedNotSaved': true). An 'appliedNotSaved' report means the steps are already durable: re-running the plan would apply it twice. A failure report names 'failedStep' and 'error'. Plans are capped at 1000 steps",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "file": { "type": "string", "required": true, "desc": "Path to plan JSON file" }
@@ -627,7 +627,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli plan template --type split-and-move"
             },
             "command.execute": {
-                "description": "Execute any supported backend edit command using the shared CommandPayload parser. Curated packs are resolved by that parser, so CreateCaption/UpdateCaption/ImportGeneratedCaptions accept stylePack, AddEffect accepts recipe, and AddTextClip accepts preset (its textData then carries only the overrides); see packs.list for the ids",
+                "description": "Execute any supported backend edit command using the shared CommandPayload parser. Curated packs are resolved by that parser, so CreateCaption/UpdateCaption/ImportGeneratedCaptions accept stylePack, AddEffect accepts recipe, and AddTextClip accepts preset (its textData then carries only the overrides); see packs.list for the ids. The result reports 'affectedRanges' — the sorted, merged [{startSec,endSec}] the edit changed, including ripple shifts no id in 'changes' names — alongside the raw 'changes' list and the 'sequenceId' they were measured against, so the next inspection step knows where to look. The same ranges are written to <project>/.openreelio/cache/agent/last_affected_ranges.json",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "type": { "type": "string", "required": true, "desc": "Backend command type, e.g. SplitClip or AddMask" },
