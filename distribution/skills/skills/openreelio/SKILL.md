@@ -52,6 +52,11 @@ A full export is the most expensive way to answer "did that cut land?". Use
 --start/--end` for a 480p draft of just the range under review. Full-quality
 renders are for delivery.
 
+`frame extract` shows the **composited** edit by default — captions, text,
+transforms and blends, exactly what export produces — and reuses an already
+rendered preview-cache segment when one covers the time. `--mode fast` is the
+opt-in cheap look at the raw footage; it shows none of the edit.
+
 ## Setup
 
 Install the CLI, point it at a project, and confirm the media toolchain.

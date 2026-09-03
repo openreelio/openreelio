@@ -77,9 +77,11 @@ A font that is neither bundled nor installed on the machine is reported the same
 way: the render substitutes a bundled family and names it in `warnings` rather
 than letting libass pick something silently.
 
-`frame extract --mode fast` shows the *composited* picture for a transformed
-clip — it detects the transform and falls back to composite mode rather than
-handing back the untouched source file. See the perception reference.
+`frame extract` shows the *composited* picture by default, so a transform, a
+caption or a blend is in the still you judge. `--mode fast` opts out for a cheap
+look at the footage, and even it falls back to compositing rather than handing
+back an untouched source file for a transformed clip. See the perception
+reference.
 
 ## Inspect without encoding
 

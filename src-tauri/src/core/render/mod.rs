@@ -35,6 +35,7 @@ pub(crate) mod export;
 pub const RENDERER_SEMANTICS_VERSION: u32 = 3;
 pub mod ffmpeg_graph;
 mod ffmpeg_plan;
+pub mod frame_probe;
 pub mod graph;
 pub mod hardware;
 pub mod hdr;

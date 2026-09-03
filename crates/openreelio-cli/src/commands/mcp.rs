@@ -757,7 +757,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.frame.extract",
             "OpenReelio frame extract",
-            &format!("See the edit: extract stills from the timeline, or from a rendered video with 'file', and get them back as inline images plus JSON metadata. Pass 'grid' with 'between' or 'times' for a contact sheet whose cells[] maps every cell back to a timecode — that is the cheapest way to judge pacing and continuity across a whole cut. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' must be inside the project directory, so render there before judging."),
+            &format!("See the edit: extract stills from the timeline, or from a rendered video with 'file', and get them back as inline images plus JSON metadata. Timeline stills show the COMPOSITED edit by default — captions, text, transforms and blends, exactly what export produces. Pass 'grid' with 'between' or 'times' for a contact sheet whose cells[] maps every cell back to a timecode — that is the cheapest way to judge pacing and continuity across a whole cut. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' must be inside the project directory, so render there before judging."),
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -797,7 +797,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     "mode": {
                         "type": "string",
                         "enum": ["fast", "composite"],
-                        "description": "Timeline extraction mode: fast (default) reads the topmost clip only; composite renders the full stack including effects and text."
+                        "description": "Timeline extraction mode: composite (default) renders the full stack — captions, text, transforms, layered clips and blends — losslessly, reading an already rendered preview-cache segment when one covers the time; fast reads the topmost clip's own media only and shows none of the edit. Every still reports which it was as source: cache | composite | source."
                     },
                     "cellWidth": {
                         "type": "integer",

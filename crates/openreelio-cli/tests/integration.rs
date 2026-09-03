@@ -94,28 +94,34 @@ fn project_path(dir: &tempfile::TempDir, name: &str) -> String {
 /// executable's own directory is the only resource root, then the managed
 /// install, then dev-mode binaries, then PATH.
 fn available_ffmpeg_path() -> Option<PathBuf> {
-    let resource_roots = cli_bin()
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .into_iter()
-        .collect();
-
-    let resolved =
-        openreelio_core::ffmpeg::resolve_ffmpeg(&openreelio_core::ffmpeg::FFmpegResolveOptions {
-            resource_roots,
-            // The CLI is launched with the overrides cleared, so the tests resolve
-            // without them too.
-            use_env: false,
-            ..Default::default()
-        })
-        .ok()
-        .map(|info| info.ffmpeg_path);
+    let resolved = available_ffmpeg_info().map(|info| info.ffmpeg_path);
 
     if resolved.is_none() {
         skip_without_ffmpeg("no FFmpeg could be resolved for the CLI under test");
     }
 
     resolved
+}
+
+/// The same resolution, keeping both binaries.
+///
+/// Tests that drive the render engine in-process rather than through the CLI
+/// build an `FFmpegRunner`, which needs ffprobe as well as ffmpeg.
+fn available_ffmpeg_info() -> Option<openreelio_core::ffmpeg::FFmpegInfo> {
+    let resource_roots = cli_bin()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .collect();
+
+    openreelio_core::ffmpeg::resolve_ffmpeg(&openreelio_core::ffmpeg::FFmpegResolveOptions {
+        resource_roots,
+        // The CLI is launched with the overrides cleared, so the tests resolve
+        // without them too.
+        use_env: false,
+        ..Default::default()
+    })
+    .ok()
 }
 
 /// Whether a missing FFmpeg must fail the run rather than quietly skip it.
@@ -2693,6 +2699,10 @@ fn test_frame_extract_writes_still_from_timeline_time() {
         &path,
         "--time",
         "1.5",
+        // Explicit: the default is the composited edit, and only the fast path
+        // reports the clip and asset this asserts on.
+        "--mode",
+        "fast",
         "--out",
         output_path.to_str().unwrap(),
     ]);
@@ -2827,6 +2837,9 @@ fn test_frame_extract_renders_a_title_card_that_outlives_the_last_file_backed_cl
         &path,
         "--time",
         &title_time.to_string(),
+        // The fallback under test is fast mode's, so it has to be asked for.
+        "--mode",
+        "fast",
         "--out",
         output_path.to_str().unwrap(),
     ]);
@@ -2856,6 +2869,9 @@ fn test_frame_extract_renders_a_gap_after_the_last_file_backed_clip() {
         &path,
         "--time",
         &gap_time.to_string(),
+        // The fallback under test is fast mode's, so it has to be asked for.
+        "--mode",
+        "fast",
         "--out",
         output_path.to_str().unwrap(),
     ]);
@@ -7827,7 +7843,13 @@ fn test_agent_perception_loop_end_to_end() {
     ]);
     assert_eq!(still["status"], "ok");
     assert_eq!(still["count"], 1);
-    assert!(still["frames"][0]["clipId"].is_string());
+    // The default still is the composited edit, so it belongs to the whole
+    // stack rather than to one source clip - it reports the tier that produced
+    // it instead of a clip id.
+    assert_eq!(
+        still["frames"][0]["source"], "composite",
+        "the agent must be looking at the edit, not at footage: {still}"
+    );
     assert!(still_path.exists(), "Expected the extracted still to exist");
     assert!(
         still_path.metadata().unwrap().len() > 0,
@@ -9672,4 +9694,564 @@ fn test_otio_verbs_are_documented_in_help_json() {
     assert!(commands.contains_key("otio.export"));
     assert!(commands.contains_key("otio.import"));
     assert!(commands["otio.import"]["params"]["dry-run"].is_object());
+}
+
+// =============================================================================
+// Result perception: what a frame probe actually shows
+// =============================================================================
+
+/// Generates a static SMPTE colour-bar clip.
+///
+/// Flat colour cannot tell a lossless still from a lossy one — every codec gets
+/// a single colour right. Colour bars are static in time, so a still is not
+/// hostage to a one-frame seek error, and they carry the hard chroma edges where
+/// a 4:2:0 draft encode diverges hardest from the composite.
+fn create_colour_bar_video(path: &std::path::Path, size: &str, duration_secs: u32) -> bool {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        eprintln!("Skipping frame probe test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("smptebars=s={size}:r=25:d={duration_secs}"),
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p", "-crf", "0"]);
+    }
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate colour bar fixture with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping frame probe test: ffmpeg could not generate the fixture");
+    }
+    status.success()
+}
+
+/// Decodes an image to raw RGB24 bytes.
+///
+/// Comparing the encoded files would compare PNG encoders; comparing decoded
+/// pixels compares the pictures, which is the actual claim.
+fn decode_image_rgb24(path: &std::path::Path) -> Option<Vec<u8>> {
+    let ffmpeg_path = available_ffmpeg_path()?;
+    let output = Command::new(ffmpeg_path)
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    Some(output.stdout)
+}
+
+/// What the render engine needs to draw a sequence, read without a session.
+struct RenderInputs {
+    project_dir: PathBuf,
+    state: openreelio_core::project::ProjectState,
+    sequence_id: String,
+    sequence: openreelio_core::timeline::Sequence,
+    graph: openreelio_core::render::RenderGraph,
+    ffmpeg: openreelio_core::ffmpeg::FFmpegInfo,
+}
+
+/// Reads a project's active sequence and builds its render graph.
+///
+/// Read-only and session-free, so it can run between CLI invocations without
+/// contending for the ops-log lock.
+fn render_inputs(project_path: &str) -> Option<RenderInputs> {
+    let ffmpeg = available_ffmpeg_info()?;
+    let project_dir = std::fs::canonicalize(project_path).ok()?;
+    let state = openreelio_core::ActiveProject::read_state_without_session(&project_dir).ok()?;
+    let sequence_id = state.active_sequence_id.clone()?;
+    let sequence = state.sequences.get(&sequence_id)?.clone();
+    let graph = openreelio_core::render::build_render_graph(&state, &sequence_id).ok()?;
+
+    Some(RenderInputs {
+        project_dir,
+        state,
+        sequence_id,
+        sequence,
+        graph,
+        ffmpeg,
+    })
+}
+
+/// Renders `[start_sec, end_sec)` of the sequence with the preview-cache
+/// profile — lossless Ut Video at the sequence canvas — and returns its size.
+///
+/// This is the profile the composite frame probe and the render cache both use,
+/// so a file produced here is the reference the probe's stills are measured
+/// against.
+fn render_preview_cache_window(
+    inputs: &RenderInputs,
+    output: &std::path::Path,
+    start_sec: Option<f64>,
+    end_sec: Option<f64>,
+) -> Option<u64> {
+    use openreelio_core::ffmpeg::FFmpegRunner;
+    use openreelio_core::render::{build_render_plan, ExportEngine, ExportSettings};
+
+    let settings = ExportSettings::preview_cache(
+        output.to_path_buf(),
+        &inputs.sequence.format.canvas,
+        start_sec,
+        end_sec,
+    );
+    let plan = build_render_plan(
+        &inputs.graph,
+        &inputs.state.assets,
+        &inputs.state.effects,
+        &settings,
+    );
+    assert!(
+        plan.validation.is_valid,
+        "The preview-cache profile must plan cleanly: {:?}",
+        plan.validation.errors
+    );
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let engine = ExportEngine::new(FFmpegRunner::new(inputs.ffmpeg.clone()));
+    let result = runtime
+        .block_on(engine.export_sequence_with_effects_for_plan(
+            &inputs.sequence,
+            &inputs.state.assets,
+            &inputs.state.effects,
+            &settings,
+            &plan,
+            None,
+            None,
+        ))
+        .ok()?;
+
+    Some(result.file_size)
+}
+
+/// Fills the project's preview render cache with the segment covering `time_sec`.
+///
+/// Mirrors the GUI's cache fill rather than calling it: there is no CLI verb for
+/// filling the cache, and the probe's cache tier has to be tested against a
+/// manifest written exactly the way the app writes one. The order is
+/// load-bearing — fingerprints are refreshed *before* the render, because
+/// `refresh_manifest_plan_fingerprints` demotes an already-`Cached` segment to
+/// `Stale` the first time it computes a fingerprint for it.
+fn fill_preview_cache_segment(project_path: &str, time_sec: f64) -> Option<u32> {
+    use openreelio_core::render::{
+        preview_profile_hash, refresh_manifest_plan_fingerprints, save_manifest,
+        segment_cache_file, RenderCacheConfig, RenderCacheManifest,
+    };
+
+    let inputs = render_inputs(project_path)?;
+    let profile_hash = preview_profile_hash(&inputs.sequence.format.canvas);
+    let mut manifest = RenderCacheManifest::new(
+        &inputs.sequence_id,
+        &profile_hash,
+        inputs.sequence.duration(),
+        RenderCacheConfig::default().segment_duration_sec,
+    );
+    refresh_manifest_plan_fingerprints(
+        &mut manifest,
+        &inputs.project_dir,
+        &inputs.sequence,
+        &inputs.graph,
+        &inputs.state.assets,
+        &inputs.state.effects,
+    )
+    .expect("The cache manifest must fingerprint against the current plan");
+
+    let segment = manifest
+        .segments
+        .iter()
+        .find(|segment| time_sec >= segment.start_sec && time_sec < segment.end_sec)?
+        .clone();
+
+    let output = segment_cache_file(
+        &inputs.project_dir,
+        &inputs.sequence_id,
+        &profile_hash,
+        segment.index,
+    )
+    .ok()?;
+    std::fs::create_dir_all(output.parent()?).ok()?;
+
+    let file_size = render_preview_cache_window(
+        &inputs,
+        &output,
+        Some(segment.start_sec),
+        Some(segment.end_sec),
+    )?;
+
+    let cached_name = output.file_name()?.to_string_lossy().to_string();
+    manifest.mark_segment_cached(segment.index, cached_name, file_size);
+    save_manifest(&inputs.project_dir, &manifest).ok()?;
+
+    Some(segment.index)
+}
+
+/// Builds a one-second project holding a single colour-bar clip.
+///
+/// Kept short on purpose: the composite path renders losslessly at the canvas,
+/// so every extra second of fixture is tens of megabytes of temporary file.
+fn create_colour_bar_project(name: &str) -> Option<(tempfile::TempDir, String, String)> {
+    available_ffmpeg_path()?;
+
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let source_path = dir.path().join("bars.mp4");
+    if !create_colour_bar_video(&source_path, "1920x1080", 2) {
+        return None;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, 1.0);
+
+    Some((dir, path, ids))
+}
+
+/// Feature: the frame probe shows the composited edit
+/// Scenario: a text clip is in the default still and missing from a fast one
+///
+/// This is the whole point of the default flip. `fast` reads the topmost
+/// file-backed clip's own media, so a title burned over that clip is simply not
+/// in the picture — an agent judging its own caption edit would see nothing.
+#[test]
+fn test_frame_extract_default_mode_renders_text_that_fast_mode_omits() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("frame_default_text");
+    let path = project_path(&dir, "frame_default_text");
+
+    let source_path = dir.path().join("text_bed.mp4");
+    if !create_solid_colour_video(&source_path, "black", "1920x1080", 2) {
+        return;
+    }
+    place_trimmed_clip(&path, &source_path, 1.0);
+
+    run_cli_ok(&[
+        "text",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "THE END",
+        "--start",
+        "0",
+        "--duration",
+        "1",
+        "--preset",
+        "title",
+    ]);
+
+    let composited_path = dir.path().join("composited.png");
+    let composited = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "0.5",
+        "--out",
+        composited_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        composited["mode"], "composite",
+        "the default must be the composited edit: {composited}"
+    );
+    assert_eq!(
+        composited["frames"][0]["source"], "composite",
+        "with no render cache the default has to render the window: {composited}"
+    );
+
+    let fast_path = dir.path().join("fast.png");
+    let fast = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "0.5",
+        "--mode",
+        "fast",
+        "--out",
+        fast_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        fast["frames"][0]["source"], "source",
+        "fast mode reads the clip's own media: {fast}"
+    );
+    assert!(
+        fast["warnings"]
+            .as_array()
+            .map(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("fast mode shows the source clip only")
+            }))
+            .unwrap_or(false),
+        "fast mode must say what it is not showing: {fast}"
+    );
+
+    let composited_pixels =
+        decode_image_rgb24(&composited_path).expect("the composited still must decode");
+    let fast_pixels = decode_image_rgb24(&fast_path).expect("the fast still must decode");
+    assert_ne!(
+        composited_pixels, fast_pixels,
+        "the default still must carry the title the fast still drops"
+    );
+}
+
+/// Feature: the frame probe is lossless
+/// Scenario: a composited still equals the same frame of a full lossless render
+///
+/// The composite path renders a window with `ExportSettings::preview_cache`, the
+/// profile the render cache stores, so its still has to be the same picture the
+/// whole-sequence render holds at that instant — not a re-encode of it. Colour
+/// bars are the fixture because their hard chroma edges are where the old H.264
+/// CRF 28 draft profile diverged worst.
+///
+/// The fixture deliberately carries no temporal filter: a filter that consumes
+/// several source frames per output frame would see different context in a
+/// windowed render than in a full one, which is a documented limit of the
+/// windowed-render contract rather than a property of this path.
+#[test]
+fn test_frame_extract_composite_matches_a_full_lossless_render() {
+    let Some((dir, path, _ids)) = create_colour_bar_project("frame_lossless_identity") else {
+        return;
+    };
+    // Past the fixture guard FFmpeg is known to be present, so anything below
+    // failing is a real failure rather than an unrunnable machine.
+    let inputs = render_inputs(&path).expect("the fixture project must be readable");
+
+    let reference = dir.path().join("reference.mov");
+    render_preview_cache_window(&inputs, &reference, None, None)
+        .expect("the lossless reference render must succeed");
+
+    let from_file_path = dir.path().join("from_file.png");
+    let from_file = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        reference.to_str().unwrap(),
+        "--time",
+        "0.5",
+        "--out",
+        from_file_path.to_str().unwrap(),
+    ]);
+    assert_eq!(from_file["mode"], "file");
+
+    let from_timeline_path = dir.path().join("from_timeline.png");
+    let from_timeline = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "0.5",
+        "--out",
+        from_timeline_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        from_timeline["frames"][0]["source"], "composite",
+        "no cache exists yet, so the window must be rendered: {from_timeline}"
+    );
+
+    let reference_pixels =
+        decode_image_rgb24(&from_file_path).expect("the reference still must decode");
+    let composited_pixels =
+        decode_image_rgb24(&from_timeline_path).expect("the composited still must decode");
+    assert_eq!(
+        reference_pixels.len(),
+        composited_pixels.len(),
+        "both stills must describe the same frame size"
+    );
+    assert_eq!(
+        reference_pixels, composited_pixels,
+        "a composited still must be the render's own pixels, not a re-encode of them"
+    );
+}
+
+/// Feature: the frame probe reads the render cache first
+/// Scenario: a cached segment serves the still, with the composite's pixels
+///
+/// A cached segment is written by the export pipeline in a lossless intra codec,
+/// so serving a frame out of one costs a seek and gives back exactly what a
+/// fresh composite render would have produced.
+#[test]
+fn test_frame_extract_serves_a_composited_still_from_the_render_cache() {
+    let Some((dir, path, _ids)) = create_colour_bar_project("frame_cache_hit") else {
+        return;
+    };
+
+    // Before the cache exists there is nothing to serve, so this still is the
+    // reference the cached one is compared against.
+    let rendered_path = dir.path().join("rendered.png");
+    let rendered = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "0.5",
+        "--out",
+        rendered_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        rendered["frames"][0]["source"], "composite",
+        "an empty cache is a miss, not an error: {rendered}"
+    );
+
+    fill_preview_cache_segment(&path, 0.5).expect("the cache segment must render");
+
+    // A file already at the output path is what makes a silent cache miss
+    // dangerous: FFmpeg writes nothing when a seek lands past the last decodable
+    // frame, so whatever was there before would be probed and reported as this
+    // still. The probe must replace it, never inherit it.
+    let cached_path = dir.path().join("cached.png");
+    let bogus = b"not an image at all".to_vec();
+    std::fs::write(&cached_path, &bogus).expect("the bogus output must be written");
+
+    let cached = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "0.5",
+        "--out",
+        cached_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        cached["frames"][0]["source"], "cache",
+        "a current cached segment must serve the still: {cached}"
+    );
+    assert_ne!(
+        std::fs::read(&cached_path).expect("the cached still must be readable"),
+        bogus,
+        "a cache hit must be the frame this run extracted, not the file it found"
+    );
+
+    let rendered_pixels =
+        decode_image_rgb24(&rendered_path).expect("the rendered still must decode");
+    let cached_pixels = decode_image_rgb24(&cached_path).expect("the cached still must decode");
+    assert_eq!(
+        rendered_pixels, cached_pixels,
+        "the cache must hand back the composite's pixels, not an approximation"
+    );
+}
+
+/// Feature: the frame probe answers anywhere inside the sequence
+/// Scenario: a time in the sequence's last frame is composited, not refused
+///
+/// The renderer addresses its output range by frame, so a window that starts at
+/// the requested instant and ends a moment later has both bounds on the same
+/// frame once the request is inside the final frame — `[4.99, 5.0]` at 25fps is
+/// frame 125 twice over. That used to come back as an empty render plan, which
+/// is a refusal for a time the probe had already accepted as in range.
+#[test]
+fn test_frame_extract_composites_a_time_inside_the_last_frame_of_the_sequence() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("frame_last_frame");
+    let path = project_path(&dir, "frame_last_frame");
+
+    let source_path = dir.path().join("tail.mp4");
+    if !create_solid_colour_video(&source_path, "blue", "1920x1080", 6) {
+        return;
+    }
+    // A 5s sequence at 25fps: the last frame is 124, which starts at 4.96s.
+    place_trimmed_clip(&path, &source_path, 5.0);
+
+    let still_path = dir.path().join("last_frame.png");
+    let still = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "4.99",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        still["frames"][0]["source"], "composite",
+        "a time inside the last frame must still be composited: {still}"
+    );
+    assert!(
+        decode_image_rgb24(&still_path).is_some(),
+        "the still must be a decodable picture: {still}"
+    );
+}
+
+/// Feature: the frame probe reads the render cache first
+/// Scenario: an edit retires the cached segment and the still is re-rendered
+///
+/// Serving pre-edit pixels under a post-edit request is the one failure a cache
+/// tier must never have: the agent would grade the edit it just replaced.
+#[test]
+fn test_frame_extract_ignores_a_cached_segment_the_edit_moved_past() {
+    let Some((dir, path, ids)) = create_colour_bar_project("frame_cache_stale") else {
+        return;
+    };
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+
+    fill_preview_cache_segment(&path, 0.5).expect("the cache segment must render");
+
+    let cached_path = dir.path().join("cached.png");
+    let cached = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "0.5",
+        "--out",
+        cached_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        cached["frames"][0]["source"], "cache",
+        "the fixture must start from a cache hit: {cached}"
+    );
+
+    run_cli_ok(&[
+        "timeline", "move", "--path", &path, "--track", track_id, "--clip", clip_id, "--to", "0.2",
+    ]);
+
+    let stale_path = dir.path().join("after_move.png");
+    let after_move = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "0.5",
+        "--out",
+        stale_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        after_move["frames"][0]["source"], "composite",
+        "a segment whose plan moved must be re-rendered, not served: {after_move}"
+    );
 }

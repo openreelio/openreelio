@@ -82,8 +82,8 @@ Per "Refactor Before Feature". `core/qc/` is dead code with three simulated rule
 `openreelio-cli frame extract --path P --out F [--asset ID --source-time T | --time T] [--sequence S] [--mode fast|composite] [--max-width N] [--format png|jpeg] [--grid CxR --between A B [--count N]]`
 
 - Asset source-time: `FFmpegRunner::extract_frame` + scale filter. Fix its stale-output short-circuit (force overwrite).
-- Timeline-time `--mode fast` (default): `ExportEngine::export_frame`; extend `FrameExportSettings` with `width`/`height` (default max-width 1280 for VLM-friendly size). Document limitation: topmost video clip only, no effects/text/compositing; when `find_topmost_clip_at_time` returns None (e.g. title card), auto-fall back to composite mode.
-- `--mode composite`: render `[t, t + max(2/fps, 0.05)]` via `ExportSettings::preview` → temp mp4 → extract frame 0. (Range renders decode from 0 — document cost; `normalize_output_time_range` rejects zero-length ranges.)
+- Timeline-time `--mode fast` (opt-in): `ExportEngine::export_frame`; extend `FrameExportSettings` with `width`/`height` (default max-width 1280 for VLM-friendly size). Document limitation: topmost video clip only, no effects/text/compositing; when `find_topmost_clip_at_time` returns None (e.g. title card), auto-fall back to composite mode.
+- `--mode composite` (default): reuse a current preview-cache segment when one covers `t`, else render `[t, t + max(2/fps, 0.05)]` via `ExportSettings::preview_cache` → temp `.mov` → extract frame 0. (A windowed render's cost tracks the in-clip offset, not the timeline position; `normalize_output_time_range` rejects zero-length ranges.)
 - `--grid`: sample N evenly over `[a,b]` into `%d.jpg` sequence dir → `VisualAnalyzer::generate_contact_sheet`; JSON returns `cells:[{index,row,col,timelineSec}]` for VLM cell→timecode mapping.
 - Output: `{status, frames:[{index, timeSec, sourceTimeSec, clipId, assetId, path, width, height}], count}` (or `{sheet: {...}}` for grid).
 

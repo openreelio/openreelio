@@ -481,18 +481,31 @@ openreelio-cli frame extract --path ./demo --asset <ASSET_ID> --source-time 3.0 
 openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet.jpg
 ```
 
-- `--mode fast` (default) renders the topmost file-backed clip only: no
-  effects, text or compositing. Cheap, and right for "what footage is here". It
+- `--mode composite` is the **default**: the picture export produces, with
+  captions, text clips, transforms, layered clips and blends all in it. It is
+  rendered losslessly at the sequence canvas, so what you judge is the edit and
+  not a codec. It works anywhere inside the timeline, including over a gap — a
+  gap has no picture, so a black frame is the correct answer, not an error. Cost
+  tracks the *in-clip offset*, not the timeline position: the window's graph
+  starts at the window and trims each input after decode, so a still late in the
+  timeline is not more expensive for being late.
+- Composite stills are served **from the preview render cache** whenever a
+  cached segment covers the requested time and still matches the current edit —
+  one seek instead of a render, and the same pixels, because those segments are
+  written by the export pipeline. Every still reports where it came from:
+  `"source": "cache" | "composite" | "source"`. A contact sheet adds
+  `sheet.sources`, counting the cells each tier served. The probe never writes to
+  the cache; an absent cache is a miss, never an error.
+- `--mode fast` is the opt-in cheap path: the topmost file-backed clip's own
+  media, with no effects, text or compositing. Right for "what footage is here",
+  wrong for "does my edit look right". When the sampled time carries captions, a
+  text clip, an effect, a transition, or a source that is not the canvas size,
+  the payload carries a `warnings` entry naming the time and saying so. It still
   auto-falls back to composite, reporting `fellBackToComposite: true`, whenever
-  fast mode cannot answer honestly: when there is no file-backed clip at that
-  time (a title card, for example), and when the topmost clip carries a
-  transform or a non-default opacity — the whole point of which is that the
-  picture is no longer the source file. Checking your own `SetClipTransform`
-  edit therefore shows the transform, at composite cost.
-- `--mode composite` renders a minimal window through the full stack, so
-  effects and overlays appear. Range renders decode from zero, so it costs more.
-  It works anywhere inside the timeline, including over a gap — a gap has no
-  picture, so a black frame is the correct answer, not an error.
+  fast mode cannot answer at all: when there is no file-backed clip at that time
+  (a title card, for example), and when the topmost clip carries a transform or
+  a non-default opacity — the whole point of which is that the picture is no
+  longer the source file. Outside `fast` mode `fellBackToComposite` is `null`.
 - `--max-width` caps the output (1–3840 px, default 1280 px, aspect
   preserved, never upscaled).
 - `--format png|jpeg` is optional: the format follows the `--out` extension, so
