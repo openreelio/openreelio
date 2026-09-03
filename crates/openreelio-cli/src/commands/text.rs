@@ -854,11 +854,11 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
             let (track_id, created_track) =
                 ensure_text_track(&mut project, &seq_id, track.as_deref(), start, duration)?;
             let cmd = AddTextClipCommand::new(&seq_id, &track_id, start, duration, text_data);
-            let result = project
-                .executor
-                .execute(Box::new(cmd), &mut project.state)
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
+                .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Add text failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
@@ -866,6 +866,8 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
                 "createdIds": result.created_ids,
                 "trackId": track_id,
                 "createdTrack": created_track,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -950,6 +952,10 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
             let track_id = resolve_text_track_id(&project, &seq_id, &id, track.as_deref())?;
             let clip_snapshot = find_text_clip(&project, &seq_id, &track_id, &id)?.clone();
             let mut text_op_id: Option<String> = None;
+            // One recorder for the whole verb: an update that retimes as well
+            // as retitles applies three commands under one save, and the ranges
+            // a caller wants are the ones the verb changed, not one command's.
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
 
             if patch_has_text_changes(&patch, &text) {
                 let mut text_data = text_data_for_clip(&project, &seq_id, &track_id, &id)?;
@@ -958,31 +964,31 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
                     text_data.content = content;
                 }
                 text_data = apply_patch(text_data, patch)?;
-                let result = project
-                    .executor
+                let result = edit
                     .execute(
+                        &mut project,
                         Box::new(UpdateTextCommand::new(&seq_id, &track_id, &id, text_data)),
-                        &mut project.state,
                     )
                     .map_err(|e| anyhow::anyhow!("Update text failed: {}", e))?;
                 text_op_id = Some(result.op_id.clone());
                 if start.is_none() && duration.is_none() {
-                    super::save_project(&mut project)?;
+                    let affected_ranges = edit.finish(&mut project)?;
                     return output::print_json(&serde_json::json!({
                         "status": "ok",
                         "opId": result.op_id,
                         "trackId": track_id,
+                        "sequenceId": seq_id,
+                        "affectedRanges": affected_ranges,
                     }));
                 }
             }
 
             let mut timing_op_ids = Vec::new();
             if let Some(value) = start {
-                let result = project
-                    .executor
+                let result = edit
                     .execute(
+                        &mut project,
                         Box::new(MoveClipCommand::new(&seq_id, &track_id, &id, value, None)),
-                        &mut project.state,
                     )
                     .map_err(|e| anyhow::anyhow!("Move text failed: {}", e))?;
                 timing_op_ids.push(result.op_id);
@@ -995,9 +1001,9 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
                     1.0
                 };
                 let new_source_out = clip_snapshot.range.source_in_sec + value * speed;
-                let result = project
-                    .executor
+                let result = edit
                     .execute(
+                        &mut project,
                         Box::new(TrimClipCommand::new(
                             &seq_id,
                             &track_id,
@@ -1006,18 +1012,19 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
                             Some(new_source_out),
                             None,
                         )),
-                        &mut project.state,
                     )
                     .map_err(|e| anyhow::anyhow!("Resize text duration failed: {}", e))?;
                 timing_op_ids.push(result.op_id);
             }
 
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "trackId": track_id,
                 "textOpId": text_op_id,
                 "timingOpIds": timing_op_ids,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -1053,20 +1060,22 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
                     anchor_y,
                 },
             )?;
-            let result = project
-                .executor
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
                 .execute(
+                    &mut project,
                     Box::new(SetClipTransformCommand::new(
                         &seq_id, &track_id, &id, transform,
                     )),
-                    &mut project.state,
                 )
                 .map_err(|e| anyhow::anyhow!("Transform text failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "trackId": track_id,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 
@@ -1080,19 +1089,21 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let track_id = resolve_text_track_id(&project, &seq_id, &id, track.as_deref())?;
-            let result = project
-                .executor
+            let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            let result = edit
                 .execute(
+                    &mut project,
                     Box::new(RemoveTextClipCommand::new(&seq_id, &track_id, &id)),
-                    &mut project.state,
                 )
                 .map_err(|e| anyhow::anyhow!("Remove text failed: {}", e))?;
-            super::save_project(&mut project)?;
+            let affected_ranges = edit.finish(&mut project)?;
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "deletedIds": result.deleted_ids,
                 "trackId": track_id,
+                "sequenceId": seq_id,
+                "affectedRanges": affected_ranges,
             }))
         }
 

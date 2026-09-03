@@ -802,7 +802,7 @@ fn run_samplers(
 ) -> FrameProbeResult<SamplerOutcome> {
     let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
     let affected_ranges = if spec.affected {
-        resolve_affected_ranges(project.path, &sequence_id)?
+        resolve_affected_ranges(project, &sequence_id)?
     } else {
         Vec::new()
     };
@@ -823,11 +823,17 @@ fn run_samplers(
 /// edit has been applied to this project through the CLI or the MCP server yet —
 /// which is a different problem from an empty edit, and the message has to say
 /// which one the caller is looking at.
+///
+/// A record whose last operation is not the project's current one is refused
+/// rather than used. The file is a hand-off, not a history: an undo, a redo, or
+/// an edit applied by a surface that does not record one leaves it describing a
+/// state the project has left, and the sampler would then point confidently at
+/// the wrong seconds — the one failure mode `--affected` exists to remove.
 fn resolve_affected_ranges(
-    project_dir: &Path,
+    project: &FrameProbeProject<'_>,
     sequence_id: &str,
 ) -> FrameProbeResult<Vec<crate::core::TimeRange>> {
-    let Some(record) = load_last_affected_ranges(project_dir) else {
+    let Some(record) = load_last_affected_ranges(project.path) else {
         return Err(FrameProbeError::new(
             "--affected reads the ranges the last edit changed, and this project has none recorded. Apply an edit with `command execute` or `plan execute` first, or pass --between <START> <END> to sweep the timeline instead."
                 .to_string(),
@@ -839,6 +845,13 @@ fn resolve_affected_ranges(
             record.sequence_id, sequence_id, record.sequence_id
         )));
     }
+    if record.op_ids.last().map(String::as_str) != project.state.last_op_id.as_deref() {
+        return Err(FrameProbeError::new(format!(
+            "The recorded hand-off ends at operation {}, but this project is at {}, so the last edit was not recorded: run the edit through `command execute` or `plan execute`, or pass --between <START> <END>.",
+            describe_op_id(record.op_ids.last().map(String::as_str)),
+            describe_op_id(project.state.last_op_id.as_deref()),
+        )));
+    }
     if record.affected_ranges.is_empty() {
         return Err(FrameProbeError::new(format!(
             "The last recorded edit on sequence '{}' moved nothing on the timeline, so --affected has nothing to look at. Pass --between <START> <END>, or a sampler such as --at-cuts.",
@@ -847,6 +860,14 @@ fn resolve_affected_ranges(
     }
 
     Ok(record.affected_ranges)
+}
+
+/// Names an operation id for a message, or says there is none.
+fn describe_op_id(op_id: Option<&str>) -> String {
+    match op_id {
+        Some(op_id) => format!("'{op_id}'"),
+        None => "no operation at all".to_string(),
+    }
 }
 
 /// Chooses the contact-sheet layout for a sampler's times.
@@ -1018,16 +1039,19 @@ pub(super) struct FileGridCell {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Last timeline position the sequence has any content at.
+/// Last timeline position the sequence renders any content at.
+///
+/// Delegates to [`Sequence::output_duration`] — the length the render pipeline
+/// pads its output to — because a still is extracted by rendering a window and
+/// the window is snapped against that length. Measuring the clips directly here
+/// looked equivalent but was not: it kept clips on tracks the export drops, so
+/// a muted twenty-second music bed made a four-second edit report twenty
+/// seconds. Every time then snapped against a different length than the
+/// renderer used, and two samples a frame apart could resolve to one frame —
+/// `cutBefore` and `cutAfter` returning the same picture, which reads as a cut
+/// that is not there.
 fn sequence_duration_sec(sequence: &Sequence) -> f64 {
-    sequence
-        .tracks
-        .iter()
-        .flat_map(|track| track.clips.iter())
-        .filter(|clip| clip.enabled)
-        .map(|clip| clip.place.timeline_out_sec())
-        .filter(|end| end.is_finite())
-        .fold(0.0_f64, f64::max)
+    sequence.output_duration()
 }
 
 /// Rejects requested times the sequence has no content at.

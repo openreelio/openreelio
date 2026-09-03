@@ -48,8 +48,11 @@ const TIME_EPSILON: f64 = 1e-6;
 ///   effect — or, for a two-input transition, the stretch it blends across,
 ///   centred on the cut rather than on any clip boundary;
 /// - a zero-length range at the time of any created or deleted marker;
-/// - the whole timeline for a track-level or sequence-level change, because
-///   muting, hiding, removing or reordering a track can alter every frame.
+/// - the whole timeline for a change to a track *this* sequence holds, or to
+///   this sequence itself, because muting, hiding, removing or reordering a
+///   track can alter every frame. A change naming another sequence's track — or
+///   another sequence, as `CreateCompoundClip` reports the nested sequence it
+///   builds — contributes nothing, because none of this timeline moved.
 ///
 /// Ranges are merged when they overlap or touch within a microsecond, so the
 /// result is disjoint and in ascending order. An empty result means nothing on
@@ -63,6 +66,7 @@ pub fn affected_ranges(
 ) -> Vec<TimeRange> {
     let before_clips = index_clips(before);
     let after_clips = index_clips(after);
+    let fps = after.format.fps.as_f64();
     let mut ranges: Vec<TimeRange> = Vec::new();
 
     // 1. Clip-by-clip diff. This is the part that catches ripple moves.
@@ -108,6 +112,7 @@ pub fn affected_ranges(
                     Some(clip_id.as_str()),
                     &before_clips,
                     effects_before,
+                    fps,
                 );
                 push_effect_ranges(
                     &mut ranges,
@@ -115,13 +120,28 @@ pub fn affected_ranges(
                     Some(clip_id.as_str()),
                     &after_clips,
                     effects_after,
+                    fps,
                 );
             }
             StateChange::EffectApplied { effect_id }
             | StateChange::EffectUpdated { effect_id }
             | StateChange::EffectRemoved { effect_id } => {
-                push_effect_ranges(&mut ranges, effect_id, None, &before_clips, effects_before);
-                push_effect_ranges(&mut ranges, effect_id, None, &after_clips, effects_after);
+                push_effect_ranges(
+                    &mut ranges,
+                    effect_id,
+                    None,
+                    &before_clips,
+                    effects_before,
+                    fps,
+                );
+                push_effect_ranges(
+                    &mut ranges,
+                    effect_id,
+                    None,
+                    &after_clips,
+                    effects_after,
+                    fps,
+                );
             }
             StateChange::MarkerCreated { marker_id } | StateChange::MarkerDeleted { marker_id } => {
                 if let Some(time) = marker_time(after, marker_id).or_else(|| {
@@ -134,12 +154,26 @@ pub fn affected_ranges(
             // A brand-new track is empty, so it shows nothing until a clip
             // lands on it — and that clip is caught by the diff above.
             StateChange::TrackCreated { .. } => {}
-            StateChange::TrackModified { .. }
-            | StateChange::TrackDeleted { .. }
-            | StateChange::SequenceCreated { .. }
-            | StateChange::SequenceModified { .. } => {
-                if let Some(range) = whole_timeline() {
-                    ranges.push(range);
+            // A track edit reaches every frame *of the sequence that holds the
+            // track*. A plan that edits two sequences reports one change list,
+            // so a track id this sequence never had is somebody else's timeline.
+            StateChange::TrackModified { track_id } | StateChange::TrackDeleted { track_id } => {
+                if has_track(before, track_id) || has_track(after, track_id) {
+                    if let Some(range) = whole_timeline() {
+                        ranges.push(range);
+                    }
+                }
+            }
+            // `CreateCompoundClip` reports `SequenceCreated` for the *nested*
+            // sequence it builds, not for the one it edits, and `CreateSequence`
+            // reports one for a sequence that has nothing on it yet. Neither
+            // moves a frame of the sequence being measured.
+            StateChange::SequenceCreated { sequence_id }
+            | StateChange::SequenceModified { sequence_id } => {
+                if sequence_id == &after.id {
+                    if let Some(range) = whole_timeline() {
+                        ranges.push(range);
+                    }
                 }
             }
             // Library-level changes place nothing on the timeline by
@@ -208,6 +242,7 @@ fn push_effect_ranges(
     clip_hint: Option<&str>,
     clips: &HashMap<&str, ClipEntry<'_>>,
     effects: &HashMap<EffectId, Effect>,
+    fps: f64,
 ) {
     let Some(effect) = effects.get(effect_id) else {
         return;
@@ -216,7 +251,7 @@ fn push_effect_ranges(
         return;
     };
 
-    if let Some((start_sec, end_sec)) = transition_span_sec(effect, entry.end_sec) {
+    if let Some((start_sec, end_sec)) = transition_span_sec(effect, entry.end_sec, fps) {
         push_range(ranges, start_sec, end_sec);
         return;
     }
@@ -240,6 +275,11 @@ fn owning_clip<'a, 'b>(
     clips
         .values()
         .find(|entry| entry.effect_ids.iter().any(|id| id == effect_id))
+}
+
+/// Whether this sequence holds the named track in the given state.
+fn has_track(sequence: &Sequence, track_id: &str) -> bool {
+    sequence.tracks.iter().any(|track| track.id == track_id)
 }
 
 fn marker_time(sequence: &Sequence, marker_id: &str) -> Option<TimeSec> {
@@ -418,6 +458,14 @@ impl LastAffectedRanges {
 
 /// Writes the last-apply record for a project, creating the cache directory.
 ///
+/// Written to a sibling temp file and renamed into place, so a reader never
+/// sees a half-written record: the file is small enough that a torn write would
+/// normally be invisible, but the failure mode it produces — a parse error that
+/// [`load_last_affected_ranges`] reports as "nothing recorded" — is exactly the
+/// one that sends an inspection step to the wrong seconds. A rename that fails
+/// falls back to writing the destination directly, because a hand-off written
+/// non-atomically still beats no hand-off at all.
+///
 /// Callers treat a failure here as a warning: the edit itself is already
 /// durable in the ops log, and a missing hand-off file only costs the next
 /// inspection step its shortcut.
@@ -433,6 +481,15 @@ pub fn save_last_affected_ranges(
 
     let serialized = serde_json::to_string_pretty(record)
         .map_err(|error| format!("Failed to serialize affected ranges: {error}"))?;
+
+    let temp_path = path.with_extension("json.tmp");
+    let staged = std::fs::write(&temp_path, &serialized).is_ok()
+        && std::fs::rename(&temp_path, &path).is_ok();
+    if staged {
+        return Ok(());
+    }
+
+    let _ = std::fs::remove_file(&temp_path);
     std::fs::write(&path, serialized)
         .map_err(|error| format!("Failed to write {}: {error}", path.display()))
 }
@@ -513,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn should_report_nothing_when_a_split_leaves_every_span_where_it_was() {
+    fn should_report_one_merged_range_covering_both_halves_of_a_split() {
         // A split replaces one clip with two covering the same stretch; the
         // new halves have new ids, so both are reported.
         let before = sequence_with(vec![("clip-a", 0.0, 4.0)]);
@@ -675,6 +732,61 @@ mod tests {
             &[StateChange::TrackModified {
                 track_id: "track-v1".to_string(),
             }],
+        );
+
+        assert_eq!(result, vec![(0.0, 5.0)]);
+    }
+
+    #[test]
+    fn should_ignore_a_track_change_naming_another_sequences_track() {
+        // A plan that edits two sequences reports one change list. Measured
+        // against sequence A, a track edit on sequence B moved nothing here.
+        let before = sequence_with(vec![("clip-a", 0.0, 5.0)]);
+        let after = before.clone();
+
+        let result = ranges(
+            &before,
+            &after,
+            &[StateChange::TrackModified {
+                track_id: "track-on-another-sequence".to_string(),
+            }],
+        );
+
+        assert!(
+            result.is_empty(),
+            "another sequence's track must not report this timeline: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_ignore_a_sequence_change_naming_another_sequence() {
+        // `CreateCompoundClip` reports `SequenceCreated` for the nested
+        // sequence it builds. Reporting the outer timeline for it sent an
+        // inspector to every second of a sequence the command barely touched.
+        let before = sequence_with(vec![("clip-a", 0.0, 5.0)]);
+        let after = before.clone();
+
+        let result = ranges(
+            &before,
+            &after,
+            &[StateChange::SequenceCreated {
+                sequence_id: "nested-sequence".to_string(),
+            }],
+        );
+
+        assert!(result.is_empty(), "{result:?}");
+    }
+
+    #[test]
+    fn should_report_the_whole_timeline_when_this_sequence_itself_changed() {
+        let before = sequence_with(vec![("clip-a", 0.0, 5.0)]);
+        let after = before.clone();
+        let sequence_id = after.id.clone();
+
+        let result = ranges(
+            &before,
+            &after,
+            &[StateChange::SequenceModified { sequence_id }],
         );
 
         assert_eq!(result, vec![(0.0, 5.0)]);

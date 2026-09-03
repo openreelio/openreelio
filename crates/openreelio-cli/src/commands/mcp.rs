@@ -1464,9 +1464,12 @@ fn build_timeline_snapshot(state: &McpServerState) -> Result<Value, ToolError> {
                 })
                 .collect();
             // Where-to-look signals: duration, frame rate, cut times, marker
-            // times and transition spans. A transition blends across the cut
-            // rather than along a clip, so no reader can derive its span from
-            // the clip list below it.
+            // times, transition spans and the caption/text spans. A transition
+            // blends across the cut rather than along a clip, so no reader can
+            // derive its span from the clip list below it. The whole summary is
+            // published, exactly as `timeline info` publishes it: an agent that
+            // reads the snapshot instead of the CLI must not have to reassemble
+            // the caption spans from the clip list to ask the same question.
             let summary =
                 openreelio_core::timeline::inspection_summary(sequence, &project.state.effects);
             serde_json::json!({
@@ -1481,8 +1484,11 @@ fn build_timeline_snapshot(state: &McpServerState) -> Result<Value, ToolError> {
                 "fpsRatio": summary.fps_ratio,
                 "canvas": summary.canvas,
                 "editPoints": summary.edit_points,
+                "cuts": summary.cuts,
                 "markers": summary.markers,
                 "transitions": summary.transitions,
+                "captionSpans": summary.caption_spans,
+                "textSpans": summary.text_spans,
                 "inspectionHints": summary.inspection_hints,
                 "tracks": tracks,
             })
@@ -2404,6 +2410,23 @@ impl FrameExtractRequest {
             return Err(ToolError::InvalidArguments(format!(
                 "grid {columns}x{rows} needs {capacity} cells, more than the maximum of {MAX_GRID_CELLS}"
             )));
+        }
+
+        // A sampler is a time source in its own right, and `between`/`times`
+        // are already refused alongside one. Falling through to the check below
+        // therefore rejected a perfectly good `{atCuts, grid: "4x3"}` for
+        // lacking the very arguments it is not allowed to carry. How many cells
+        // the sampler actually fills is not knowable until it has run, so the
+        // engine checks it in `resolve_sampled_grid`; what is knowable here is
+        // the finished image size.
+        if self.has_sampler() {
+            return frame::ensure_sheet_dimensions_in_range(
+                columns,
+                rows,
+                self.cell_width,
+                self.cell_height,
+            )
+            .map_err(|error| ToolError::InvalidArguments(error.to_string()));
         }
 
         // The sheet's own source: exactly one, because a sampled range and an
@@ -4985,6 +5008,34 @@ mod tests {
             message.contains("times"),
             "the refusal must name the conflicting selector: {message}"
         );
+    }
+
+    #[test]
+    fn should_accept_a_sampler_with_an_explicit_grid() {
+        // A sampler is its own time source, and `between`/`times` are refused
+        // alongside one — so demanding them here rejected the only shape a
+        // sampled sheet with a fixed layout can have.
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "atCuts": true,
+            "grid": "4x3"
+        }))
+        .expect("a sampler sizes its own sheet");
+
+        assert!(request.at_cuts);
+        assert_eq!(request.grid.as_deref(), Some("4x3"));
+    }
+
+    #[test]
+    fn should_still_refuse_a_sampler_sheet_whose_image_is_too_large() {
+        let error = FrameExtractRequest::parse(&serde_json::json!({
+            "atCuts": true,
+            "grid": "8x8",
+            "cellWidth": 1024,
+            "cellHeight": 1024
+        }))
+        .expect_err("the finished image is knowable before anything is sampled");
+
+        assert!(matches!(error, ToolError::InvalidArguments(_)));
     }
 
     #[test]

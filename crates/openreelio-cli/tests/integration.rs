@@ -10393,8 +10393,12 @@ fn test_timeline_info_reports_duration_fps_markers_and_spans() {
     assert_eq!(info["inspectionHints"]["markerCount"], 1);
     assert_eq!(info["inspectionHints"]["captionCount"], 1);
     assert_eq!(info["inspectionHints"]["transitionCount"], 0);
-    // 1.0 and 3.0 are interior; the head at 0 and the tail are not cuts.
-    assert_eq!(info["inspectionHints"]["cutCount"], 2);
+    assert_eq!(info["inspectionHints"]["refusedTransitionCount"], 0);
+    // 1.0 and 3.0 are the caption's boundaries and 0 and the tail are the
+    // timeline's own, so nowhere does the picture cut: one clip runs the whole
+    // sequence. `editPoints` still lists all four.
+    assert_eq!(info["cuts"].as_array().map(Vec::len), Some(0));
+    assert_eq!(info["inspectionHints"]["cutCount"], 0);
 
     // Additive: the keys `timeline info` already published are untouched.
     assert_eq!(info["sequenceId"], sequence_id.as_str());
@@ -11039,5 +11043,180 @@ fn test_frame_extract_rejects_a_sampler_combined_with_explicit_times() {
     assert!(
         stderr.contains("--times") && stderr.contains("--at-cuts"),
         "Expected the refusal to name both sides of the conflict, got: {stderr}"
+    );
+}
+
+/// Feature: affected ranges on mutating verbs
+/// Scenario: a convenience verb records the hand-off too
+///
+/// `--affected` reads a single hand-off slot. While only `command execute` and
+/// `plan execute` wrote it, a `timeline move` left the file describing an older
+/// edit, and the next `--affected` sheet silently showed the wrong seconds —
+/// the exact failure the sampler exists to remove.
+#[test]
+fn test_timeline_move_reports_and_records_its_affected_ranges() {
+    let (_dir, path, _asset_id, track_id) =
+        create_project_with_placed_dummy("timeline_move_affected");
+    let sequence_id = active_sequence(&path);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip = &clips["clips"][0];
+    let clip_id = clip["id"].as_str().unwrap().to_string();
+    let original_start = clip["timelineInSec"].as_f64().expect("timelineInSec");
+    let length = clip["durationSec"].as_f64().expect("durationSec");
+    let moved_start = original_start + length + 10.0;
+
+    let result = run_cli_ok(&[
+        "timeline",
+        "move",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--to",
+        &moved_start.to_string(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sequenceId"], sequence_id.as_str());
+    assert_eq!(
+        affected_pairs(&result["affectedRanges"]),
+        vec![
+            (original_start, original_start + length),
+            (moved_start, moved_start + length)
+        ],
+        "a convenience verb must report where it landed too: {result}"
+    );
+
+    let record = last_affected_record(&path);
+    assert_eq!(record["sequenceId"], sequence_id.as_str());
+    assert_eq!(
+        record["opIds"].as_array().and_then(|ids| ids.last()),
+        Some(&result["opId"])
+    );
+    assert_eq!(
+        affected_pairs(&record["affectedRanges"]),
+        affected_pairs(&result["affectedRanges"])
+    );
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: `--affected` follows a convenience verb, not just `command execute`
+#[test]
+fn test_frame_extract_samples_the_range_a_timeline_move_changed() {
+    let Some((dir, path, _sequence_id, track_id, _outgoing)) =
+        create_two_shot_project("frame_affected_timeline_move")
+    else {
+        return;
+    };
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let incoming = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .find(|clip| clip["timelineInSec"].as_f64() == Some(TRANSITION_SHOT_SEC))
+        .expect("the second shot")
+        .clone();
+    let incoming_id = incoming["id"].as_str().expect("clip id").to_string();
+
+    let moved = run_cli_ok(&[
+        "timeline",
+        "move",
+        "--path",
+        &path,
+        "--clip",
+        &incoming_id,
+        "--track",
+        &track_id,
+        "--to",
+        &(TRANSITION_SHOT_SEC + 0.5).to_string(),
+    ]);
+    let expected_ranges = affected_pairs(&moved["affectedRanges"]);
+    assert!(!expected_ranges.is_empty(), "{moved}");
+
+    let sheet_path = dir.path().join("moved.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--affected",
+        "--grid",
+        "auto",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        affected_pairs(&result["sampler"]["affectedRanges"]),
+        expected_ranges,
+        "the sheet has to be built from the ranges the move reported: {result}"
+    );
+    assert!(sheet_path.exists());
+}
+
+/// Feature: where-to-look samplers
+/// Scenario: a hand-off the project has moved past is refused, not used
+///
+/// An undo leaves the record describing an edit the project no longer has.
+/// Sampling it anyway is the one thing worse than not sampling at all: the
+/// sheet looks right and points at seconds nothing changed at.
+#[test]
+fn test_frame_extract_affected_refuses_a_stale_hand_off() {
+    let Some((dir, path, sequence_id, track_id, _outgoing)) =
+        create_two_shot_project("frame_affected_stale")
+    else {
+        return;
+    };
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let incoming_id = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .find(|clip| clip["timelineInSec"].as_f64() == Some(TRANSITION_SHOT_SEC))
+        .and_then(|clip| clip["id"].as_str())
+        .expect("the second shot")
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "MoveClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": incoming_id,
+            "newTimelineIn": TRANSITION_SHOT_SEC + 0.5,
+        })
+        .to_string(),
+    ]);
+
+    // Undo does not record a hand-off, so the file now describes an edit the
+    // project has rolled off its history.
+    run_cli_ok(&["timeline", "undo", "--path", &path]);
+
+    let out_dir = dir.path().join("stale");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--affected",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("was not recorded") && stderr.contains("--between"),
+        "Expected the refusal to say the hand-off is stale and name the fallback, got: {stderr}"
     );
 }

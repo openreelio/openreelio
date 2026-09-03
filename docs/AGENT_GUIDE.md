@@ -154,13 +154,26 @@ enough to compute any subsequent edit without dumping full state.
 
 `timeline info` answers *where to look* without any arithmetic over the clip
 list: `durationSec` (editing length) and `outputDurationSec` (render length),
-`fps` plus the exact `fpsRatio`, `canvas`, `editPoints` (the sorted cut times,
-including `0`), `markers`, `transitions`, `captionSpans`, `textSpans`, and an
-`inspectionHints` count summary. Read the cut times from `editPoints` rather
-than reducing over `timeline clips`, and read blend spans from `transitions`:
-a transition hangs on the outgoing clip and is rendered over
-`[cutSec − durationSec/2, cutSec + durationSec/2]`, which is not any clip
-boundary the clip list prints.
+`fps` plus the exact `fpsRatio`, `canvas`, `cuts`, `editPoints`, `markers`,
+`transitions`, `captionSpans`, `textSpans`, and an `inspectionHints` count
+summary.
+
+Read the cut times from `cuts` rather than reducing over `timeline clips`.
+`cuts` is where the *picture* changes: boundaries of enabled clips on the video
+tracks the export includes, with the timeline's head and tail left out. It is
+what `frame extract --at-cuts` samples, and `inspectionHints.cutCount` counts.
+`editPoints` answers a different question — every boundary on every track,
+including `0`, the end, caption and audio boundaries, and disabled clips — which
+is the editing view, not the cut list.
+
+Read blend spans from `transitions`: a transition hangs on the outgoing clip and
+is rendered around the cut rather than along a clip, so neither edge is a clip
+boundary the clip list prints. The span is quantised to whole frames the way the
+renderer places it, and is asymmetric for an odd frame count. A stored
+transition the renderer refuses is still listed, with `rendersAsCut: true` and a
+`refusalReason` — the file will show a hard cut there, and
+`inspectionHints.transitionCount` counts only the blends it will really get
+(`refusedTransitionCount` counts the rest).
 
 ### The escape hatch: `command execute`
 
@@ -179,16 +192,18 @@ Payloads are camelCase JSON objects. Use `--payload-file <FILE>` instead of
 `--payload` when the JSON is large or shell quoting is awkward. `command
 validate` runs the same strict parser without touching the project.
 
-Every mutating verb answers *where the edit landed*. `command execute` and
-`plan execute` both report `affectedRanges` — a sorted, merged list of
-`{startSec, endSec}` measured against `sequenceId` — so the next `frame extract`
-or `render start --start/--end` can be aimed at the seconds that actually
-changed instead of the whole timeline. The ranges are computed by diffing the
-sequence, so a ripple edit reports every clip it shifted, not only the ids in
-`changes`; a dissolve reports the stretch it blends across, centred on the cut.
-`plan execute` reports them per step as well as in total, and a rolled-back plan
-reports an empty list because nothing stayed changed. The last successful
-apply's ranges are also written to
+Every mutating verb answers *where the edit landed*. `command execute`,
+`plan execute` and the `timeline`, `text` and `caption` edit verbs all report
+`affectedRanges` — a sorted, merged list of `{startSec, endSec}` measured
+against `sequenceId` — so the next `frame extract` or
+`render start --start/--end` can be aimed at the seconds that actually changed
+instead of the whole timeline. The ranges are computed by diffing the sequence,
+so a ripple edit reports every clip it shifted, not only the ids in `changes`;
+a dissolve reports the stretch it blends across, around the cut. `plan execute`
+reports them per step as well as in total; a plan that rolled back cleanly
+reports an empty list because nothing stayed changed, while one whose rollback
+did not complete (`rollbackIncomplete: true`) keeps them, because the project
+really is mutated. The last successful apply's ranges are also written to
 `<project>/.openreelio/cache/agent/last_affected_ranges.json`, which is what
 `frame extract --affected` reads — so the post-apply look needs no times carried
 between commands:
@@ -575,8 +590,9 @@ sequence — is an error naming `command execute` / `plan execute`, never a gues
   capped at 100 cells, and the finished sheet at 8000 px on either edge — an
   oversized combination is rejected before the first cell is extracted, not
   after the whole grid.
-- `--grid auto` sizes the sheet from the sample count — 2 columns up to 2
-  samples, 3 up to 9, 4 up to 16, then 6 — so a sampler needs no layout guess.
+- `--grid auto` sizes the sheet from the sample count — 1 column for a single
+  sample, 2 for two, 3 up to 9, 4 up to 16, then 6 — so a sampler needs no
+  layout guess.
   It requires a sampler or `--times`; `--between` already fixes its own count.
 - `--label-cells` burns each cell's **requested** index and timecode into the
   image (not the decoded frame's PTS); `--cell-width` / `--cell-height`

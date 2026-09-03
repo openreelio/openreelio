@@ -123,8 +123,10 @@ and assembling a `--times` list, ask for the events:
   short timeline.
 - `--affected` reads
   `<project>/.openreelio/cache/agent/last_affected_ranges.json`, written by every
-  successful `command execute` and `plan execute`. With no record, or one naming
-  another sequence, it errors and says to apply an edit first — it never guesses.
+  successful mutating verb: `command execute`, `plan execute`, and the
+  `timeline`, `text` and `caption` edit verbs. With no record, one naming another
+  sequence, or one that does not end at the project's current operation, it
+  errors and says what to do — it never guesses.
 - Without `--grid` a sampler writes a batch of stills, so `--out` must be a
   directory.
 
@@ -136,8 +138,8 @@ model comments on back to a timecode. Capped at 100 cells, and at 8000 px on
 either finished edge — an oversized combination is rejected before any cell is
 extracted.
 
-- `--grid auto` picks the layout from the sample count: 2 columns up to 2
-  samples, 3 up to 9, 4 up to 16, then 6. It needs a sampler or `--times`, since
+- `--grid auto` picks the layout from the sample count: 1 column for a single
+  sample, 2 for two, 3 up to 9, 4 up to 16, then 6. It needs a sampler or `--times`, since
   `--between` already fixes its own count.
 
 - `--label-cells` burns each cell's index and *requested* timecode into the

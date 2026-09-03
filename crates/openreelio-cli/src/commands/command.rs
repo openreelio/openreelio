@@ -62,7 +62,9 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
             payload_file,
         } => {
             let payload = read_payload(payload, payload_file)?;
-            let payload_sequence_id = payload_sequence_id(&payload);
+            let named_sequence_id = payload_string(&payload, "sequenceId");
+            let named_effect_id = payload_string(&payload, "effectId");
+            let named_clip_id = payload_string(&payload, "clipId");
             let typed_payload = CommandPayload::parse(command_type.clone(), payload)
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
 
@@ -70,31 +72,39 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
             // The before-image has to be taken while the state still holds it:
             // the ranges an edit changed are the diff across the mutation, and
             // a ripple move shifts clips no `StateChange` entry names.
-            // Resolved leniently: a command that names no sequence and a
-            // project with no active one still execute, they just have no
-            // timeline to measure ranges against.
-            let sequence_id = payload_sequence_id
-                .or_else(|| project.state.active_sequence_id.clone())
-                .unwrap_or_default();
-            let before = SequenceSnapshot::capture(&project.state, &sequence_id);
+            let sequence_id = named_sequence_id.or_else(|| {
+                infer_sequence_id(
+                    &project.state,
+                    named_effect_id.as_deref(),
+                    named_clip_id.as_deref(),
+                )
+            });
+            let before = SequenceSnapshot::capture(
+                &project.state,
+                sequence_id.as_deref().unwrap_or_default(),
+            );
 
             let command = typed_payload.build_command(&project.path);
             let result = project
                 .executor
                 .execute(command, &mut project.state)
                 .map_err(|error| anyhow::anyhow!("Command '{}' failed: {}", command_type, error))?;
-            let affected_ranges =
-                before.affected_ranges(&project.state, &sequence_id, &result.changes);
+            let affected_ranges = match sequence_id.as_deref() {
+                Some(sequence_id) => {
+                    before.affected_ranges(&project.state, sequence_id, &result.changes)
+                }
+                None => Vec::new(),
+            };
             super::save_project(&mut project)?;
 
-            record_affected_ranges(
-                &project.path,
-                &sequence_id,
-                vec![result.op_id.clone()],
-                &affected_ranges,
-            );
-
-            let reported_sequence_id = (!sequence_id.is_empty()).then_some(sequence_id);
+            if let Some(sequence_id) = sequence_id.as_deref() {
+                record_affected_ranges(
+                    &project.path,
+                    sequence_id,
+                    vec![result.op_id.clone()],
+                    &affected_ranges,
+                );
+            }
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
@@ -102,9 +112,9 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
                 "opId": result.op_id,
                 "createdIds": result.created_ids,
                 "deletedIds": result.deleted_ids,
-                "sequenceId": reported_sequence_id,
+                "sequenceId": sequence_id,
                 "affectedRanges": affected_ranges,
-                "changes": camel_cased_changes(&result.changes)?,
+                "changes": camel_cased_changes(&result.changes),
             }))
         }
 
@@ -161,15 +171,50 @@ fn read_payload(
     Ok(value)
 }
 
-/// Reads the sequence a payload names, if it names one as a plain string.
-///
-/// Most backend commands carry `sequenceId`; the ones that do not act on the
-/// active sequence, which is what the caller falls back to.
-fn payload_sequence_id(payload: &serde_json::Value) -> Option<String> {
+/// Reads a plain-string field from a payload, if it carries one.
+fn payload_string(payload: &serde_json::Value, key: &str) -> Option<String> {
     payload
-        .get("sequenceId")
+        .get(key)
         .and_then(|value| value.as_str())
         .map(str::to_string)
+}
+
+/// Finds the sequence a payload acts on when it does not name one.
+///
+/// `UpdateEffect`, `UpdateMask` and `RemoveMask` address an effect and never a
+/// sequence, so the sequence is whichever one holds a clip carrying that effect.
+/// Falling back to the *active* sequence instead reported the whole timeline of
+/// a sequence the command had not touched, which is worse than reporting
+/// nothing: an agent cannot tell a confident wrong answer from a right one.
+///
+/// `None` when the payload names nothing that identifies a sequence — a
+/// `CreateSequence`, an asset import — and the caller then reports no sequence
+/// and no ranges rather than guessing.
+fn infer_sequence_id(
+    state: &openreelio_core::project::ProjectState,
+    effect_id: Option<&str>,
+    clip_id: Option<&str>,
+) -> Option<String> {
+    if effect_id.is_none() && clip_id.is_none() {
+        return None;
+    }
+
+    state
+        .sequences
+        .iter()
+        .find(|(_, sequence)| {
+            sequence
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter())
+                .any(|clip| {
+                    clip_id.is_some_and(|clip_id| clip.id == clip_id)
+                        || effect_id.is_some_and(|effect_id| {
+                            clip.effects.iter().any(|held| held == effect_id)
+                        })
+                })
+        })
+        .map(|(sequence_id, _)| sequence_id.clone())
 }
 
 /// Writes the where-to-look hand-off for the next inspection step.
@@ -178,12 +223,21 @@ fn payload_sequence_id(payload: &serde_json::Value) -> Option<String> {
 /// failed write costs a later sampler its shortcut and nothing else. It is
 /// reported on stderr rather than turned into a command failure, which would
 /// wrongly suggest the edit did not apply.
+///
+/// A record with no sequence or no ranges is not written at all. The file is a
+/// single hand-off slot, so writing an empty one over a real one loses the
+/// answer to "where did the last edit land" for a command that never had one —
+/// an asset import, a sequence created empty.
 pub(crate) fn record_affected_ranges(
     project_dir: &Path,
     sequence_id: &str,
     op_ids: Vec<String>,
     affected_ranges: &[TimeRange],
 ) {
+    if sequence_id.is_empty() || affected_ranges.is_empty() {
+        return;
+    }
+
     let record = LastAffectedRanges::new(sequence_id.to_string(), op_ids, affected_ranges.to_vec());
     if let Err(error) = save_last_affected_ranges(project_dir, &record) {
         eprintln!("warning: could not record the affected ranges: {error}");
@@ -198,20 +252,23 @@ pub(crate) fn record_affected_ranges(
 /// event payload — so the re-keying happens here rather than by changing a
 /// shape another surface already depends on. Each variant is a flat object of
 /// string fields, which is why a shallow pass over the keys is enough.
-fn camel_cased_changes(changes: &[StateChange]) -> anyhow::Result<Vec<serde_json::Value>> {
+///
+/// An entry that will not serialize is reported as JSON `null` rather than
+/// failing the command: by the time this runs the edit is applied *and saved*,
+/// so returning an error would print no result at all for work that is already
+/// durable, and invite the caller to run it a second time.
+fn camel_cased_changes(changes: &[StateChange]) -> Vec<serde_json::Value> {
     changes
         .iter()
-        .map(|change| {
-            let value = serde_json::to_value(change)?;
-            let serde_json::Value::Object(fields) = value else {
-                return Ok(value);
-            };
-            Ok(serde_json::Value::Object(
+        .map(|change| match serde_json::to_value(change) {
+            Ok(serde_json::Value::Object(fields)) => serde_json::Value::Object(
                 fields
                     .into_iter()
                     .map(|(key, value)| (to_camel_case(&key), value))
                     .collect(),
-            ))
+            ),
+            Ok(value) => value,
+            Err(_) => serde_json::Value::Null,
         })
         .collect()
 }
@@ -238,6 +295,70 @@ fn to_camel_case(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openreelio_core::project::ProjectState;
+    use openreelio_core::timeline::{Clip, Sequence, SequenceFormat, Track};
+
+    /// A project holding two sequences, the effect living on the second one.
+    ///
+    /// Returns `(state, active_sequence_id, other_sequence_id)`.
+    fn two_sequence_state(effect_id: &str) -> (ProjectState, String, String) {
+        let mut state = ProjectState::new("Two sequences");
+        let active_id = state
+            .sequences
+            .keys()
+            .next()
+            .cloned()
+            .expect("the default sequence");
+        state.active_sequence_id = Some(active_id.clone());
+
+        let mut other = Sequence::new("Second", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new("asset-a");
+        clip.effects.push(effect_id.to_string());
+        let clip_id = clip.id.clone();
+        track.clips.push(clip);
+        other.tracks.push(track);
+        let other_id = other.id.clone();
+        state.sequences.insert(other_id.clone(), other);
+
+        assert_ne!(active_id, other_id);
+        assert!(!clip_id.is_empty());
+        (state, active_id, other_id)
+    }
+
+    #[test]
+    fn should_measure_an_effect_edit_against_the_sequence_that_holds_the_effect() {
+        // `UpdateEffect` names no sequence. Measuring it against the *active*
+        // one reported that timeline's every second for an edit on another.
+        let (state, active_id, other_id) = two_sequence_state("fx-1");
+
+        let resolved = infer_sequence_id(&state, Some("fx-1"), None);
+
+        assert_eq!(resolved.as_deref(), Some(other_id.as_str()));
+        assert_ne!(resolved.as_deref(), Some(active_id.as_str()));
+    }
+
+    #[test]
+    fn should_measure_a_clip_edit_against_the_sequence_that_holds_the_clip() {
+        let (state, _active_id, other_id) = two_sequence_state("fx-1");
+        let clip_id = state.sequences[&other_id].tracks[0].clips[0].id.clone();
+
+        assert_eq!(
+            infer_sequence_id(&state, None, Some(&clip_id)).as_deref(),
+            Some(other_id.as_str())
+        );
+    }
+
+    #[test]
+    fn should_resolve_no_sequence_for_a_payload_that_names_nothing() {
+        // A `CreateSequence` payload names no sequence, no effect and no clip.
+        // Reporting the active sequence there claimed an edit landed somewhere
+        // it did not.
+        let (state, _active_id, _other_id) = two_sequence_state("fx-1");
+
+        assert_eq!(infer_sequence_id(&state, None, None), None);
+        assert_eq!(infer_sequence_id(&state, Some("fx-unknown"), None), None);
+    }
 
     #[test]
     fn should_report_change_fields_in_the_camel_case_the_cli_promises() {
@@ -251,7 +372,7 @@ mod tests {
             },
         ];
 
-        let serialized = camel_cased_changes(&changes).expect("changes");
+        let serialized = camel_cased_changes(&changes);
 
         assert_eq!(serialized[0]["type"], "markerCreated");
         assert_eq!(serialized[0]["markerId"], "marker-1");

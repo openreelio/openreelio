@@ -103,19 +103,26 @@ Samplers combine as a union, are deduplicated and sorted, and every frame or
 cell carries its `reason`. The payload also gains a `sampler` block —
 `{kinds, candidates, selected, limited, affectedRanges?}` — so a thinned
 selection is visible rather than looking like a short timeline. `--grid auto`
-sizes the sheet from the sample count (2 columns up to 2 samples, 3 up to 9,
-4 up to 16, then 6), which is why none of the calls above states a layout.
+sizes the sheet from the sample count (1 column for a single sample, 2 for two,
+3 up to 9, 4 up to 16, then 6), which is why none of the calls above states a
+layout.
 
 `--affected` reads `<project>/.openreelio/cache/agent/last_affected_ranges.json`,
-written by every successful `command execute` and `plan execute`; the same union
-is on those commands' own `affectedRanges` response. If nothing has been applied
-to the sequence yet, the sampler says so rather than guessing — apply first, or
-fall back to `--between`.
+written by every successful mutating verb — `command execute`, `plan execute`,
+and the `timeline`, `text` and `caption` edit verbs, which all report the same
+union on their own `affectedRanges` response. If nothing has been applied to the
+sequence yet, or the record does not end at the project's current operation
+(an undo, a redo, an edit applied by something that records no hand-off), the
+sampler says so rather than guessing — re-apply, or fall back to `--between`.
 
-`timeline info` still reports the raw signals (`editPoints`, `fps`/`fpsRatio`,
+`timeline info` still reports the raw signals (`cuts`, `fps`/`fpsRatio`,
 `markers`, `transitions`, `captionSpans`, `textSpans`), and you need them for one
 case the samplers cannot serve: a `--file` sheet, which reads a rendered artifact
-and has no timeline to sample. There, keep passing `--times`.
+and has no timeline to sample. There, keep passing `--times`. Take the cut times
+from `cuts` — the boundaries where the picture changes — not from `editPoints`,
+which also lists the head, the tail, and caption and audio boundaries. A
+transition listed with `rendersAsCut: true` will not be blended in the file, so
+judge that boundary as a cut.
 
 **Why the cut offsets are asymmetric.** `frame extract` seeks with `-ss` before
 `-i`, which resolves **forward**: it returns the first frame whose PTS is ≥ the
