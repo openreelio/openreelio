@@ -108,6 +108,20 @@ pub struct AgentPlanResult {
     pub error_message: Option<String>,
     /// Total execution time in milliseconds
     pub execution_time_ms: u64,
+    /// Sequence the affected ranges are measured against, when one is known.
+    ///
+    /// Resolved once for the whole plan: a step that edits a different sequence
+    /// contributes no ranges rather than ranges read off the wrong timeline.
+    #[serde(default)]
+    pub sequence_id: Option<String>,
+    /// Stretches of that sequence's timeline the plan changed, as a union.
+    ///
+    /// A plan that failed and rolled back cleanly reports none — there is no
+    /// longer anywhere to look. A plan whose rollback was incomplete keeps the
+    /// applied steps' ranges, because the project really is changed and that
+    /// union is the only honest answer to "where do I look now".
+    #[serde(default)]
+    pub affected_ranges: Vec<crate::core::TimeRange>,
 }
 
 /// Result of executing a single plan step.
@@ -236,6 +250,8 @@ mod tests {
             rollback_report: None,
             error_message: None,
             execution_time_ms: 60,
+            sequence_id: Some("seq-1".to_string()),
+            affected_ranges: vec![crate::core::TimeRange::new(1.0, 2.5)],
         };
 
         let json = serde_json::to_string(&result).unwrap();
@@ -246,6 +262,29 @@ mod tests {
         assert_eq!(deserialized.steps_completed, 2);
         assert_eq!(deserialized.operation_ids.len(), 2);
         assert!(deserialized.rollback_report.is_none());
+        assert_eq!(deserialized.sequence_id.as_deref(), Some("seq-1"));
+        assert_eq!(deserialized.affected_ranges.len(), 1);
+        assert_eq!(deserialized.affected_ranges[0].start_sec, 1.0);
+    }
+
+    #[test]
+    fn agent_plan_result_without_affected_ranges_still_parses() {
+        // The frontend and the external-agent bridge both predate the field, so
+        // a result serialized without it has to keep deserializing rather than
+        // failing the whole plan apply.
+        let result: AgentPlanResult = serde_json::from_value(serde_json::json!({
+            "planId": "plan-002",
+            "success": true,
+            "totalSteps": 0,
+            "stepsCompleted": 0,
+            "stepResults": [],
+            "operationIds": [],
+            "executionTimeMs": 3,
+        }))
+        .expect("a result without affected ranges still parses");
+
+        assert!(result.sequence_id.is_none());
+        assert!(result.affected_ranges.is_empty());
     }
 
     #[test]

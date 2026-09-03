@@ -6,6 +6,7 @@
 //! data types and small helpers so they compile in the core crate.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -324,6 +325,45 @@ pub fn write_mcp_config_file(path: &Path, mcp_url: &str, token: &str) -> Result<
     Ok(())
 }
 
+/// Prefix Claude namespaces this server's tools with.
+///
+/// The loopback server registers bare names and Claude asks for the prefixed
+/// ones, so anything that reasons about a tool *name* has to accept both
+/// spellings or it will silently only ever match one host.
+pub const CLAUDE_MCP_TOOL_PREFIX: &str = "mcp__openreelio__";
+
+/// Time a `tools/call` may take before the loopback server gives up on it.
+///
+/// Generous, because the wait covers a human: the frontend shows an approval
+/// dialog and only answers once someone acts on it.
+pub const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Time a `tools/call` that runs a render may take.
+///
+/// A proxy render of a range is FFmpeg work on top of the same approval wait,
+/// and a cut long enough to be worth judging routinely outruns the default
+/// budget. Timing it out reports a failed tool call for a render that is still
+/// running and will finish, which is the one answer an agent cannot recover
+/// from — it re-plans around a step it thinks did not happen.
+pub const MCP_RENDER_CALL_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// The budget one `tools/call` is given, chosen by which tool was called.
+///
+/// `tool_name` may arrive bare (as the loopback server registers it) or
+/// prefixed (as Claude spells it); both resolve to the same budget so the two
+/// hosts cannot disagree about how long a render is allowed to take.
+pub fn tool_call_timeout(tool_name: &str) -> Duration {
+    let bare = tool_name
+        .strip_prefix(CLAUDE_MCP_TOOL_PREFIX)
+        .unwrap_or(tool_name);
+
+    if bare.ends_with("render_proxy") {
+        return MCP_RENDER_CALL_TIMEOUT;
+    }
+
+    MCP_CALL_TIMEOUT
+}
+
 /// Wraps a frontend tool-call response as an MCP `tools/call` result payload of
 /// the shape `{ content: [{ type: "text", text }, ...images], isError }`.
 ///
@@ -527,6 +567,33 @@ mod tests {
             "a tool that attaches no image must carry one block"
         );
         assert_eq!(wrapped["isError"], false);
+    }
+
+    #[test]
+    fn tool_call_timeout_gives_a_render_its_own_budget() {
+        // Bare as the loopback server registers it, prefixed as Claude spells
+        // it: both hosts have to land on the same budget.
+        assert_eq!(tool_call_timeout("render_proxy"), MCP_RENDER_CALL_TIMEOUT);
+        assert_eq!(
+            tool_call_timeout("mcp__openreelio__render_proxy"),
+            MCP_RENDER_CALL_TIMEOUT
+        );
+
+        // Everything else keeps the default, which is sized for a human
+        // answering an approval dialog rather than for FFmpeg.
+        for tool in [
+            "project_state",
+            "frame_extract",
+            "plan_apply",
+            "mcp__openreelio__timeline_snapshot",
+            // Not a suffix match: only a tool that actually renders gets the
+            // longer budget.
+            "render_proxy_status",
+        ] {
+            assert_eq!(tool_call_timeout(tool), MCP_CALL_TIMEOUT, "{tool}");
+        }
+
+        assert!(MCP_RENDER_CALL_TIMEOUT > MCP_CALL_TIMEOUT);
     }
 
     #[test]

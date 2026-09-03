@@ -28,7 +28,8 @@ use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use crate::core::claude_headless::{
-    parse_bearer_token, wrap_tool_result, ClaudeMcpToolSpec, OpenReelioMcpCallResponse,
+    parse_bearer_token, tool_call_timeout, wrap_tool_result, ClaudeMcpToolSpec,
+    OpenReelioMcpCallResponse,
 };
 use crate::AppState;
 
@@ -45,9 +46,6 @@ pub const OPENREELIO_MCP_CANCEL_EVENT: &str = "openreelio:mcp:cancel";
 
 /// MCP protocol revision advertised by the loopback server.
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-
-/// Maximum time to await a `tools/call` response from the frontend.
-const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Registry entry for one headless session's bearer token.
 struct McpSessionEntry {
@@ -389,7 +387,18 @@ async fn handle_tools_call(
         );
     }
 
-    match timeout(MCP_CALL_TIMEOUT, receiver).await {
+    // Per tool, not flat: a proxy render of a range routinely outruns the
+    // budget an approval dialog needs, and timing it out reports a failed call
+    // for work that is still running.
+    let call_timeout = tool_call_timeout(tool);
+    tracing::debug!(
+        tool = %tool,
+        call_id = %call_id,
+        timeout_secs = call_timeout.as_secs(),
+        "Awaiting OpenReelio MCP tool call"
+    );
+
+    match timeout(call_timeout, receiver).await {
         Ok(Ok(response)) => json_rpc_result(id, wrap_tool_result(response)),
         Ok(Err(_)) => {
             // The responder was dropped (e.g. the session was deregistered).

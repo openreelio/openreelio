@@ -3365,7 +3365,23 @@ errorMessage?: string | null;
 /**
  * Total execution time in milliseconds
  */
-executionTimeMs: number }
+executionTimeMs: number; 
+/**
+ * Sequence the affected ranges are measured against, when one is known.
+ * 
+ * Resolved once for the whole plan: a step that edits a different sequence
+ * contributes no ranges rather than ranges read off the wrong timeline.
+ */
+sequenceId?: string | null; 
+/**
+ * Stretches of that sequence's timeline the plan changed, as a union.
+ * 
+ * A plan that failed and rolled back cleanly reports none — there is no
+ * longer anywhere to look. A plan whose rollback was incomplete keeps the
+ * applied steps' ranges, because the project really is changed and that
+ * union is the only honest answer to "where do I look now".
+ */
+affectedRanges?: TimeRange[] }
 /**
  * Persisted orchestration run for an agent session.
  */
@@ -4837,7 +4853,23 @@ createdIds: string[];
 /**
  * IDs of entities deleted by this command
  */
-deletedIds: string[] }
+deletedIds: string[]; 
+/**
+ * Sequence the affected ranges are measured against, when one is known.
+ * 
+ * `None` for a command that identifies no timeline — a `CreateSequence`,
+ * an asset import — where reporting the active sequence would send an
+ * inspection step to a timeline the command never touched.
+ */
+sequenceId: string | null; 
+/**
+ * Stretches of that sequence's timeline this command changed.
+ * 
+ * Sorted, disjoint, and measured as a diff across the apply, so a ripple
+ * move is reported in full rather than as the one clip that was named.
+ * Empty when nothing on the timeline moved.
+ */
+affectedRanges: TimeRange[] }
 /**
  * Persisted compaction record DTO aligned with the frontend session kernel vocabulary.
  */
@@ -8976,6 +9008,10 @@ duration: number;
  * Edit mode that was applied.
  */
 editMode: ThreePointEditMode }
+/**
+ * Time range
+ */
+export type TimeRange = { startSec: number; endSec: number }
 /**
  * A complete time remap curve for variable-speed playback.
  * 

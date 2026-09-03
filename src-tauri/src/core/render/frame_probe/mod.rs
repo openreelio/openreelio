@@ -646,12 +646,7 @@ impl FrameProbePlan {
     /// Every guard the CLI relies on lives here rather than in its clap layer,
     /// because clap validates only the CLI's own callers.
     pub fn resolve(request: FrameProbeRequest) -> FrameProbeResult<Self> {
-        let selection = resolve_selection(&request)?;
-        let format = resolve_image_format(request.format.as_deref(), &request.out)?;
-        let mode = TimelineMode::resolve(request.mode.as_deref())?;
-        ensure_cell_size_in_range(&request)?;
-        ensure_max_width_in_range(&request)?;
-        ensure_sheet_fits(&request, &selection)?;
+        let (selection, format, mode) = Self::check(&request)?;
 
         Ok(Self {
             request,
@@ -659,6 +654,33 @@ impl FrameProbePlan {
             format,
             mode,
         })
+    }
+
+    /// Runs every guard [`resolve`](Self::resolve) runs, without consuming the
+    /// request.
+    ///
+    /// For a caller that has to know a request is servable *before* it acquires
+    /// something on the request's behalf. The GUI reserves a frame-cache entry
+    /// for every extraction, and reserving one also prunes the cache — so
+    /// allocating first meant a malformed request evicted a legitimate entry to
+    /// make room for a directory nothing was ever written into.
+    pub fn validate(request: &FrameProbeRequest) -> FrameProbeResult<()> {
+        Self::check(request).map(|_| ())
+    }
+
+    /// The guards themselves, shared by [`resolve`](Self::resolve) and
+    /// [`validate`](Self::validate) so the two can never disagree.
+    fn check(
+        request: &FrameProbeRequest,
+    ) -> FrameProbeResult<(Selection, ImageFormat, TimelineMode)> {
+        let selection = resolve_selection(request)?;
+        let format = resolve_image_format(request.format.as_deref(), &request.out)?;
+        let mode = TimelineMode::resolve(request.mode.as_deref())?;
+        ensure_cell_size_in_range(request)?;
+        ensure_max_width_in_range(request)?;
+        ensure_sheet_fits(request, &selection)?;
+
+        Ok((selection, format, mode))
     }
 
     /// Whether serving this plan needs the project opened.
@@ -841,7 +863,7 @@ fn resolve_affected_ranges(
 ) -> FrameProbeResult<Vec<crate::core::TimeRange>> {
     let Some(record) = load_last_affected_ranges(project.path) else {
         return Err(FrameProbeError::new(
-            "--affected reads the ranges the last edit changed, and this project has none recorded. Apply an edit with `command execute` or `plan execute` first, or pass --between <START> <END> to sweep the timeline instead."
+            "--affected reads the ranges the last edit changed, and this project has none recorded. Apply an edit first — `command execute`, `plan execute`, the other editing verbs and the app's own edit commands all record where one landed — or pass --between <START> <END> to sweep the timeline instead."
                 .to_string(),
         ));
     };
@@ -853,7 +875,7 @@ fn resolve_affected_ranges(
     }
     if record.op_ids.last().map(String::as_str) != project.state.last_op_id.as_deref() {
         return Err(FrameProbeError::new(format!(
-            "The recorded hand-off ends at operation {}, but this project is at {}, so the last edit was not recorded: run the edit through `command execute` or `plan execute`, or pass --between <START> <END>.",
+            "The recorded hand-off ends at operation {}, but this project is at {}, so the last edit was not recorded — an undo or a redo leaves it describing a state the project has left. Re-apply the edit, or pass --between <START> <END>.",
             describe_op_id(record.op_ids.last().map(String::as_str)),
             describe_op_id(project.state.last_op_id.as_deref()),
         )));

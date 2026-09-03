@@ -15,6 +15,9 @@ use std::time::Instant;
 
 use super::agent_plan::{AgentPlan, AgentPlanResult, RollbackReport, StepResult};
 use super::plan_executor::{resolve_step_references, PlanExecutor};
+use crate::core::commands::{record_affected_ranges, union_ranges, SequenceSnapshot};
+use crate::core::project::ProjectState;
+use crate::core::TimeRange;
 use crate::ipc::CommandPayload;
 use crate::ActiveProject;
 
@@ -120,6 +123,13 @@ pub fn run_agent_plan(
 ///
 /// `execution_order` must come from [`PlanExecutor::validate_and_prepare`] for
 /// the same plan.
+///
+/// Every step is diffed against a before-image of the target sequence, and the
+/// union is reported as `affected_ranges` and written to the project's
+/// where-to-look hand-off. That is what lets the next inspection step — a
+/// contact sheet of the change, say — ask for "the last edit" instead of
+/// re-reading the whole timeline. On failure the ranges follow the rollback:
+/// see [`rolled_back_ranges`].
 pub fn execute_prepared_plan(
     project: &mut ActiveProject,
     plan: &AgentPlan,
@@ -131,6 +141,7 @@ pub fn execute_prepared_plan(
     let plan_id = plan.id.clone();
     let total_steps = plan.steps.len();
     let project_path = project.path.clone();
+    let target_sequence_id = resolve_plan_sequence_id(&project.state, plan);
 
     // Rollback unwinds the executor's in-memory undo stack, and that stack is
     // capped for interactive use — far below the plan step cap. Without this, a
@@ -141,6 +152,7 @@ pub fn execute_prepared_plan(
     let mut step_results: Vec<StepResult> = Vec::with_capacity(total_steps);
     let mut results_by_id: HashMap<String, StepResult> = HashMap::new();
     let mut operation_ids: Vec<String> = Vec::new();
+    let mut step_ranges: Vec<Vec<TimeRange>> = Vec::new();
     let mut steps_completed: usize = 0;
 
     tracing::info!(
@@ -185,6 +197,7 @@ pub fn execute_prepared_plan(
                 });
 
                 let rollback_report = rollback_steps(project, executor, step_idx, &step_results);
+                let affected_ranges = rolled_back_ranges(&rollback_report, step_ranges);
 
                 return AgentPlanResult {
                     plan_id,
@@ -199,6 +212,8 @@ pub fn execute_prepared_plan(
                         step.id
                     )),
                     execution_time_ms: start.elapsed().as_millis() as u64,
+                    sequence_id: reported_sequence_id(&target_sequence_id),
+                    affected_ranges,
                 };
             }
         };
@@ -228,6 +243,7 @@ pub fn execute_prepared_plan(
                 });
 
                 let rollback_report = rollback_steps(project, executor, step_idx, &step_results);
+                let affected_ranges = rolled_back_ranges(&rollback_report, step_ranges);
 
                 return AgentPlanResult {
                     plan_id,
@@ -239,16 +255,27 @@ pub fn execute_prepared_plan(
                     rollback_report: Some(rollback_report),
                     error_message: Some(format!("Step '{}' failed: invalid command", step.id)),
                     execution_time_ms: start.elapsed().as_millis() as u64,
+                    sequence_id: reported_sequence_id(&target_sequence_id),
+                    affected_ranges,
                 };
             }
         };
 
-        // Build and execute the command
+        // Build and execute the command. The before-image has to be taken
+        // while the state still holds it: the ranges a step changed are the
+        // diff across its mutation, and a ripple move shifts clips no reported
+        // `StateChange` names.
         let command = typed_payload.build_command(&project_path);
+        let before = SequenceSnapshot::capture(&project.state, &target_sequence_id);
         match project.executor.execute(command, &mut project.state) {
             Ok(cmd_result) => {
                 let duration_ms = step_start.elapsed().as_millis() as u64;
                 let op_id = cmd_result.op_id.clone();
+                step_ranges.push(before.affected_ranges(
+                    &project.state,
+                    &target_sequence_id,
+                    &cmd_result.changes,
+                ));
 
                 let step_data = serde_json::json!({
                     "operationId": op_id,
@@ -315,6 +342,7 @@ pub fn execute_prepared_plan(
                 );
 
                 let rollback_report = rollback_steps(project, executor, step_idx, &step_results);
+                let affected_ranges = rolled_back_ranges(&rollback_report, step_ranges);
 
                 return AgentPlanResult {
                     plan_id,
@@ -326,14 +354,32 @@ pub fn execute_prepared_plan(
                     rollback_report: Some(rollback_report),
                     error_message: Some(format!("Step '{}' failed during execution", step.id)),
                     execution_time_ms: start.elapsed().as_millis() as u64,
+                    sequence_id: reported_sequence_id(&target_sequence_id),
+                    affected_ranges,
                 };
             }
         }
     }
 
+    let affected_ranges = union_ranges(step_ranges);
+    if let Err(error) = record_affected_ranges(
+        &project_path,
+        &target_sequence_id,
+        operation_ids.clone(),
+        &affected_ranges,
+    ) {
+        // The plan is already durable in the ops log, so a failed hand-off
+        // costs the next inspection step its shortcut and nothing else.
+        tracing::warn!(
+            plan_id = %plan_id,
+            "Could not record the affected ranges: {error}"
+        );
+    }
+
     tracing::info!(
         plan_id = %plan_id,
         steps_completed = steps_completed,
+        affected_ranges = affected_ranges.len(),
         elapsed_ms = start.elapsed().as_millis(),
         "Agent plan executed successfully"
     );
@@ -348,7 +394,57 @@ pub fn execute_prepared_plan(
         rollback_report: None,
         error_message: None,
         execution_time_ms: start.elapsed().as_millis() as u64,
+        sequence_id: reported_sequence_id(&target_sequence_id),
+        affected_ranges,
     }
+}
+
+/// Picks the sequence a plan's affected ranges are measured against.
+///
+/// The first step that names an existing `sequenceId` wins; a plan that names
+/// none falls back to the active sequence. Resolved once for the whole plan
+/// rather than per step, because a hand-off file describing two timelines could
+/// not say which seconds of which one to look at.
+///
+/// Returns an empty string when nothing can be resolved — a project with no
+/// active sequence — which yields empty ranges rather than an error.
+fn resolve_plan_sequence_id(state: &ProjectState, plan: &AgentPlan) -> String {
+    plan.steps
+        .iter()
+        .filter_map(|step| step.params.get("sequenceId").and_then(|id| id.as_str()))
+        .find(|sequence_id| state.sequences.contains_key(*sequence_id))
+        .map(str::to_string)
+        .or_else(|| state.active_sequence_id.clone())
+        .unwrap_or_default()
+}
+
+/// The sequence id a result reports, or `None` when none could be resolved.
+fn reported_sequence_id(sequence_id: &str) -> Option<String> {
+    (!sequence_id.is_empty()).then(|| sequence_id.to_string())
+}
+
+/// The ranges a failed plan reports, decided by whether the rollback worked.
+///
+/// A clean rollback puts every applied step back, so the ranges those steps
+/// reported no longer name anything changed and all of them are dropped —
+/// sending an inspector to a frame that never differed is worse than sending it
+/// nowhere.
+///
+/// An incomplete rollback is the opposite case: an operation that could not be
+/// undone or discarded stays applied and comes back on the next open, so the
+/// project really is changed. Reporting no ranges there would say in one breath
+/// that the project was mutated and that nothing on the timeline moved. The
+/// union of the applied steps' ranges is the only honest answer to "where do I
+/// look now".
+///
+/// Nothing is written to the hand-off file either way: a failed plan must not
+/// overwrite the record of the last apply that did land.
+fn rolled_back_ranges(report: &RollbackReport, step_ranges: Vec<Vec<TimeRange>>) -> Vec<TimeRange> {
+    if report.rollback_errors.is_empty() {
+        return Vec::new();
+    }
+
+    union_ranges(step_ranges)
 }
 
 /// Rolls back completed steps in reverse order and excludes their persisted ops
@@ -501,6 +597,117 @@ mod tests {
             project.state.active_sequence_id = Some(sequence_id);
         }
         project
+    }
+
+    /// A step that drops a marker at `time` on the target sequence.
+    ///
+    /// A marker is the cheapest edit that lands at a known place on a timeline:
+    /// it needs no asset and no track, so the test measures the range
+    /// arithmetic rather than a fixture.
+    fn add_marker_step(id: &str, sequence_id: &str, time: f64) -> PlanStep {
+        PlanStep {
+            id: id.to_string(),
+            tool_name: "addMarker".to_string(),
+            params: serde_json::json!({
+                "sequenceId": sequence_id,
+                "timeSec": time,
+                "label": format!("Marker at {time}"),
+            }),
+            description: format!("Mark {time}"),
+            risk_level: PlanRiskLevel::Low,
+            depends_on: vec![],
+            optional: false,
+        }
+    }
+
+    #[test]
+    fn run_agent_plan_reports_and_records_where_the_plan_landed() {
+        let dir = TempDir::new().expect("temp dir");
+        let mut project = open_project(&dir);
+        let sequence_id = project
+            .state
+            .active_sequence_id
+            .clone()
+            .expect("active sequence");
+
+        let plan = plan_with(vec![
+            add_marker_step("step-1", &sequence_id, 1.5),
+            add_marker_step("step-2", &sequence_id, 6.0),
+        ]);
+
+        let result = run_agent_plan(&mut project, &plan, &NullPlanStepReporter, Instant::now())
+            .expect("the plan applies");
+
+        assert!(result.success, "{:?}", result.error_message);
+        assert_eq!(result.sequence_id.as_deref(), Some(sequence_id.as_str()));
+        // Two moments apart on the timeline: the union keeps them as two
+        // ranges rather than one span covering the gap between them.
+        assert_eq!(
+            result
+                .affected_ranges
+                .iter()
+                .map(|range| (range.start_sec, range.end_sec))
+                .collect::<Vec<_>>(),
+            vec![(1.5, 1.5), (6.0, 6.0)]
+        );
+
+        // The hand-off is what makes a later `--affected` inspection mean "the
+        // last edit"; without it the in-app bridge could never use one.
+        let record = crate::core::commands::load_last_affected_ranges(&project.path)
+            .expect("a hand-off was written");
+        assert_eq!(record.sequence_id, sequence_id);
+        assert_eq!(record.op_ids, result.operation_ids);
+        assert_eq!(record.affected_ranges, result.affected_ranges);
+    }
+
+    #[test]
+    fn run_agent_plan_reports_no_ranges_when_the_plan_rolled_back_cleanly() {
+        let dir = TempDir::new().expect("temp dir");
+        let mut project = open_project(&dir);
+        let sequence_id = project
+            .state
+            .active_sequence_id
+            .clone()
+            .expect("active sequence");
+
+        let mut steps = vec![add_marker_step("step-1", &sequence_id, 1.5)];
+        // Rejected by the payload parser, after the first step already applied.
+        steps.push(PlanStep {
+            id: "step-boom".to_string(),
+            tool_name: "addTrack".to_string(),
+            params: serde_json::json!({ "trackType": "not-a-track-type" }),
+            description: "Invalid step".to_string(),
+            risk_level: PlanRiskLevel::Low,
+            depends_on: vec![],
+            optional: false,
+        });
+
+        let result = run_agent_plan(
+            &mut project,
+            &plan_with(steps),
+            &NullPlanStepReporter,
+            Instant::now(),
+        )
+        .expect("a step failure is reported as a failed result");
+
+        assert!(!result.success);
+        let report = result.rollback_report.as_ref().expect("a rollback report");
+        assert!(
+            report.rollback_errors.is_empty(),
+            "the rollback must be clean for this case: {:?}",
+            report.rollback_errors
+        );
+        // Everything went back, so nothing on the timeline differs any more.
+        // Sending an inspector to a frame that never changed is worse than
+        // sending it nowhere.
+        assert!(
+            result.affected_ranges.is_empty(),
+            "a clean rollback must report no ranges: {:?}",
+            result.affected_ranges
+        );
+        // And the hand-off of whatever landed before must not be overwritten
+        // by a plan that did not land.
+        assert!(crate::core::commands::load_last_affected_ranges(&project.path).is_none());
     }
 
     #[test]

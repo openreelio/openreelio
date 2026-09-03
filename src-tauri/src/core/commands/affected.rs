@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    commands::StateChange,
+    commands::{CommandResult, StateChange},
     effects::Effect,
     project::ProjectState,
     timeline::{transition_span_sec, Sequence},
@@ -383,6 +383,122 @@ impl SequenceSnapshot {
     }
 }
 
+/// One mutating apply, from the before-image to the ranges it changed.
+///
+/// Every surface that applies an edit has to answer the same question — *where
+/// on the timeline did this land* — and the answer is a diff across the whole
+/// apply, not a summary of what each step reported. Holding the before-image and
+/// folding results into it keeps that arithmetic in one place, so the GUI's
+/// `execute_command`, its plan runner and the CLI's verbs cannot disagree about
+/// what `--affected` will point at.
+///
+/// A verb that applies several commands under one save opens one recorder and
+/// observes each result: the ranges are then the diff across the whole verb,
+/// which is what the caller asked about anyway.
+#[derive(Clone, Debug)]
+pub struct EditRecording {
+    sequence_id: String,
+    before: SequenceSnapshot,
+    op_ids: Vec<String>,
+    changes: Vec<StateChange>,
+}
+
+impl EditRecording {
+    /// Captures the before-image of the sequence an apply is about to change.
+    ///
+    /// Must be called before the first command runs: the ranges are a diff
+    /// across the mutation, and a ripple move shifts clips no reported change
+    /// names.
+    pub fn begin(state: &ProjectState, sequence_id: &str) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            before: SequenceSnapshot::capture(state, sequence_id),
+            op_ids: Vec::new(),
+            changes: Vec::new(),
+        }
+    }
+
+    /// Folds one applied command's result into the recording.
+    pub fn observe(&mut self, result: &CommandResult) {
+        self.op_ids.push(result.op_id.clone());
+        self.changes.extend(result.changes.iter().cloned());
+    }
+
+    /// The sequence these ranges are measured against.
+    pub fn sequence_id(&self) -> &str {
+        &self.sequence_id
+    }
+
+    /// The operation ids the apply appended, in order.
+    pub fn op_ids(&self) -> &[String] {
+        &self.op_ids
+    }
+
+    /// Diffs the before-image against the state as it now stands.
+    pub fn ranges(&self, state: &ProjectState) -> Vec<TimeRange> {
+        self.before
+            .affected_ranges(state, &self.sequence_id, &self.changes)
+    }
+
+    /// Computes the ranges and writes the where-to-look hand-off for them.
+    ///
+    /// Recording is best-effort: by the time this runs the edit is already
+    /// durable in the ops log, so a failed write costs the next inspection step
+    /// its shortcut and nothing else. It is logged rather than returned, because
+    /// a caller that turned it into a failure would tell the user an edit that
+    /// did apply did not.
+    pub fn finish(self, project_dir: &Path, state: &ProjectState) -> Vec<TimeRange> {
+        let ranges = self.ranges(state);
+        if let Err(error) =
+            record_affected_ranges(project_dir, &self.sequence_id, self.op_ids, &ranges)
+        {
+            tracing::warn!(
+                sequence_id = %self.sequence_id,
+                "Could not record the affected ranges: {error}"
+            );
+        }
+        ranges
+    }
+}
+
+/// Finds the sequence a command payload acts on when it does not name one.
+///
+/// `UpdateEffect`, `UpdateMask` and `RemoveMask` address an effect and never a
+/// sequence, so the sequence is whichever one holds a clip carrying that effect.
+/// Falling back to the *active* sequence instead reported the whole timeline of
+/// a sequence the command had not touched, which is worse than reporting
+/// nothing: an agent cannot tell a confident wrong answer from a right one.
+///
+/// `None` when the payload names nothing that identifies a sequence — a
+/// `CreateSequence`, an asset import — and the caller then reports no sequence
+/// and no ranges rather than guessing.
+pub fn infer_sequence_id(
+    state: &ProjectState,
+    effect_id: Option<&str>,
+    clip_id: Option<&str>,
+) -> Option<String> {
+    if effect_id.is_none() && clip_id.is_none() {
+        return None;
+    }
+
+    state
+        .sequences
+        .iter()
+        .find(|(_, sequence)| {
+            sequence
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter())
+                .any(|clip| {
+                    clip_id.is_some_and(|clip_id| clip.id == clip_id)
+                        || effect_id.is_some_and(|effect_id| {
+                            clip.effects.iter().any(|held| held == effect_id)
+                        })
+                })
+        })
+        .map(|(sequence_id, _)| sequence_id.clone())
+}
+
 fn whole_sequence_range(sequence: &Sequence) -> Vec<TimeRange> {
     let end = sequence.duration();
     if !end.is_finite() || end <= 0.0 {
@@ -492,6 +608,33 @@ pub fn save_last_affected_ranges(
     let _ = std::fs::remove_file(&temp_path);
     std::fs::write(&path, serialized)
         .map_err(|error| format!("Failed to write {}: {error}", path.display()))
+}
+
+/// Writes the where-to-look hand-off for the next inspection step, if there is
+/// one to write.
+///
+/// A record with no sequence or no ranges is skipped rather than written empty
+/// — the answer is `Ok(false)`. The file is a single hand-off slot, so writing
+/// an empty one over a real one loses the answer to "where did the last edit
+/// land" for a command that never had one: an asset import, a sequence created
+/// empty.
+///
+/// Callers treat a failure as a warning in their own voice. The edit is already
+/// durable in the ops log by the time this runs, so turning a failed hand-off
+/// into a command failure would wrongly suggest the edit did not apply.
+pub fn record_affected_ranges(
+    project_dir: &Path,
+    sequence_id: &str,
+    op_ids: Vec<String>,
+    affected_ranges: &[TimeRange],
+) -> Result<bool, String> {
+    if sequence_id.is_empty() || affected_ranges.is_empty() {
+        return Ok(false);
+    }
+
+    let record = LastAffectedRanges::new(sequence_id.to_string(), op_ids, affected_ranges.to_vec());
+    save_last_affected_ranges(project_dir, &record)?;
+    Ok(true)
 }
 
 /// Reads the last-apply record for a project.
@@ -806,6 +949,144 @@ mod tests {
         );
 
         assert!(result.is_empty());
+    }
+
+    /// A project holding two sequences, the effect living on the second one.
+    ///
+    /// Returns `(state, active_sequence_id, other_sequence_id)`.
+    fn two_sequence_state(effect_id: &str) -> (ProjectState, String, String) {
+        let mut state = ProjectState::new("Two sequences");
+        let active_id = state
+            .sequences
+            .keys()
+            .next()
+            .cloned()
+            .expect("the default sequence");
+        state.active_sequence_id = Some(active_id.clone());
+
+        let mut other = Sequence::new("Second", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new("asset-a");
+        clip.effects.push(effect_id.to_string());
+        let clip_id = clip.id.clone();
+        track.clips.push(clip);
+        other.tracks.push(track);
+        let other_id = other.id.clone();
+        state.sequences.insert(other_id.clone(), other);
+
+        assert_ne!(active_id, other_id);
+        assert!(!clip_id.is_empty());
+        (state, active_id, other_id)
+    }
+
+    #[test]
+    fn should_measure_an_effect_edit_against_the_sequence_that_holds_the_effect() {
+        // `UpdateEffect` names no sequence. Measuring it against the *active*
+        // one reported that timeline's every second for an edit on another.
+        let (state, active_id, other_id) = two_sequence_state("fx-1");
+
+        let resolved = infer_sequence_id(&state, Some("fx-1"), None);
+
+        assert_eq!(resolved.as_deref(), Some(other_id.as_str()));
+        assert_ne!(resolved.as_deref(), Some(active_id.as_str()));
+    }
+
+    #[test]
+    fn should_measure_a_clip_edit_against_the_sequence_that_holds_the_clip() {
+        let (state, _active_id, other_id) = two_sequence_state("fx-1");
+        let clip_id = state.sequences[&other_id].tracks[0].clips[0].id.clone();
+
+        assert_eq!(
+            infer_sequence_id(&state, None, Some(&clip_id)).as_deref(),
+            Some(other_id.as_str())
+        );
+    }
+
+    #[test]
+    fn should_resolve_no_sequence_for_a_payload_that_names_nothing() {
+        // A `CreateSequence` payload names no sequence, no effect and no clip.
+        // Reporting the active sequence there claimed an edit landed somewhere
+        // it did not.
+        let (state, _active_id, _other_id) = two_sequence_state("fx-1");
+
+        assert_eq!(infer_sequence_id(&state, None, None), None);
+        assert_eq!(infer_sequence_id(&state, Some("fx-unknown"), None), None);
+    }
+
+    /// A project whose active sequence holds three back-to-back clips.
+    fn rippleable_project() -> (ProjectState, String) {
+        let mut state = ProjectState::new("Recording");
+        let mut sequence = sequence_with(vec![
+            ("clip-a", 0.0, 2.0),
+            ("clip-b", 2.0, 2.0),
+            ("clip-c", 4.0, 2.0),
+        ]);
+        sequence.id = "seq-record".to_string();
+        let sequence_id = sequence.id.clone();
+        state.sequences.insert(sequence_id.clone(), sequence);
+        state.active_sequence_id = Some(sequence_id.clone());
+        (state, sequence_id)
+    }
+
+    #[test]
+    fn should_record_the_ranges_a_real_apply_changed() {
+        // The GUI cannot construct a `State<AppState>` in a unit test, so the
+        // path under test is the one its command delegates to: capture the
+        // before-image, run a real command through a real `CommandExecutor`,
+        // and fold the result back in.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (mut state, sequence_id) = rippleable_project();
+        let mut executor = crate::core::commands::CommandExecutor::new();
+
+        let mut recording = EditRecording::begin(&state, &sequence_id);
+        let result = executor
+            .execute(
+                Box::new(crate::core::commands::RippleDeleteCommand::new(
+                    &sequence_id,
+                    "track-v1",
+                    vec!["clip-a".to_string()],
+                )),
+                &mut state,
+            )
+            .expect("the clip is rippled out");
+        recording.observe(&result);
+
+        let ranges = recording.finish(dir.path(), &state);
+
+        // A ripple delete moves clips no `StateChange` entry names, so the
+        // answer has to be the diff, not the change list.
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| (range.start_sec, range.end_sec))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 6.0)]
+        );
+
+        let record = load_last_affected_ranges(dir.path()).expect("a hand-off was written");
+        assert_eq!(record.sequence_id, sequence_id);
+        assert_eq!(record.op_ids, vec![result.op_id]);
+        assert_eq!(record.affected_ranges, ranges);
+    }
+
+    #[test]
+    fn should_not_overwrite_the_hand_off_for_an_apply_that_moved_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let landed = LastAffectedRanges::new(
+            "seq-record".to_string(),
+            vec!["op-earlier".to_string()],
+            vec![TimeRange::new(1.0, 2.0)],
+        );
+        save_last_affected_ranges(dir.path(), &landed).expect("save");
+
+        let (state, sequence_id) = rippleable_project();
+        // No command ran, so the diff is empty. The file is one hand-off slot:
+        // blanking it here would lose the answer to "where did the last edit
+        // land" for a command that never had one.
+        let ranges = EditRecording::begin(&state, &sequence_id).finish(dir.path(), &state);
+
+        assert!(ranges.is_empty());
+        assert_eq!(load_last_affected_ranges(dir.path()), Some(landed));
     }
 
     #[test]

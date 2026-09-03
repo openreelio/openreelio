@@ -19,17 +19,19 @@
 //!
 //! The caller never names an output path. Every image is written into a
 //! timestamped entry under `.openreelio/cache/frames/`, which bounds itself to
-//! its newest entries and is safe to delete. A `file` to judge and an `asset`
-//! to sample are both confined to the project directory, because those are the
-//! two arguments that reach FFmpeg as a path.
+//! its newest entries and is safe to delete. A `file` to judge is confined to
+//! the project directory, because it is a caller-supplied path handed straight
+//! to FFmpeg. An `asset` is not: it is an id, and the media behind it is the
+//! project's own — see [`check_asset_media`] for what is still enforced there.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use crate::core::fs::{confine_media_path_to_project, ProjectMediaRejection};
+use crate::core::fs::{confine_media_path_to_project, is_network_path, strip_verbatim_prefix};
 use crate::core::project::ProjectState;
 use crate::core::render::frame_probe::{
-    frame_image_paths, image_mime_type, inline_frame_images, parse_image_format, FrameArtifact,
-    FrameProbeRequest, MAX_INLINE_FRAME_STILLS,
+    allocate_frame_output, frame_image_paths, image_mime_type, inline_frame_images,
+    parse_image_format, FrameArtifact, FrameOutput, FrameProbePlan, FrameProbeRequest,
+    MAX_INLINE_FRAME_STILLS,
 };
 use crate::core::render::ImageFormat;
 
@@ -287,10 +289,58 @@ impl TimelineFrameProbeRequestDto {
     }
 }
 
+/// Validates the request, then reserves the cache entry it writes into.
+///
+/// The order is the point. Reserving an entry creates a directory *and prunes
+/// the cache back to its bound*, so doing it first meant a request the engine
+/// was always going to refuse — an empty `{}`, a grid past the cell cap —
+/// evicted a legitimate entry to make room for a directory nothing was ever
+/// written into. Every guard the probe applies runs before anything is created.
+///
+/// Blocking on purpose: both halves touch the filesystem, so callers on an
+/// async runtime hand the whole thing to a blocking thread rather than stalling
+/// the one that is also driving the UI.
+pub(crate) fn plan_frame_probe(
+    project_dir: &Path,
+    request: TimelineFrameProbeRequestDto,
+    file: Option<PathBuf>,
+    format: ImageFormat,
+    limit: Option<usize>,
+) -> Result<(FrameProbePlan, FrameOutput), String> {
+    let artifact = request.artifact();
+    // `out` is not known until an entry is reserved, and reserving one is
+    // exactly what must not happen yet. The engine reads `out` only to infer a
+    // format the caller did not state, and this request always states one.
+    let mut probe_request = request.into_probe_request(PathBuf::new(), file, format, limit);
+    FrameProbePlan::validate(&probe_request).map_err(|error| error.to_string())?;
+
+    let output =
+        allocate_frame_output(project_dir, artifact, format).map_err(|error| error.to_string())?;
+    probe_request.out = output.out().to_path_buf();
+
+    match FrameProbePlan::resolve(probe_request) {
+        Ok(plan) => Ok((plan, output)),
+        Err(error) => {
+            // Unreachable while `validate` and `resolve` run the same guards,
+            // but an entry left behind by a refusal is residue either way.
+            output.discard();
+            Err(error.to_string())
+        }
+    }
+}
+
 /// Describes every image the payload names, reading back only what was asked for.
 ///
 /// The read-and-encode pass is handed to a blocking thread: the images can run
 /// to megabytes and base64 is pure CPU on a runtime that is also driving the UI.
+///
+/// An inline request that produced more stills than one reply carries is a hard
+/// failure, not a partial answer. [`TimelineFrameProbeRequestDto::resolve_limit`]
+/// and [`validate_inline_budget`](TimelineFrameProbeRequestDto::validate_inline_budget)
+/// are supposed to make that unreachable, so reaching it means the budget and
+/// the extraction disagree — and the one thing that must not happen then is
+/// handing an agent a batch where some stills quietly carry no bytes, which it
+/// would judge as if it had seen them.
 pub(crate) async fn collect_images(
     payload: &serde_json::Value,
     inline: bool,
@@ -306,6 +356,13 @@ pub(crate) async fn collect_images(
     } else {
         Vec::new()
     };
+
+    if inline && inlined.len() < paths.len() {
+        return Err(format!(
+            "The extraction produced {} stills, more than the {MAX_INLINE_FRAME_STILLS} one inline reply carries. Ask for fewer times, lower limit, or pass grid for a contact sheet.",
+            paths.len()
+        ));
+    }
 
     // `inline_frame_images` reads the same payload in the same order and takes a
     // prefix of it, so zipping by position pairs each still with its own bytes.
@@ -329,12 +386,35 @@ pub(crate) async fn collect_images(
         .collect()
 }
 
+/// One rejection message for every way a `file` fails to land in the project.
+///
+/// Absolute-elsewhere, traversing, symlinked and simply-missing paths all fail
+/// with the same words, and the words name neither the project's resolved
+/// location nor whether the file exists. Two separate messages made the probe an
+/// existence oracle for the whole disk — "does not exist" versus "outside the
+/// project" answers `file` for any path a caller cares to try — and the
+/// second of them printed the canonical project path back to the caller.
+fn probe_file_escape_error(requested: &str) -> String {
+    format!("file '{requested}' must resolve inside the project directory")
+}
+
 /// Confines a rendered file the caller asked to judge to the project directory.
 ///
 /// The same rule the MCP server applies: an unconfined path handed to FFmpeg
 /// turns a read-only tool into a whole-disk existence oracle and an outbound
 /// connection primitive. A relative path is read against the project root, so
 /// the natural spelling of a render inside the project keeps working.
+///
+/// Rejection is lexical *before* it is filesystem-based, and that ordering is
+/// the point: a URL, a UNC/device path, a `..` escape or a non-disk prefix is
+/// refused without anything being stat'd, so a hostile value cannot make the
+/// app open an outbound SMB connection (and leak an NTLM handshake on Windows)
+/// merely by being validated. Only a path already known to be spelled inside
+/// the project is resolved on disk, where symlinks are caught.
+///
+/// The returned path carries no `\\?\` verbatim prefix: it is handed to FFmpeg
+/// and echoed back to the caller, and neither should see a spelling the caller
+/// never wrote.
 pub(crate) fn confine_probe_file(
     canonical_project: &Path,
     requested: &str,
@@ -348,34 +428,68 @@ pub(crate) fn confine_probe_file(
             "file must be a filesystem path inside the project directory, not a URL".to_string(),
         );
     }
+    // Matched on the raw string: a platform whose path parser does not
+    // recognise `\\server\share` as a network path would treat it as a file
+    // name and only fail later, after having tried to reach the share.
+    if is_network_path(trimmed) {
+        return Err(
+            "file must be a filesystem path inside the project directory; UNC, device, and network paths are rejected"
+                .to_string(),
+        );
+    }
 
     let requested_path = Path::new(trimmed);
+    let escapes_lexically = requested_path
+        .components()
+        .any(|component| match component {
+            Component::ParentDir => true,
+            Component::Prefix(prefix) => !matches!(prefix.kind(), std::path::Prefix::Disk(_)),
+            _ => false,
+        });
+    if escapes_lexically {
+        return Err(probe_file_escape_error(trimmed));
+    }
+
+    // The project root is the app's own, not the caller's, so it is safe to
+    // spell plainly; joining a relative path onto the verbatim form would hand
+    // FFmpeg a `\\?\` path it never asked for.
+    let project_root =
+        PathBuf::from(strip_verbatim_prefix(&canonical_project.to_string_lossy()).into_owned());
     let candidate = if requested_path.is_absolute() {
         requested_path.to_path_buf()
     } else {
-        canonical_project.join(requested_path)
+        project_root.join(requested_path)
     };
 
-    confine_media_path_to_project(canonical_project, &candidate.to_string_lossy()).map_err(
-        |rejection| match rejection {
-            ProjectMediaRejection::Unresolved => {
-                format!("file '{trimmed}' does not exist inside the project directory")
-            }
-            _ => format!(
-                "file '{trimmed}' must resolve inside the project directory '{}'",
-                canonical_project.display()
-            ),
-        },
-    )
+    // Only now is touching the filesystem safe. Resolution is what catches a
+    // symlink inside the project that points out of it, and every rejection it
+    // can produce — including "does not exist" — collapses into one message.
+    let resolved = confine_media_path_to_project(canonical_project, &candidate.to_string_lossy())
+        .map_err(|_| probe_file_escape_error(trimmed))?;
+
+    Ok(PathBuf::from(
+        strip_verbatim_prefix(&resolved.to_string_lossy()).into_owned(),
+    ))
 }
 
-/// Confines the media behind an asset id before FFmpeg is asked to read it.
+/// Checks the media behind an asset id before FFmpeg is asked to read it.
 ///
-/// Project state is data the app reads, not a grant: an asset's `uri` can come
-/// from an imported project or an `UpdateAsset` an agent plan applied, so the
-/// path it resolves to is checked rather than trusted.
-pub(crate) fn confine_asset_media(
-    canonical_project: &Path,
+/// Deliberately *not* a project-directory confinement. The GUI imports media by
+/// reference: the file stays where the user put it, and
+/// [`Asset::resolved_path`](crate::core::assets::Asset::resolved_path) hands
+/// back that original absolute path. Confining it would refuse the ordinary
+/// case — every asset of every project whose footage lives in a camera dump or
+/// a shared drive — while protecting nothing, because the sequence those same
+/// assets are cut into is already rendered, previewed and exported from
+/// wherever the media lies.
+///
+/// What is enforced is what the frame probe itself adds: it must not be the
+/// thing that reaches off-host. A UNC or network path is refused lexically,
+/// before anything stats it, because on Windows the stat *is* the outbound SMB
+/// connection and the NTLM handshake that leaks with it. Existence is checked
+/// so the caller is told the media is gone rather than reading an FFmpeg error
+/// about a file it cannot see.
+pub(crate) fn check_asset_media(
     project_path: &Path,
     project_state: &ProjectState,
     asset_id: &str,
@@ -386,13 +500,17 @@ pub(crate) fn confine_asset_media(
     };
 
     let media_path = asset.resolved_path(project_path);
-    confine_media_path_to_project(canonical_project, &media_path.to_string_lossy()).map_err(
-        |_| {
-            format!(
-                "Asset '{asset_id}' resolves to media outside the project directory; frame extraction only reads media inside the open project"
-            )
-        },
-    )?;
+    let media = media_path.to_string_lossy();
+    if is_network_path(&media) {
+        return Err(format!(
+            "Asset '{asset_id}' resolves to media on a UNC or network path; frame extraction only reads local media"
+        ));
+    }
+    if !media_path.exists() {
+        return Err(format!(
+            "Asset '{asset_id}' resolves to media that is not on this machine: '{media}'"
+        ));
+    }
 
     Ok(())
 }
@@ -650,6 +768,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_fail_rather_than_inline_only_part_of_a_batch() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let mut frames = Vec::new();
+        for index in 0..MAX_INLINE_FRAME_STILLS + 2 {
+            let still = temp.path().join(format!("frame_{index:03}.jpg"));
+            std::fs::write(&still, b"bytes").expect("still");
+            frames.push(json!({ "path": still.to_string_lossy() }));
+        }
+        let payload = json!({ "frames": frames });
+
+        // Handing back a batch where the last two stills quietly carry no bytes
+        // would have an agent judge moments it never saw. The budget guards are
+        // supposed to make this unreachable; if they ever disagree with the
+        // extraction, the call has to fail rather than answer partially.
+        let error = collect_images(&payload, true)
+            .await
+            .expect_err("a batch past the inline cap must not be answered partially");
+        assert!(
+            error.contains(&(MAX_INLINE_FRAME_STILLS + 2).to_string())
+                && error.contains(&MAX_INLINE_FRAME_STILLS.to_string()),
+            "the error should name the count and the cap, got: {error}"
+        );
+
+        // Nothing travels inline, so every still is described by path and the
+        // same payload is fine.
+        assert_eq!(
+            collect_images(&payload, false)
+                .await
+                .expect("paths only")
+                .len(),
+            MAX_INLINE_FRAME_STILLS + 2
+        );
+    }
+
+    #[tokio::test]
     async fn should_report_a_sheet_as_one_image() {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let sheet = temp.path().join("sheet.jpg");
@@ -686,31 +839,48 @@ mod tests {
     }
 
     #[test]
-    fn should_confine_asset_media_to_the_project_directory() {
+    fn should_read_ordinary_gui_asset_media_from_where_the_user_keeps_it() {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let project = temp.path().join("project");
-        std::fs::create_dir_all(project.join("media")).expect("project");
-        let inside = project.join("media").join("clip.mp4");
-        std::fs::write(&inside, b"media").expect("media");
-        let outside = temp.path().join("elsewhere.mp4");
-        std::fs::write(&outside, b"media").expect("outside media");
-        let canonical = std::fs::canonicalize(&project).expect("canonical project");
+        std::fs::create_dir_all(&project).expect("project");
+        // What GUI import actually produces: the footage stays in the camera
+        // dump the user pointed at, and the asset carries its absolute path.
+        let outside = temp.path().join("camera_dump.mp4");
+        std::fs::write(&outside, b"media").expect("media");
 
-        let state = project_with_asset(&inside);
-        assert!(confine_asset_media(&canonical, &project, &state, "asset-1").is_ok());
-
-        // An asset uri is project data, not a grant: an imported project or an
-        // agent's UpdateAsset can point it anywhere on the disk.
-        let escaped = project_with_asset(&outside);
-        let error = confine_asset_media(&canonical, &project, &escaped, "asset-1")
-            .expect_err("media outside the project must not be readable");
+        let state = project_with_asset(&outside);
         assert!(
-            error.contains("asset-1") && error.contains("outside"),
-            "the refusal should name the asset and the reason, got: {error}"
+            check_asset_media(&project, &state, "asset-1").is_ok(),
+            "the project's own media must be readable from wherever it lives"
         );
 
         // An unknown id is the probe's error to report, in its own words.
-        assert!(confine_asset_media(&canonical, &project, &state, "missing").is_ok());
+        assert!(check_asset_media(&project, &state, "missing").is_ok());
+    }
+
+    #[test]
+    fn should_refuse_asset_media_that_is_not_local_or_not_there() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project");
+
+        // Stat'ing a share is itself the outbound SMB connection, so the
+        // refusal has to happen on the string.
+        let share = project_with_asset(Path::new(r"\\attacker\share\clip.mp4"));
+        let error = check_asset_media(&project, &share, "asset-1")
+            .expect_err("network media must not be reached");
+        assert!(
+            error.contains("asset-1") && error.contains("network"),
+            "the refusal should name the asset and the reason, got: {error}"
+        );
+
+        let gone = project_with_asset(&temp.path().join("relinked_away.mp4"));
+        let error = check_asset_media(&project, &gone, "asset-1")
+            .expect_err("media that is not on this machine must be reported");
+        assert!(
+            error.contains("asset-1"),
+            "the refusal should name the asset, got: {error}"
+        );
     }
 
     #[test]
@@ -725,10 +895,18 @@ mod tests {
 
         let inside = confine_probe_file(&canonical, "exports/cut.mp4").expect("a render inside");
         assert!(inside.ends_with("cut.mp4"));
+        // The path is handed to FFmpeg and echoed back to the caller, so it
+        // must not carry a spelling the caller never wrote.
+        assert!(
+            !inside.to_string_lossy().contains(r"\\?\"),
+            "the accepted path must carry no verbatim prefix: {}",
+            inside.display()
+        );
 
         for escape in [
             outside.to_string_lossy().to_string(),
             "../outside.mp4".to_string(),
+            r"\\attacker\share\cut.mp4".to_string(),
             "https://example.com/cut.mp4".to_string(),
             "  ".to_string(),
         ] {
@@ -737,5 +915,182 @@ mod tests {
                 "'{escape}' must not be readable through the frame probe"
             );
         }
+    }
+
+    #[test]
+    fn should_not_tell_a_caller_whether_a_file_outside_the_project_exists() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project");
+        let existing_outside = temp.path().join("secret.mp4");
+        std::fs::write(&existing_outside, b"render").expect("outside render");
+        let canonical = std::fs::canonicalize(&project).expect("canonical project");
+
+        // Distinguishable refusals turn the probe into a whole-disk existence
+        // oracle: ask for a path, read which way it was refused.
+        let outside = confine_probe_file(&canonical, &existing_outside.to_string_lossy())
+            .expect_err("a render outside the project must be refused");
+        let missing = confine_probe_file(&canonical, "exports/never_rendered.mp4")
+            .expect_err("a render that was never produced must be refused");
+
+        assert_eq!(
+            missing, "file 'exports/never_rendered.mp4' must resolve inside the project directory",
+            "the refusal must not say whether the file exists"
+        );
+        assert!(
+            outside.starts_with(&format!("file '{}'", existing_outside.to_string_lossy()))
+                && outside.ends_with("must resolve inside the project directory"),
+            "both refusals must read identically, got: {outside}"
+        );
+        // Neither may echo where the project actually resolved to.
+        for message in [&outside, &missing] {
+            assert!(
+                !message.contains(&canonical.to_string_lossy().to_string()),
+                "the refusal must not leak the canonical project path: {message}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn should_refuse_a_symlink_inside_the_project_that_points_outside() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join("exports")).expect("project");
+        let outside = temp.path().join("secret.mp4");
+        std::fs::write(&outside, b"render").expect("outside render");
+        let canonical = std::fs::canonicalize(&project).expect("canonical project");
+
+        let link = project.join("exports").join("cut.mp4");
+        // Creating a symlink needs Developer Mode or an elevated shell; a
+        // machine that refuses is not evidence about the guard either way.
+        if std::os::windows::fs::symlink_file(&outside, &link).is_err() {
+            return;
+        }
+
+        // The path is spelled entirely inside the project, so only resolving it
+        // catches this one.
+        let error = confine_probe_file(&canonical, "exports/cut.mp4")
+            .expect_err("a symlink out of the project must be refused");
+        assert_eq!(
+            error,
+            "file 'exports/cut.mp4' must resolve inside the project directory"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn should_refuse_a_symlink_inside_the_project_that_points_outside() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join("exports")).expect("project");
+        let outside = temp.path().join("secret.mp4");
+        std::fs::write(&outside, b"render").expect("outside render");
+        let canonical = std::fs::canonicalize(&project).expect("canonical project");
+
+        let link = project.join("exports").join("cut.mp4");
+        if std::os::unix::fs::symlink(&outside, &link).is_err() {
+            return;
+        }
+
+        let error = confine_probe_file(&canonical, "exports/cut.mp4")
+            .expect_err("a symlink out of the project must be refused");
+        assert_eq!(
+            error,
+            "file 'exports/cut.mp4' must resolve inside the project directory"
+        );
+    }
+
+    #[test]
+    fn should_not_touch_the_frame_cache_for_a_request_the_engine_refuses() {
+        use crate::core::render::frame_probe::{frame_cache_dir, MAX_CACHED_FRAME_DIRECTORIES};
+
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+        let cache_root = frame_cache_dir(&project);
+        std::fs::create_dir_all(&cache_root).expect("cache root");
+
+        // A cache already at its bound. Reserving an entry prunes, so a
+        // rejected request that allocated first would evict a real judgement's
+        // evidence to make room for a directory nothing is written into.
+        let seeded: Vec<String> = (0..MAX_CACHED_FRAME_DIRECTORIES)
+            .map(|index| format!("20260816T120000{index:06}Z-0000"))
+            .collect();
+        for stamp in &seeded {
+            std::fs::create_dir_all(cache_root.join(stamp)).expect("cache entry");
+        }
+
+        let refused = [
+            // No time source at all.
+            json!({}),
+            // A grid past the cell cap.
+            json!({ "grid": "11x11", "between": [0.0, 4.0] }),
+        ];
+        for arguments in refused {
+            let request: TimelineFrameProbeRequestDto =
+                serde_json::from_value(arguments.clone()).expect("the request deserializes");
+            let format = request.resolve_format().expect("format");
+            let limit = request.resolve_limit();
+
+            assert!(
+                plan_frame_probe(&project, request, None, format, limit).is_err(),
+                "{arguments} must be refused"
+            );
+
+            let mut remaining: Vec<String> = std::fs::read_dir(&cache_root)
+                .expect("cache root")
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect();
+            remaining.sort();
+            assert_eq!(
+                remaining, seeded,
+                "a refused request must leave the cache exactly as it found it"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reserve_a_cache_entry_once_the_request_is_servable() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+
+        let request = TimelineFrameProbeRequestDto {
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let format = request.resolve_format().expect("format");
+        let limit = request.resolve_limit();
+
+        let (_plan, output) =
+            plan_frame_probe(&project, request, None, format, limit).expect("a servable request");
+
+        assert!(output.directory().is_dir());
+        assert_eq!(
+            output.out().file_name().and_then(|name| name.to_str()),
+            Some("frame.png")
+        );
+    }
+
+    #[test]
+    fn should_reject_an_empty_request_with_the_engines_own_words() {
+        // `{}` is what a bridge sends when the model names no time source at
+        // all. It has to deserialize — the DTO is all-optional — and then be
+        // refused by the engine's own guard, so the GUI and the CLI say the
+        // same thing about the same mistake.
+        let request: TimelineFrameProbeRequestDto =
+            serde_json::from_value(json!({})).expect("an empty request must still deserialize");
+        assert!(request.validate_inline_budget().is_ok());
+        let format = request.resolve_format().expect("format");
+        let limit = request.resolve_limit();
+
+        let probe = request.into_probe_request(PathBuf::new(), None, format, limit);
+        let error = crate::core::render::frame_probe::FrameProbePlan::validate(&probe)
+            .expect_err("a request naming no time source must be refused");
+
+        assert!(
+            error.to_string().contains("Nothing to extract"),
+            "the refusal should be the engine's own, got: {error}"
+        );
     }
 }

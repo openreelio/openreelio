@@ -15,6 +15,7 @@ use crate::core::render::ImageFormat;
 use base64::Engine as _;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Largest number of individual stills one inline response carries.
 ///
@@ -31,11 +32,29 @@ pub const MAX_INLINE_FRAME_STILLS: usize = 12;
 /// long session leave the whole cut on disk inside the user's project.
 pub const MAX_CACHED_FRAME_DIRECTORIES: usize = 16;
 
-/// Name format for a frame-cache entry.
+/// Timestamp format an entry name starts with.
 ///
-/// Microsecond precision keeps concurrent judgements from colliding, and the
-/// fixed width is what makes a lexicographic sort an age sort during pruning.
+/// The fixed width is what makes a lexicographic sort an age sort during
+/// pruning. A stamp alone does not identify an entry — two probes started in
+/// the same microsecond produce the same one — so the name carries a nonce
+/// after it; see [`claim_cache_entry`].
 const FRAME_CACHE_STAMP: &str = "%Y%m%dT%H%M%S%6fZ";
+
+/// Distinguishes entries whose timestamps landed in the same microsecond.
+///
+/// Kept process-wide rather than per call site so two concurrent probes in one
+/// process can never draw the same value. A collision *between* processes is
+/// still possible and is caught by [`claim_cache_entry`]'s retry, which is the
+/// guarantee that matters: `create_dir` on an existing name fails rather than
+/// merging two extractions into one entry.
+static FRAME_CACHE_NONCE: AtomicU32 = AtomicU32::new(0);
+
+/// Attempts made to claim a free entry name before the allocation fails.
+///
+/// Each attempt re-reads the clock and draws a fresh nonce, so a losing racer
+/// converges immediately; a handful of tries is a bound on a pathological loop
+/// rather than a number the happy path ever approaches.
+const FRAME_CACHE_NAME_ATTEMPTS: usize = 8;
 
 /// What a single extraction writes into its cache entry.
 ///
@@ -117,23 +136,25 @@ pub fn frame_cache_dir(project_dir: &Path) -> PathBuf {
 /// place that is safe to delete.
 ///
 /// Pruning happens here rather than after the probe so a surface cannot forget
-/// it: the new entry is already on disk and carries the newest stamp, so it is
-/// always among the survivors.
+/// it. The entry just claimed is excluded from the sweep outright rather than
+/// trusted to sort last: a clock that moved backwards, or a stale entry stamped
+/// in the future, would otherwise let the allocation delete the very directory
+/// it was called to produce.
 pub fn allocate_frame_output(
     project_dir: &Path,
     artifact: FrameArtifact,
     format: ImageFormat,
 ) -> FrameProbeResult<FrameOutput> {
-    let directory =
-        frame_cache_dir(project_dir).join(chrono::Utc::now().format(FRAME_CACHE_STAMP).to_string());
-    std::fs::create_dir_all(&directory).map_err(|error| {
+    let root = frame_cache_dir(project_dir);
+    std::fs::create_dir_all(&root).map_err(|error| {
         FrameProbeError::new(format!(
             "Failed to create the frame cache directory '{}': {error}",
-            directory.display()
+            root.display()
         ))
     })?;
 
-    prune_frame_cache(project_dir);
+    let directory = claim_cache_entry(&root)?;
+    prune_frame_cache_excluding(project_dir, Some(directory.as_path()));
 
     let out = match artifact.file_name(format) {
         Some(name) => directory.join(name),
@@ -145,6 +166,49 @@ pub fn allocate_frame_output(
     Ok(FrameOutput { directory, out })
 }
 
+/// Creates a directory no other extraction owns, and returns it.
+///
+/// `create_dir` rather than `create_dir_all` is the whole point: the call has
+/// to *fail* on a name that already exists. Two probes that agreed on a name —
+/// the same microsecond in two processes — would otherwise both be handed the
+/// same directory, and the second would overwrite the first's stills, or
+/// `discard` them out from under a caller still reading them.
+fn claim_cache_entry(root: &Path) -> FrameProbeResult<PathBuf> {
+    let mut taken = Vec::new();
+    for _ in 0..FRAME_CACHE_NAME_ATTEMPTS {
+        // Masked to four hex digits so every entry name keeps the fixed width
+        // that makes a lexicographic sort an age sort.
+        let nonce = FRAME_CACHE_NONCE.fetch_add(1, Ordering::Relaxed) & 0xffff;
+        let candidate = root.join(format!(
+            "{}-{nonce:04x}",
+            chrono::Utc::now().format(FRAME_CACHE_STAMP)
+        ));
+
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                taken.push(candidate);
+            }
+            Err(error) => {
+                return Err(FrameProbeError::new(format!(
+                    "Failed to create the frame cache directory '{}': {error}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+
+    Err(FrameProbeError::new(format!(
+        "Failed to claim a frame cache entry under '{}' after {FRAME_CACHE_NAME_ATTEMPTS} attempts; \
+         the last name tried was '{}'",
+        root.display(),
+        taken
+            .last()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default()
+    )))
+}
+
 /// Keeps the frame cache to its most recent [`MAX_CACHED_FRAME_DIRECTORIES`]
 /// entries.
 ///
@@ -154,6 +218,16 @@ pub fn allocate_frame_output(
 /// Best-effort: an extraction whose images are already in hand must not fail
 /// because the cache could not be tidied.
 pub fn prune_frame_cache(project_dir: &Path) {
+    prune_frame_cache_excluding(project_dir, None);
+}
+
+/// Prunes the cache while leaving `keep` alone, whatever its name sorts as.
+///
+/// An extraction in flight owns its entry, and an entry name is a wall-clock
+/// stamp: a clock that stepped backwards, or a directory left behind stamped in
+/// the future, makes the newest entry no longer the last one in name order. The
+/// caller therefore names what it is holding instead of relying on the sort.
+fn prune_frame_cache_excluding(project_dir: &Path, keep: Option<&Path>) {
     let Ok(entries) = std::fs::read_dir(frame_cache_dir(project_dir)) else {
         return;
     };
@@ -167,11 +241,17 @@ pub fn prune_frame_cache(project_dir: &Path) {
         return;
     }
 
-    // Entry names are fixed-width UTC timestamps, so sorting them by name sorts
-    // them by age.
+    // Entry names start with a fixed-width UTC timestamp, so sorting them by
+    // name sorts them by age.
     directories.sort();
+    // `keep` still counts towards the bound — it is a cache entry like any
+    // other — it is only excluded from what may be deleted.
     let stale = directories.len() - MAX_CACHED_FRAME_DIRECTORIES;
-    for directory in directories.into_iter().take(stale) {
+    for directory in directories
+        .into_iter()
+        .filter(|path| keep != Some(path.as_path()))
+        .take(stale)
+    {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
@@ -301,38 +381,66 @@ mod tests {
         assert!(batch.out().is_dir());
     }
 
-    #[test]
-    fn allocate_frame_output_should_prune_to_the_newest_entries() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let project = temp.path().join("project");
-        let cache_root = frame_cache_dir(&project);
-
-        // Names are fixed-width UTC stamps, so the ordering under test is the
-        // one real entries get.
-        let stamps: Vec<String> = (0..MAX_CACHED_FRAME_DIRECTORIES + 4)
-            .map(|index| format!("20260816T120000{index:06}Z"))
+    /// Seeds a cache with entries stamped `offset` away from now, oldest first.
+    ///
+    /// Stamps are written relative to the clock rather than pinned to a literal
+    /// date: an entry seeded in 2026 stops being "older than now" the moment the
+    /// machine's clock passes it, and the test would then assert the opposite of
+    /// what it was written to check.
+    fn seed_cache_entries(
+        cache_root: &Path,
+        count: usize,
+        offset: impl Fn(i64) -> chrono::Duration,
+    ) -> Vec<String> {
+        let now = chrono::Utc::now();
+        let stamps: Vec<String> = (0..count)
+            .map(|index| {
+                let at = now + offset(index as i64);
+                format!("{}-0000", at.format(FRAME_CACHE_STAMP))
+            })
             .collect();
         for stamp in &stamps {
             let entry = cache_root.join(stamp);
             std::fs::create_dir_all(&entry).expect("cache entry");
             std::fs::write(entry.join("sheet.jpg"), b"sheet bytes").expect("cache image");
         }
+        stamps
+    }
 
-        let allocated = allocate_frame_output(&project, FrameArtifact::Sheet, ImageFormat::Jpeg)
-            .expect("a new entry is allocated");
-
-        let mut remaining: Vec<String> = std::fs::read_dir(&cache_root)
+    /// Reads back the entry names a cache holds, in age order.
+    fn cache_entry_names(cache_root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(cache_root)
             .expect("cache root")
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect();
-        remaining.sort();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn allocate_frame_output_should_prune_to_the_newest_entries() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+        let cache_root = frame_cache_dir(&project);
+        std::fs::create_dir_all(&cache_root).expect("cache root");
+
+        let seeded = MAX_CACHED_FRAME_DIRECTORIES + 4;
+        // Oldest first, every one of them behind the clock the allocation reads.
+        let stamps = seed_cache_entries(&cache_root, seeded, |index| {
+            chrono::Duration::seconds(index - seeded as i64)
+        });
+
+        let allocated = allocate_frame_output(&project, FrameArtifact::Sheet, ImageFormat::Jpeg)
+            .expect("a new entry is allocated");
+
+        let remaining = cache_entry_names(&cache_root);
 
         assert_eq!(remaining.len(), MAX_CACHED_FRAME_DIRECTORIES);
         // The entry just allocated carries the newest stamp, so pruning must
         // never be able to delete the extraction it was called for.
         assert!(allocated.directory().is_dir());
-        // The survivors are the newest, not an arbitrary set: the four oldest
+        // The survivors are the newest, not an arbitrary set: the five oldest
         // seeded stamps are gone and the rest are still there.
         for stale in &stamps[..5] {
             assert!(
@@ -344,6 +452,58 @@ mod tests {
             assert!(
                 remaining.contains(kept),
                 "pruning must keep the newest entries, {kept} was dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn allocate_frame_output_should_keep_its_own_entry_when_stale_ones_are_stamped_in_the_future() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+        let cache_root = frame_cache_dir(&project);
+        std::fs::create_dir_all(&cache_root).expect("cache root");
+
+        // A project copied from a machine whose clock runs ahead — or a clock
+        // that stepped backwards — leaves entries that sort *after* the one
+        // being allocated, which makes the new entry the apparent oldest and
+        // the first candidate for deletion.
+        seed_cache_entries(&cache_root, MAX_CACHED_FRAME_DIRECTORIES + 4, |index| {
+            chrono::Duration::hours(index + 1)
+        });
+
+        let allocated = allocate_frame_output(&project, FrameArtifact::Batch, ImageFormat::Jpeg)
+            .expect("a new entry is allocated");
+
+        assert!(
+            allocated.directory().is_dir(),
+            "pruning deleted the entry the allocation was called to produce: {}",
+            allocated.directory().display()
+        );
+        assert_eq!(
+            cache_entry_names(&cache_root).len(),
+            MAX_CACHED_FRAME_DIRECTORIES,
+            "the cache must still come back to its bound"
+        );
+    }
+
+    #[test]
+    fn allocate_frame_output_should_give_every_call_its_own_entry() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+
+        // The system clock is far coarser than the microsecond the stamp
+        // records, so a tight loop reproduces exactly what two concurrent
+        // judgements do: several calls read the same instant. Sharing an entry
+        // would let one extraction overwrite another's stills, or `discard`
+        // them out from under a caller still reading them.
+        let mut claimed = std::collections::HashSet::new();
+        for _ in 0..MAX_CACHED_FRAME_DIRECTORIES {
+            let output = allocate_frame_output(&project, FrameArtifact::Batch, ImageFormat::Jpeg)
+                .expect("an entry is allocated");
+            assert!(
+                claimed.insert(output.directory().to_path_buf()),
+                "two extractions were handed the same cache entry: {}",
+                output.directory().display()
             );
         }
     }

@@ -1,19 +1,22 @@
 //! Frame-probe IPC command — the in-app agent's eye on the edit.
 //!
 //! A thin entry point: the request shape, the translation into the engine's own
-//! request, path confinement and the inline budget all live in
-//! [`crate::ipc::dto::frame_probe`], which is Tauri-free and therefore unit
-//! tested. What is here is what only a command can do — take the project
-//! snapshot, resolve the FFmpeg runner, and drive the probe.
+//! request, path confinement, the inline budget and the validate-then-allocate
+//! ordering all live in [`crate::ipc::dto::frame_probe`], which is Tauri-free
+//! and therefore unit tested. What is here is what only a command can do — take
+//! the project snapshot, resolve the FFmpeg runner, and drive the probe, moving
+//! every filesystem step off the runtime that is also driving the UI.
+
+use std::path::PathBuf;
 
 use tauri::State;
 
 use crate::core::ffmpeg::SharedFFmpegState;
-use crate::core::render::frame_probe::{allocate_frame_output, FrameProbePlan, FrameProbeProject};
-use crate::ipc::commands::analysis::{resolve_ffmpeg_runner, resolve_project_snapshot};
+use crate::core::render::frame_probe::{FrameOutput, FrameProbeProject};
+use crate::ipc::commands::analysis::{resolve_ffmpeg_runner_for, resolve_project_snapshot};
 use crate::ipc::dto::frame_probe::{
-    collect_images, confine_asset_media, confine_probe_file, TimelineFrameProbeRequestDto,
-    TimelineFrameProbeResultDto,
+    check_asset_media, collect_images, confine_probe_file, plan_frame_probe,
+    TimelineFrameProbeRequestDto, TimelineFrameProbeResultDto,
 };
 use crate::AppState;
 
@@ -32,44 +35,31 @@ pub async fn extract_timeline_frames(
     request.validate_inline_budget()?;
     let format = request.resolve_format()?;
     let limit = request.resolve_limit();
-    let artifact = request.artifact();
     let inline = request.inline;
 
     let (project_path, project_state) = resolve_project_snapshot(&state).await?;
-    let runner = resolve_ffmpeg_runner(&ffmpeg_state).await?;
-
-    // Resolved once: every confinement decision below compares against this one
-    // spelling of the project root.
-    let canonical_project = std::fs::canonicalize(&project_path).map_err(|error| {
-        format!(
-            "Project directory '{}' could not be resolved: {error}",
-            project_path.display()
-        )
-    })?;
+    let runner = resolve_ffmpeg_runner_for(&ffmpeg_state, "frame extraction").await?;
 
     // A rendered file is a caller-supplied path handed straight to FFmpeg, so it
-    // is confined outright. An asset arrives as an id, and what needs confining
-    // is the media behind it.
+    // is confined outright. Resolving the project root and the path against it
+    // both hit the disk, so they run on a blocking thread.
     let file = match request.file.as_deref() {
-        Some(requested) => Some(confine_probe_file(&canonical_project, requested)?),
+        Some(requested) => Some(confine_requested_file(&project_path, requested).await?),
         None => None,
     };
+    // An asset arrives as an id, and the media behind it is the project's own —
+    // only its locality is checked, not its location.
     if let Some(asset_id) = request.asset.as_deref() {
-        confine_asset_media(&canonical_project, &project_path, &project_state, asset_id)?;
+        check_asset_media(&project_path, &project_state, asset_id)?;
     }
 
-    // Allocated only once every argument and path check has passed, so a
-    // rejected request leaves no directory behind at all.
-    let output = allocate_frame_output(&project_path, artifact, format)
-        .map_err(|error| error.to_string())?;
-
-    let probe_request = request.into_probe_request(output.out().to_path_buf(), file, format, limit);
-    let plan = match FrameProbePlan::resolve(probe_request) {
-        Ok(plan) => plan,
-        Err(error) => {
-            output.discard();
-            return Err(error.to_string());
-        }
+    let (plan, output) = {
+        let project_path = project_path.clone();
+        tokio::task::spawn_blocking(move || {
+            plan_frame_probe(&project_path, request, file, format, limit)
+        })
+        .await
+        .map_err(|error| format!("Frame probe planning failed: {error}"))??
     };
 
     let probe_project = FrameProbeProject {
@@ -81,7 +71,7 @@ pub async fn extract_timeline_frames(
         Err(error) => {
             // Nothing usable came back, so this call's entry is residue: an
             // empty directory per failed probe is how the cache grows fastest.
-            output.discard();
+            discard_frame_output(output).await;
             return Err(error.to_string());
         }
     };
@@ -89,4 +79,39 @@ pub async fn extract_timeline_frames(
     let images = collect_images(&payload, inline).await?;
 
     Ok(TimelineFrameProbeResultDto { payload, images })
+}
+
+/// Resolves the project root and confines a caller-supplied render path to it.
+///
+/// Both halves canonicalize, which is a filesystem round trip on a path that
+/// may not exist and, on Windows, a call that can block for as long as the
+/// volume takes to answer.
+async fn confine_requested_file(
+    project_path: &std::path::Path,
+    requested: &str,
+) -> Result<PathBuf, String> {
+    let project_path = project_path.to_path_buf();
+    let requested = requested.to_string();
+
+    tokio::task::spawn_blocking(move || {
+        let canonical_project = std::fs::canonicalize(&project_path).map_err(|error| {
+            format!(
+                "Project directory '{}' could not be resolved: {error}",
+                project_path.display()
+            )
+        })?;
+        confine_probe_file(&canonical_project, &requested)
+    })
+    .await
+    .map_err(|error| format!("Project path resolution failed: {error}"))?
+}
+
+/// Removes the cache entry of an extraction that produced nothing usable.
+///
+/// A recursive delete on the async runtime would block the thread that is also
+/// driving the UI, so it goes to a blocking one. Best-effort in both senses:
+/// the removal itself is, and so is the join — a leftover directory is not
+/// worth replacing the real error with a housekeeping one.
+async fn discard_frame_output(output: FrameOutput) {
+    let _ = tokio::task::spawn_blocking(move || output.discard()).await;
 }

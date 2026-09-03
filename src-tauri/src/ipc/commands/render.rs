@@ -13,7 +13,7 @@ use crate::core::{
     },
     render::{
         cancel_render_job, register_render_job, unregister_render_job, AudioExportFormat,
-        ExportError, ExportPreset, ImageFormat, VideoExportRequest,
+        ExportError, ImageFormat, VideoExportRequest,
     },
     CoreError,
 };
@@ -315,15 +315,22 @@ pub struct FrameExportResultDto {
 // Helpers
 // =============================================================================
 
-/// Parse a preset string into an ExportPreset enum.
-fn parse_export_preset(preset: &str) -> Result<ExportPreset, String> {
-    ExportPreset::from_legacy_id(preset).map_err(|e| e.to_string())
-}
-
+/// Builds the settings a render runs with, from an explicit request or a preset id.
+///
+/// `canvas` is the sequence canvas. It only matters to the proxy profile, which
+/// fits its frame to the sequence instead of to a fixed 854x480 — a vertical or
+/// square edit rendered into a landscape frame arrives with a fraction of its
+/// picture and is useless to look at.
+///
+/// The proxy is handled before [`ExportPreset::from_legacy_id`] because it is
+/// not one of its variants: `proxy_480p` is a documented preset the CLI serves,
+/// and reaching the enum with it produced "Unknown export preset" from every
+/// desktop render command.
 fn build_export_settings(
     output_path: std::path::PathBuf,
     preset: &str,
     request: Option<&VideoExportRequest>,
+    canvas: &crate::core::timeline::Canvas,
     start_time: Option<f64>,
     end_time: Option<f64>,
 ) -> Result<crate::core::render::ExportSettings, String> {
@@ -335,14 +342,14 @@ fn build_export_settings(
             end_time,
         )
         .map_err(|e| e.to_string()),
-        None => {
-            let export_preset = parse_export_preset(preset)?;
-            let mut settings =
-                crate::core::render::ExportSettings::from_preset(export_preset, output_path);
-            settings.start_time = start_time;
-            settings.end_time = end_time;
-            Ok(settings)
-        }
+        None => crate::core::render::ExportSettings::from_preset_id(
+            preset,
+            output_path,
+            canvas,
+            start_time,
+            end_time,
+        )
+        .map_err(|error| error.to_string()),
     }
 }
 
@@ -591,6 +598,7 @@ pub async fn validate_export(
         validated_output_path,
         &preset,
         settings.as_ref(),
+        &sequence.format.canvas,
         in_point,
         out_point,
     )?;
@@ -697,6 +705,7 @@ pub async fn start_render(
         validated_output_path.clone(),
         &preset,
         settings.as_ref(),
+        &sequence.format.canvas,
         None,
         None,
     )?;
@@ -941,6 +950,7 @@ pub async fn render_range(
         validated_output_path,
         &preset,
         settings.as_ref(),
+        &sequence.format.canvas,
         Some(in_point),
         Some(out_point),
     )?;
@@ -1170,6 +1180,7 @@ pub async fn batch_render(
             validated_path,
             &item.preset,
             item.settings.as_ref(),
+            &sequence.format.canvas,
             item.in_point,
             item.out_point,
         )?;
