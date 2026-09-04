@@ -3,6 +3,7 @@
 //! This enables AI agents to discover and use the CLI without parsing --help text.
 //! The schema includes command names, descriptions, parameters, types, and examples.
 
+use openreelio_core::qc::{QCEngine, OPT_IN_CHECK_IDS};
 use openreelio_core::style::{pacing_profile_ids, text_preset_ids, NO_TEXT_PRESET, TEXT_PRESETS};
 
 use crate::output;
@@ -43,6 +44,58 @@ fn text_preset_desc() -> String {
         NO_TEXT_PRESET,
         TEXT_PRESETS.len()
     )
+}
+
+/// Every QC check id the `verify` engine registers, in registration order.
+///
+/// Read from the engine rather than restated, because the hand-kept copy in
+/// this schema had already lost `transition.no_handles`: an agent that asked
+/// the schema for the full set never learned the check existed, so it could
+/// neither select nor skip it by id.
+fn qc_check_ids() -> Vec<String> {
+    QCEngine::new()
+        .rules()
+        .iter()
+        .map(|rule| rule.check_id().to_string())
+        .collect()
+}
+
+/// `verify --checks` description, listing exactly the registered check ids.
+fn verify_checks_desc() -> String {
+    format!(
+        "Comma-separated check IDs to run exclusively ({} are opt-in and only run when named \
+         here): {}",
+        join_with_and(OPT_IN_CHECK_IDS),
+        qc_check_ids().join(", ")
+    )
+}
+
+/// Joins a list the way English does: `a`, `a and b`, `a, b and c`.
+///
+/// `join(" and ")` reads correctly for exactly two items, which is how many
+/// opt-in checks there happen to be today; a third would have produced
+/// "a and b and c" in a sentence an agent reads to discover the surface.
+fn join_with_and(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The `affectedRanges` sentence every mutating edit verb carries.
+///
+/// Stated once so the `timeline`, `text` and `caption` verbs cannot drift apart
+/// in how they describe the one key that tells an agent where to look next.
+const AFFECTED_RANGES_NOTE: &str = " Reports 'affectedRanges' — the sorted, merged \
+     [{startSec,endSec}] stretches of timeline this edit changed, including ripple shifts no id \
+     in the result names, measured against the sequence the edit ran on. Pass them straight to \
+     'frame extract --range START END' to inspect exactly what moved; the same ranges are also \
+     written to <project>/.openreelio/cache/agent/last_affected_ranges.json.";
+
+/// One mutating verb's description: its own summary plus the shared ranges note.
+fn edit_desc(summary: &str) -> String {
+    format!("{summary}{AFFECTED_RANGES_NOTE}")
 }
 
 pub(crate) fn build_schema() -> serde_json::Value {
@@ -240,7 +293,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline tracks --path ./project"
             },
             "timeline.insert": {
-                "description": "Insert a clip onto the timeline from an asset",
+                "description": edit_desc("Insert a clip onto the timeline from an asset"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "asset": { "type": "string", "required": true, "desc": "Asset ID to insert" },
@@ -251,7 +304,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline insert --path ./project --asset asset_001 --track track_v1 --at 0.0"
             },
             "timeline.remove": {
-                "description": "Remove a clip from the timeline",
+                "description": edit_desc("Remove a clip from the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -261,7 +314,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline remove --path ./project --clip clip_001 --track track_v1"
             },
             "timeline.move": {
-                "description": "Move a clip to a new timeline position",
+                "description": edit_desc("Move a clip to a new timeline position"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -273,7 +326,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline move --path ./project --clip clip_001 --to 10.0 --track track_v1"
             },
             "timeline.trim": {
-                "description": "Trim a clip's source in/out points",
+                "description": edit_desc("Trim a clip's source in/out points"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -285,7 +338,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline trim --path ./project --clip clip_001 --track track_v1 --source-in 2.0 --source-out 8.0"
             },
             "timeline.split": {
-                "description": "Split a clip at a specific timeline position",
+                "description": edit_desc("Split a clip at a specific timeline position"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -296,7 +349,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline split --path ./project --clip clip_001 --track track_v1 --at 5.0"
             },
             "timeline.speed": {
-                "description": "Change clip playback speed",
+                "description": edit_desc("Change clip playback speed"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -308,7 +361,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline speed --path ./project --clip clip_001 --track track_v1 --speed 2.0"
             },
             "timeline.add-track": {
-                "description": "Add a new track to the timeline",
+                "description": edit_desc("Add a new track to the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "kind": { "type": "string", "required": true, "desc": "Track type: video, audio, caption, or overlay" },
@@ -318,7 +371,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline add-track --path ./project --kind video --name \"Video 2\""
             },
             "timeline.remove-track": {
-                "description": "Remove a track from the timeline",
+                "description": edit_desc("Remove a track from the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "track": { "type": "string", "required": true, "desc": "Track ID" },
@@ -354,7 +407,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline redo --path ./project"
             },
             "caption.add": {
-                "description": "Add a caption to the timeline",
+                "description": edit_desc("Add a caption to the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "track": { "type": "string", "required": false, "desc": "Caption track ID (auto-created when omitted)" },
@@ -415,7 +468,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli caption export --path ./project --format srt --output captions.srt"
             },
             "caption.import": {
-                "description": "Import captions from an SRT, VTT, or transcription JSON file",
+                "description": edit_desc("Import captions from an SRT, VTT, or transcription JSON file"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "file": { "type": "string", "required": true, "desc": "Subtitle or transcription JSON file path" },
@@ -426,9 +479,10 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object applied to all cues" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom. A vertical anchor only; the margin comes from --style-pack when one is named, else 5%" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object applied to all cues" },
-                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" },
+                    "source-clip": { "type": "string", "required": false, "desc": "Clip ID to map SOURCE-relative transcript times onto the timeline (transcript-json only). A transcript produced from a source asset counts from the start of the file, so a trimmed, moved or sped-up clip drifts; naming the hosting clip remaps every cue to its timeline position. Omitted, cues are imported as-is - correct only when the times are already timeline-relative. Ignored for SRT/VTT, which always are" }
                 },
-                "example": "openreelio-cli caption import --path ./project --file transcript.json --format transcript-json"
+                "example": "openreelio-cli caption import --path ./project --file transcript.json --format transcript-json --source-clip clip_001"
             },
             "transcription.status": {
                 "description": "Show local Whisper transcription readiness and installed model status",
@@ -455,9 +509,10 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "import": { "type": "boolean", "required": false, "desc": "Import generated captions into the active or selected sequence" },
                     "track": { "type": "string", "required": false, "desc": "Caption track ID for import" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID for import" },
-                    "replace-existing": { "type": "boolean", "required": false, "desc": "Replace existing captions on the target caption track during import" }
+                    "replace-existing": { "type": "boolean", "required": false, "desc": "Replace existing captions on the target caption track during import" },
+                    "source-clip": { "type": "string", "required": false, "desc": "Clip ID to map SOURCE-relative transcript times onto the timeline during import. Transcribing an asset counts from the start of the file, so a trimmed, moved or sped-up clip drifts; naming the hosting clip remaps every segment to its timeline position. When the asset sits on the target sequence as exactly one clip, that clip is resolved automatically and the mapping is applied" }
                 },
-                "example": "openreelio-cli transcription generate --path ./project --asset asset_001 --language auto --model auto --import"
+                "example": "openreelio-cli transcription generate --path ./project --asset asset_001 --language auto --model auto --import --source-clip clip_001"
             },
             "transcription.generate-sequence": {
                 "description": "Generate speech-to-text transcript segments from the audible audio mix of a sequence, with optional caption import",
@@ -475,7 +530,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli transcription generate-sequence --path ./project --sequence seq_001 --language auto --model auto --import"
             },
             "caption.update": {
-                "description": "Update a caption's text, timing, and style",
+                "description": edit_desc("Update a caption's text, timing, and style"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Caption ID to update" },
@@ -492,7 +547,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli caption update --path ./project --id cap_001 --text \"Updated text\""
             },
             "caption.remove": {
-                "description": "Remove a caption from the timeline",
+                "description": edit_desc("Remove a caption from the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Caption ID to remove" },
@@ -502,7 +557,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli caption remove --path ./project --id cap_001"
             },
             "text.add": {
-                "description": "Add an editable text overlay clip with full style, effect, position, and timing data",
+                "description": edit_desc("Add an editable text overlay clip with full style, effect, position, and timing data"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "track": { "type": "string", "required": false, "desc": "Video or overlay track ID (auto-created when omitted)" },
@@ -536,7 +591,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli text add --path ./project --text \"Directed by OpenReelio\" --start 90 --preset credits"
             },
             "text.update": {
-                "description": "Update an editable text clip's content, style, position, effects, and timing",
+                "description": edit_desc("Update an editable text clip's content, style, position, effects, and timing"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Text clip ID" },
@@ -573,7 +628,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli text update --path ./project --id clip_001 --text \"Updated\" --font-weight 600 --start 1.25 --duration 4.5"
             },
             "text.transform": {
-                "description": "Move, scale, rotate, or re-anchor an editable text clip in preview space",
+                "description": edit_desc("Move, scale, rotate, or re-anchor an editable text clip in preview space"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Text clip ID" },
@@ -590,7 +645,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli text transform --path ./project --id clip_001 --x 0.38 --y 0.42 --scale-x 1.2 --scale-y 1.2 --rotation 8"
             },
             "text.remove": {
-                "description": "Remove an editable text overlay clip",
+                "description": edit_desc("Remove an editable text overlay clip"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Text clip ID" },
@@ -738,11 +793,12 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli ffmpeg info"
             },
             "frame.extract": {
-                "description": "Extract still frames for visual inspection: event-driven samples of the edit, one asset-time frame, one or many timeline-time frames, a contact sheet grid, or — with --file — stills and sheets from an already rendered video. Prefer a SAMPLER over hand-computed times: --range START END looks at exactly the ranges an edit reported changing (the post-apply step, best paired with --grid auto), --affected reads the last recorded edit instead when you do not hold its ranges (pair it with --after-op, since the record is a slot the app's own edits also write), --at-cuts at both sides of every cut, --at-transitions at every blend, --at-captions at every caption and title, --at-markers, --per-shot for coverage, --around <SEC> for one moment in detail. Samplers combine as a union, dedupe, sort ascending, and report why each frame was chosen as frames[].reason / sheet.cells[].reason plus a 'sampler' block (kinds, candidates, selected, limited, affectedRanges — the ranges sampled, however they were named). --limit <N> thins an oversized selection evenly while keeping its first and last. Reach for --between (evenly spaced midpoints, which land on no event at all) only when nothing event-driven fits. Timeline stills default to 'composite': the full stack — captions, text clips, transforms, layered clips and blends — rendered losslessly, served from an already rendered preview-cache segment when one covers the time. Every still reports where its pixels came from as 'source': 'cache' (a fresh cache segment), 'composite' (rendered now) or 'source' (the clip's own media). Timeline 'fast' mode captures the topmost file-backed clip only (no effects, text, or compositing), warns when that hides a caption, text, effect, transition, blend or canvas fit at the sampled time, naming the ones it found, and falls back to 'composite' automatically when no such clip covers the requested time, including over a gap, where a black frame is the correct result. Timeline times must fall inside the sequence; one at or past the end is rejected with the sequence duration in the message. Seeks resolve FORWARD (the first frame at or after the requested time), so the frame before a cut is sampled at cut - 1.5/fps and the frame after it at the cut time itself. Output shapes: --asset gives 'mode':'asset' with 'frames'; timeline stills give 'mode':'fast'|'composite' with 'frames' (each carrying 'timeSec' and 'source'); timeline grids give 'mode':'grid' with 'sheet' (cells carry 'timelineSec', and 'sheet.sources' counts how many cells each tier served); --file gives 'mode':'file' with a 'source' object plus either 'frames' or 'sheet', whose times are named 'fileSec' because they are relative to the file, not the timeline.",
+                "description": "Extract still frames for visual inspection: event-driven samples of the edit, one asset-time frame, one or many timeline-time frames, a contact sheet grid, or — with --file — stills and sheets from an already rendered video. Prefer a SAMPLER over hand-computed times: --range START END looks at exactly the ranges an edit reported changing (the post-apply step, best paired with --grid auto), --affected reads the last recorded edit instead when you do not hold its ranges (pair it with --after-op, since the record is a slot the app's own edits also write), --at-cuts at both sides of every cut, --at-transitions at every blend, --at-captions at every caption and title, --at-markers, --per-shot for coverage, --around <SEC> for one moment in detail. Samplers combine as a union, dedupe, sort ascending, and report why each frame was chosen as frames[].reason / sheet.cells[].reason plus a 'sampler' block (kinds, candidates, selected, limited, affectedRanges — the ranges sampled, however they were named). --limit <N> thins an oversized selection evenly while keeping its first and last. Reach for --between (evenly spaced midpoints, which land on no event at all) only when nothing event-driven fits. Timeline stills default to 'composite': the full stack — captions, text clips, transforms, layered clips and blends — rendered losslessly, served from an already rendered preview-cache segment when one covers the time. Every still reports where its pixels came from as 'source': 'cache' (a fresh cache segment), 'composite' (rendered now) or 'source' (the clip's own media). Timeline 'fast' mode captures the topmost file-backed clip only (no effects, text, or compositing), warns when that hides a caption, text, effect, transition, blend or canvas fit at the sampled time, naming the ones it found, and falls back to 'composite' automatically when no such clip covers the requested time, including over a gap, where a black frame is the correct result. Timeline times must fall inside the sequence; one at or past the end is rejected with the sequence duration in the message. Seeks resolve FORWARD (the first frame at or after the requested time), so the frame before a cut is sampled at cut - 1.5/fps and the frame after it at the cut time itself. Output shapes: --asset gives 'mode':'asset' with 'frames'; timeline stills give 'mode':'fast'|'composite' with 'frames' (each carrying 'timeSec' and 'source'); timeline grids give 'mode':'grid' with 'sheet' (cells carry 'timelineSec', and 'sheet.sources' counts how many cells each tier served); --file gives 'mode':'file' with a 'source' object plus either 'frames' or 'sheet', whose times are named 'fileSec' because they are relative to the file, not the timeline. A sampler works on a rendered file too, once --file-range START END says which timeline seconds it covers: the samplers read the timeline over that range and each time is translated into the file, so every frame and cell carries 'fileSec', 'timelineSec' and 'reason', 'source.timelineRange' echoes the declaration, and 'sampler.droppedOutsideFile' counts the samples the file did not hold.",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path. Not read in --file mode, which needs no project state." },
                     "out": { "type": "string", "required": true, "desc": "Output image file; must be a directory when --times is used without --grid. A .png/.jpg extension selects the format and is written as given." },
-                    "file": { "type": "string", "required": false, "desc": "Rendered video file to extract from instead of the project timeline, using fast seeking in the file's own timebase. Works with --time, --times, and --grid (+ --between or --times). This is the cheap judging path: it sheets the artifact that was actually produced, so no per-cell timeline render happens and the frames match what 'verify --file' measured. Conflicts with --asset, --source-time, --sequence, and --mode. Times are validated against the VIDEO stream's end, reported as source.videoDurationSec, rather than source.durationSec (the container, i.e. the longest stream) — so a file whose audio outlasts its picture is rejected where the picture stops. A seek that produces no frame is reported as an error naming the requested time, never as a success over a stale image at --out." },
+                    "file": { "type": "string", "required": false, "desc": "Rendered video file to extract from instead of the project timeline, using fast seeking in the file's own timebase. Works with --time, --times, --grid (+ --between or --times), and - with --file-range - every event sampler. This is the cheap judging path: it sheets the artifact that was actually produced, so no per-cell timeline render happens and the frames match what 'verify --file' measured. Conflicts with --asset, --source-time, --sequence, and --mode; a sampled --file therefore reads the ACTIVE sequence. Times are validated against the VIDEO stream's end, reported as source.videoDurationSec, rather than source.durationSec (the container, i.e. the longest stream) — so a file whose audio outlasts its picture is rejected where the picture stops. A seek that produces no frame is reported as an error naming the requested time, never as a success over a stale image at --out." },
+                    "file-range": { "type": "string", "required": false, "desc": "The timeline range --file covers, given as two values: START END - the range you rendered. Requires --file. This is what lets the event samplers run against a rendered file: they read the timeline restricted to [START, END] (--range and --affected are clipped to it as well) and every sampled time is translated into the file as t - START, so 'frames' and 'sheet.cells' carry 'fileSec', 'timelineSec' and 'reason' together. A sample the file turns out not to hold - outside [0, source.videoDurationSec) - is dropped and counted as 'sampler.droppedOutsideFile' rather than clamped onto a frame it is not of. Without a sampler it is only recorded as 'source.timelineRange'; --time, --times and --between stay file-relative either way, so the range is an annotation there. START must be below END, and a range whose length differs from the file's video by more than one frame is reported as a warning, not an error." },
                     "asset": { "type": "string", "required": false, "desc": "Asset ID to extract from; requires --source-time and cannot be combined with timeline selectors" },
                     "source-time": { "type": "number", "required": false, "desc": "Time in seconds inside the asset's own media; requires --asset" },
                     "time": { "type": "number", "required": false, "desc": "Timeline time in seconds for a single still" },
@@ -752,7 +808,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "max-width": { "type": "number", "required": false, "desc": "Maximum output width in pixels, 1-3840, aspect ratio preserved and never upscaled (default: 1280 for timeline and --file stills, native for --asset). Out-of-range values are rejected rather than clamped. For grid cells the default is the cell width instead, so passing it only matters when you want an oversampled source." },
                     "format": { "type": "string", "required": false, "desc": "Output image format: png or jpeg. Defaults to the --out extension, falling back to png for directories and extensionless paths; a value that contradicts a .png/.jpg extension is rejected. Grid cells are always JPEG; the sheet itself uses this format." },
                     "grid": { "type": "string", "required": false, "desc": "Contact sheet layout as COLSxROWS (e.g. 3x2), at most 100 cells and at most 8000px on either finished edge (columns * cell width, rows * cell height); an oversized combination is rejected before any cell is extracted. Requires exactly one time source: a sampler, --between to sample a range evenly, or --times to place a specific list of moments. Pass 'auto' to let the layout follow the sample count (1 column for a single sample, 2 for two, 3 up to 9, 4 up to 16, then 6); 'auto' needs a sampler or --times, since --between already fixes its own count." },
-                    "at-cuts": { "type": "boolean", "required": false, "desc": "Sample both sides of every cut in 'timeline info'.cuts — enabled clip boundaries on the video tracks the export includes, so a caption or audio boundary never spends a frame: the outgoing shot's last frame at cut - 1.5/fps (seeks resolve forward, so a smaller offset lands on the incoming shot) and the incoming shot's first frame at the cut itself. Reasons cutBefore and cutAfter. Cannot be combined with --time, --times, --between, --count, --asset or --file." },
+                    "at-cuts": { "type": "boolean", "required": false, "desc": "Sample both sides of every cut in 'timeline info'.cuts — enabled clip boundaries on the video tracks the export includes, so a caption or audio boundary never spends a frame: the outgoing shot's last frame at cut - 1.5/fps (seeks resolve forward, so a smaller offset lands on the incoming shot) and the incoming shot's first frame at the cut itself. Reasons cutBefore and cutAfter. Cannot be combined with --time, --times, --between, --count or --asset; --file needs --file-range START END, which turns the samples into file times." },
                     "at-transitions": { "type": "boolean", "required": false, "desc": "Sample the start, the cut and the end of every two-input transition the renderer will really blend. Reasons transitionStart, transitionCut, transitionEnd. None of the three is a clip boundary, so they cannot be derived from 'timeline clips'. A transition 'timeline info' reports with 'rendersAsCut': true is skipped — its three times all name one hard cut, which --at-cuts already covers." },
                     "at-captions": { "type": "boolean", "required": false, "desc": "Sample the middle of every caption span and every text clip — the settled frame, after any animation in. Reasons captionMid and textMid. Pair with --cell-width 640 or more when sheeting, or the words are unreadable." },
                     "at-markers": { "type": "boolean", "required": false, "desc": "Sample every sequence marker. Reason marker." },
@@ -768,9 +824,9 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "count": { "type": "number", "required": false, "desc": "Number of --between samples (default: columns * rows; must not exceed the grid capacity). Requires --grid and is rejected without it. Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for. Meaningless with --times, which already fixes the cell count." },
                     "cell-width": { "type": "number", "required": false, "desc": "Contact sheet cell width in pixels, 64-1024 (default: 320); requires --grid and is rejected without it. Out-of-range values are rejected rather than clamped. Passing it alone derives the height from the default 16:9 cell (--cell-width 640 gives a 640x360 cell), because cells are fitted with force_original_aspect_ratio=decrease: a 640x180 cell would only pad black around the same 320x180 picture. Grid cells are extracted at the cell width, so raising the pair really does buy detail; --max-width overrides the extraction width." },
                     "cell-height": { "type": "number", "required": false, "desc": "Contact sheet cell height in pixels, 64-1024 (default: 180); requires --grid and is rejected without it. Passing it alone derives the width at 16:9 the same way --cell-width does; passing both keeps exactly what was asked for, including a deliberately non-16:9 cell. A derived dimension is clamped into the 64-1024 range. The reported sheet.cellWidth/cellHeight always name the values actually used." },
-                    "label-cells": { "type": "boolean", "required": false, "desc": "Burn '<index> | <seconds>s' into the bottom-left of every cell so the sheet.cells mapping is readable from the image itself; requires --grid and is rejected without it. The label carries the REQUESTED time, not the decoded frame's PTS, so it identifies the cell rather than proving which frame was decoded. Costs one extra FFmpeg pass per cell and needs an FFmpeg build with the drawtext filter. The sheet reports 'labeled': true when it was applied." }
+                    "label-cells": { "type": "boolean", "required": false, "desc": "Burn '<index> | <seconds>s <timebase>' into the bottom-left of every cell so the sheet.cells mapping is readable from the image itself; requires --grid and is rejected without it. The trailing marker says which clock the number belongs to: 'tl' a timeline second, 'file' an offset into the rendered file. The label carries the REQUESTED time, not the decoded frame's PTS, so it identifies the cell rather than proving which frame was decoded. On a --file-range sheet it carries the TIMELINE second the cell shows rather than the file offset, because that is the number a judgement has to quote; the file offset is still reported as cells[].fileSec. Without --file-range a --file sheet has no timeline to name, so its cells are labelled 'file'. Costs one extra FFmpeg pass per cell and needs an FFmpeg build with the drawtext filter. The sheet reports 'labeled': true when it was applied." }
                 },
-                "example": "openreelio-cli frame extract --path ./project --affected --grid auto --label-cells --out sheet.jpg"
+                "example": "openreelio-cli frame extract --path ./project --file proxy.mp4 --file-range 2 6 --at-cuts --grid auto --label-cells --out sheet.jpg"
             },
             "verify": {
                 "description": "Run deterministic quality control over a sequence and, with --file, over a rendered export. Emits one entry per check — including the ones that passed or were skipped — so an agent can tell 'checked and clean' from 'never checked'. Each check reports status passed (ran, found nothing), warned (ran, warning/info findings only), failed (ran, error or critical findings), skipped, or errored; checks[].passed is true only for 'passed', while the top-level status/passed follow severity and stay true when findings are warnings or info. Exit codes: 0 = ran without breaching --fail-on, 1 = threshold breached, 2 = tool failure (bad arguments, unreadable file, FFmpeg failure, or a check that errored).",
@@ -779,7 +835,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
                     "file": { "type": "string", "required": false, "desc": "Rendered file to measure (black/freeze/silence detection, EBU R128 loudness, peaks). Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and are compared against timeline times, so pass a full-sequence render rather than a partial one." },
                     "structural-only": { "type": "boolean", "required": false, "desc": "Run structural checks only and never touch FFmpeg; conflicts with --file" },
-                    "checks": { "type": "string", "required": false, "desc": "Comma-separated check IDs to run exclusively (asset.license and sequence.duration are opt-in and only run when named here): sequence.empty, timeline.gap, clip.orphan, clip.missing_asset, audio.silent_clip, caption.overlap, caption.reading_rate, caption.out_of_bounds, caption.safe_area, shot.length_stats, shot.cut_rhythm, clip.aspect_ratio, asset.license, sequence.duration, render.duration_mismatch, render.missing_video, render.resolution_mismatch, render.black_frames, render.frozen, audio.peak, audio.clipping, audio.loudness" },
+                    "checks": { "type": "string", "required": false, "desc": verify_checks_desc() },
                     "skip": { "type": "string", "required": false, "desc": "Comma-separated check IDs to disable" },
                     "target-lufs": { "type": "number", "required": false, "desc": "Integrated loudness target in LUFS (default -14). Negative values need the '=' form: --target-lufs=-14. Deviation over 1 LU warns, over 3 LU errors." },
                     "max-true-peak": { "type": "number", "required": false, "desc": "Maximum acceptable true peak in dBTP (default -1). Negative values need the '=' form: --max-true-peak=-1. Sample peak is used when the encoder reports no true peak." },
@@ -810,23 +866,45 @@ pub(crate) fn build_schema() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_schema, text_preset_ids, NO_TEXT_PRESET};
+    use super::{
+        build_schema, join_with_and, qc_check_ids, text_preset_ids, verify_checks_desc,
+        NO_TEXT_PRESET,
+    };
     use crate::commands::Cli;
     use clap::{Command, CommandFactory};
+    use std::collections::BTreeMap;
 
-    fn collect_leaf_paths(command: &Command, prefix: &[String], acc: &mut Vec<String>) {
+    /// Every runnable command in the clap tree, as `("dotted.path", command)`.
+    fn collect_leaf_commands<'a>(
+        command: &'a Command,
+        prefix: &[String],
+        acc: &mut Vec<(String, &'a Command)>,
+    ) {
         let mut has_subcommands = false;
 
         for subcommand in command.get_subcommands() {
             has_subcommands = true;
             let mut next_prefix = prefix.to_vec();
             next_prefix.push(subcommand.get_name().to_string());
-            collect_leaf_paths(subcommand, &next_prefix, acc);
+            collect_leaf_commands(subcommand, &next_prefix, acc);
         }
 
         if !has_subcommands && !prefix.is_empty() {
-            acc.push(prefix.join("."));
+            acc.push((prefix.join("."), command));
         }
+    }
+
+    /// The clap tree's leaves, keyed by the dotted id the schema uses.
+    fn clap_leaf_commands() -> Vec<(String, Command)> {
+        let root = Cli::command();
+        let mut leaves = Vec::new();
+        collect_leaf_commands(&root, &[], &mut leaves);
+        let mut leaves: Vec<(String, Command)> = leaves
+            .into_iter()
+            .map(|(path, command)| (path, command.clone()))
+            .collect();
+        leaves.sort_by(|left, right| left.0.cmp(&right.0));
+        leaves
     }
 
     #[test]
@@ -836,9 +914,10 @@ mod tests {
             .as_object()
             .expect("schema commands must be an object");
 
-        let mut clap_paths = Vec::new();
-        collect_leaf_paths(&Cli::command(), &[], &mut clap_paths);
-        clap_paths.sort();
+        let clap_paths: Vec<String> = clap_leaf_commands()
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
 
         let mut schema_paths: Vec<String> = schema_commands.keys().cloned().collect();
         schema_paths.sort();
@@ -985,5 +1064,171 @@ mod tests {
                 .contains("redo"),
             "The jump verb must warn that a new edit clears the redo branch"
         );
+    }
+
+    #[test]
+    fn verify_checks_description_names_exactly_the_registered_qc_checks() {
+        // The bug this replaces: the schema listed 22 ids while the engine
+        // registered 23, so `transition.no_handles` was invisible to any agent
+        // that discovered the surface through help-json. What stops that coming
+        // back is the schema carrying the generated sentence rather than a
+        // hand-kept copy of it — parsing the ids back out of that sentence and
+        // comparing them to the list it was built from could never fail.
+        assert!(
+            !qc_check_ids().is_empty(),
+            "the QC engine must register rules"
+        );
+
+        let schema = build_schema();
+        let described = schema["commands"]["verify"]["params"]["checks"]["desc"]
+            .as_str()
+            .expect("verify --checks must document its ids");
+
+        assert_eq!(described, verify_checks_desc());
+    }
+
+    #[test]
+    fn join_with_and_should_read_as_english_at_every_length() {
+        assert_eq!(join_with_and(&[]), "");
+        assert_eq!(join_with_and(&["a"]), "a");
+        assert_eq!(join_with_and(&["a", "b"]), "a and b");
+        // The case `join(" and ")` got wrong, and the one a third opt-in check
+        // would have introduced into a sentence agents read.
+        assert_eq!(join_with_and(&["a", "b", "c"]), "a, b and c");
+    }
+
+    /// Flags clap adds or the root declares for every verb, which no per-verb
+    /// schema entry describes.
+    const GLOBAL_FLAG_IDS: [&str; 4] = ["help", "version", "verbose", "quiet"];
+
+    /// Every long flag a clap command declares, with whether it is required.
+    fn long_flags(command: &Command) -> BTreeMap<String, bool> {
+        command
+            .get_arguments()
+            .filter(|argument| !GLOBAL_FLAG_IDS.contains(&argument.get_id().as_str()))
+            .filter_map(|argument| {
+                argument
+                    .get_long()
+                    .map(|long| (long.to_string(), argument.is_required_set()))
+            })
+            .collect()
+    }
+
+    /// The same table read off one schema entry's `params`.
+    fn documented_flags(params: &serde_json::Value, verb: &str) -> BTreeMap<String, bool> {
+        params
+            .as_object()
+            .unwrap_or_else(|| panic!("{verb} must document its params"))
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    entry["required"].as_bool().unwrap_or_else(|| {
+                        panic!("{verb} --{name} must document whether it is required")
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    /// Feature: help-json schema
+    /// Scenario: every verb documents exactly the flags its parser accepts
+    ///
+    /// The bug this replaces: the guard checked two hand-listed leaves, so
+    /// `caption import --source-clip` and `transcription generate --source-clip`
+    /// — the flags that decide whether transcript times are remapped onto the
+    /// timeline at all — were parsed but invisible to any agent that discovered
+    /// the surface through help-json. Reading the leaves out of the clap tree is
+    /// what makes a flag added tomorrow fail this rather than go unnoticed.
+    #[test]
+    fn build_schema_documents_exactly_the_flags_every_verb_parses() {
+        let schema = build_schema();
+
+        for (verb, command) in clap_leaf_commands() {
+            let parsed = long_flags(&command);
+            let documented = documented_flags(&schema["commands"][&verb]["params"], &verb);
+
+            let missing: Vec<&String> = parsed
+                .keys()
+                .filter(|flag| !documented.contains_key(*flag))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{verb} parses flags the schema never mentions: {missing:?}"
+            );
+
+            let phantom: Vec<&String> = documented
+                .keys()
+                .filter(|flag| !parsed.contains_key(*flag))
+                .collect();
+            assert!(
+                phantom.is_empty(),
+                "{verb} documents flags the parser rejects: {phantom:?}"
+            );
+
+            let disagreed: Vec<String> = parsed
+                .iter()
+                .filter(|(flag, required)| documented.get(*flag) != Some(required))
+                .map(|(flag, required)| format!("--{flag} (clap requires it: {required})"))
+                .collect();
+            assert!(
+                disagreed.is_empty(),
+                "{verb} disagrees with its parser about which flags are required: {disagreed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_schema_says_every_mutating_edit_verb_reports_affected_ranges() {
+        // The edit verbs hand back the seconds that moved; an agent that reads
+        // only the schema has to learn that from the schema.
+        let schema = build_schema();
+
+        for verb in [
+            "timeline.insert",
+            "timeline.remove",
+            "timeline.move",
+            "timeline.trim",
+            "timeline.split",
+            "timeline.speed",
+            "timeline.add-track",
+            "timeline.remove-track",
+            "text.add",
+            "text.update",
+            "text.transform",
+            "text.remove",
+            "caption.add",
+            "caption.update",
+            "caption.remove",
+            "caption.import",
+        ] {
+            let description = schema["commands"][verb]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{verb} must have a description"));
+            assert!(
+                description.contains("affectedRanges"),
+                "{verb} reports affectedRanges and the schema must say so: {description}"
+            );
+            assert!(
+                description.contains("frame extract --range"),
+                "{verb} must point at the inspection step its ranges feed: {description}"
+            );
+        }
+
+        // Read-only and history verbs report nothing of the kind.
+        for verb in [
+            "timeline.info",
+            "timeline.undo",
+            "text.list",
+            "caption.list",
+        ] {
+            let description = schema["commands"][verb]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{verb} must have a description"));
+            assert!(
+                !description.contains("affectedRanges"),
+                "{verb} does not report affectedRanges: {description}"
+            );
+        }
     }
 }

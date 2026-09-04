@@ -14,7 +14,9 @@
 //!    clip's own media, which shows the footage but not the edit.
 
 use super::sampler::{SampleReason, SamplerReport};
-use super::sheet::{build_contact_sheet, grid_cell_extract_width, resolve_cell_size, CellStaging};
+use super::sheet::{
+    build_contact_sheet, grid_cell_extract_width, resolve_cell_size, CellStaging, LabelTimebase,
+};
 use super::{
     batch_frame_name, create_batch_output_dir, ensure_times_inside_sequence, remove_stale_output,
     resolve_sequence, resolve_single_output_path, FrameEntry, FrameProbeError, FrameProbeProject,
@@ -242,8 +244,9 @@ pub(super) async fn run_timeline_mode(
     batch: bool,
     sampler: Option<&SamplerContext<'_>>,
 ) -> FrameProbeResult<serde_json::Value> {
-    let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
-    ensure_times_inside_sequence(sequence, times)?;
+    let (sequence_id, sequence) =
+        resolve_sequence(project, request.sequence.clone(), request.names)?;
+    ensure_times_inside_sequence(sequence, times, request.names)?;
     let mut context = TimelineFrameContext::new(
         runner,
         project,
@@ -296,8 +299,9 @@ pub(super) async fn run_grid_mode(
     times: &[f64],
     sampler: Option<&SamplerContext<'_>>,
 ) -> FrameProbeResult<serde_json::Value> {
-    let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
-    ensure_times_inside_sequence(sequence, times)?;
+    let (sequence_id, sequence) =
+        resolve_sequence(project, request.sequence.clone(), request.names)?;
+    ensure_times_inside_sequence(sequence, times, request.names)?;
     let cell = resolve_cell_size(request);
     let mut context = TimelineFrameContext::new(
         runner,
@@ -312,7 +316,7 @@ pub(super) async fn run_grid_mode(
     );
     context.measure_sources().await;
 
-    let staging = CellStaging::new(cell, request.label_cells)?;
+    let staging = CellStaging::new(cell, request.label_cells, request.names)?;
 
     let mut cell_paths = Vec::with_capacity(times.len());
     let mut cells = Vec::with_capacity(times.len());
@@ -322,7 +326,11 @@ pub(super) async fn run_grid_mode(
             .extract(index, *time, &staging.extract_path(index))
             .await?;
         sources.record(entry.source);
-        cell_paths.push(staging.finish(runner, index, *time).await?);
+        cell_paths.push(
+            staging
+                .finish(runner, index, *time, *time, LabelTimebase::Timeline)
+                .await?,
+        );
         cells.push(GridCell {
             index,
             row: index / columns,

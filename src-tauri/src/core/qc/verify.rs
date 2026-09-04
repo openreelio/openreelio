@@ -508,6 +508,23 @@ pub fn exit_code_for(report: &QCReport, fail_on: Severity, measurement_failed: b
 // ── Configuration ───────────────────────────────────────────────────────
 
 /// Picks the sequence to verify, defaulting to the project's active one.
+///
+/// # Why this is not shared
+///
+/// Two other resolvers apply the same rule — take the caller's id, else the
+/// active one, else refuse with the same sentence:
+///
+/// * `frame_probe::resolve_sequence` also looks the sequence up and reports
+///   through `FrameProbeError`, so its signature is not this one's.
+/// * `openreelio_cli::commands::resolve_sequence_id_in_state` reports through
+///   `anyhow` and lives in a crate that depends on this one, so nothing here
+///   can call it.
+///
+/// Collapsing the three needs a resolver that returns no error at all — an
+/// `Option<String>` accessor on [`ProjectState`] that each surface wraps in its
+/// own error type. That belongs in the project state module rather than in any
+/// one of its callers, so this copy stands until that accessor exists; the
+/// duplicated part is then a single `ok_or_else`.
 fn resolve_sequence_id(state: &ProjectState, explicit: Option<&str>) -> VerifyResult<String> {
     explicit
         .map(str::to_string)
@@ -516,7 +533,11 @@ fn resolve_sequence_id(state: &ProjectState, explicit: Option<&str>) -> VerifyRe
 }
 
 /// Parses a severity threshold name, refusing in the caller's own vocabulary.
-pub(crate) fn parse_severity(raw: &str, argument: &str) -> VerifyResult<Severity> {
+///
+/// Private: every surface (clap, MCP JSON, the in-app IPC bridge) hands the raw
+/// `failOn` string to [`VerifyRequest`] and lets this module do the parsing, so
+/// there is no caller outside it and nothing to widen the visibility for.
+fn parse_severity(raw: &str, argument: &str) -> VerifyResult<Severity> {
     match raw.trim().to_lowercase().as_str() {
         "info" => Ok(Severity::Info),
         "warning" | "warn" => Ok(Severity::Warning),

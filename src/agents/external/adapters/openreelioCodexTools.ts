@@ -9,6 +9,7 @@ import {
   type ClipAnalysisResponse,
   type ClipPerceptionOptions,
   type ClipPerceptionResponse,
+  type InspectionSummary,
   type PlanRiskLevel,
   type ProjectInfo,
   type ProjectStateDto,
@@ -19,6 +20,7 @@ import {
   type StockMediaImportResult,
   type StockMediaSearchResult,
   type TimelineFrameProbeRequestDto,
+  type TimeRange,
   type TranscriptionOptionsDto,
   type TranscriptionResultDto,
   type TranscriptionStatusDto,
@@ -832,7 +834,8 @@ const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
     },
     labelCells: {
       type: 'boolean',
-      description: "Burn each cell's index and timecode into the contact sheet. Requires grid.",
+      description:
+        "Burn each cell's index and timecode into the contact sheet. Requires grid. On a fileRange sheet the burnt-in timecode is the timeline second the cell shows, not the file offset; the file offset is still reported as cells[].fileSec.",
     },
     mode: {
       type: 'string',
@@ -849,7 +852,15 @@ const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
     file: {
       type: 'string',
       description:
-        'Rendered video inside the project directory to read instead of the timeline, such as the outputPath returned by render_proxy. Times are relative to the file and cells map back as fileSec. Samplers are not available with file; use times, or between with an explicit grid.',
+        'Rendered video inside the project directory to read instead of the timeline, such as the outputPath returned by render_proxy. Times are relative to the file and cells map back as fileSec. Pass fileRange alongside it to use the samplers on the render.',
+    },
+    fileRange: {
+      type: 'array',
+      minItems: 2,
+      maxItems: 2,
+      items: { type: 'number', minimum: 0 },
+      description:
+        'The timeline range [start, end] the file covers — the start and end render_proxy reported. With a sampler this is what makes samplers work on a render: they read the timeline over this range and every time is translated into the file, so each frame and cell carries fileSec, timelineSec and its reason, and any sample the file does not hold is dropped and counted as sampler.droppedOutsideFile. Without a sampler it is only recorded as source.timelineRange; time, times and between stay file-relative either way. Only with file.',
     },
     atCuts: {
       type: 'boolean',
@@ -936,6 +947,12 @@ const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
  * blocks the tool call until it finishes, so an unbounded request is an
  * unbounded stall. Five minutes of timeline is far more than any "does this
  * motion read?" question needs.
+ *
+ * The same bound is enforced in Rust as
+ * `core::render::cache::MAX_AGENT_RENDER_RANGE_SEC`, which is the authority: it
+ * applies to every surface that renders into the agent render directory,
+ * including this one. This copy exists so the refusal is an argument error the
+ * agent reads before a render is started, and the two must be changed together.
  */
 const RENDER_PROXY_MAX_RANGE_SEC = 300;
 
@@ -1030,7 +1047,7 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
     namespace: 'openreelio',
     name: 'timeline_snapshot',
     description:
-      'Read a concise snapshot of the active OpenReelio timeline, tracks, clips, markers, and current sequence.',
+      "Read a concise snapshot of the active OpenReelio timeline, tracks, clips, markers, and current sequence, plus each sequence's where-to-look signals: durationSec, outputDurationSec, fps, canvas, cuts, editPoints, transitions, captionSpans, textSpans, and inspectionHints.",
     inputSchema: EMPTY_OBJECT_SCHEMA,
   },
   {
@@ -1250,7 +1267,7 @@ export function buildOpenReelioCodexDeveloperInstructions(
     "- Do not compute inspection times yourself. frame_extract samples the edit's own events (ranges, affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around); uniform between sampling lands on no event and is for whole-timeline overviews only.",
     "- cellWidth, cellHeight, labelCells and between only apply to a contact sheet and are rejected without grid. grid: 'auto' sizes itself from a sampler or times, so between always needs an explicit grid such as '4x3'.",
     '- frame_extract shows the composited edit by default. Only pass mode: "fast" when you deliberately want the raw footage without captions, text or effects.',
-    `- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, and keep the range under ${RENDER_PROXY_MAX_RANGE_SEC}s. Then inspect its outputPath with openreelio.frame_extract { file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true } — file times are relative to the file, and samplers are not available with file.`,
+    `- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, and keep the range under ${RENDER_PROXY_MAX_RANGE_SEC}s (the same cap the backend enforces). Then inspect its outputPath with openreelio.frame_extract { file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true }, which sweeps the whole draft and always has something to show. When the rendered range contains cuts, captions or transitions, judge those instead: add fileRange: [start, start + durationSec] — the start you asked for and the duration the render reported — with a sampler such as atCuts, atCaptions, atTransitions or perShot and grid: 'auto'. fileRange is what lets the samplers read a rendered file, and every cell then carries both fileSec and timelineSec; a sampler over a range holding no such event errors rather than returning an empty sheet.`,
     '- Never claim a cut, caption, overlay, or transition looks right without having extracted a frame that shows it.',
     '- Before you report a task done, run openreelio.verify with no arguments for the structural checks, and after an openreelio.render_proxy run openreelio.verify { file: outputPath } so the black, freeze, silence, loudness and true-peak measurements run too.',
     "- Read the verify exitCode: 0 passed, 1 means a check failed and there is something to fix before reporting done, 2 means verify itself could not run — report that as a tool problem, never as a clean edit. Look at a violation's timeRange with openreelio.frame_extract { ranges: <the violation timeRanges>, grid: 'auto', labelCells: true }, and apply a suggestedFix through openreelio.plan_apply only after reviewing it.",
@@ -1287,7 +1304,7 @@ export async function handleOpenReelioCodexDynamicToolCall(
       case 'project_state':
         return toolResponse(await buildProjectStateResponse(context));
       case 'timeline_snapshot':
-        return toolResponse(buildTimelineSnapshot(await readProjectState(), context));
+        return toolResponse(await buildTimelineSnapshot(await readProjectState(), context));
       case 'assets_list':
         return toolResponse(buildAssetsList(await readProjectState(), context));
       case 'transcription_status': {
@@ -1860,29 +1877,30 @@ async function extractFramesToolCall(
   };
 }
 
-/** One timeline range the `ranges` sampler looks at. */
-interface FrameProbeRange {
-  startSec: number;
-  endSec: number;
-}
-
-/**
- * The `extract_timeline_frames` request as this bridge sends it.
- *
- * `ranges` and `afterOp` belong to the probe's request contract but are not in
- * the generated bindings yet, so they are declared here rather than by
- * hand-editing `src/bindings.ts`.
- */
-type FrameProbeRequest = TimelineFrameProbeRequestDto & {
-  ranges?: FrameProbeRange[] | null;
-  afterOp?: string | null;
-};
-
 /** Translate tool arguments into the frame-probe request DTO. */
-function buildFrameProbeRequest(args: CodexJsonObject): FrameProbeRequest {
+function buildFrameProbeRequest(args: CodexJsonObject): TimelineFrameProbeRequestDto {
   const between = readNumberArrayArg(args, 'between', 'frame_extract');
   if (between && between.length !== 2) {
     throw new Error('OpenReelio frame_extract requires between to be [start, end].');
+  }
+  const fileRange = readNumberArrayArg(args, 'fileRange', 'frame_extract');
+  const file = getString(args, 'file')?.trim() || null;
+  if (fileRange && fileRange.length !== 2) {
+    throw new Error('OpenReelio frame_extract requires fileRange to be [start, end].');
+  }
+  // The probe enforces both of these too, and its refusals are the authority.
+  // They are restated here so a malformed hand-back is an argument error the
+  // model reads in the same turn, before an IPC round trip and before a cache
+  // directory has been reserved for a request that cannot run.
+  if (fileRange && !file) {
+    throw new Error(
+      'OpenReelio frame_extract fileRange declares which timeline seconds a rendered file covers, so it only means something with file.',
+    );
+  }
+  if (fileRange && fileRange[0] >= fileRange[1]) {
+    throw new Error(
+      `OpenReelio frame_extract requires fileRange start (${fileRange[0]}) to be before its end (${fileRange[1]}).`,
+    );
   }
 
   return {
@@ -1895,7 +1913,8 @@ function buildFrameProbeRequest(args: CodexJsonObject): FrameProbeRequest {
     labelCells: args.labelCells === true,
     mode: getString(args, 'mode')?.trim() || null,
     maxWidth: getFiniteNonNegativeNumberArg(args, 'maxWidth', 'frame_extract') ?? null,
-    file: getString(args, 'file')?.trim() || null,
+    file,
+    fileRange,
     atCuts: args.atCuts === true,
     atTransitions: args.atTransitions === true,
     atCaptions: args.atCaptions === true,
@@ -1921,7 +1940,7 @@ function buildFrameProbeRequest(args: CodexJsonObject): FrameProbeRequest {
  * Shape is checked here rather than left to the probe so a malformed hand-back
  * fails with the field name in the message instead of an IPC-level rejection.
  */
-function readFrameProbeRanges(args: CodexJsonObject, toolName: string): FrameProbeRange[] | null {
+function readFrameProbeRanges(args: CodexJsonObject, toolName: string): TimeRange[] | null {
   const value = args.ranges;
   if (value === undefined || value === null) {
     return null;
@@ -1945,13 +1964,21 @@ function readFrameProbeRanges(args: CodexJsonObject, toolName: string): FramePro
   });
 }
 
+/**
+ * Read an argument that names times or bounds in seconds.
+ *
+ * NaN and the infinities are rejected here rather than passed on: they are
+ * `typeof 'number'`, they survive JSON as `null` only on the way out, and a
+ * range built from one turns into an arithmetic refusal from the engine that
+ * says nothing about which argument produced it.
+ */
 function readNumberArrayArg(args: CodexJsonObject, key: string, toolName: string): number[] | null {
   const value = args[key];
   if (value === undefined || value === null) {
     return null;
   }
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'number')) {
-    throw new Error(`OpenReelio ${toolName} requires ${key} to be an array of numbers.`);
+  if (!Array.isArray(value) || value.some((entry) => !Number.isFinite(entry))) {
+    throw new Error(`OpenReelio ${toolName} requires ${key} to be an array of finite numbers.`);
   }
   return value as number[];
 }
@@ -2171,7 +2198,15 @@ async function renderProxyToolCall(
   // The file only exists when the encoder finished; naming a path the render
   // never wrote invites the agent to point frame_extract at nothing.
   const producedFile = render.outcome.status === 'ok';
-  const durationSec = render.outcome.durationSec ?? end - start;
+  // fileRange describes the range the render PLANNED after clamping — the
+  // length the export reported for the range it settled on — not a measurement
+  // of the finished file. The bridge has no probe of its own; the encoder can
+  // still land a frame short of the plan, and a sampled time the file turns out
+  // not to hold is dropped and counted as sampler.droppedOutsideFile rather
+  // than mislabelled. It is still much closer than the requested range, which
+  // is what this falls back to when the render reported no duration at all.
+  const renderedDurationSec = render.outcome.durationSec ?? end - start;
+  const fileRangeEnd = roundSeconds(start + renderedDurationSec);
 
   return {
     status: render.outcome.status,
@@ -2189,7 +2224,11 @@ async function renderProxyToolCall(
       ? `Look at the render: ${toolIdFor(
           context.runtimeId,
           'frame_extract',
-        )} { file: outputPath, between: [0, ${roundSeconds(durationSec)}], grid: '4x3', labelCells: true }. File times are relative to the file, and samplers are not available with file. Then measure it: ${toolIdFor(
+        )} { file: outputPath, between: [0, ${roundSeconds(
+          renderedDurationSec,
+        )}], grid: '4x3', labelCells: true } sweeps the whole draft and always has something to show. When the range you rendered contains cuts, captions or transitions, judge those instead by adding fileRange: [${roundSeconds(
+          start,
+        )}, ${fileRangeEnd}] with a sampler — atCuts, atCaptions, atTransitions or perShot — and grid: 'auto'; fileRange says which timeline seconds this file holds, so the samplers read the timeline over them and every cell carries both fileSec and timelineSec. A sampler over a range with no such event errors rather than returning an empty sheet. Then measure it: ${toolIdFor(
           context.runtimeId,
           'verify',
         )} { file: outputPath }.`
@@ -4468,20 +4507,135 @@ async function importStockMediaToolCall(
   };
 }
 
-function buildTimelineSnapshot(
+async function buildTimelineSnapshot(
   state: ProjectStateDto,
   context: OpenReelioCodexToolContext,
-): CodexJsonObject {
+): Promise<CodexJsonObject> {
   const activeSequence = state.sequences.find((sequence) => sequence.id === state.activeSequenceId);
   const contextToken = issueContextToken(context, state, 'timeline_snapshot');
+  const inspections = await readSequenceInspections(state);
   return {
     contextToken: contextToken.token,
     contextTokenExpiresAt: contextToken.issuedAt + CONTEXT_TOKEN_TTL_MS,
     available: true,
     activeSequenceId: state.activeSequenceId,
-    activeSequence: activeSequence ? summarizeSequence(activeSequence) : null,
+    activeSequence: activeSequence ? summarizeSequence(activeSequence, inspections) : null,
     editingDefaults: activeSequence ? buildTimelineEditingDefaults(activeSequence) : null,
-    sequences: state.sequences.map(summarizeSequence),
+    sequences: state.sequences.map((sequence) => summarizeSequence(sequence, inspections)),
+  };
+}
+
+/**
+ * The where-to-look signals for one sequence, or why they are missing.
+ *
+ * A snapshot whose inspection call failed is still worth returning — the
+ * structural half is what an agent needs to name tracks and clips — so the
+ * failure travels as a note beside it rather than as a thrown error or, worse,
+ * as invented numbers.
+ */
+type SequenceInspectionResult =
+  | { readonly summary: InspectionSummary }
+  | { readonly unavailable: string };
+
+/** Inspection results by sequence id. */
+type SequenceInspectionMap = ReadonlyMap<string, SequenceInspectionResult>;
+
+/**
+ * Read the core's inspection summary for every sequence in the snapshot.
+ *
+ * The signals are derived once in Rust (`timeline::inspection`), the same
+ * function `openreelio-cli timeline info` and the MCP snapshot call, so the
+ * bridge only fetches them. Recomputing cut times or transition spans here
+ * would be a second implementation that could disagree with the render.
+ *
+ * One call for every sequence, not one call each: each invocation clones the
+ * whole project state to read from, so a project with a dozen sequences paid
+ * for a dozen clones of every clip, effect and caption in it. The summaries come
+ * back in the order the ids went out — a summary carries no id of its own — so
+ * the two lists are zipped back together here.
+ */
+async function readSequenceInspections(state: ProjectStateDto): Promise<SequenceInspectionMap> {
+  const sequenceIds = state.sequences
+    .map((sequence) => sequence.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  if (sequenceIds.length === 0) {
+    return new Map();
+  }
+
+  const unavailable = (reason: string): SequenceInspectionMap =>
+    new Map(sequenceIds.map((id) => [id, { unavailable: reason }]));
+
+  try {
+    const result = await commands.sequenceInspectionSummary(null, sequenceIds);
+    if (result.status !== 'ok') {
+      return unavailable(describeInspectionFailure(result.error));
+    }
+    if (result.data.length !== sequenceIds.length) {
+      return unavailable(
+        'The sequence inspection summaries did not line up with the sequences they were asked for.',
+      );
+    }
+    return new Map(
+      sequenceIds.map((id, index) => [id, { summary: result.data[index] as InspectionSummary }]),
+    );
+  } catch (error) {
+    return unavailable(describeInspectionFailure(error));
+  }
+}
+
+/**
+ * Render an inspection failure as a sentence an agent can act on.
+ *
+ * The generated bindings hand back whatever the IPC rejected with — a plain
+ * string from the backend's own `Err`, an `Error` when the transport itself
+ * failed — and either has to survive JSON as readable text.
+ */
+function describeInspectionFailure(error: unknown): string {
+  if (typeof error === 'string') {
+    return error;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return 'The sequence inspection summary could not be read.';
+}
+
+/**
+ * Merge one sequence's inspection signals into its summary.
+ *
+ * Every value is passed through from the core summary untouched. When the call
+ * failed, `inspectionUnavailable` carries the reason and no signal field is
+ * emitted, so a missing field never reads as "there is nothing there".
+ */
+function summarizeInspection(
+  sequenceId: unknown,
+  inspections: SequenceInspectionMap | undefined,
+): CodexJsonObject {
+  if (!inspections) {
+    return {};
+  }
+  const entry = typeof sequenceId === 'string' ? inspections.get(sequenceId) : undefined;
+  if (!entry) {
+    return { inspectionUnavailable: 'No inspection summary was read for this sequence.' };
+  }
+  if ('unavailable' in entry) {
+    return { inspectionUnavailable: entry.unavailable };
+  }
+
+  const summary = entry.summary;
+  return {
+    durationSec: summary.durationSec,
+    outputDurationSec: summary.outputDurationSec,
+    fps: summary.fps,
+    fpsRatio: summary.fpsRatio,
+    canvas: summary.canvas,
+    cuts: summary.cuts,
+    editPoints: summary.editPoints,
+    markers: summary.markers,
+    transitions: summary.transitions,
+    captionSpans: summary.captionSpans,
+    textSpans: summary.textSpans,
+    inspectionHints: summary.inspectionHints,
   };
 }
 
@@ -4517,7 +4671,14 @@ function buildRecommendedTimelineTracks(
   };
 }
 
-function summarizeSequence(sequence: unknown): CodexJsonObject {
+/**
+ * Structural summary of one sequence, plus the core's where-to-look signals
+ * when `inspections` carries them.
+ */
+function summarizeSequence(
+  sequence: unknown,
+  inspections?: SequenceInspectionMap,
+): CodexJsonObject {
   const sequenceObject = asObject(sequence) ?? {};
   const tracks = Array.isArray(sequenceObject.tracks) ? sequenceObject.tracks : [];
   return {
@@ -4525,6 +4686,7 @@ function summarizeSequence(sequence: unknown): CodexJsonObject {
     name: sequenceObject.name,
     trackCount: tracks.length,
     markerCount: Array.isArray(sequenceObject.markers) ? sequenceObject.markers.length : 0,
+    ...summarizeInspection(sequenceObject.id, inspections),
     tracks: tracks.map((track, index) => {
       const trackObject = asObject(track) ?? {};
       const clips = Array.isArray(trackObject.clips) ? trackObject.clips : [];

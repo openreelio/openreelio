@@ -28,10 +28,11 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::core::fs::{confine_media_path_to_project, is_network_path, strip_verbatim_prefix};
 use crate::core::project::ProjectState;
+use crate::core::render::frame_probe;
 use crate::core::render::frame_probe::{
     allocate_frame_output, frame_image_paths, image_mime_type, inline_frame_images,
     parse_image_format, FrameArtifact, FrameOutput, FrameProbePlan, FrameProbeRequest,
-    MAX_INLINE_FRAME_STILLS,
+    API_ARGUMENT_NAMES, MAX_INLINE_FRAME_STILLS,
 };
 use crate::core::render::ImageFormat;
 
@@ -82,6 +83,14 @@ pub struct TimelineFrameProbeRequestDto {
     /// Rendered video inside the project to read instead of the timeline.
     #[serde(default)]
     pub file: Option<String>,
+    /// Timeline range the `file` covers, as `[start, end]` seconds.
+    ///
+    /// What lets a sampler run against a rendered file: the samplers read the
+    /// timeline restricted to this range and every time they choose is
+    /// translated into the file as `t - start`. `render_proxy` reports the
+    /// `start` and `end` it rendered, so the pair is handed straight back.
+    #[serde(default)]
+    pub file_range: Option<Vec<f64>>,
     /// Asset to extract from, in the asset's own media timebase.
     #[serde(default)]
     pub asset: Option<String>,
@@ -202,7 +211,9 @@ impl TimelineFrameProbeRequestDto {
     /// than quietly handed the other one.
     pub(crate) fn resolve_format(&self) -> Result<ImageFormat, String> {
         let requested = match self.format.as_deref() {
-            Some(raw) => Some(parse_image_format(raw).map_err(|error| error.to_string())?),
+            Some(raw) => Some(
+                parse_image_format(raw, API_ARGUMENT_NAMES).map_err(|error| error.to_string())?,
+            ),
             None => None,
         };
 
@@ -275,6 +286,7 @@ impl TimelineFrameProbeRequestDto {
         FrameProbeRequest {
             out,
             file,
+            file_range: self.file_range,
             asset: self.asset,
             source_time: self.source_time,
             time: self.time,
@@ -304,6 +316,9 @@ impl TimelineFrameProbeRequestDto {
             after_op: self.after_op,
             ranges: self.ranges,
             limit,
+            // The bridge speaks JSON, so a refusal names `cellWidth` rather
+            // than a command-line flag the in-app agent cannot pass.
+            names: API_ARGUMENT_NAMES,
         }
     }
 }
@@ -556,24 +571,25 @@ pub(crate) fn check_asset_media(
     project_state: &ProjectState,
     asset_id: &str,
 ) -> Result<(), String> {
-    let Some(asset) = project_state.assets.get(asset_id) else {
-        // A missing asset is the probe's error to report, in its own words.
-        return Ok(());
-    };
+    frame_probe::check_asset_media(project_path, project_state, asset_id)
+        .map_err(|error| error.to_string())
+}
 
-    let media_path = asset.resolved_path(project_path);
-    if is_network_path(&media_path.to_string_lossy()) {
-        return Err(format!(
-            "Asset '{asset_id}' resolves to media on a UNC or network path; frame extraction only reads local media"
-        ));
-    }
-    if !media_path.exists() {
-        return Err(format!(
-            "Asset '{asset_id}' has no readable media on this machine"
-        ));
-    }
-
-    Ok(())
+/// Checks the media of every clip a timeline extraction is about to render.
+///
+/// The rule is [`check_asset_media`]'s, applied to the whole sequence: a
+/// timeline still is a render, and a render reads every asset the graph
+/// references. Without this the in-app bridge checked only an explicitly named
+/// `asset` and let a sequence full of off-host clips through to FFmpeg — the
+/// MCP surface has always walked the sequence, and the two now share one
+/// implementation.
+pub(crate) fn check_sequence_media(
+    project_path: &Path,
+    project_state: &ProjectState,
+    sequence_id: &str,
+) -> Result<(), String> {
+    frame_probe::check_sequence_media(project_path, project_state, sequence_id)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -748,6 +764,7 @@ mod tests {
             around_count: Some(7),
             affected: true,
             time: Some(9.5),
+            file_range: Some(vec![2.0, 6.0]),
             ..Default::default()
         };
 
@@ -762,6 +779,7 @@ mod tests {
         // mapping is written out by hand: a transposed pair would still compile.
         assert_eq!(probe.out, PathBuf::from("cache/entry/sheet.jpg"));
         assert_eq!(probe.file, Some(PathBuf::from("render.mp4")));
+        assert_eq!(probe.file_range, Some(vec![2.0, 6.0]));
         assert_eq!(probe.sequence.as_deref(), Some("seq"));
         assert_eq!(probe.time, Some(9.5));
         assert_eq!(probe.times, Some(vec![0.0, 1.5]));
@@ -917,6 +935,39 @@ mod tests {
 
         // An unknown id is the probe's error to report, in its own words.
         assert!(check_asset_media(&project, &state, "missing").is_ok());
+    }
+
+    #[test]
+    fn should_refuse_a_timeline_extraction_whose_sequence_reaches_off_host() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project");
+
+        // No `asset` is named — this is an ordinary timeline still — so the
+        // only thing standing between a share and FFmpeg is the sequence walk.
+        let mut state = project_with_asset(Path::new(r"\\attacker\share\clip.mp4"));
+        let mut sequence = crate::core::timeline::Sequence::new(
+            "Sequence 1",
+            crate::core::timeline::SequenceFormat::default(),
+        );
+        sequence.id = "seq-1".to_string();
+        let mut track =
+            crate::core::timeline::Track::new("V1", crate::core::timeline::TrackKind::Video);
+        let mut clip = crate::core::timeline::Clip::new("asset-1");
+        clip.place.duration_sec = 5.0;
+        track.clips.push(clip);
+        sequence.tracks.push(track);
+        state.sequences.insert(sequence.id.clone(), sequence);
+
+        let error = check_sequence_media(&project, &state, "seq-1")
+            .expect_err("a sequence of off-host media must not reach FFmpeg");
+        assert!(
+            error.contains("asset-1") && error.contains("network"),
+            "the refusal should name the asset and the reason, got: {error}"
+        );
+
+        // An unknown sequence is the probe's error to report, in its own words.
+        assert!(check_sequence_media(&project, &state, "missing").is_ok());
     }
 
     #[test]
@@ -1263,9 +1314,12 @@ mod tests {
         let error = crate::core::render::frame_probe::FrameProbePlan::validate(&probe)
             .expect_err("two authorities on the same ranges must be refused");
 
+        // The bridge speaks JSON, so the refusal has to name the field the
+        // caller actually sent — not a command-line flag it cannot type.
+        let message = error.to_string();
         assert!(
-            error.to_string().contains("--affected"),
-            "the refusal should name the other source, got: {error}"
+            message.contains("affected") && !message.contains("--"),
+            "the refusal should name the other source in this surface's own words, got: {message}"
         );
     }
 }

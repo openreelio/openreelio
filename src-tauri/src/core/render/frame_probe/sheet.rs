@@ -6,7 +6,7 @@
 //! staging directories the cells pass through, the optional burnt-in labels,
 //! and the tiling itself.
 
-use super::{FrameProbeError, FrameProbeRequest, FrameProbeResult};
+use super::{FrameProbeArgumentNames, FrameProbeError, FrameProbeRequest, FrameProbeResult};
 use crate::core::analysis::types::ContactSheetArtifact;
 use crate::core::analysis::visual::{ContactSheetCellSize, VisualAnalyzer};
 use crate::core::effects::{Effect, EffectType, IntoFFmpegFilter, ParamValue};
@@ -89,6 +89,23 @@ pub fn ensure_sheet_dimensions_in_range(
     Ok(())
 }
 
+/// Rejects a contact sheet whose finished *width* exceeds the cap.
+///
+/// The half of the geometry a sampled sheet already knows. How many rows a
+/// sampler fills is not knowable until the sequence has been read, but the
+/// column count is stated outright, so an 8-wide sheet of 1024px cells is a
+/// 8192px image whatever the samplers find — and refusing it up front costs
+/// nothing, while discovering it after sampling costs a full extraction.
+pub fn ensure_sheet_width_in_range(
+    columns: usize,
+    cell_width: Option<u32>,
+    cell_height: Option<u32>,
+) -> FrameProbeResult<()> {
+    // The row count is the one dimension that cannot grow the width, so a
+    // single row measures exactly the edge under test.
+    ensure_sheet_dimensions_in_range(columns, 1, cell_width, cell_height)
+}
+
 /// Resolves the contact-sheet cell geometry from the request.
 ///
 /// One dimension on its own derives the other from the default cell's 16:9
@@ -159,10 +176,20 @@ pub(super) struct CellStaging {
     sheet_dir: tempfile::TempDir,
     raw_dir: Option<tempfile::TempDir>,
     cell: ContactSheetCellSize,
+    /// How the calling surface spells the labelling switch.
+    ///
+    /// A sheet whose labels cannot be drawn is worth retrying without them, and
+    /// the caller can only act on that if it is told to drop the argument *it*
+    /// passed: `--label-cells` on the command line, `labelCells` in JSON.
+    names: &'static FrameProbeArgumentNames,
 }
 
 impl CellStaging {
-    pub(super) fn new(cell: ContactSheetCellSize, label_cells: bool) -> FrameProbeResult<Self> {
+    pub(super) fn new(
+        cell: ContactSheetCellSize,
+        label_cells: bool,
+        names: &'static FrameProbeArgumentNames,
+    ) -> FrameProbeResult<Self> {
         let sheet_dir = tempfile::tempdir().map_err(|error| {
             FrameProbeError::new(format!(
                 "Failed to create temporary cell directory: {error}"
@@ -182,6 +209,7 @@ impl CellStaging {
             sheet_dir,
             raw_dir,
             cell,
+            names,
         })
     }
 
@@ -204,11 +232,20 @@ impl CellStaging {
     /// tiler reads the cells back as a `%d.jpg` image sequence, which stops at
     /// the first missing index and pads the rest of the sheet with black, while
     /// `sheet.cells` still claims a timecode for every one of them.
+    ///
+    /// `time_sec` is the time the cell was extracted at, which is what a missing
+    /// cell is reported against. `label_sec` is the time *written into the
+    /// picture*, and the two differ on a sheet built from a rendered file: the
+    /// extraction is file-relative, while the number a judge has to quote is the
+    /// timeline second the frame belongs to. `timebase` says which of the two
+    /// `label_sec` is, and is burnt in beside it.
     pub(super) async fn finish(
         &self,
         runner: &FFmpegRunner,
         index: usize,
         time_sec: f64,
+        label_sec: f64,
+        timebase: LabelTimebase,
     ) -> FrameProbeResult<PathBuf> {
         ensure_cell_written(&self.extract_path(index), index, time_sec)?;
 
@@ -217,15 +254,16 @@ impl CellStaging {
             return Ok(sheet_path);
         }
 
-        let filter = build_cell_label_filter(index, time_sec, self.cell);
+        let filter = build_cell_label_filter(index, label_sec, timebase, self.cell);
         runner
             .filter_image(&self.extract_path(index), &sheet_path, &filter, None)
             .await
             .map_err(|error| {
                 FrameProbeError::new(format!(
-                    "Failed to label contact sheet cell {}: {}. Cell labels need an FFmpeg build with the drawtext filter; drop --label-cells to build the sheet without them.",
+                    "Failed to label contact sheet cell {}: {}. Cell labels need an FFmpeg build with the drawtext filter; drop {} to build the sheet without them.",
                     index,
-                    error
+                    error,
+                    self.names.label_cells
                 ))
             })?;
         ensure_cell_written(&sheet_path, index, time_sec)?;
@@ -250,9 +288,40 @@ fn ensure_cell_written(cell_path: &Path, index: usize, time_sec: f64) -> FramePr
     )))
 }
 
+/// Which clock a burnt-in cell label is quoting.
+///
+/// A sheet built from a rendered file can be labelled in either: the file's own
+/// offsets, or the timeline seconds those offsets translate back to. The two
+/// differ by wherever the render started, so a judge quoting a number off the
+/// picture has to be able to see which clock it belongs to — hence the marker
+/// in the label itself rather than only in the JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LabelTimebase {
+    /// Seconds of the sequence.
+    Timeline,
+    /// Seconds into the rendered file.
+    File,
+}
+
+impl LabelTimebase {
+    /// The suffix written after the timecode. Kept to one short word: the label
+    /// shares a 320px cell with the picture it annotates.
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Timeline => "tl",
+            Self::File => "file",
+        }
+    }
+}
+
 /// Text burnt into a labelled contact-sheet cell.
-fn cell_label_text(index: usize, time_sec: f64) -> String {
-    format!("{} | {:.2}s", index, time_sec.max(0.0))
+fn cell_label_text(index: usize, time_sec: f64, timebase: LabelTimebase) -> String {
+    format!(
+        "{} | {:.2}s {}",
+        index,
+        time_sec.max(0.0),
+        timebase.marker()
+    )
 }
 
 /// Type size used for a cell label, in pixels of the finished cell.
@@ -272,7 +341,12 @@ fn cell_label_font_size(cell_height: usize) -> f64 {
 ///
 /// The drawtext parameters come from the shared text-overlay effect builder, so
 /// labels resolve fonts exactly the way burnt-in captions do.
-fn build_cell_label_filter(index: usize, time_sec: f64, cell: ContactSheetCellSize) -> String {
+fn build_cell_label_filter(
+    index: usize,
+    time_sec: f64,
+    timebase: LabelTimebase,
+    cell: ContactSheetCellSize,
+) -> String {
     let font_size = cell_label_font_size(cell.height);
     // Keep the contrast box clear of the frame edge: its border grows outward
     // from the text by the padding, so the margin has to cover it.
@@ -281,7 +355,10 @@ fn build_cell_label_filter(index: usize, time_sec: f64, cell: ContactSheetCellSi
         .max(CELL_LABEL_BOX_PADDING_PX as f64 + 2.0);
 
     let mut label = Effect::new(EffectType::TextOverlay);
-    label.set_param("text", ParamValue::String(cell_label_text(index, time_sec)));
+    label.set_param(
+        "text",
+        ParamValue::String(cell_label_text(index, time_sec, timebase)),
+    );
     label.set_param("font_size", ParamValue::Float(font_size));
     label.set_param(
         "color",
@@ -347,9 +424,22 @@ mod tests {
     }
 
     #[test]
-    fn cell_label_text_should_pair_the_index_with_a_timecode() {
-        assert_eq!(cell_label_text(3, 12.5), "3 | 12.50s");
-        assert_eq!(cell_label_text(0, 0.0), "0 | 0.00s");
+    fn cell_label_text_should_pair_the_index_with_a_timecode_and_its_timebase() {
+        // Without the marker a judge reading "12.50s" off a sheet of a rendered
+        // file cannot tell whether that is a second of the edit or an offset
+        // into the draft, and the two differ by wherever the render started.
+        assert_eq!(
+            cell_label_text(3, 12.5, LabelTimebase::Timeline),
+            "3 | 12.50s tl"
+        );
+        assert_eq!(
+            cell_label_text(3, 12.5, LabelTimebase::File),
+            "3 | 12.50s file"
+        );
+        assert_eq!(
+            cell_label_text(0, 0.0, LabelTimebase::Timeline),
+            "0 | 0.00s tl"
+        );
     }
 
     #[test]
@@ -370,7 +460,12 @@ mod tests {
 
     #[test]
     fn build_cell_label_filter_should_fit_the_cell_then_draw_the_label() {
-        let filter = build_cell_label_filter(3, 12.5, ContactSheetCellSize::default());
+        let filter = build_cell_label_filter(
+            3,
+            12.5,
+            LabelTimebase::Timeline,
+            ContactSheetCellSize::default(),
+        );
 
         assert!(
             filter.starts_with(
@@ -379,7 +474,7 @@ mod tests {
             "The cell must be fitted before the label is drawn, got: {filter}"
         );
         assert!(
-            filter.contains("text='3 | 12.50s'"),
+            filter.contains("text='3 | 12.50s tl'"),
             "Label should carry the index and timecode, got: {filter}"
         );
         assert!(
@@ -394,7 +489,8 @@ mod tests {
 
     #[test]
     fn build_cell_label_filter_should_keep_the_label_inside_the_bottom_left_corner() {
-        let filter = build_cell_label_filter(0, 1.0, ContactSheetCellSize::default());
+        let filter =
+            build_cell_label_filter(0, 1.0, LabelTimebase::File, ContactSheetCellSize::default());
 
         // Left-aligned at a small margin, near the bottom edge but not on it.
         assert!(

@@ -209,6 +209,41 @@ describe('openreelio.frame_extract', () => {
     expect(responseText(response)).toContain('ranges');
     expect(invoke).not.toHaveBeenCalled();
   });
+
+  it('should reject a declared file range with no file to declare it for', async () => {
+    const response = await callTool('frame_extract', { fileRange: [0, 4], time: 1 });
+
+    expect(response.success).toBe(false);
+    expect(responseText(response)).toContain('fileRange');
+    expect(responseText(response)).toContain('file');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('should reject a number list carrying a value that is not finite', async () => {
+    const response = await callTool('frame_extract', {
+      file: 'draft.mp4',
+      fileRange: [0, Number.POSITIVE_INFINITY],
+      atCuts: true,
+      grid: 'auto',
+    });
+
+    expect(response.success).toBe(false);
+    expect(responseText(response)).toContain('fileRange');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('should reject a declared file range whose start is not before its end', async () => {
+    const response = await callTool('frame_extract', {
+      file: 'draft.mp4',
+      fileRange: [4, 2],
+      atCuts: true,
+      grid: 'auto',
+    });
+
+    expect(response.success).toBe(false);
+    expect(responseText(response)).toContain('fileRange');
+    expect(invoke).not.toHaveBeenCalled();
+  });
 });
 
 describe('openreelio.render_proxy', () => {
@@ -237,11 +272,15 @@ describe('openreelio.render_proxy', () => {
       expect(vi.mocked(invoke).mock.calls.some(([name]) => name === 'render_range')).toBe(true);
     });
 
+    // Deliberately half a second short of the 2s-6s that was asked for: a draft
+    // render lands where the encoder lands, and a follow-up built from the
+    // REQUESTED range would be indistinguishable from one built from the
+    // reported one unless the two differ.
     handlers.get('render-complete')?.(
       makeEvent({
         jobId: 'job-1',
         outputPath: 'D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4',
-        durationSec: 4,
+        durationSec: 3.5,
         fileSize: 1024,
         encodingTimeSec: 3,
       }),
@@ -254,14 +293,20 @@ describe('openreelio.render_proxy', () => {
     expect(result.status).toBe('ok');
     expect(result.jobId).toBe('job-1');
     expect(result.outputPath).toBe('D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4');
-    expect(result.durationSec).toBe(4);
-    // The follow-up must be a request the probe accepts: samplers are not
-    // available with `file`, and `between` needs an explicit grid.
+    expect(result.durationSec).toBe(3.5);
+    // The follow-up must be a request the probe accepts. The unconditional one
+    // is an even sweep of the draft, because a sampler over a rendered window
+    // that happens to hold no cut is an error rather than an empty sheet.
     expect(result.nextStep).toContain('openreelio.frame_extract');
     expect(result.nextStep).toContain('file: outputPath');
-    expect(result.nextStep).toContain('between: [0, 4]');
+    expect(result.nextStep).toContain('between: [0, 3.5]');
     expect(result.nextStep).toContain("grid: '4x3'");
-    expect(result.nextStep).not.toContain("grid: 'auto'");
+    // The sampler follow-up carries the range the render REPORTED, not the one
+    // that was asked for, so every cell's timelineSec means what it says.
+    expect(result.nextStep).toContain('fileRange: [2, 5.5]');
+    expect(result.nextStep).not.toContain('fileRange: [2, 6]');
+    expect(result.nextStep).toContain('atCuts');
+    expect(result.nextStep).toContain("grid: 'auto'");
     // Looking is only half of it: the draft is also what the QC pass measures.
     expect(result.nextStep).toContain('openreelio.verify { file: outputPath }');
     expect(unlistened()).toBe(2);
@@ -1140,6 +1185,7 @@ interface FrameProbeRecipe {
   count?: number;
   asset?: string;
   file?: string;
+  fileRange?: [number, number];
   grid?: string;
   cellWidth?: number;
   cellHeight?: number;
@@ -1171,11 +1217,11 @@ const RANGES_EXCLUSIVE_KEYS = [
 ] as const;
 
 /**
- * Mirror of the three request checks the Rust frame probe applies, so a recipe
- * the instructions hand an agent cannot silently become one the probe rejects.
+ * Mirror of the request checks the Rust frame probe applies, so a recipe the
+ * instructions hand an agent cannot silently become one the probe rejects.
  *
- * Sources: `ensure_sampler_selectors_unused`, `ensure_grid_only_flags_unused`
- * and `resolve_auto_grid_selection` in
+ * Sources: `ensure_sampler_selectors_unused`, `resolve_file_range`,
+ * `ensure_grid_only_flags_unused` and `resolve_auto_grid_selection` in
  * `src-tauri/src/core/render/frame_probe/mod.rs`.
  */
 function frameProbeRejection(recipe: FrameProbeRecipe): string | null {
@@ -1190,7 +1236,20 @@ function frameProbeRejection(recipe: FrameProbeRecipe): string | null {
     recipe.around !== undefined,
   );
 
-  const named = SAMPLER_EXCLUSIVE_KEYS.filter((key) => recipe[key] !== undefined);
+  if (recipe.fileRange !== undefined && recipe.file === undefined) {
+    return 'fileRange requires file';
+  }
+  if (recipe.fileRange !== undefined && recipe.fileRange[0] >= recipe.fileRange[1]) {
+    return 'fileRange needs start below end';
+  }
+
+  // `file` names a timebase rather than a list of times, so declaring the
+  // timeline range it covers is what lets a sampler run against it.
+  const named = SAMPLER_EXCLUSIVE_KEYS.filter((key) =>
+    key === 'file'
+      ? recipe.file !== undefined && recipe.fileRange === undefined
+      : recipe[key] !== undefined,
+  );
   if (samplerActive && named.length > 0) {
     return `a sampler cannot be combined with ${named.join(', ')}`;
   }
@@ -1250,7 +1309,21 @@ const INSTRUCTION_RECIPES: Array<{ text: string; request: FrameProbeRecipe }> = 
   },
   {
     text: "{ file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true }",
-    request: { file: 'draft.mp4', between: [0, 12], grid: '4x3', labelCells: true },
+    request: {
+      file: 'draft.mp4',
+      between: [0, 4],
+      grid: '4x3',
+      labelCells: true,
+    },
+  },
+  {
+    text: 'fileRange: [start, start + durationSec]',
+    request: {
+      file: 'draft.mp4',
+      fileRange: [2, 6],
+      atCuts: true,
+      grid: 'auto',
+    },
   },
   {
     text: "ranges: <the violation timeRanges>, grid: 'auto', labelCells: true",
@@ -1265,6 +1338,10 @@ describe('frameProbeRejection', () => {
     expect(frameProbeRejection({ between: [0, 10], grid: 'auto' })).toContain('sampler or times');
     expect(frameProbeRejection({ file: 'draft.mp4', atCuts: true, grid: 'auto' })).toContain(
       'sampler cannot be combined',
+    );
+    expect(frameProbeRejection({ fileRange: [0, 4] })).toContain('fileRange requires file');
+    expect(frameProbeRejection({ file: 'draft.mp4', fileRange: [4, 2] })).toContain(
+      'start below end',
     );
   });
 
@@ -1284,6 +1361,14 @@ describe('frameProbeRejection', () => {
   it('should accept a sampler sheet and a file sweep', () => {
     expect(frameProbeRejection({ atCuts: true, grid: 'auto' })).toBeNull();
     expect(frameProbeRejection({ file: 'draft.mp4', between: [0, 5], grid: '4x3' })).toBeNull();
+    // A declared range is what turns a render into something a sampler can read.
+    expect(
+      frameProbeRejection({ file: 'draft.mp4', fileRange: [2, 6], atCuts: true, grid: 'auto' }),
+    ).toBeNull();
+    // Without a sampler it is a harmless annotation on a file-relative sweep.
+    expect(
+      frameProbeRejection({ file: 'draft.mp4', fileRange: [2, 6], between: [0, 4], grid: '2x2' }),
+    ).toBeNull();
     expect(frameProbeRejection({ times: [1, 2], grid: 'auto' })).toBeNull();
     expect(
       frameProbeRejection({ ranges: [{ startSec: 2, endSec: 6 }], grid: 'auto', labelCells: true }),
@@ -1431,5 +1516,112 @@ describe('SetSequenceFormat plan targeting', () => {
       | { plan: { steps: { params: Record<string, unknown> }[] } }
       | undefined;
     expect(applied?.plan.steps[0]?.params.sequenceId).toBe('seq-2');
+  });
+});
+
+describe('openreelio.timeline_snapshot where-to-look signals', () => {
+  const SEQUENCE = {
+    id: 'seq-1',
+    name: 'Main',
+    markers: [{ id: 'm-1' }],
+    tracks: [{ id: 'track-1', name: 'V1', kind: 'video', clips: [{ id: 'clip-1' }] }],
+  };
+
+  const SUMMARY = {
+    durationSec: 12.5,
+    outputDurationSec: 12,
+    fps: 30,
+    fpsRatio: { num: 30, den: 1 },
+    canvas: { width: 1920, height: 1080 },
+    editPoints: [0, 4, 12.5],
+    cuts: [4],
+    markers: [{ id: 'm-1', timeSec: 2, label: 'hook', color: {}, markerType: 'hook' }],
+    transitions: [{ clipId: 'clip-1', cutSec: 4, startSec: 3.5, endSec: 4.5 }],
+    captionSpans: [{ id: 'cap-1', startSec: 1, endSec: 3, text: 'hello' }],
+    textSpans: [],
+    inspectionHints: {
+      cutCount: 1,
+      transitionCount: 1,
+      refusedTransitionCount: 0,
+      captionCount: 1,
+      textCount: 0,
+      markerCount: 1,
+    },
+  };
+
+  /** Answer the project read, and let the caller decide the inspection reply. */
+  function stubSnapshot(inspection: () => Promise<unknown>): void {
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      if (command === 'get_project_state') {
+        return Promise.resolve({
+          activeSequenceId: 'seq-1',
+          assets: [],
+          sequences: [SEQUENCE],
+        });
+      }
+      if (command === 'sequence_inspection_summary') {
+        return inspection();
+      }
+      return Promise.reject(new Error(`unexpected command '${command}'`));
+    });
+  }
+
+  it('should carry the core inspection signals on every sequence', async () => {
+    stubSnapshot(() => Promise.resolve([SUMMARY]));
+
+    const snapshot = JSON.parse(responseText(await callTool('timeline_snapshot'))) as {
+      activeSequence: Record<string, unknown>;
+      sequences: Array<Record<string, unknown>>;
+    };
+
+    // One call for the whole snapshot: each invocation clones the project
+    // state, so asking per sequence paid for that clone once per sequence.
+    expect(invoke).toHaveBeenCalledWith('sequence_inspection_summary', {
+      sequenceId: null,
+      sequenceIds: ['seq-1'],
+    });
+    expect(
+      vi.mocked(invoke).mock.calls.filter(([name]) => name === 'sequence_inspection_summary'),
+    ).toHaveLength(1);
+    for (const sequence of [snapshot.activeSequence, snapshot.sequences[0]]) {
+      // The structural half every existing caller reads stays put.
+      expect(sequence.id).toBe('seq-1');
+      expect(sequence.name).toBe('Main');
+      expect(sequence.trackCount).toBe(1);
+      expect(sequence.markerCount).toBe(1);
+      expect(Array.isArray(sequence.tracks)).toBe(true);
+      // The signals come from the core summary, verbatim.
+      expect(sequence.durationSec).toBe(SUMMARY.durationSec);
+      expect(sequence.outputDurationSec).toBe(SUMMARY.outputDurationSec);
+      expect(sequence.fps).toBe(SUMMARY.fps);
+      expect(sequence.fpsRatio).toEqual(SUMMARY.fpsRatio);
+      expect(sequence.canvas).toEqual(SUMMARY.canvas);
+      expect(sequence.cuts).toEqual(SUMMARY.cuts);
+      expect(sequence.editPoints).toEqual(SUMMARY.editPoints);
+      expect(sequence.markers).toEqual(SUMMARY.markers);
+      expect(sequence.transitions).toEqual(SUMMARY.transitions);
+      expect(sequence.captionSpans).toEqual(SUMMARY.captionSpans);
+      expect(sequence.textSpans).toEqual(SUMMARY.textSpans);
+      expect(sequence.inspectionHints).toEqual(SUMMARY.inspectionHints);
+      expect(sequence.inspectionUnavailable).toBeUndefined();
+    }
+  });
+
+  it('should keep the structural snapshot and say so when inspection fails', async () => {
+    stubSnapshot(() => Promise.reject(new Error('No project is currently open')));
+
+    const snapshot = JSON.parse(responseText(await callTool('timeline_snapshot'))) as {
+      available: boolean;
+      sequences: Array<Record<string, unknown>>;
+    };
+    const sequence = snapshot.sequences[0];
+
+    expect(snapshot.available).toBe(true);
+    expect(sequence.trackCount).toBe(1);
+    expect(sequence.inspectionUnavailable).toContain('No project is currently open');
+    // A failed read must not invent numbers.
+    expect(sequence.cuts).toBeUndefined();
+    expect(sequence.durationSec).toBeUndefined();
+    expect(sequence.inspectionHints).toBeUndefined();
   });
 });

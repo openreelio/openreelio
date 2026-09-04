@@ -555,7 +555,11 @@ fn collect_referenced_effects(
 const LAST_AFFECTED_RANGES_FILE: &str = "last_affected_ranges.json";
 
 /// Returns the directory holding agent-facing scratch files for a project.
-pub fn agent_cache_dir(project_dir: &Path) -> PathBuf {
+///
+/// Private: the directory is an implementation detail of the hand-off record,
+/// and every caller outside this module wants
+/// [`last_affected_ranges_path`] rather than the directory it sits in.
+fn agent_cache_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".openreelio").join("cache").join("agent")
 }
 

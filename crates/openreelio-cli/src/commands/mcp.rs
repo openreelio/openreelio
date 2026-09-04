@@ -43,7 +43,7 @@ use crate::{
         MAX_GRID_CELLS, MAX_SHEET_DIMENSION_PX, MAX_STILL_WIDTH_PX, MIN_CELL_SIZE_PX,
         MIN_STILL_WIDTH_PX,
     },
-    commands::{help_json, plan, transcription, verify},
+    commands::{help_json, plan, render, transcription, verify},
     output,
 };
 // Decoding the images a tool returned is a test-only concern now that the
@@ -54,16 +54,22 @@ use clap::Args;
 #[cfg(test)]
 use openreelio_core::commands::SplitClipCommand;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
-use openreelio_core::fs::is_network_path;
+use openreelio_core::ffmpeg::FFmpegRunner;
 use openreelio_core::ipc::CommandPayload;
-use openreelio_core::qc::verify::{VerifyArgumentNames, VerifyRequest};
+use openreelio_core::qc::verify::{
+    VerifyArgumentNames, VerifyRequest, DEFAULT_FAIL_ON, DEFAULT_MEASURE_TIMEOUT_SEC,
+};
 #[cfg(test)]
 use openreelio_core::render::frame_probe::frame_cache_dir;
+use openreelio_core::render::frame_probe::media as frame_probe_media;
 use openreelio_core::render::frame_probe::{
-    allocate_frame_output, inline_frame_images, FrameArtifact, FrameOutput,
+    allocate_frame_output, inline_frame_images, FrameArtifact, FrameOutput, MediaLocalityError,
     MAX_CACHED_FRAME_DIRECTORIES, MAX_INLINE_FRAME_STILLS,
 };
-use openreelio_core::render::ImageFormat;
+use openreelio_core::render::{
+    agent_render_dir, ensure_agent_render_range_within_cap, prune_agent_renders, ImageFormat,
+    MAX_AGENT_RENDERS, MAX_AGENT_RENDER_RANGE_SEC,
+};
 use openreelio_core::style::{
     caption_pack_ids, text_preset_keys, transition_recipe_ids, TextPresetCategory, TEXT_PRESETS,
 };
@@ -73,14 +79,6 @@ use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
-
-/// Timeout for the rendered-file measurement pass of `openreelio.verify`,
-/// matching the `verify --timeout-sec` default.
-const VERIFY_MEASURE_TIMEOUT_SEC: u64 = 600;
-
-/// Severity threshold `openreelio.verify` applies when the caller names none,
-/// matching the `verify --fail-on` default.
-const DEFAULT_VERIFY_FAIL_ON: &str = "error";
 
 #[derive(Args)]
 pub struct McpAction {
@@ -226,9 +224,10 @@ fn policy_mode(state: &McpServerState) -> &'static str {
 /// and the operator can delete. That write is disclosed separately as
 /// `cacheWrites` rather than folded in here, because a client deciding whether
 /// to trust the server with an edit is asking about the command log. The cache
-/// bounds itself — see `openreelio_core::render::frame_probe::prune_frame_cache`
-/// — so the disclosure is of a fixed
-/// footprint rather than of unbounded growth.
+/// bounds itself — every allocation through
+/// `openreelio_core::render::frame_probe::allocate_frame_output` prunes the
+/// cache down to its newest `MAX_CACHED_FRAME_DIRECTORIES` entries — so the
+/// disclosure is of a fixed footprint rather than of unbounded growth.
 fn filesystem_access(state: &McpServerState) -> &'static str {
     if state.project.is_none() {
         "none"
@@ -595,7 +594,34 @@ impl std::fmt::Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
+/// Tools that only appear once mutations are allowed.
+///
+/// Named here rather than only where they are pushed, so the guard that reads
+/// argument names out of the schemas can build the whole table and the
+/// advertised list can be derived from it by removing these.
+const MUTATING_TOOL_NAMES: [&str; 2] = ["openreelio.media.insert", "openreelio.plan.apply"];
+
+/// The tools this server advertises to a client.
+///
+/// The mutating pair is filtered out of [`all_tool_schemas`] rather than left
+/// unbuilt, because their schemas are needed either way: `tools/call` validates
+/// arguments against them even on a read-only server, where the answer is a
+/// permission refusal rather than a silent shrug at an unknown key.
 fn build_tools(state: &McpServerState) -> Vec<Value> {
+    let mut tools = all_tool_schemas(state);
+    if !state.mutations_enabled() {
+        tools.retain(|entry| {
+            entry
+                .get("name")
+                .and_then(Value::as_str)
+                .is_none_or(|name| !MUTATING_TOOL_NAMES.contains(&name))
+        });
+    }
+    tools
+}
+
+/// Every tool this server knows how to describe, mutating ones included.
+fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
     let mut tools = vec![
         tool(
             "openreelio.host.context",
@@ -751,6 +777,24 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Check IDs to disable."
+                    },
+                    "targetLufs": {
+                        "type": "number",
+                        "description": "Integrated loudness target in LUFS the rendered file is measured against. Only meaningful with 'file'."
+                    },
+                    "maxTruePeak": {
+                        "type": "number",
+                        "description": "Highest acceptable true peak in dBTP. Only meaningful with 'file'."
+                    },
+                    "durationToleranceSec": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "Divergence tolerated between the rendered file's length and the sequence's, in seconds. Honoured exactly, so a tighter value really is tighter."
+                    },
+                    "timeoutSec": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": format!("Timeout for the rendered-file measurement pass, in seconds. Defaults to {DEFAULT_MEASURE_TIMEOUT_SEC}.")
                     }
                 },
                 "additionalProperties": false
@@ -759,7 +803,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.frame.extract",
             "OpenReelio frame extract",
-            &format!("See the edit — and above all, see what you just changed. Right after applying an edit, call this with the affectedRanges it reported as ranges and grid:'auto': it samples only the seconds that moved and returns them as ONE contact sheet whose cells[] name their timecode and their reason. (affected:true reads the last recorded edit instead, which is a shared slot — pair it with afterOp when you use it.) Other event samplers answer the other standing questions without any arithmetic: atCuts for continuity (each cut gives the outgoing shot's last frame and the incoming shot's first), atTransitions for a blend's start/cut/end, atCaptions for readability (pass cellWidth 640 or more so the words are legible), atMarkers, perShot for coverage, and around+span for one moment in detail. Samplers combine, and 'limit' caps how many frames come back. Reach for 'between' — evenly spaced midpoints that land on no event at all — only when nothing event-driven fits. Timeline stills show the COMPOSITED edit by default: captions, text, transforms and blends, exactly what export produces. Without 'grid' the result is up to {MAX_INLINE_FRAME_STILLS} separate stills; with it, one sheet. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' reads an already rendered video instead of the timeline, must be inside the project directory, and takes no sampler."),
+            &format!("See the edit — and above all, see what you just changed. Right after applying an edit, call this with the affectedRanges it reported as ranges and grid:'auto': it samples only the seconds that moved and returns them as ONE contact sheet whose cells[] name their timecode and their reason. (affected:true reads the last recorded edit instead, which is a shared slot — pair it with afterOp when you use it.) Other event samplers answer the other standing questions without any arithmetic: atCuts for continuity (each cut gives the outgoing shot's last frame and the incoming shot's first), atTransitions for a blend's start/cut/end, atCaptions for readability (pass cellWidth 640 or more so the words are legible), atMarkers, perShot for coverage, and around+span for one moment in detail. Samplers combine, and 'limit' caps how many frames come back. Reach for 'between' — evenly spaced midpoints that land on no event at all — only when nothing event-driven fits. Timeline stills show the COMPOSITED edit by default: captions, text, transforms and blends, exactly what export produces. Without 'grid' the result is up to {MAX_INLINE_FRAME_STILLS} separate stills; with it, one sheet. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' reads an already rendered video instead of the timeline and must be inside the project directory; to judge a partial render with the samplers, pass 'fileRange' [start, end] with the timeline range you rendered — the samplers then read those seconds of the timeline and every cell carries both fileSec and timelineSec."),
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -852,7 +896,23 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     },
                     "file": {
                         "type": "string",
-                        "description": "Rendered video to read instead of the timeline, in the file's own timebase. Must be inside the project directory; a relative path resolves against the project root and anything outside it is rejected. Cannot be combined with sequenceId or mode."
+                        "description": "Rendered video to read instead of the timeline, in the file's own timebase. Must be inside the project directory; a relative path resolves against the project root and anything outside it is rejected. Cannot be combined with sequenceId or mode. Add 'fileRange' to sample it with the event samplers."
+                    },
+                    "fileRange": {
+                        "type": "array",
+                        "items": { "type": "number", "minimum": 0 },
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "The timeline range [start, end] the 'file' covers — the range you rendered. With a sampler this is what makes the samplers work on a render: they read the timeline over this range and every time is translated into the file as t - start, so cells carry BOTH fileSec and timelineSec plus their reason, and any sample the file turns out not to hold is dropped and counted as sampler.droppedOutsideFile. A cut sitting at the very start of the range is the one ordinary exception: its outgoing frame is a frame and a half earlier, before the file begins, so only the incoming side is shown and the miss is counted as sampler.droppedBeforeFile. Without a sampler it is only recorded as source.timelineRange; 'time', 'times' and 'between' stay file-relative either way. Only with 'file'."
+                    },
+                    "assetId": {
+                        "type": "string",
+                        "description": "Extract from this asset's OWN media timebase instead of the timeline — 'what does this footage look like at 12s', before it is cut. Requires 'sourceTime', and cannot be combined with any timeline selector (time, times, grid, between) or with a sampler. The asset's media must be readable on this machine and must not sit on a UNC or network path."
+                    },
+                    "sourceTime": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "Time in seconds inside the asset's own media. Only with 'assetId'."
                     },
                     "sequenceId": {
                         "type": "string",
@@ -877,13 +937,44 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     },
                     "labelCells": {
                         "type": "boolean",
-                        "description": "Burn each cell's index and timecode into the sheet, so a judgement can name the cell it is about. Only with 'grid'."
+                        "description": "Burn each cell's index and timecode into the sheet, so a judgement can name the cell it is about. Only with 'grid'. Each label ends in the clock it quotes: 'tl' for a timeline second, 'file' for an offset into a rendered file. On a 'fileRange' sheet the burnt-in timecode is the TIMELINE second the cell shows, not the file offset; the file offset is still reported as cells[].fileSec."
                     },
                     "maxWidth": {
                         "type": "integer",
                         "minimum": MIN_STILL_WIDTH_PX,
                         "maximum": MAX_STILL_WIDTH_PX,
                         "description": format!("Maximum still width in pixels, {MIN_STILL_WIDTH_PX}-{MAX_STILL_WIDTH_PX}, aspect preserved and never upscaled. Defaults to {DEFAULT_MAX_WIDTH}.")
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "openreelio.render.range",
+            "OpenReelio draft render",
+            &format!("Render a range of the timeline to a draft video file, for the questions a still cannot answer: motion, pacing, whether a transition reads. The file lands in the project's own agent render cache (.openreelio/cache/renders/agent/) and the caller does not choose where; only the {MAX_AGENT_RENDERS} newest drafts are kept, so use the reported outputPath before it ages out. A draft is a look, not a deliverable: at most {MAX_AGENT_RENDER_RANGE_SEC:.0}s of timeline per call, so render around the moment in question rather than the whole edit. Then judge it without re-rendering: openreelio.frame.extract with {{file, between:[0, durationSec], grid:'4x3', labelCells:true}} sweeps the whole draft and always has something to show, and openreelio.frame.extract with {{file, fileRange:[start, start + durationSec], atCuts:true, grid:'auto'}} sheets the cuts when the rendered range holds any — a sampler over a range with no such event errors rather than returning an empty sheet. openreelio.verify with {{file}} measures black, freeze, silence, loudness and peaks over the same file."),
+            serde_json::json!({
+                "type": "object",
+                "required": ["start", "end"],
+                "properties": {
+                    "start": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "First timeline second of the range to render."
+                    },
+                    "end": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": format!("Last timeline second of the range. Must be after 'start', and at most {MAX_AGENT_RENDER_RANGE_SEC:.0}s beyond it.")
+                    },
+                    "sequenceId": {
+                        "type": "string",
+                        "description": "Sequence to render. Defaults to the active sequence."
+                    },
+                    "preset": {
+                        "type": "string",
+                        "enum": [render::PROXY_PRESET_ID, render::DRAFT_PRESET_ID],
+                        "description": format!("Draft preset. '{}' (default) is a 480p-class CRF 30 ultrafast proxy fitted to the sequence canvas — never pillarboxed. '{}' is a 720p draft, worth the extra encode time when judging the legibility of burned-in text.", render::PROXY_PRESET_ID, render::DRAFT_PRESET_ID)
                     }
                 },
                 "additionalProperties": false
@@ -897,49 +988,47 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         ),
     ];
 
-    if state.mutations_enabled() {
-        tools.push(tool(
-            "openreelio.media.insert",
-            "OpenReelio media insert",
-            "Insert a media asset through the drag-and-drop parity path: validates visible track placement, preserves source ranges, and creates linked audio for video assets.",
-            serde_json::json!({
-                "type": "object",
-                "required": required_fields(state, &["sequenceId", "trackId", "assetId", "timelineStart"]),
-                "properties": {
-                    "approvalToken": { "type": "string" },
-                    "sequenceId": { "type": "string" },
-                    "trackId": { "type": "string" },
-                    "assetId": { "type": "string" },
-                    "timelineStart": { "type": "number" },
-                    "sourceIn": { "type": "number" },
-                    "sourceOut": { "type": "number" },
-                    "audioOnly": {
-                        "type": "boolean",
-                        "description": "Set true only when intentionally placing a video asset as audio-only on an audio track."
-                    },
-                    "autoExtractLinkedAudio": {
-                        "type": "boolean",
-                        "description": "Defaults true for video assets on visual tracks."
-                    }
+    tools.push(tool(
+        "openreelio.media.insert",
+        "OpenReelio media insert",
+        "Insert a media asset through the drag-and-drop parity path: validates visible track placement, preserves source ranges, and creates linked audio for video assets.",
+        serde_json::json!({
+            "type": "object",
+            "required": required_fields(state, &["sequenceId", "trackId", "assetId", "timelineStart"]),
+            "properties": {
+                "approvalToken": { "type": "string" },
+                "sequenceId": { "type": "string" },
+                "trackId": { "type": "string" },
+                "assetId": { "type": "string" },
+                "timelineStart": { "type": "number" },
+                "sourceIn": { "type": "number" },
+                "sourceOut": { "type": "number" },
+                "audioOnly": {
+                    "type": "boolean",
+                    "description": "Set true only when intentionally placing a video asset as audio-only on an audio track."
                 },
-                "additionalProperties": false
-            }),
-        ));
-        tools.push(tool(
-            "openreelio.plan.apply",
-            "OpenReelio approved plan apply",
-            "Apply a validated edit plan, including text/caption commands, through the OpenReelio command log path using an approval token. The whole plan is validated before anything is mutated, and a step failure rolls every applied step back.",
-            serde_json::json!({
-                "type": "object",
-                "required": required_fields(state, &["plan"]),
-                "properties": {
-                    "approvalToken": { "type": "string" },
-                    "plan": plan_schema()
-                },
-                "additionalProperties": false
-            }),
-        ));
-    }
+                "autoExtractLinkedAudio": {
+                    "type": "boolean",
+                    "description": "Defaults true for video assets on visual tracks."
+                }
+            },
+            "additionalProperties": false
+        }),
+    ));
+    tools.push(tool(
+        "openreelio.plan.apply",
+        "OpenReelio approved plan apply",
+        "Apply a validated edit plan, including text/caption commands, through the OpenReelio command log path using an approval token. The whole plan is validated before anything is mutated, and a step failure rolls every applied step back.",
+        serde_json::json!({
+            "type": "object",
+            "required": required_fields(state, &["plan"]),
+            "properties": {
+                "approvalToken": { "type": "string" },
+                "plan": plan_schema()
+            },
+            "additionalProperties": false
+        }),
+    ));
 
     tools
 }
@@ -1069,6 +1158,8 @@ fn call_tool(
     name: &str,
     arguments: Value,
 ) -> Result<ToolOutput, ToolError> {
+    ensure_known_arguments(state, name, &arguments)?;
+
     // `openreelio.frame.extract` is the one tool that answers with pictures; the
     // rest hand back a JSON document that becomes a lone text block.
     if name == "openreelio.frame.extract" {
@@ -1092,6 +1183,7 @@ fn call_tool(
         "openreelio.command.validate" => validate_command(arguments),
         "openreelio.plan.validate" => validate_plan(arguments),
         "openreelio.verify" => run_verify_tool(state, arguments),
+        "openreelio.render.range" => run_render_range_tool(state, arguments),
         "openreelio.media.insert" => apply_media_insert(state, arguments),
         "openreelio.plan.apply" => apply_plan(state, arguments),
         "openreelio.preview.describe" => Ok(build_preview_state()),
@@ -1101,6 +1193,110 @@ fn call_tool(
     }?;
 
     Ok(ToolOutput::from(value))
+}
+
+/// Rejects a `tools/call` carrying an argument the tool has no such thing as.
+///
+/// Most schemas here declare `additionalProperties: false`, but a schema is a
+/// promise a client may or may not validate against — nothing on this side
+/// enforced it, so `atCut: true` or `timeout_sec: 30` was accepted, silently
+/// ignored, and answered with a confident result computed from the defaults.
+/// Naming the key is the whole point: a typo and a genuinely unsupported
+/// argument look identical to the caller until somebody says which key was not
+/// recognised.
+///
+/// The known set is read from the tool's own schema rather than restated, so a
+/// property added to a schema is accepted the moment it exists, and nested
+/// objects that close themselves are checked too — `ranges[0].startSecs` is the
+/// same typo one level down. A schema that stays open (the plan steps do, so a
+/// plan the deserializer tolerates is not rejected by a stricter schema than the
+/// parser) stops the walk there.
+///
+/// Every tool is checked, including the mutating pair a read-only server does
+/// not advertise: their answer is otherwise "you may not do that" alone, and a
+/// caller that fixes the grant then hits the same typo it was never told about.
+/// This runs ahead of the grant check, so a call that is wrong in both ways is
+/// reported as the argument error — the half the caller can fix on its own.
+/// A tool this server does not have at all is left alone; the dispatcher reports
+/// it as unknown, which is a better answer than a list of its arguments.
+fn ensure_known_arguments(
+    state: &McpServerState,
+    name: &str,
+    arguments: &Value,
+) -> Result<(), ToolError> {
+    let tools = all_tool_schemas(state);
+    let Some(schema) = tools
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+        .and_then(|entry| entry.get("inputSchema"))
+    else {
+        return Ok(());
+    };
+
+    ensure_object_matches_schema(name, arguments, schema)
+}
+
+/// Checks one value against one object schema, then recurses into whatever that
+/// schema closes.
+///
+/// `subject` is what a refusal calls the thing being checked: the tool name at
+/// the top, `<tool> ranges[0]` a level down, so a caller reads which object it
+/// got wrong as well as which key.
+fn ensure_object_matches_schema(
+    subject: &str,
+    value: &Value,
+    schema: &Value,
+) -> Result<(), ToolError> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    // Only schemas that closed themselves are enforced; an open one means the
+    // tool deliberately accepts what it does not declare.
+    if schema.get("additionalProperties") != Some(&Value::Bool(false)) {
+        return Ok(());
+    }
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Ok(());
+    };
+
+    let mut unknown: Vec<&str> = object
+        .keys()
+        .filter(|key| !properties.contains_key(*key))
+        .map(String::as_str)
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        let mut known: Vec<&str> = properties.keys().map(String::as_str).collect();
+        known.sort_unstable();
+
+        return Err(ToolError::InvalidArguments(format!(
+            "{subject} has no argument named {}. It accepts: {}.",
+            unknown.join(", "),
+            if known.is_empty() {
+                "no arguments".to_string()
+            } else {
+                known.join(", ")
+            }
+        )));
+    }
+
+    for (key, property) in properties {
+        let Some(argument) = object.get(key) else {
+            continue;
+        };
+        if argument.is_object() {
+            ensure_object_matches_schema(&format!("{subject} {key}"), argument, property)?;
+            continue;
+        }
+        let (Some(entries), Some(items)) = (argument.as_array(), property.get("items")) else {
+            continue;
+        };
+        for (index, entry) in entries.iter().enumerate() {
+            ensure_object_matches_schema(&format!("{subject} {key}[{index}]"), entry, items)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
@@ -1180,31 +1376,20 @@ fn confine_asset_media(
     project: &openreelio_core::ActiveProject,
     asset_id: &str,
 ) -> Result<(), ToolError> {
-    let Some(asset) = project.state.assets.get(asset_id) else {
-        // A missing asset is the transcription command's error to report, with
-        // its own wording; there is no path to check here.
-        return Ok(());
-    };
+    frame_probe_media::check_asset_media(&project.path, &project.state, asset_id)
+        .map_err(media_locality_error)
+}
 
-    // Import canonicalizes the URI, so on Windows it carries the `\\?\` verbatim
-    // prefix. Stripping it here is what tells an ordinary drive path apart from a
-    // real UNC share, which keeps its prefix and is rejected below.
-    let media_path = strip_verbatim_prefix(&asset.resolved_path(&project.path));
-    if is_network_path(&media_path.to_string_lossy()) {
-        return Err(ToolError::PermissionDenied(format!(
-            "Asset '{asset_id}' resolves to media on a UNC or network path; this server only reads local media"
-        )));
+/// Maps a shared media-locality refusal onto this surface's error kinds.
+///
+/// The distinction is worth keeping: reaching off-host is a policy decision
+/// this server makes, while media that is simply not on the machine is an
+/// environment failure whose fix is to reconnect a drive.
+fn media_locality_error(error: MediaLocalityError) -> ToolError {
+    match error {
+        MediaLocalityError::OffHost { .. } => ToolError::PermissionDenied(error.to_string()),
+        MediaLocalityError::Unreadable { .. } => ToolError::Execution(error.to_string()),
     }
-    if !media_path.exists() {
-        // An environment failure rather than a policy decision, and worded as
-        // one: the operator's fix is to reconnect the drive, not to move the
-        // file into the project.
-        return Err(ToolError::Execution(format!(
-            "Asset '{asset_id}' has no readable media on this machine"
-        )));
-    }
-
-    Ok(())
 }
 
 /// Checks every asset a sequence's render will read.
@@ -1218,17 +1403,8 @@ fn confine_sequence_media(
     project: &openreelio_core::ActiveProject,
     sequence_id: &str,
 ) -> Result<(), ToolError> {
-    let Some(sequence) = project.state.sequences.get(sequence_id) else {
-        // Reported by the transcription command in its own words.
-        return Ok(());
-    };
-
-    for track in &sequence.tracks {
-        for clip in &track.clips {
-            confine_asset_media(project, &clip.asset_id)?;
-        }
-    }
-    Ok(())
+    frame_probe_media::check_sequence_media(&project.path, &project.state, sequence_id)
+        .map_err(media_locality_error)
 }
 
 fn build_host_context(state: &McpServerState) -> Value {
@@ -1990,6 +2166,47 @@ fn optional_non_negative_number(arguments: &Value, key: &str) -> Result<Option<f
 /// from a server advertising itself as read-only.
 ///
 /// Returns the resolved absolute path.
+/// Reads an optional finite number, of either sign.
+///
+/// `targetLufs` and `maxTruePeak` are both negative in every realistic value,
+/// so the non-negative reader cannot serve them.
+fn optional_finite_number(arguments: &Value, key: &str) -> Result<Option<f64>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    value
+        .as_f64()
+        .filter(|number| number.is_finite())
+        .map(Some)
+        .ok_or_else(|| {
+            ToolError::InvalidArguments(format!("{key} must be a finite number when provided"))
+        })
+}
+
+/// Reads an optional whole number of seconds, at least one.
+fn optional_positive_seconds(arguments: &Value, key: &str) -> Result<Option<u64>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    value
+        .as_u64()
+        .filter(|seconds| *seconds >= 1)
+        .map(Some)
+        .ok_or_else(|| {
+            ToolError::InvalidArguments(format!(
+                "{key} must be a whole number of seconds of at least 1 when provided"
+            ))
+        })
+}
+
 fn confine_to_project(
     project_root: &Path,
     key: &str,
@@ -2070,8 +2287,10 @@ fn confine_to_project(
 /// Absolute, traversing, and symlinked paths fail identically so the wording
 /// cannot be used to distinguish "outside the project" from "does not exist".
 fn path_escape_error(key: &str, requested: &str) -> ToolError {
+    // Worded exactly as the in-app bridge words it, so an agent that meets the
+    // rule on one surface recognises it on the other.
     ToolError::PermissionDenied(format!(
-        "{key} must resolve inside the project directory; '{requested}' escapes it"
+        "{key} '{requested}' must resolve inside the project directory"
     ))
 }
 
@@ -2143,19 +2362,27 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
         .map(|requested| confine_to_project(project_path, "file", &requested))
         .transpose()?;
 
+    // Every field the engine accepts is read. Built exhaustively rather than
+    // with `..Default::default()`: a struct-update fallback silently pinned the
+    // measurement thresholds to their defaults, so a client that sent
+    // `targetLufs` got a verdict measured against something else and no
+    // indication that its argument had been dropped.
     let request = VerifyRequest {
         sequence: optional_string_argument(&arguments, "sequenceId")?,
         file,
         structural_only,
         checks: optional_string_array_argument(&arguments, "checks")?,
         skip: optional_string_array_argument(&arguments, "skip")?,
+        target_lufs: optional_finite_number(&arguments, "targetLufs")?,
+        max_true_peak: optional_finite_number(&arguments, "maxTruePeak")?,
+        duration_tolerance_sec: optional_non_negative_number(&arguments, "durationToleranceSec")?,
         fail_on: optional_string_argument(&arguments, "failOn")?
-            .unwrap_or_else(|| DEFAULT_VERIFY_FAIL_ON.to_string()),
-        timeout_sec: VERIFY_MEASURE_TIMEOUT_SEC,
+            .unwrap_or_else(|| DEFAULT_FAIL_ON.to_string()),
+        timeout_sec: optional_positive_seconds(&arguments, "timeoutSec")?
+            .unwrap_or(DEFAULT_MEASURE_TIMEOUT_SEC),
         // A refusal from the shared engine reaches an MCP client, which sends
         // JSON fields and has no command-line flags to correct.
         names: VerifyArgumentNames::api(),
-        ..Default::default()
     };
 
     // The exit code is dropped on purpose: the report already carries `status`,
@@ -2166,21 +2393,226 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
     Ok(report)
 }
 
+// ── Draft rendering ─────────────────────────────────────────────────────────
+
+/// Renders one bounded range of the timeline into the agent render cache.
+///
+/// The render itself goes through `render start`'s own path — the same preset
+/// table, the same export validation, the same result document — so a draft an
+/// agent asks for here is the file the command line would have produced. What
+/// this adds is everything that makes it safe to hand to a tool loop: the
+/// output path is the server's, not the caller's, so nothing can be written
+/// outside the project; the directory is pruned to its newest few drafts before
+/// the render starts; and the range is capped, because a draft is a look at one
+/// moment rather than a deliverable.
+///
+/// The answer names what to do with the file, because the whole point of
+/// producing it is the step after: sheeting its cuts, or measuring it.
+fn run_render_range_tool(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
+    let Some(project_path) = state.project.as_ref() else {
+        return Err(ToolError::InvalidArguments(
+            "openreelio.render.range requires mcp --project <project-path>".to_string(),
+        ));
+    };
+
+    let start = required_non_negative_number(&arguments, "start")?;
+    let end = required_non_negative_number(&arguments, "end")?;
+    if start >= end {
+        return Err(ToolError::InvalidArguments(format!(
+            "start ({start}) must be before end ({end})"
+        )));
+    }
+    // The output always lands in the agent directory, so the cap always applies.
+    ensure_agent_render_range_within_cap(true, start, end).map_err(ToolError::InvalidArguments)?;
+
+    let preset = optional_string_argument(&arguments, "preset")?
+        .unwrap_or_else(|| render::PROXY_PRESET_ID.to_string());
+    if preset != render::PROXY_PRESET_ID && preset != render::DRAFT_PRESET_ID {
+        return Err(ToolError::InvalidArguments(format!(
+            "preset must be '{}' or '{}' (got '{preset}')",
+            render::PROXY_PRESET_ID,
+            render::DRAFT_PRESET_ID
+        )));
+    }
+
+    // Opened here rather than left to the render so the media check runs against
+    // the same snapshot, and so an off-host clip is refused before FFmpeg is
+    // asked to reach for it.
+    let project = super::load_project(project_path).map_err(|error| {
+        ToolError::Execution(format!(
+            "Failed to open project '{}': {error}",
+            project_path.display()
+        ))
+    })?;
+    let sequence_id = super::resolve_sequence_id(
+        &project,
+        optional_string_argument(&arguments, "sequenceId")?,
+    )
+    .map_err(|error| ToolError::Execution(error.to_string()))?;
+    confine_sequence_media(&project, &sequence_id)?;
+
+    let output_path = allocate_agent_render_path(project_path)?;
+    let payload = render::run_start_render(render::StartArgs {
+        path: project_path.clone(),
+        output_path,
+        preset: preset.clone(),
+        proxy: false,
+        sequence: Some(sequence_id),
+        start: Some(start),
+        end: Some(end),
+        progress: false,
+    })
+    .map_err(|error| ToolError::Execution(error.to_string()))?;
+
+    let rendered_path = payload
+        .get("outputPath")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    // The range the file actually holds, not the one that was asked for: a
+    // draft render routinely lands a frame short, and every `timelineSec` the
+    // samplers report is offset by whatever this declaration gets wrong.
+    //
+    // Measured off the file rather than taken from the render result, which
+    // reports the length the export *planned* for the range. The follow-ups
+    // below hand these seconds straight to `frame.extract`, so a planned number
+    // that the encoder did not quite reach becomes a sampled time the file has
+    // no frame at. A probe that cannot run falls back to what was planned, and
+    // then to the requested range — a hint is not worth failing a good render
+    // over.
+    let rendered_duration_sec = measure_rendered_duration_sec(Path::new(&rendered_path))
+        .or_else(|| {
+            payload
+                .get("durationSec")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value > 0.0)
+        })
+        .unwrap_or(end - start);
+
+    let mut payload = payload;
+    if let Some(object) = payload.as_object_mut() {
+        // Replaced rather than reported alongside the planned length: this is
+        // the number the follow-ups below are built from, and a caller reading
+        // `durationSec` is asking how much picture the file holds.
+        object.insert(
+            "durationSec".to_string(),
+            serde_json::json!(rendered_duration_sec),
+        );
+        object.insert(
+            "timelineRange".to_string(),
+            serde_json::json!({ "startSec": start, "endSec": end }),
+        );
+        object.insert(
+            "nextStep".to_string(),
+            serde_json::json!({
+                // The unconditional look: an even sweep of the draft always has
+                // something to show. A sampler is the better question when the
+                // range holds events, but `atCuts` over a range with no cut in
+                // it is an error, and that is the ordinary case for a draft
+                // rendered around one moment.
+                "sweep": {
+                    "tool": "openreelio.frame.extract",
+                    "arguments": {
+                        "file": rendered_path,
+                        "between": [0.0, rendered_duration_sec],
+                        "grid": "4x3",
+                        "labelCells": true
+                    },
+                    "note": "Sweeps the whole draft evenly; always has something to show."
+                },
+                "judgeEvents": {
+                    "tool": "openreelio.frame.extract",
+                    "arguments": {
+                        "file": rendered_path,
+                        "fileRange": [start, start + rendered_duration_sec],
+                        "atCuts": true,
+                        "grid": "auto",
+                        "labelCells": true
+                    },
+                    "note": "Use when the rendered range contains cuts; swap atCuts for atCaptions, atTransitions or perShot to judge those instead. Errors when the range holds no such event. A cut sitting at the very start of the range shows only its incoming side — its outgoing frame is a frame and a half earlier, before this file begins, and is reported as sampler.droppedBeforeFile; render from slightly earlier to see both sides."
+                },
+                "measure": {
+                    "tool": "openreelio.verify",
+                    "arguments": { "file": rendered_path }
+                }
+            }),
+        );
+    }
+
+    Ok(payload)
+}
+
+/// Measures how many seconds of media a rendered file actually holds.
+///
+/// The same probe `openreelio.verify --file` measures a render with, so the two
+/// tools never disagree about the length of the file they were both handed.
+/// `None` when FFmpeg is not resolvable here, when the probe fails, or when the
+/// file declares no usable duration; every one of those is a reason to fall back
+/// to what the render planned rather than to fail a draft that exists.
+fn measure_rendered_duration_sec(path: &Path) -> Option<f64> {
+    if !path.is_file() {
+        return None;
+    }
+    let info = crate::ffmpeg_env::ensure_ffmpeg_optional()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let probed = runtime.block_on(FFmpegRunner::new(info).probe(path)).ok()?;
+
+    Some(probed.duration_sec).filter(|value| value.is_finite() && *value > 0.0)
+}
+
+/// Reserves the path one draft render writes into, and bounds the directory.
+///
+/// Pruning runs before the render rather than after it, and asks to keep one
+/// fewer than the bound, so the directory holds [`MAX_AGENT_RENDERS`] once this
+/// render lands. The name carries a millisecond stamp: two drafts asked for in
+/// the same second must not collide, and the stamp is also what makes "newest"
+/// meaningful to a reader listing the directory.
+fn allocate_agent_render_path(project_path: &Path) -> Result<PathBuf, ToolError> {
+    let directory = agent_render_dir(project_path);
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        ToolError::Execution(format!(
+            "Failed to create the agent render directory '{}': {error}",
+            directory.display()
+        ))
+    })?;
+    // A prune failure is not worth losing the render over: the directory being
+    // one file over its bound is a housekeeping problem, and the next call
+    // sweeps it.
+    let _ = prune_agent_renders(project_path, MAX_AGENT_RENDERS.saturating_sub(1), None);
+
+    Ok(directory.join(format!("proxy-{}.mp4", current_time_millis())))
+}
+
 // ── Frame extraction ────────────────────────────────────────────────────────
 
-/// A parsed, range-checked `openreelio.frame.extract` request.
+/// A parsed `openreelio.frame.extract` request.
 ///
-/// Parsing is separated from execution because the CLI's argument rules live in
-/// clap, which this surface never runs through: every constraint `frame extract`
-/// gets from `#[arg(conflicts_with = ...)]` has to be restated here, or the tool
-/// would accept combinations the extraction then silently ignores.
+/// Reading is separated from execution because clap — where the CLI gets its
+/// argument rules — is never run on this surface. What clap enforces for the
+/// command line, [`FrameProbePlan::validate`] enforces for everything else, and
+/// this type hands it the request before a directory is reserved or a project
+/// is opened, so a bad combination comes back as an argument error rather than
+/// an execution failure.
+///
+/// The rules themselves are deliberately *not* restated here. They used to be,
+/// and the restatement drifted: it spoke a slightly different English, and it
+/// answered some refusals the engine never got to make. Only what the engine
+/// cannot know stays — how many images one JSON-RPC reply can carry.
+#[derive(Clone)]
 #[cfg_attr(test, derive(Debug))]
 struct FrameExtractRequest {
+    asset_id: Option<String>,
+    source_time: Option<f64>,
     time: Option<f64>,
     times: Option<Vec<f64>>,
     grid: Option<String>,
     between: Option<Vec<f64>>,
     file: Option<String>,
+    file_range: Option<Vec<f64>>,
     sequence_id: Option<String>,
     mode: Option<String>,
     cell_width: Option<u32>,
@@ -2204,11 +2636,14 @@ struct FrameExtractRequest {
 impl FrameExtractRequest {
     fn parse(arguments: &Value) -> Result<Self, ToolError> {
         let request = Self {
+            asset_id: optional_string_argument(arguments, "assetId")?,
+            source_time: optional_non_negative_number(arguments, "sourceTime")?,
             time: optional_non_negative_number(arguments, "time")?,
             times: optional_non_negative_number_array(arguments, "times")?,
             grid: optional_string_argument(arguments, "grid")?,
             between: optional_non_negative_number_array(arguments, "between")?,
             file: optional_string_argument(arguments, "file")?,
+            file_range: optional_non_negative_number_array(arguments, "fileRange")?,
             sequence_id: optional_string_argument(arguments, "sequenceId")?,
             mode: optional_string_argument(arguments, "mode")?,
             cell_width: optional_pixel_argument(arguments, "cellWidth")?,
@@ -2237,13 +2672,6 @@ impl FrameExtractRequest {
         self.grid.is_some()
     }
 
-    /// Whether the layout is chosen from the sample count rather than stated.
-    fn is_auto_grid(&self) -> bool {
-        self.grid
-            .as_deref()
-            .is_some_and(|grid| grid.trim().eq_ignore_ascii_case("auto"))
-    }
-
     /// Whether any event sampler was asked for.
     fn has_sampler(&self) -> bool {
         self.at_cuts
@@ -2256,324 +2684,58 @@ impl FrameExtractRequest {
             || self.ranges.is_some()
     }
 
+    /// Rejects the request, in this surface's own vocabulary, before anything
+    /// is reserved or opened.
     fn validate(&self) -> Result<(), ToolError> {
-        self.validate_range_sources()?;
-        self.validate_sampler_combination()?;
-        if self.time.is_none() && self.times.is_none() && !self.is_grid() && !self.has_sampler() {
-            return Err(ToolError::InvalidArguments(
-                "Nothing to extract: pass affected, ranges, atCuts, atTransitions, atCaptions, atMarkers, perShot, around, time, times, or grid"
-                    .to_string(),
-            ));
-        }
-        if self.time.is_some() && (self.times.is_some() || self.is_grid()) {
-            return Err(ToolError::InvalidArguments(
-                "time extracts one still and cannot be combined with times or grid".to_string(),
-            ));
-        }
-        if let Some(mode) = self.mode.as_deref() {
-            if !matches!(mode, "fast" | "composite") {
-                return Err(ToolError::InvalidArguments(format!(
-                    "mode must be 'fast' or 'composite' (got '{mode}')"
-                )));
-            }
-        }
-        if self.file.is_some() {
-            // A rendered file is read in its own timebase and never opens the
-            // project, so neither of these could mean anything.
-            if self.sequence_id.is_some() || self.mode.is_some() {
-                return Err(ToolError::InvalidArguments(
-                    "file reads a rendered video, so it cannot be combined with sequenceId or mode"
-                        .to_string(),
-                ));
-            }
-        }
-
-        self.validate_cell_geometry()?;
-        self.validate_still_width()?;
-        self.validate_selection_size()
+        self.validate_inline_budget()?;
+        self.validate_through_engine()
     }
 
-    /// Rejects the two range sources asked for together, and `afterOp` asked
-    /// for without `affected`.
+    /// Bounds how much picture one JSON-RPC reply carries.
     ///
-    /// `ranges` is what the caller says its own edit changed; `affected` is
-    /// what the project's hand-off record says the last edit changed. They are
-    /// different authorities on the same question, and sampling their union
-    /// would report one set of pictures as though both agreed.
-    fn validate_range_sources(&self) -> Result<(), ToolError> {
-        if self.ranges.is_some() && self.affected {
-            return Err(ToolError::InvalidArguments(
-                "ranges names the ranges to sample and affected reads the ones the last edit recorded; pass one or the other. Use ranges when you already hold what your own apply reported, and affected with afterOp when you do not."
-                    .to_string(),
-            ));
-        }
-        if self.after_op.is_some() && !self.affected {
-            return Err(ToolError::InvalidArguments(
-                "afterOp names the operation the recorded hand-off must end at, so it only means something with affected"
-                    .to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Rejects a sampler paired with a selector that already names its times.
-    ///
-    /// Samplers union with each other but not with a hand-written list, and the
-    /// shaping arguments are meaningless without something to shape. The engine
-    /// enforces the same rules; restating them here makes the refusal an
-    /// argument error rather than an execution failure.
-    fn validate_sampler_combination(&self) -> Result<(), ToolError> {
-        if self.has_sampler() {
-            let conflicting = [
-                ("time", self.time.is_some()),
-                ("times", self.times.is_some()),
-                ("between", self.between.is_some()),
-                ("file", self.file.is_some()),
-            ]
-            .into_iter()
-            .filter_map(|(name, used)| used.then_some(name))
-            .collect::<Vec<_>>();
-
-            if !conflicting.is_empty() {
-                return Err(ToolError::InvalidArguments(format!(
-                    "A sampler chooses its own times, so it cannot be combined with {}",
-                    conflicting.join(", ")
-                )));
-            }
-
-            return self.validate_sampler_budget();
-        }
-
-        let orphaned = [
-            ("span", self.span.is_some()),
-            ("aroundCount", self.around_count.is_some()),
-            ("limit", self.limit.is_some()),
-        ]
-        .into_iter()
-        .filter_map(|(name, used)| used.then_some(name))
-        .collect::<Vec<_>>();
-
-        if orphaned.is_empty() {
-            return Ok(());
-        }
-
-        Err(ToolError::InvalidArguments(format!(
-            "{} only shapes a sampler; add affected, ranges, atCuts, atTransitions, atCaptions, atMarkers, perShot or around",
-            orphaned.join(", ")
-        )))
-    }
-
-    /// Bounds how many separate stills a sampler may return.
-    ///
-    /// A sheet is one image whatever it holds, so only the batch path needs a
-    /// cap — and the count is not known until the sequence is read, so the cap
-    /// has to be expressed as a limit the caller states up front.
-    fn validate_sampler_budget(&self) -> Result<(), ToolError> {
+    /// The only rule the engine cannot make: it knows nothing about a response
+    /// budget, and a sheet is one image however many cells it holds, so only
+    /// the separate-stills paths are capped. A sampler's count is not knowable
+    /// until the sequence is read, so its cap is expressed as the `limit` the
+    /// caller states up front — and `into_extract_args` supplies that limit
+    /// when the caller states none.
+    fn validate_inline_budget(&self) -> Result<(), ToolError> {
         if self.is_grid() {
             return Ok(());
         }
+        if let Some(times) = self.times.as_deref() {
+            if times.len() > MAX_INLINE_FRAME_STILLS {
+                return Err(ToolError::InvalidArguments(format!(
+                    "times asks for {} stills, more than the maximum of {MAX_INLINE_FRAME_STILLS} one reply carries. Ask for fewer, or pass grid for a contact sheet.",
+                    times.len()
+                )));
+            }
+        }
         match self.limit {
             Some(limit) if limit > MAX_INLINE_FRAME_STILLS => Err(ToolError::InvalidArguments(
-                format!("limit asks for up to {limit} stills, more than the maximum of {MAX_INLINE_FRAME_STILLS}. Lower it, or pass grid for a contact sheet."),
+                format!("limit asks for up to {limit} stills, more than the maximum of {MAX_INLINE_FRAME_STILLS} one reply carries. Lower it, or pass grid for a contact sheet."),
             )),
             _ => Ok(()),
         }
     }
 
-    /// Bounds the pixels one still carries.
+    /// Runs the extraction engine's own guards against this request.
     ///
-    /// The count caps alone say nothing about size: the images travel inline as
-    /// base64, so an unbounded width lets a handful of stills become a response
-    /// no host can read back.
-    fn validate_still_width(&self) -> Result<(), ToolError> {
-        let Some(max_width) = self.max_width else {
-            return Ok(());
-        };
-        if !(MIN_STILL_WIDTH_PX..=MAX_STILL_WIDTH_PX).contains(&max_width) {
-            return Err(ToolError::InvalidArguments(format!(
-                "maxWidth must be between {MIN_STILL_WIDTH_PX} and {MAX_STILL_WIDTH_PX} pixels (got {max_width})"
-            )));
-        }
+    /// The paths are placeholders: nothing the guards read depends on them —
+    /// the format is stated outright by `into_extract_args`, so the output path
+    /// is never consulted for one — and reserving a real cache entry before the
+    /// request is known to be servable is exactly what leaves a directory
+    /// behind for every refusal.
+    fn validate_through_engine(&self) -> Result<(), ToolError> {
+        let args = self.clone().into_extract_args(
+            PathBuf::new(),
+            PathBuf::new(),
+            self.file.as_deref().map(PathBuf::from),
+            self.sequence_id.clone(),
+        );
 
-        Ok(())
-    }
-
-    /// Rejects sheet-only arguments on a request that builds no sheet, and cell
-    /// dimensions the tiler cannot fill.
-    fn validate_cell_geometry(&self) -> Result<(), ToolError> {
-        if self.is_grid() {
-            for (key, value) in [
-                ("cellWidth", self.cell_width),
-                ("cellHeight", self.cell_height),
-            ] {
-                let Some(value) = value else {
-                    continue;
-                };
-                if !(MIN_CELL_SIZE_PX..=MAX_CELL_SIZE_PX).contains(&value) {
-                    return Err(ToolError::InvalidArguments(format!(
-                        "{key} must be between {MIN_CELL_SIZE_PX} and {MAX_CELL_SIZE_PX} pixels (got {value})"
-                    )));
-                }
-            }
-            return Ok(());
-        }
-
-        let sheet_only = [
-            ("between", self.between.is_some()),
-            ("cellWidth", self.cell_width.is_some()),
-            ("cellHeight", self.cell_height.is_some()),
-            ("labelCells", self.label_cells),
-        ]
-        .into_iter()
-        .filter_map(|(name, used)| used.then_some(name))
-        .collect::<Vec<_>>();
-
-        if sheet_only.is_empty() {
-            return Ok(());
-        }
-
-        Err(ToolError::InvalidArguments(format!(
-            "{} only applies to a contact sheet and needs grid",
-            sheet_only.join(", ")
-        )))
-    }
-
-    /// Bounds how much picture one response carries.
-    fn validate_selection_size(&self) -> Result<(), ToolError> {
-        let Some(grid) = self.grid.as_deref() else {
-            if let Some(times) = self.times.as_deref() {
-                if times.is_empty() {
-                    return Err(ToolError::InvalidArguments(
-                        "times requires at least one value".to_string(),
-                    ));
-                }
-                if times.len() > MAX_INLINE_FRAME_STILLS {
-                    return Err(ToolError::InvalidArguments(format!(
-                        "times asks for {} stills, more than the maximum of {MAX_INLINE_FRAME_STILLS}. Ask for fewer, or use grid for a contact sheet.",
-                        times.len()
-                    )));
-                }
-            }
-            return Ok(());
-        };
-
-        if self.is_auto_grid() {
-            return self.validate_auto_grid();
-        }
-
-        let (columns, rows) = frame::parse_grid_spec(grid)
-            .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
-        let capacity = columns.saturating_mul(rows);
-        if capacity > MAX_GRID_CELLS {
-            return Err(ToolError::InvalidArguments(format!(
-                "grid {columns}x{rows} needs {capacity} cells, more than the maximum of {MAX_GRID_CELLS}"
-            )));
-        }
-
-        // A sampler is a time source in its own right, and `between`/`times`
-        // are already refused alongside one. Falling through to the check below
-        // therefore rejected a perfectly good `{atCuts, grid: "4x3"}` for
-        // lacking the very arguments it is not allowed to carry. How many cells
-        // the sampler actually fills is not knowable until it has run, so the
-        // engine checks it in `resolve_sampled_grid`; what is knowable here is
-        // the finished image size.
-        if self.has_sampler() {
-            return frame::ensure_sheet_dimensions_in_range(
-                columns,
-                rows,
-                self.cell_width,
-                self.cell_height,
-            )
-            .map_err(|error| ToolError::InvalidArguments(error.to_string()));
-        }
-
-        // The sheet's own source: exactly one, because a sampled range and an
-        // explicit list describe different sheets.
-        let filled_rows = match (self.between.as_deref(), self.times.as_deref()) {
-            (Some(between), None) => {
-                if between.len() != 2 {
-                    return Err(ToolError::InvalidArguments(
-                        "between takes exactly two values: [start, end]".to_string(),
-                    ));
-                }
-                rows
-            }
-            (None, Some(times)) => {
-                if times.is_empty() {
-                    return Err(ToolError::InvalidArguments(
-                        "times requires at least one value".to_string(),
-                    ));
-                }
-                if times.len() > capacity {
-                    return Err(ToolError::InvalidArguments(format!(
-                        "times lists {} cells, more than the {columns}x{rows} grid holds ({capacity})",
-                        times.len()
-                    )));
-                }
-                // A short list leaves whole rows unfilled, and the extraction
-                // drops them rather than tiling black — so the sheet that gets
-                // measured is the one that will actually be built.
-                times.len().div_ceil(columns)
-            }
-            (Some(_), Some(_)) => {
-                return Err(ToolError::InvalidArguments(
-                    "grid takes either between or times, not both".to_string(),
-                ))
-            }
-            (None, None) => {
-                return Err(ToolError::InvalidArguments(
-                    "grid requires between [start, end] or times".to_string(),
-                ))
-            }
-        };
-
-        // The cell cap and the cell-count cap bound different terms; only their
-        // product is the image the caller gets back. `run_extract` applies the
-        // same guard, so the CLI is bounded too — restating it here is what
-        // makes the refusal an argument error instead of an execution failure.
-        frame::ensure_sheet_dimensions_in_range(
-            columns,
-            filled_rows,
-            self.cell_width,
-            self.cell_height,
-        )
-        .map_err(|error| ToolError::InvalidArguments(error.to_string()))
-    }
-
-    /// Checks what can be checked about an `auto` sheet before it is sampled.
-    ///
-    /// With `times` the count is already known, so the finished geometry is
-    /// measured here exactly as it is for a stated grid. With a sampler it is
-    /// not known until the sequence is read, and the extraction measures the
-    /// layout it actually chose.
-    fn validate_auto_grid(&self) -> Result<(), ToolError> {
-        if let Some(times) = self.times.as_deref() {
-            if times.is_empty() {
-                return Err(ToolError::InvalidArguments(
-                    "times requires at least one value".to_string(),
-                ));
-            }
-            let (columns, rows) = frame::auto_grid(times.len())
-                .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
-
-            return frame::ensure_sheet_dimensions_in_range(
-                columns,
-                rows,
-                self.cell_width,
-                self.cell_height,
-            )
-            .map_err(|error| ToolError::InvalidArguments(error.to_string()));
-        }
-
-        if self.has_sampler() {
-            return Ok(());
-        }
-
-        Err(ToolError::InvalidArguments(
-            "grid 'auto' sizes the sheet from its samples, so it needs a sampler (affected, ranges, atCuts, atTransitions, atCaptions, atMarkers, perShot, around) or times. With between, state the layout as COLSxROWS."
-                .to_string(),
-        ))
+        frame::FrameProbePlan::validate(&args.into_request())
+            .map_err(|error| ToolError::InvalidArguments(error.to_string()))
     }
 
     /// Builds the CLI-side arguments, with the paths the server chose.
@@ -2590,8 +2752,9 @@ impl FrameExtractRequest {
             path: project_path,
             out,
             file,
-            asset: None,
-            source_time: None,
+            file_range: self.file_range,
+            asset: self.asset_id,
+            source_time: self.source_time,
             time: self.time,
             times: self.times,
             sequence: sequence_id,
@@ -2635,9 +2798,27 @@ impl FrameExtractRequest {
                 (None, true) => Some(MAX_INLINE_FRAME_STILLS),
                 (None, false) => None,
             },
+            // Every refusal the engine makes travels back to an MCP client,
+            // which sends JSON keys and has no flags to correct. `sequenceId`
+            // and `assetId` are this surface's own spellings of the shared
+            // `sequence` and `asset` labels.
+            names: MCP_FRAME_ARGUMENT_NAMES,
         }
     }
 }
+
+/// How `openreelio.frame.extract` spells the engine's arguments.
+///
+/// The shared JSON vocabulary, with the two keys this surface names
+/// differently. Every override here has to be a property of the tool's own
+/// `inputSchema` — a refusal naming an argument the schema does not declare is
+/// one the client cannot act on — which
+/// `frame_argument_names_should_match_the_advertised_schema` enforces.
+const MCP_FRAME_ARGUMENT_NAMES: &frame::FrameProbeArgumentNames = &frame::FrameProbeArgumentNames {
+    sequence: "sequenceId",
+    asset: "assetId",
+    ..*frame::API_ARGUMENT_NAMES
+};
 
 /// Reads an optional strictly positive number of seconds.
 fn optional_positive_number(arguments: &Value, key: &str) -> Result<Option<f64>, ToolError> {
@@ -2746,7 +2927,30 @@ fn run_frame_extract_tool(
     // confined like every other one. Timeline extraction instead opens the media
     // the sequence's clips point at, which arrives as project state and is
     // confined there — the same split `openreelio.transcription.generate` makes.
+    //
+    // A sampled file sits on the first side of that split even though it reads
+    // the sequence: the sequence is read for its cut and caption *times*, and
+    // every picture comes out of the confined file. No clip's media is opened,
+    // so no clip's media is checked — which is also what the in-app IPC does.
     let (file, project, sequence_id) = match request.file.as_deref() {
+        Some(requested) if request.has_sampler() => {
+            let file = confine_to_project(project_path, "file", requested)?;
+            let project = super::load_project(project_path).map_err(|error| {
+                ToolError::Execution(format!(
+                    "Failed to open project '{}': {error}",
+                    project_path.display()
+                ))
+            })?;
+            // `sequenceId` is refused alongside `file`, so a sampled file always
+            // reads the active sequence — the one the render came from.
+            // Resolved here only so a project without one is refused before a
+            // cache directory is reserved; the engine resolves the same id from
+            // this same snapshot, and a file names a timebase rather than a
+            // sequence, so nothing is passed on.
+            super::resolve_sequence_id(&project, None)
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            (Some(file), Some(project), None)
+        }
         Some(requested) => (
             Some(confine_to_project(project_path, "file", requested)?),
             None,
@@ -2759,16 +2963,28 @@ fn run_frame_extract_tool(
                     project_path.display()
                 ))
             })?;
-            let sequence_id = super::resolve_sequence_id(&project, request.sequence_id.clone())
-                .map_err(|error| ToolError::Execution(error.to_string()))?;
-            confine_sequence_media(&project, &sequence_id)?;
-            (None, Some(project), Some(sequence_id))
+            // An asset request reads exactly one piece of media in its own
+            // timebase, and never opens the sequence; walking every clip would
+            // refuse a still of a perfectly readable asset because some other
+            // clip in the edit is offline.
+            if let Some(asset_id) = request.asset_id.as_deref() {
+                confine_asset_media(&project, asset_id)?;
+                (None, Some(project), None)
+            } else {
+                let sequence_id = super::resolve_sequence_id(&project, request.sequence_id.clone())
+                    .map_err(|error| ToolError::Execution(error.to_string()))?;
+                confine_sequence_media(&project, &sequence_id)?;
+                (None, Some(project), Some(sequence_id))
+            }
         }
     };
 
     // Allocated only once every argument, path, and media check has passed, so
     // a rejected request leaves no directory behind at all.
     let output = frame_output_slot(project_path, &request)?;
+    // A rendered file names a timebase, not a sequence, and the engine refuses
+    // the pair on every surface — the file arms above therefore carry no id at
+    // all, and this is only where the timeline arm's reaches the request.
     let args = request.into_extract_args(
         project_path.clone(),
         output.out().to_path_buf(),
@@ -3157,11 +3373,18 @@ fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolErr
     Ok(result)
 }
 
+/// Describes what a headless server can say about preview.
+///
+/// There is no interactive preview to report on, so the playhead is a constant.
+/// What is *not* constant is whether frames can be seen at all: this used to
+/// answer `rawFrameAccess: "disabled"` while `openreelio.frame.extract` was
+/// registered two functions away, which told a client the one thing it most
+/// needed to know, wrongly. The tool that does exist is named instead.
 fn build_preview_state() -> Value {
     serde_json::json!({
         "state": "idle",
         "playheadSeconds": 0.0,
-        "rawFrameAccess": "disabled",
+        "frameExtraction": "openreelio.frame.extract",
         "source": "headless-default"
     })
 }
@@ -3641,7 +3864,7 @@ mod tests {
                 serde_json::json!({
                     "name": "openreelio.plan.apply",
                     "arguments": {
-                        "planId": "plan-1"
+                        "plan": { "id": "plan-1", "steps": [] }
                     }
                 }),
             ),
@@ -4683,6 +4906,169 @@ mod tests {
         }
     }
 
+    /// Feature: MCP frame extraction
+    /// Scenario: a refusal names an argument the client can actually send
+    ///
+    /// The engine builds every refusal out of this table, so a label that is not
+    /// a property of the advertised schema tells a client to fix a key that does
+    /// not exist. `assetId` was exactly that: the schema declared `assetId` while
+    /// the refusals said `asset`.
+    #[test]
+    fn frame_argument_names_should_match_the_advertised_schema() {
+        let state = McpServerState {
+            project: Some(PathBuf::from("unused")),
+            ..Default::default()
+        };
+        let tools = build_tools(&state);
+        let properties = tools
+            .iter()
+            .find(|tool| tool["name"] == "openreelio.frame.extract")
+            .and_then(|tool| tool["inputSchema"]["properties"].as_object())
+            .expect("frame.extract advertises an object schema");
+
+        let names = MCP_FRAME_ARGUMENT_NAMES;
+        let declared = [
+            names.file,
+            names.file_range,
+            names.asset,
+            names.source_time,
+            names.time,
+            names.times,
+            names.sequence,
+            names.mode,
+            names.max_width,
+            names.grid,
+            names.between,
+            names.cell_width,
+            names.cell_height,
+            names.label_cells,
+            names.at_cuts,
+            names.at_transitions,
+            names.at_captions,
+            names.at_markers,
+            names.per_shot,
+            names.around,
+            names.span,
+            names.around_count,
+            names.affected,
+            names.after_op,
+            names.ranges,
+            names.limit,
+        ];
+
+        for name in declared {
+            assert!(
+                properties.contains_key(name),
+                "frame.extract refuses in terms of '{name}', which its schema does not declare"
+            );
+        }
+        // `format` and `count` are the two the engine accepts but this surface
+        // never advertises: images travel inline as JPEG, and a sampled sheet
+        // sizes itself. Naming them keeps the omission deliberate.
+        assert!(!properties.contains_key(names.format));
+        assert!(!properties.contains_key(names.count));
+        assert_eq!(
+            names.sequence, "sequenceId",
+            "the surface's own spelling of the sequence argument"
+        );
+        assert_eq!(names.asset, "assetId");
+    }
+
+    #[test]
+    fn should_reject_an_argument_no_tool_declares() {
+        let state = McpServerState {
+            project: Some(PathBuf::from("unused")),
+            ..Default::default()
+        };
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.frame.extract",
+                    "arguments": { "atCut": true }
+                }),
+            ),
+        );
+
+        assert_eq!(response["error"]["code"], -32602);
+        let message = response["error"]["message"]
+            .as_str()
+            .expect("an argument error carries a message");
+        assert!(
+            message.contains("atCut") && message.contains("atCuts"),
+            "the refusal must name the key and what the tool does accept: {message}"
+        );
+    }
+
+    /// Feature: MCP argument validation
+    /// Scenario: a mutating tool's arguments are checked on a read-only server
+    ///
+    /// The known set used to be read from the advertised list, which drops the
+    /// mutating pair when writes are off — so a misspelled `media.insert` was
+    /// answered with a permission refusal alone, and the caller fixed the grant
+    /// and hit the same typo again.
+    #[test]
+    fn should_reject_an_unknown_argument_on_a_tool_writes_are_off_for() {
+        let state = McpServerState {
+            project: Some(PathBuf::from("unused")),
+            ..Default::default()
+        };
+        assert!(
+            !state.mutations_enabled(),
+            "the point of this test is a server that does not advertise the tool"
+        );
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.media.insert",
+                    "arguments": { "sequenceIdd": "seq-1" }
+                }),
+            ),
+        );
+
+        assert_eq!(response["error"]["code"], -32602);
+        let message = response["error"]["message"]
+            .as_str()
+            .expect("an argument error carries a message");
+        assert!(
+            message.contains("sequenceIdd"),
+            "the refusal must name the misspelled key: {message}"
+        );
+    }
+
+    /// Feature: MCP argument validation
+    /// Scenario: a typo inside a nested object is named too
+    #[test]
+    fn should_reject_an_unknown_argument_inside_a_closed_sub_schema() {
+        let state = McpServerState {
+            project: Some(PathBuf::from("unused")),
+            ..Default::default()
+        };
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.frame.extract",
+                    "arguments": { "ranges": [{ "startSec": 1.0, "endSecs": 2.0 }] }
+                }),
+            ),
+        );
+
+        assert_eq!(response["error"]["code"], -32602);
+        let message = response["error"]["message"]
+            .as_str()
+            .expect("an argument error carries a message");
+        assert!(
+            message.contains("ranges[0]") && message.contains("endSecs"),
+            "the refusal must name the entry and the key: {message}"
+        );
+    }
+
     #[test]
     fn should_always_advertise_the_frame_extract_tool() {
         for state in [
@@ -4997,6 +5383,237 @@ mod tests {
         assert_eq!(payload["sampler"]["kinds"][0], "atCuts");
         assert_eq!(payload["sampler"]["selected"], 2);
         assert_eq!(payload["sampler"]["limited"], false);
+    }
+
+    /// Writes a decodable `render.mp4` of `duration_sec` inside the project.
+    ///
+    /// Stands in for a draft render of one stretch of the timeline: what the
+    /// file samplers need from it is a real video stream of the right length in
+    /// its own timebase, which is what a range render produces. The end-to-end
+    /// path through `render start --proxy` is covered by the CLI integration
+    /// tests, which drive the real binary.
+    fn rendered_range_file(project_path: &Path, duration_sec: f64) -> Option<String> {
+        let ffmpeg = ffmpeg_for_tests()?;
+        let output = project_path.join("render.mp4");
+        let status = std::process::Command::new(ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("color=c=white:s=320x240:r=25:d={duration_sec}"),
+                "-c:v",
+                "mpeg4",
+            ])
+            .arg(&output)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() || !output.exists() {
+            eprintln!("Skipping file-sampler test: ffmpeg could not write the render fixture");
+            return None;
+        }
+
+        Some("render.mp4".to_string())
+    }
+
+    #[test]
+    fn should_sheet_both_sides_of_a_cut_inside_a_rendered_range() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let Some(project_path) = project_with_real_media(&temp_dir, "frame_file_range_project")
+        else {
+            return;
+        };
+        split_the_only_clip(&project_path, 3.0);
+        // A draft of timeline 2.0s-5.0s: three seconds of picture starting at
+        // the file's own zero.
+        let Some(file) = rendered_range_file(&project_path, 3.0) else {
+            return;
+        };
+        let state = frame_extract_state(project_path);
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.frame.extract",
+                    "arguments": {
+                        "file": file,
+                        "fileRange": [2.0, 5.0],
+                        "atCuts": true,
+                        "grid": "auto"
+                    }
+                }),
+            ),
+        );
+
+        let content = response["result"]["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("frame extract failed: {response}"));
+        assert_eq!(content.len(), 2, "an auto sheet is one image plus metadata");
+        assert_image_block(&content[0], "image/jpeg");
+
+        let payload: Value =
+            serde_json::from_str(content[1]["text"].as_str().expect("text block")).expect("JSON");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["mode"], "file");
+        assert_eq!(
+            payload["source"]["timelineRange"],
+            serde_json::json!([2.0, 5.0])
+        );
+
+        let cells = payload["sheet"]["cells"].as_array().expect("cells");
+        assert_eq!(cells.len(), 2, "{payload}");
+        assert_eq!(cells[0]["reason"], "cutBefore");
+        assert_eq!(cells[1]["reason"], "cutAfter");
+        // Both keys, because they answer different questions: where in this
+        // file, and where in the edit.
+        assert_eq!(cells[1]["timelineSec"].as_f64(), Some(3.0));
+        assert_eq!(cells[1]["fileSec"].as_f64(), Some(1.0));
+        let before_file_sec = cells[0]["fileSec"].as_f64().expect("cell file time");
+        assert!(
+            before_file_sec < 1.0 && before_file_sec > 0.0,
+            "the outgoing frame sits just before the cut, inside the file: {payload}"
+        );
+
+        assert_eq!(payload["sampler"]["kinds"][0], "atCuts");
+        assert_eq!(payload["sampler"]["selected"], 2);
+        assert_eq!(payload["sampler"]["droppedOutsideFile"], 0);
+    }
+
+    /// Feature: MCP frame extraction
+    /// Scenario: sampling a render does not need the sequence's media
+    ///
+    /// The samplers read the sequence for cut and caption *times*; every picture
+    /// comes out of the confined file, and no clip's media is opened. Refusing
+    /// the call because some clip is on a disconnected drive turned a perfectly
+    /// answerable question about an artifact that already exists into a refusal
+    /// — and the in-app IPC, which shares this engine, never did that.
+    #[test]
+    fn should_sample_a_render_even_when_the_sequences_media_is_off_host() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let inside_media = temp_dir.path().join("off_host_sampler").join("clip.mp4");
+        let (project_path, _sequence_id, asset_id) =
+            project_with_media_asset(&temp_dir, "off_host_sampler", &inside_media);
+        // A cut inside the declared range, so the sampler has something to find
+        // and the run reaches the file it was asked to read.
+        split_the_only_clip(&project_path, 1.5);
+
+        let mut project = super::super::load_project(&project_path).expect("load project");
+        project.state.assets.get_mut(&asset_id).expect("asset").uri =
+            "\\\\attacker.example\\share\\probe.mp4".to_string();
+        project
+            .state
+            .assets
+            .get_mut(&asset_id)
+            .expect("asset")
+            .relative_path = None;
+        project.save().expect("save project");
+        drop(project);
+
+        let state = frame_extract_state(project_path);
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.frame.extract",
+                    "arguments": {
+                        "file": "draft.mp4",
+                        "fileRange": [0.0, 3.0],
+                        "atCuts": true,
+                        "grid": "auto"
+                    }
+                }),
+            ),
+        );
+
+        // The render itself was never written, so this still fails — but on the
+        // file it was asked to read, not on media it was never going to open.
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the missing draft must be reported: {response}"));
+        assert!(
+            message.contains("draft.mp4") && message.contains("not found"),
+            "the refusal must be about the render, got: {message}"
+        );
+        assert!(
+            !message.contains("UNC") && !message.contains("network path"),
+            "the sequence's media is never opened by a sampled file: {message}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_sampler_on_a_rendered_file_that_declares_no_range() {
+        let error = FrameExtractRequest::parse(&serde_json::json!({
+            "file": "render.mp4",
+            "atCuts": true,
+            "grid": "auto"
+        }))
+        .expect_err("a rendered video has no timeline of its own to sample");
+
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected an argument refusal");
+        };
+        assert!(
+            message.contains("fileRange"),
+            "the refusal must name the argument that lifts it: {message}"
+        );
+    }
+
+    #[test]
+    fn should_accept_a_sampler_on_a_rendered_file_that_declares_its_range() {
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "file": "render.mp4",
+            "fileRange": [2.0, 6.0],
+            "atCuts": true,
+            "grid": "auto"
+        }))
+        .expect("a declared range makes the render samplable");
+
+        let args = request.into_extract_args(
+            PathBuf::from("project"),
+            PathBuf::from("project/sheet.jpg"),
+            Some(PathBuf::from("project/render.mp4")),
+            Some("seq-resolved".to_string()),
+        );
+        assert_eq!(args.file_range, Some(vec![2.0, 6.0]));
+        assert!(args.at_cuts);
+    }
+
+    #[test]
+    fn should_reject_a_file_range_that_names_nothing_usable() {
+        for arguments in [
+            // No file to declare a range for.
+            serde_json::json!({ "time": 1.0, "fileRange": [2.0, 6.0] }),
+            // Reversed, and zero-width.
+            serde_json::json!({ "file": "render.mp4", "time": 1.0, "fileRange": [6.0, 2.0] }),
+            serde_json::json!({ "file": "render.mp4", "time": 1.0, "fileRange": [2.0, 2.0] }),
+            // Negative, and the wrong number of values.
+            serde_json::json!({ "file": "render.mp4", "time": 1.0, "fileRange": [-1.0, 6.0] }),
+            serde_json::json!({ "file": "render.mp4", "time": 1.0, "fileRange": [2.0] }),
+        ] {
+            assert!(
+                FrameExtractRequest::parse(&arguments).is_err(),
+                "{arguments} is not a usable declaration"
+            );
+        }
+    }
+
+    #[test]
+    fn should_accept_a_declared_range_alongside_file_relative_times() {
+        // Allowed and useful: the times stay file-relative, and the payload
+        // still records which seconds of the edit the file holds.
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "file": "render.mp4",
+            "fileRange": [2.0, 6.0],
+            "times": [0.5, 1.5]
+        }))
+        .expect("a declared range needs no sampler");
+
+        assert_eq!(request.file_range, Some(vec![2.0, 6.0]));
     }
 
     #[test]
@@ -5461,6 +6078,7 @@ mod tests {
             path: temp_dir.path().join("this_directory_does_not_exist"),
             out: out.clone(),
             file: None,
+            file_range: None,
             asset: None,
             source_time: None,
             time: Some(1.0),
@@ -5487,6 +6105,7 @@ mod tests {
             after_op: None,
             range: None,
             limit: None,
+            names: frame::CLI_ARGUMENT_NAMES,
         };
 
         frame::run_extract_with_project(args, &project)
@@ -5832,6 +6451,7 @@ mod tests {
             "openreelio.verify",
             "openreelio.transcription.generate",
             "openreelio.frame.extract",
+            "openreelio.render.range",
         ];
         // Everything else reads or writes project state only; none of them opens
         // a media file, so none of them can be used as a read primitive.
@@ -6149,7 +6769,11 @@ mod tests {
                     "tools/call",
                     serde_json::json!({
                         "name": mutating_tool,
-                        "arguments": { "approvalToken": "", "plan": { "id": "p" } }
+                        // The one argument both tools declare: arguments are
+                        // checked before the grant is, so a payload carrying a
+                        // key the other tool has no such thing as would come
+                        // back as an argument error rather than a denial.
+                        "arguments": { "approvalToken": "" }
                     }),
                 ),
             );

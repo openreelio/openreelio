@@ -940,6 +940,11 @@ async fn prune_agent_renders_off_runtime(
 /// that renders a draft per iteration of a judge loop would otherwise leave
 /// every intermediate cut inside the user's project. Renders anywhere else are
 /// untouched.
+///
+/// The same output path is also what bounds the range: an agent draft may cover
+/// at most `MAX_AGENT_RENDER_RANGE_SEC` (300s) of timeline, because a draft is a
+/// look at one moment rather than a deliverable. A user-initiated export to
+/// their own path is not range-bounded.
 #[tauri::command]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)]
@@ -1012,6 +1017,16 @@ pub async fn render_range(
     let root_refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
     let validated_output_path =
         validate_scoped_output_path(&output_path, "Output path", &root_refs)?;
+
+    // An agent draft render is bounded in length as well as in count: it is a
+    // look at one moment, not a deliverable. The bound applies only to output
+    // inside the agent render directory, so a user-initiated export to a path
+    // of their own stays unbounded.
+    crate::core::render::cache::ensure_agent_render_range_within_cap(
+        is_agent_render_output(&project_path, &validated_output_path),
+        in_point,
+        out_point,
+    )?;
 
     // An agent's draft renders land in a directory nothing else prunes, so the
     // bound is enforced here, before the job that adds to it starts. The file

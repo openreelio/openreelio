@@ -646,7 +646,8 @@ export const CLIP_ANALYSIS_TOOLS: ToolDefinition[] = [
         },
         includeContactSheet: {
           type: 'boolean',
-          description: 'Reserve compatibility with provider contact-sheet context. Default: false.',
+          description:
+            'Also send the vision provider a contact sheet tiling the sampled frames in timeline order, so it can answer about continuity across the clip and not only about each frame. Needs allowCloud. Default: false.',
         },
         includeEdges: { type: 'boolean', description: 'Include edge samples.' },
         rangeStartSec: { type: 'number', description: 'Optional absolute timeline range start.' },

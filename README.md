@@ -146,6 +146,15 @@ npx openreelio-cli help-json                        # machine-readable command s
 npx openreelio-cli mcp --project <dir> --stdio      # MCP server (read-only by default)
 ```
 
+**Every path an MCP client sends resolves inside the project directory.** A
+relative path is joined onto the project root, and absolute paths outside it,
+`..` escapes, UNC/network paths and URLs are rejected before they reach the
+filesystem or FFmpeg — so render into the project before asking the server to
+read, sheet or verify a file. The project's own imported media is the one
+exception: it is read wherever the user put it, because the app imports by
+reference, but media on a UNC or network path is still refused lexically and
+media this machine cannot read is refused as missing.
+
 ## Project Structure
 
 ```

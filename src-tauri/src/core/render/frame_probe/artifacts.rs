@@ -212,18 +212,15 @@ fn claim_cache_entry(root: &Path) -> FrameProbeResult<PathBuf> {
 }
 
 /// Keeps the frame cache to its most recent [`MAX_CACHED_FRAME_DIRECTORIES`]
-/// entries.
+/// entries, leaving `keep` alone whatever its name sorts as.
 ///
 /// The images are already inline in the response, so the on-disk copy exists
 /// only for a follow-up call that wants the path. Without a bound, a judge loop
 /// deposits every frame it ever looked at into the user's project directory.
 /// Best-effort: an extraction whose images are already in hand must not fail
 /// because the cache could not be tidied.
-pub fn prune_frame_cache(project_dir: &Path) {
-    prune_frame_cache_excluding(project_dir, None);
-}
-
-/// Prunes the cache while leaving `keep` alone, whatever its name sorts as.
+///
+/// Pass `keep: None` to prune without protecting anything.
 ///
 /// An extraction in flight owns its entry, and an entry name is a wall-clock
 /// stamp: a clock that stepped backwards, or a directory left behind stamped in
@@ -305,7 +302,7 @@ pub fn inline_frame_images(payload: &Value, cap: usize) -> FrameProbeResult<Vec<
 }
 
 /// Reads one extracted image and encodes it for the wire.
-pub fn encode_inline_image(path: &Path) -> FrameProbeResult<InlineImage> {
+pub(super) fn encode_inline_image(path: &Path) -> FrameProbeResult<InlineImage> {
     let mime_type = image_mime_type(path)?;
     let bytes = std::fs::read(path).map_err(|error| {
         FrameProbeError::new(format!(
@@ -515,7 +512,7 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp dir");
         // The first extraction on a project prunes before anything was cached,
         // and housekeeping must never be able to fail a successful call.
-        prune_frame_cache(&temp.path().join("never_extracted"));
+        prune_frame_cache_excluding(&temp.path().join("never_extracted"), None);
     }
 
     #[test]

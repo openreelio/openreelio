@@ -73,8 +73,9 @@ openreelio-cli timeline undo  --path ./demo
 
 # 4. See the result, not just the JSON
 #    Contact-sheet times must land inside the sequence, so read its end first.
-#    `timeline info` reports it directly, along with fps, editPoints (cut times),
-#    markers and transition spans - no reducing over the clip list.
+#    `timeline info` reports it directly, along with fps, cuts (the times the
+#    picture changes), editPoints, markers, caption/text spans and transition
+#    spans - no reducing over the clip list.
 END=$(openreelio-cli timeline info --path ./demo | pick '.durationSec')
 openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 "$END" --out ./frames/sheet.jpg
 openreelio-cli render start --path ./demo --proxy --output ./out/proxy.mp4 --progress
@@ -153,6 +154,22 @@ END` (repeatable - the `affectedRanges` an apply just returned), `--affected`
 `--grid auto` for one contact sheet whose cells carry their timecode and the
 `reason` they were sampled, and `--limit <N>` to cap how many frames come back.
 Uniform `--between` sampling lands on no event at all — keep it for an overview.
+
+The same samplers work on a **rendered file**, once `--file-range START END`
+says which timeline seconds that file covers — the range you rendered:
+
+```bash
+openreelio-cli render start  --path ./demo --proxy --start 2 --end 6 \
+  --output ./out/range.mp4
+openreelio-cli frame extract --path ./demo --file ./out/range.mp4 \
+  --file-range 2 6 --at-cuts --grid auto --label-cells --out ./look.jpg
+```
+
+Every time is translated into the file as `t - START`, so each cell carries both
+`fileSec` and `timelineSec`, and a sample the file does not hold is dropped and
+counted as `sampler.droppedOutsideFile` rather than clamped onto the wrong
+frame. Without a sampler the flag is just an annotation: `--time`, `--times` and
+`--between` stay file-relative.
 
 ### MCP server
 

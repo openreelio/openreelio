@@ -25,7 +25,8 @@ openreelio-cli frame extract --path ./demo --range <START> <END> --grid auto \
   --label-cells --out ./judge/a-affected.jpg
 openreelio-cli render start  --path ./demo --proxy --output ./judge/a.mp4 --progress
 openreelio-cli frame extract --path ./demo --file ./judge/a.mp4 \
-  --grid 4x3 --between 0 <RENDER_END> --label-cells --out ./judge/a-sheet.jpg
+  --file-range 0 <SEQUENCE_END> --at-cuts --grid auto \
+  --label-cells --out ./judge/a-sheet.jpg
 openreelio-cli verify        --path ./demo --file ./judge/a.mp4 > ./judge/a-verify.json
 openreelio-cli state history --path ./demo    # re-read before rewinding, see below
 openreelio-cli state jump    --path ./demo --index <BASELINE_INDEX>
@@ -67,14 +68,14 @@ omits effects, text and compositing outright, which are exactly the things being
 judged. The `--file` sheet is cheap (fast seeks into an existing render) and
 shows the same pixels `verify --file` measured, so scores and measurements
 describe one artifact. In `--file` mode cells map back as `fileSec` (the
-render's own timebase).
+render's own timebase), and with `--file-range` they carry `timelineSec` too.
 
 ## Let the sampler choose the times
 
 Cut-boundary sheets beat uniform sheets for continuity judging — and you no
 longer assemble one by hand. `frame extract` takes **event samplers** that read
-the sequence and pick the times themselves, on the timeline (samplers need a
-timeline, so they do not combine with `--file`):
+the sequence and pick the times themselves — on the timeline, and on a rendered
+file once `--file-range START END` says which timeline seconds that file holds:
 
 ```bash
 # Exactly the seconds the apply reported changing — the post-apply look
@@ -88,6 +89,22 @@ openreelio-cli frame extract --path ./demo --at-cuts --grid auto \
 # Captions and titles, on the frame they are settled in
 openreelio-cli frame extract --path ./demo --at-captions --grid auto \
   --cell-width 640 --out ./judge/a-captions.jpg
+
+# A rendered range, swept evenly. This is the first look at any draft: it always
+# has something to show, while a sampler over a range that happens to hold no cut
+# is an error rather than an empty sheet.
+openreelio-cli render start  --path ./demo --proxy --start 2 --end 6   --output ./judge/a-range.mp4
+openreelio-cli frame extract --path ./demo --file ./judge/a-range.mp4   --between 0 <DURATION_SEC> --grid 4x3 --label-cells   --out ./judge/a-range-sweep.jpg
+
+# The same samplers, reading the RENDER, when the range DOES hold cuts, captions
+# or transitions: --file-range is the range you rendered - its start plus the
+# durationSec the render reported - so every cell carries fileSec and timelineSec
+# and you compute no offsets
+openreelio-cli render start  --path ./demo --proxy --start 2 --end 6 \
+  --output ./judge/a-range.mp4
+openreelio-cli frame extract --path ./demo --file ./judge/a-range.mp4 \
+  --file-range 2 6 --at-cuts --grid auto --label-cells \
+  --out ./judge/a-range-cuts.jpg
 ```
 
 | Sampler | Picks | Reasons reported |
@@ -124,14 +141,41 @@ sequence yet, or the record does not end at the project's current operation
 (an undo, a redo, an edit applied by something that records no hand-off), the
 sampler says so rather than guessing — re-apply, or fall back to `--between`.
 
-`timeline info` still reports the raw signals (`cuts`, `fps`/`fpsRatio`,
-`markers`, `transitions`, `captionSpans`, `textSpans`), and you need them for one
-case the samplers cannot serve: a `--file` sheet, which reads a rendered artifact
-and has no timeline to sample. There, keep passing `--times`. Take the cut times
-from `cuts` — the boundaries where the picture changes — not from `editPoints`,
-which also lists the head, the tail, and caption and audio boundaries. A
-transition listed with `rendersAsCut: true` will not be blended in the file, so
-judge that boundary as a cut.
+### Sampling a render
+
+A rendered file has its own timebase starting at zero, so on its own it has no
+timeline to sample. `--file-range START END` supplies the missing half: the
+timeline seconds that file covers — the `--start`/`--end` you rendered, or `0`
+and the sequence end for a full render. The samplers then read the timeline over
+that range and translate every time they choose into the file as `t − START`, so:
+
+- every frame and cell carries **both** `fileSec` and `timelineSec`, plus its
+  `reason`;
+- `source.timelineRange` echoes what you declared, so a sheet can be checked
+  against the seconds it claims to be of;
+- a sample the file turns out not to hold is **dropped**, not clamped, and
+  counted as `sampler.droppedOutsideFile` — a non-zero count means your declared
+  range and the file disagree;
+- `--range` and `--affected` are clipped to the declared range too, so the
+  post-apply look works on a partial render;
+- a declared length more than one frame off the file's own is a **warning**, not
+  a refusal, because a draft render is routinely a frame short.
+
+Without a sampler, `--file-range` changes nothing: `--time`, `--times` and
+`--between` stay file-relative, and the range is only recorded. A sampled
+`--file` reads the **active** sequence, since `--sequence` is not accepted
+alongside `--file`.
+
+`timeline info` still reports the raw signals (`durationSec`,
+`outputDurationSec`, `fps`/`fpsRatio`, `canvas`, `cuts`, `editPoints`,
+`markers`, `transitions`, `captionSpans`, `textSpans` and the `inspectionHints`
+counts derived from them). You need them when you
+sheet a render you cannot state a timeline range for — one produced somewhere
+else — where `--times` is still the way in. Take the cut times from `cuts` — the
+boundaries where the picture changes — not from `editPoints`, which also lists
+the head, the tail, and caption and audio boundaries. A transition listed with
+`rendersAsCut: true` will not be blended in the file, so judge that boundary as
+a cut.
 
 **Why the cut offsets are asymmetric.** `frame extract` seeks with `-ss` before
 `-i`, which resolves **forward**: it returns the first frame whose PTS is ≥ the
@@ -140,13 +184,17 @@ requested time. So the cut time itself already gives the incoming shot, while
 at every timebase. A symmetric `±0.04 s` is not: at 24 fps one frame is 0.0417 s,
 so `cut − 0.04` resolves forward across the cut and both cells show the incoming
 shot — a sheet that looks like a valid before/after and is not. `--at-cuts`
-applies the correct offset from the sequence's own fps; when you compute times
-by hand for a `--file` sheet, take the fps from the render (`verify --file`
-reports it) rather than assuming one.
+applies the correct offset from the sequence's own fps, on a `--file-range`
+sheet as much as on a timeline one; only when you compute times by hand for a
+render you cannot declare a range for do you need the fps from the render itself
+(`verify --file` reports it) rather than assuming one.
 
 `--label-cells` burns the **requested** time, not the decoded frame's PTS, so a
 label is proof of which cell you are looking at, never proof that the frame came
-from the side of the cut you wanted.
+from the side of the cut you wanted. On a `--file-range` sheet the number burnt
+in is the **timeline** second the cell shows, not its offset into the file — the
+file's timebase is an artefact of where the render started, so a judgement has to
+quote the timeline. The file offset is still reported as `cells[].fileSec`.
 
 ### How many frames
 
@@ -175,8 +223,27 @@ this: `openreelio.frame.extract` takes the same selectors and returns the sheet
 **inline** as an MCP `image` block, followed by the usual JSON metadata. It is a
 read tool, available without `--allow-write`.
 
+`openreelio.render.range` draws the draft without shelling out:
+`{start, end, preset?}` writes into `.openreelio/cache/renders/agent/`, keeps
+only the 8 newest drafts, covers at most 300 s of timeline per call, and returns
+`{outputPath, durationSec, fileSize, encodingTimeSec, warnings, timelineRange,
+nextStep}` — `nextStep` names the `frame.extract` follow-ups below and
+`verify {file}`.
+
 ```jsonc
-// tools/call → openreelio.frame.extract — the whole render, as one sheet
+// tools/call → openreelio.render.range — draw the draft
+{ "start": 2, "end": 6 }
+
+// tools/call → openreelio.frame.extract — the draft, swept evenly (first look)
+{ "file": "judge/a-range.mp4", "between": [0, 4], "grid": "4x3",
+  "labelCells": true }
+
+// tools/call → openreelio.frame.extract — every cut inside a rendered range,
+// when the range holds any: a sampler over a range with no such event errors
+{ "file": "judge/a-range.mp4", "fileRange": [2, 6], "atCuts": true,
+  "grid": "auto", "labelCells": true }
+
+// tools/call → openreelio.frame.extract — the whole render, as one uniform sheet
 { "file": "judge/a.mp4", "grid": "4x3", "between": [0, 90], "labelCells": true }
 
 // tools/call → openreelio.frame.extract — the ranges plan.apply just reported
@@ -266,7 +333,7 @@ The winner's weaknesses become the next fix loop's worklist.
 | `verify --structural-only` | free, no FFmpeg | pacing stats; disqualifying broken candidates early |
 | `frame extract --range START END --grid auto` | cheap | seeing what an apply just did, before rendering |
 | timeline sheet (`--grid`, fast mode) | cheap | rough structure before rendering anything |
-| `render start --proxy --start/--end` + `--file` sheet | moderate | judging one range of one candidate |
+| `render start --proxy --start/--end` + `--file --file-range` sampler sheet | moderate | judging one range of one candidate |
 | full proxy render + `--file` sheet + `verify --file` | the judging unit | scoring a candidate |
 
 Two or three strong candidates judged well beat six judged carelessly. Spend

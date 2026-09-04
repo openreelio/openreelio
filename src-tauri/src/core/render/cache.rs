@@ -1626,6 +1626,49 @@ pub fn render_cache_dir(project_dir: &Path) -> PathBuf {
 /// would leave the directory at nine.
 pub const MAX_AGENT_RENDERS: usize = 8;
 
+/// Longest timeline range one agent draft render may cover, in seconds.
+///
+/// An agent draft render is a *look*, not a deliverable: it exists so a
+/// perception step can watch motion or pacing that a still cannot answer, and
+/// then be thrown away. Five minutes bounds what one such step costs — the
+/// encode time the agent waits on, and the file the project has to carry until
+/// [`MAX_AGENT_RENDERS`] sweeps it — while still covering any moment worth
+/// reviewing in one pass. An agent that wants more than this wants a narrower
+/// question, and a user who wants the whole timeline wants a normal export,
+/// which is unbounded because it lands outside the agent render directory.
+pub const MAX_AGENT_RENDER_RANGE_SEC: f64 = 300.0;
+
+/// Rejects an agent draft render whose range exceeds
+/// [`MAX_AGENT_RENDER_RANGE_SEC`].
+///
+/// `is_agent_output` is the caller's verdict from
+/// [`is_agent_render_output`]: a render landing anywhere else is a user
+/// export and stays unbounded, so this returns `Ok(())` for it without
+/// looking at the range at all. Non-finite bounds are left to the caller's own
+/// range validation rather than being reinterpreted here.
+///
+/// The message names the cap and both ways out, because its reader is usually
+/// an agent choosing what to do next rather than a person reading a log.
+pub fn ensure_agent_render_range_within_cap(
+    is_agent_output: bool,
+    in_point: f64,
+    out_point: f64,
+) -> Result<(), String> {
+    if !is_agent_output {
+        return Ok(());
+    }
+
+    let range_sec = out_point - in_point;
+    if !range_sec.is_finite() || range_sec <= MAX_AGENT_RENDER_RANGE_SEC {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Agent draft renders cover at most {:.0}s in one call, and this range is {:.0}s. Render a narrower range around the moment in question, or export normally to a path of your own.",
+        MAX_AGENT_RENDER_RANGE_SEC, range_sec
+    ))
+}
+
 /// File extension an agent draft render carries.
 ///
 /// Pruning only ever deletes files it recognises as its own output, so a note
@@ -2433,6 +2476,47 @@ mod tests {
             .expect("set modification time");
 
         path
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should refuse an agent draft longer than the range cap
+    #[test]
+    fn test_agent_render_range_cap_should_refuse_an_over_cap_agent_render() {
+        let error = ensure_agent_render_range_within_cap(
+            true,
+            10.0,
+            10.0 + MAX_AGENT_RENDER_RANGE_SEC + 1.0,
+        )
+        .expect_err("an over-cap agent draft is refused");
+
+        assert_eq!(
+            error,
+            "Agent draft renders cover at most 300s in one call, and this range is 301s. \
+             Render a narrower range around the moment in question, or export normally to \
+             a path of your own."
+        );
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should leave a user export to their own path unbounded
+    #[test]
+    fn test_agent_render_range_cap_should_allow_an_over_cap_user_export() {
+        assert!(
+            ensure_agent_render_range_within_cap(false, 0.0, MAX_AGENT_RENDER_RANGE_SEC * 10.0,)
+                .is_ok(),
+            "a render outside the agent render directory is not bounded by this rule"
+        );
+    }
+
+    /// Feature: Bounded agent renders
+    /// Scenario: should accept an agent draft exactly at the cap
+    #[test]
+    fn test_agent_render_range_cap_should_accept_a_range_at_the_cap() {
+        assert!(
+            ensure_agent_render_range_within_cap(true, 5.0, 5.0 + MAX_AGENT_RENDER_RANGE_SEC)
+                .is_ok(),
+            "the cap itself is allowed"
+        );
     }
 
     /// Feature: Bounded agent renders
