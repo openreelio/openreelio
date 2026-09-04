@@ -2365,7 +2365,7 @@ fn test_render_reports_only_unrenderable_motion_as_unrendered() {
         return;
     }
 
-    fn is_motion_warning(warning: &String) -> bool {
+    fn is_motion_warning(warning: &str) -> bool {
         warning.contains("Motion keyframes") && warning.contains("not yet rendered")
     }
 
@@ -2373,7 +2373,7 @@ fn test_render_reports_only_unrenderable_motion_as_unrendered() {
         return;
     };
     assert!(
-        !panning.iter().any(is_motion_warning),
+        !panning.iter().any(|warning| is_motion_warning(warning)),
         "a pan renders, so it must not be reported as unrendered: {panning:?}"
     );
 
@@ -2381,7 +2381,7 @@ fn test_render_reports_only_unrenderable_motion_as_unrendered() {
         return;
     };
     assert!(
-        rotating.iter().any(is_motion_warning),
+        rotating.iter().any(|warning| is_motion_warning(warning)),
         "motion that turns the picture is still unrendered and must be reported: {rotating:?}"
     );
 }

@@ -2776,12 +2776,11 @@ fn run_frame_extract_tool(
         sequence_id,
     );
 
-    extract_inline_frames(args, project.as_ref()).map_err(|error| {
+    extract_inline_frames(args, project.as_ref()).inspect_err(|_error| {
         // Nothing usable came back, so this call's directory is residue: FFmpeg
         // and the sequence-bounds check both run after the mkdir, and an empty
         // entry per failed probe is how the cache grows fastest.
         output.discard();
-        error
     })
 }
 

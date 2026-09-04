@@ -175,6 +175,18 @@ describe('cacheFrameOffsetSec', () => {
     expect(frameIndexAt(cacheFrameOffsetSec(segment, 5, NTSC_FPS), NTSC_FPS)).toBe(149);
   });
 
+  it('should clamp to the last stored frame rather than half a frame of wall clock', () => {
+    // A 0-5s segment at 25fps holds frames 0..124, the last of them at 4.96s.
+    // Clamping to the segment's length less half a frame would ask for 4.98s,
+    // which rounds to frame 125 — one past the end of the file.
+    const segment = createSegment({ startSec: 0, endSec: 5 });
+
+    const offset = cacheFrameOffsetSec(segment, 5, 25);
+
+    expect(offset).toBeCloseTo(4.96, 9);
+    expect(frameIndexAt(offset, 25)).toBe(124);
+  });
+
   it('should address through the frame grid so an NTSC segment start keeps its phase', () => {
     // Segment bounds are whole seconds but the renderer snaps its window to
     // round(t * fps) and rebases the file to zero, so file frame 0 sits up to

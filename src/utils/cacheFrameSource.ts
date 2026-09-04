@@ -25,9 +25,11 @@ import type { CacheSegmentStatusDto, RenderCacheStatus } from '@/bindings';
 /**
  * Slack subtracted from a segment's end when the frame rate is unusable.
  *
- * Only a fallback: with a real frame rate the end clamp is half a frame (see
- * {@link cacheFrameOffsetSec}), because the decoder addresses by nearest frame
- * and errors out of range rather than saturating.
+ * Only a fallback: with a real frame rate the end clamp is the segment's final
+ * stored frame (see {@link cacheFrameOffsetSec}), because the decoder addresses
+ * by nearest frame and errors out of range rather than saturating. Without a
+ * frame rate there is no frame count to clamp to, so a sliver of a second is
+ * taken off the segment's wall-clock length instead.
  */
 export const CACHE_SEGMENT_END_EPSILON_SEC = 0.001;
 
@@ -154,13 +156,20 @@ export function cacheFrameAssetId(sequenceId: string, segment: CacheSegmentStatu
  * Differencing the two grid positions instead reproduces exactly the frame the
  * renderer wrote.
  *
- * ## Why the end clamp is half a frame
+ * ## Why the end clamp is the segment's final stored frame
  *
  * The decoder addresses by *nearest* frame and treats an out-of-range index as
- * an error rather than saturating at the last one. Anything inside the final
- * half-frame of a segment therefore rounds one frame past the end of the file,
- * and the resulting failure would retire the whole segment as unplayable. The
- * clamp keeps the request on the last frame the file actually holds.
+ * an error rather than saturating at the last one, and a failed decode retires
+ * the whole segment as unplayable. The file holds
+ * `round(endSec * fps) - round(startSec * fps)` frames numbered from zero, so
+ * the clamp is the offset of the last of them. Clamping to wall-clock seconds
+ * instead — the segment's length less half a frame — lands past that frame
+ * whenever the length is not a whole number of frames: a 0-5s segment at 25fps
+ * holds its last frame at 4.96s, and the seconds clamp would ask for 4.98s.
+ *
+ * Mirrors `cache_frame_offset_sec` in
+ * `src-tauri/src/core/render/frame_probe/timeline.rs`; the two surfaces must
+ * agree about which frame of the file an instant addresses.
  *
  * @param segment - Segment covering `timeSec`
  * @param timeSec - Timeline time in seconds
@@ -173,22 +182,20 @@ export function cacheFrameOffsetSec(
   timeSec: number,
   fps: number,
 ): number {
-  const durationSec = Math.max(0, segment.endSec - segment.startSec);
-
   if (!Number.isFinite(fps) || fps <= 0) {
+    const durationSec = Math.max(0, segment.endSec - segment.startSec);
     const fallbackLastSec = Math.max(0, durationSec - CACHE_SEGMENT_END_EPSILON_SEC);
     return Math.min(Math.max(0, timeSec - segment.startSec), fallbackLastSec);
   }
 
   const frameSec = 1 / fps;
-  // A segment shorter than one frame holds a single frame at offset zero, so
-  // there is nothing to address but the start of the file.
-  if (durationSec < frameSec) {
-    return 0;
-  }
-
-  const gridOffsetFrames = Math.round(timeSec * fps) - Math.round(segment.startSec * fps);
-  const lastAddressableSec = Math.max(0, durationSec - frameSec / 2);
+  const startFrame = Math.round(segment.startSec * fps);
+  // What the renderer wrote: the same grid difference the offset itself is
+  // built from, so a segment holding a single frame — or none at all — clamps
+  // every request onto the start of the file.
+  const storedFrames = Math.round(segment.endSec * fps) - startFrame;
+  const lastAddressableSec = Math.max(0, storedFrames - 1) * frameSec;
+  const gridOffsetFrames = Math.round(timeSec * fps) - startFrame;
 
   return Math.min(Math.max(0, gridOffsetFrames * frameSec), lastAddressableSec);
 }

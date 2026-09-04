@@ -1028,8 +1028,8 @@ fn find_segment_for_time(
 /// length is not a whole number of frames: a 0-5s segment at 25fps holds its
 /// last frame at 4.96s, and the seconds clamp would ask for 4.98s.
 ///
-/// Mirrors `cacheFrameOffsetSec` in `src/utils/cacheFrameSource.ts`, which still
-/// carries the seconds clamp on the GUI's preview path.
+/// Mirrors `cacheFrameOffsetSec` in `src/utils/cacheFrameSource.ts`; the two
+/// surfaces must agree about which frame of the file an instant addresses.
 fn cache_frame_offset_sec(segment: &RenderCacheSegment, time_sec: f64, fps: f64) -> f64 {
     if !fps.is_finite() || fps <= 0.0 {
         let duration_sec = (segment.end_sec - segment.start_sec).max(0.0);
