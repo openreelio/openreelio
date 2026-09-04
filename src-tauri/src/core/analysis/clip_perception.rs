@@ -1780,6 +1780,7 @@ mod tests {
 
     /// Feature: Clip perception contact sheet
     /// Scenario: should tell the model what the first image is
+    #[cfg(feature = "ai-providers")]
     #[test]
     fn prompt_names_the_contact_sheet_only_when_one_is_attached() {
         let request = ClipPerceptionProviderRequest {
