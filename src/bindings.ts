@@ -9208,6 +9208,15 @@ format?: string | null;
  */
 file?: string | null; 
 /**
+ * Timeline range the `file` covers, as `[start, end]` seconds.
+ * 
+ * What lets a sampler run against a rendered file: the samplers read the
+ * timeline restricted to this range and every time they choose is
+ * translated into the file as `t - start`. `render_proxy` reports the
+ * `start` and `end` it rendered, so the pair is handed straight back.
+ */
+fileRange?: number[] | null; 
+/**
  * Asset to extract from, in the asset's own media timebase.
  */
 asset?: string | null; 

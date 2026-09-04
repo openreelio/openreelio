@@ -10771,6 +10771,236 @@ fn test_frame_extract_sheets_both_sides_of_every_cut() {
     assert!(sheet_path.exists(), "Expected the sheet at the .jpg path");
 }
 
+/// Draft-renders `[start, end]` of the project into `proxy.mp4`.
+///
+/// This is the artifact a judge actually has in front of it: a proxy of one
+/// stretch of the edit, in its own timebase starting at zero. `None` when the
+/// render did not produce a file, so the tests skip rather than fail.
+fn render_proxy_range(
+    dir: &tempfile::TempDir,
+    path: &str,
+    start_sec: f64,
+    end_sec: f64,
+) -> Option<std::path::PathBuf> {
+    let output = dir.path().join("proxy.mp4");
+    let rendered = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        path,
+        "--proxy",
+        "--start",
+        &start_sec.to_string(),
+        "--end",
+        &end_sec.to_string(),
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    if rendered["status"] != "ok" || !output.exists() {
+        eprintln!("Skipping file-sampler test: the proxy render produced no file");
+        return None;
+    }
+
+    Some(output)
+}
+
+/// Feature: where-to-look samplers on a rendered file
+/// Scenario: the cut inside a rendered range is sheeted from the render itself
+///
+/// The judging loop this closes: `render start --proxy --start 2 --end 6`
+/// answers a motion question, and the agent then wants to see the cut inside
+/// *that file*. Before `--file-range` it had to re-derive the cut, subtract the
+/// range start by hand, and pass a `--times` list — arithmetic whose one
+/// mistake, forgetting the offset, silently sheets the wrong seconds.
+#[test]
+fn test_frame_extract_sheets_a_cut_inside_a_rendered_range() {
+    let Some((dir, path, _sequence_id, _track_id, _clip_id)) =
+        create_two_shot_project("frame_file_range_cuts")
+    else {
+        return;
+    };
+    let range_start_sec = 2.0;
+    let Some(proxy) = render_proxy_range(&dir, &path, range_start_sec, 6.0) else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("render_cuts.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        proxy.to_str().unwrap(),
+        "--file-range",
+        "2",
+        "6",
+        "--at-cuts",
+        "--grid",
+        "auto",
+        "--label-cells",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["mode"], "file",
+        "the pixels come from the render, not from a fresh composite"
+    );
+    assert_eq!(
+        result["source"]["timelineRange"],
+        serde_json::json!([2.0, 6.0]),
+        "the payload must echo which seconds of the edit the file was said to hold"
+    );
+
+    let cells = result["sheet"]["cells"].as_array().expect("cells");
+    assert_eq!(cells.len(), 2, "{result}");
+    assert_eq!(
+        cell_reasons(&result["sheet"]),
+        vec!["cutBefore", "cutAfter"]
+    );
+
+    // Both timebases, on every cell: where in this file, and where in the edit.
+    let expected = [TRANSITION_SHOT_SEC - CUT_LEAD_SEC, TRANSITION_SHOT_SEC];
+    for (cell, timeline_sec) in cells.iter().zip(expected) {
+        assert!(
+            (cell["timelineSec"].as_f64().expect("timeline time") - timeline_sec).abs() < 1e-6,
+            "expected timeline {timeline_sec}s, got {cell}"
+        );
+        assert!(
+            (cell["fileSec"].as_f64().expect("file time") - (timeline_sec - range_start_sec)).abs()
+                < 1e-6,
+            "expected file {}s, got {cell}",
+            timeline_sec - range_start_sec
+        );
+    }
+
+    assert_eq!(result["sampler"]["kinds"][0], "atCuts");
+    assert_eq!(result["sampler"]["selected"], 2);
+    assert_eq!(result["sampler"]["droppedOutsideFile"], 0);
+    assert!(sheet_path.exists(), "Expected the sheet at the .jpg path");
+}
+
+/// Feature: where-to-look samplers on a rendered file
+/// Scenario: a sample the render does not reach is dropped and counted
+///
+/// The declared range is the caller's claim, and a claim wider than the file is
+/// the one way this feature can mislead: every sample past the last frame would
+/// otherwise be clamped onto whatever the file ends with and reported under the
+/// timeline second it was meant to show.
+#[test]
+fn test_frame_extract_drops_sampled_times_the_render_does_not_hold() {
+    let Some((dir, path, _sequence_id, _track_id, _clip_id)) =
+        create_two_shot_project("frame_file_range_dropped")
+    else {
+        return;
+    };
+    let Some(proxy) = render_proxy_range(&dir, &path, 2.0, 6.0) else {
+        return;
+    };
+
+    let out_dir = dir.path().join("render_stills");
+    // The file really covers 2s-6s; the declaration says 2s-12s, so the range
+    // at 7s translates past the end of the picture.
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        proxy.to_str().unwrap(),
+        "--file-range",
+        "2",
+        "12",
+        "--range",
+        "3",
+        "3",
+        "--range",
+        "7",
+        "7",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    let frames = result["frames"].as_array().expect("frames");
+    assert_eq!(
+        frames.len(),
+        1,
+        "only the range inside the render: {result}"
+    );
+    assert_eq!(frames[0]["timelineSec"].as_f64(), Some(3.0));
+    assert_eq!(frames[0]["fileSec"].as_f64(), Some(1.0));
+    assert_eq!(frames[0]["reason"], "affectedMid");
+
+    assert_eq!(result["sampler"]["droppedOutsideFile"], 1);
+    assert_eq!(
+        result["sampler"]["selected"], 1,
+        "the reported selection has to be the one the caller actually got"
+    );
+
+    let warnings = result["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or_default().contains("timelineSec")),
+        "a declared range this much wider than the file has to be reported: {result}"
+    );
+}
+
+/// Feature: where-to-look samplers on a rendered file
+/// Scenario: a sampler on a render with no declared range is refused by name
+#[test]
+fn test_frame_extract_refuses_a_sampler_on_a_render_with_no_declared_range() {
+    let dir = create_temp_project("frame_file_range_missing");
+    let path = project_path(&dir, "frame_file_range_missing");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        "proxy.mp4",
+        "--at-cuts",
+        "--grid",
+        "auto",
+        "--out",
+        dir.path().join("sheet.jpg").to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("--file-range"),
+        "the refusal has to name the flag that lifts it, got: {stderr}"
+    );
+}
+
+/// Feature: where-to-look samplers on a rendered file
+/// Scenario: a declared range needs a file to describe
+#[test]
+fn test_frame_extract_refuses_a_declared_range_without_a_file() {
+    let dir = create_temp_project("frame_file_range_orphan");
+    let path = project_path(&dir, "frame_file_range_orphan");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file-range",
+        "2",
+        "6",
+        "--time",
+        "1",
+        "--out",
+        dir.path().join("frame.png").to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("--file"),
+        "the refusal has to name what the range was missing, got: {stderr}"
+    );
+}
+
 /// Feature: where-to-look samplers
 /// Scenario: a blend is sampled across the stretch it actually covers
 ///

@@ -849,7 +849,15 @@ const FRAME_EXTRACT_SCHEMA: CodexJsonObject = {
     file: {
       type: 'string',
       description:
-        'Rendered video inside the project directory to read instead of the timeline, such as the outputPath returned by render_proxy. Times are relative to the file and cells map back as fileSec. Samplers are not available with file; use times, or between with an explicit grid.',
+        'Rendered video inside the project directory to read instead of the timeline, such as the outputPath returned by render_proxy. Times are relative to the file and cells map back as fileSec. Pass fileRange alongside it to use the samplers on the render.',
+    },
+    fileRange: {
+      type: 'array',
+      minItems: 2,
+      maxItems: 2,
+      items: { type: 'number', minimum: 0 },
+      description:
+        'The timeline range [start, end] the file covers — the start and end render_proxy reported. With a sampler this is what makes samplers work on a render: they read the timeline over this range and every time is translated into the file, so each frame and cell carries fileSec, timelineSec and its reason, and any sample the file does not hold is dropped and counted as sampler.droppedOutsideFile. Without a sampler it is only recorded as source.timelineRange; time, times and between stay file-relative either way. Only with file.',
     },
     atCuts: {
       type: 'boolean',
@@ -1250,7 +1258,7 @@ export function buildOpenReelioCodexDeveloperInstructions(
     "- Do not compute inspection times yourself. frame_extract samples the edit's own events (ranges, affected, atCuts, atTransitions, atCaptions, atMarkers, perShot, around); uniform between sampling lands on no event and is for whole-timeline overviews only.",
     "- cellWidth, cellHeight, labelCells and between only apply to a contact sheet and are rejected without grid. grid: 'auto' sizes itself from a sampler or times, so between always needs an explicit grid such as '4x3'.",
     '- frame_extract shows the composited edit by default. Only pass mode: "fast" when you deliberately want the raw footage without captions, text or effects.',
-    `- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, and keep the range under ${RENDER_PROXY_MAX_RANGE_SEC}s. Then inspect its outputPath with openreelio.frame_extract { file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true } — file times are relative to the file, and samplers are not available with file.`,
+    `- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, and keep the range under ${RENDER_PROXY_MAX_RANGE_SEC}s. Then inspect its outputPath with openreelio.frame_extract { file: outputPath, fileRange: [start, end], atCuts: true, grid: 'auto', labelCells: true } — fileRange is the start and end the render reported, and it is what lets the samplers read a rendered file; every cell then carries both fileSec and timelineSec.`,
     '- Never claim a cut, caption, overlay, or transition looks right without having extracted a frame that shows it.',
     '- Before you report a task done, run openreelio.verify with no arguments for the structural checks, and after an openreelio.render_proxy run openreelio.verify { file: outputPath } so the black, freeze, silence, loudness and true-peak measurements run too.',
     "- Read the verify exitCode: 0 passed, 1 means a check failed and there is something to fix before reporting done, 2 means verify itself could not run — report that as a tool problem, never as a clean edit. Look at a violation's timeRange with openreelio.frame_extract { ranges: <the violation timeRanges>, grid: 'auto', labelCells: true }, and apply a suggestedFix through openreelio.plan_apply only after reviewing it.",
@@ -1884,6 +1892,10 @@ function buildFrameProbeRequest(args: CodexJsonObject): FrameProbeRequest {
   if (between && between.length !== 2) {
     throw new Error('OpenReelio frame_extract requires between to be [start, end].');
   }
+  const fileRange = readNumberArrayArg(args, 'fileRange', 'frame_extract');
+  if (fileRange && fileRange.length !== 2) {
+    throw new Error('OpenReelio frame_extract requires fileRange to be [start, end].');
+  }
 
   return {
     time: getFiniteNumberArg(args, 'time', 'frame_extract') ?? null,
@@ -1896,6 +1908,7 @@ function buildFrameProbeRequest(args: CodexJsonObject): FrameProbeRequest {
     mode: getString(args, 'mode')?.trim() || null,
     maxWidth: getFiniteNonNegativeNumberArg(args, 'maxWidth', 'frame_extract') ?? null,
     file: getString(args, 'file')?.trim() || null,
+    fileRange,
     atCuts: args.atCuts === true,
     atTransitions: args.atTransitions === true,
     atCaptions: args.atCaptions === true,
@@ -2171,7 +2184,6 @@ async function renderProxyToolCall(
   // The file only exists when the encoder finished; naming a path the render
   // never wrote invites the agent to point frame_extract at nothing.
   const producedFile = render.outcome.status === 'ok';
-  const durationSec = render.outcome.durationSec ?? end - start;
 
   return {
     status: render.outcome.status,
@@ -2189,7 +2201,9 @@ async function renderProxyToolCall(
       ? `Look at the render: ${toolIdFor(
           context.runtimeId,
           'frame_extract',
-        )} { file: outputPath, between: [0, ${roundSeconds(durationSec)}], grid: '4x3', labelCells: true }. File times are relative to the file, and samplers are not available with file. Then measure it: ${toolIdFor(
+        )} { file: outputPath, fileRange: [${roundSeconds(start)}, ${roundSeconds(
+          end,
+        )}], atCuts: true, grid: 'auto', labelCells: true }. fileRange says which timeline seconds this file holds, so the samplers work on it and every cell carries both fileSec and timelineSec. Then measure it: ${toolIdFor(
           context.runtimeId,
           'verify',
         )} { file: outputPath }.`

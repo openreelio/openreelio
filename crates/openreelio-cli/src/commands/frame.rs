@@ -7,6 +7,9 @@
 //! With `--file` the same selectors read an already rendered video instead of
 //! the timeline. That is the judging path: it inspects the artifact that was
 //! actually produced, in the file's own timebase, without re-rendering anything.
+//! Adding `--file-range START END` says which timeline seconds that file holds,
+//! which is what lets the event samplers work on it: they read the timeline over
+//! the declared range and every time they choose is translated into the file.
 //!
 //! The extraction engine itself lives in
 //! [`openreelio_core::render::frame_probe`], which the MCP surface reaches
@@ -32,15 +35,14 @@ pub use openreelio_core::render::frame_probe::{
 /// A sampler derives its own times, so clap refuses the pair the same way it
 /// refuses `--time` with `--times` — and the engine restates the refusal for
 /// callers that never run through clap.
-const SAMPLER_CONFLICTS: [&str; 7] = [
-    "time",
-    "times",
-    "between",
-    "count",
-    "asset",
-    "source_time",
-    "file",
-];
+///
+/// `--file` is deliberately absent. It names a timebase rather than a set of
+/// times, and paired with `--file-range` it is a legitimate sampler target: the
+/// samplers read the timeline over the declared range and translate their
+/// answers into the file. A `--file` without one is still refused, by the
+/// engine, whose message can say which flag is missing — something a clap
+/// conflict cannot.
+const SAMPLER_CONFLICTS: [&str; 6] = ["time", "times", "between", "count", "asset", "source_time"];
 
 #[derive(Subcommand)]
 pub enum FrameAction {
@@ -62,6 +64,10 @@ pub struct ExtractArgs {
     /// Rendered video file to extract from instead of the project timeline
     #[arg(long, conflicts_with_all = ["asset", "source_time", "sequence", "mode"])]
     pub file: Option<PathBuf>,
+
+    /// Timeline range --file covers, as two values START END; lets samplers run against it
+    #[arg(long, num_args = 2, value_names = ["START", "END"], requires = "file")]
+    pub file_range: Option<Vec<f64>>,
 
     /// Asset ID to extract from (requires --source-time)
     #[arg(long, requires = "source_time", conflicts_with_all = ["time", "times", "grid"])]
@@ -185,6 +191,7 @@ impl ExtractArgs {
         FrameProbeRequest {
             out: self.out,
             file: self.file,
+            file_range: self.file_range,
             asset: self.asset,
             source_time: self.source_time,
             time: self.time,

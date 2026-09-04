@@ -154,6 +154,22 @@ END` (repeatable - the `affectedRanges` an apply just returned), `--affected`
 `reason` they were sampled, and `--limit <N>` to cap how many frames come back.
 Uniform `--between` sampling lands on no event at all — keep it for an overview.
 
+The same samplers work on a **rendered file**, once `--file-range START END`
+says which timeline seconds that file covers — the range you rendered:
+
+```bash
+openreelio-cli render start  --path ./demo --proxy --start 2 --end 6 \
+  --output ./out/range.mp4
+openreelio-cli frame extract --path ./demo --file ./out/range.mp4 \
+  --file-range 2 6 --at-cuts --grid auto --label-cells --out ./look.jpg
+```
+
+Every time is translated into the file as `t - START`, so each cell carries both
+`fileSec` and `timelineSec`, and a sample the file does not hold is dropped and
+counted as `sampler.droppedOutsideFile` rather than clamped onto the wrong
+frame. Without a sampler the flag is just an annotation: `--time`, `--times` and
+`--between` stay file-relative.
+
 ### MCP server
 
 `openreelio-cli` is also an MCP server over stdio, so MCP-capable agents can use

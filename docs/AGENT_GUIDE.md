@@ -653,6 +653,18 @@ recorded apply — or one on another sequence — is an error naming
   so a file whose audio outlasts its picture is rejected where the picture
   stops. A request FFmpeg produces no frame for is an error, never a silently
   stale image at `--out`.
+- `--file-range START END` declares which timeline seconds that render covers —
+  the `--start`/`--end` you rendered — and is what lets the **event samplers**
+  run against it: they read the timeline restricted to `[START, END]` and every
+  time is translated into the file as `t − START`, so each frame and cell
+  carries both `fileSec` and `timelineSec` plus its `reason`, and
+  `source.timelineRange` echoes the declaration. A sample the file turns out not
+  to hold is dropped, not clamped, and counted as `sampler.droppedOutsideFile`;
+  `--range` and `--affected` are clipped to the declared range as well. A
+  declared length more than one frame off the file's own is a warning, not a
+  refusal. Without a sampler the flag is only recorded — `--time`, `--times` and
+  `--between` stay file-relative — and a sampled `--file` reads the active
+  sequence, since `--sequence` is not accepted with `--file`.
 
 Every timeline time must fall inside the sequence. Asking for one at or past
 the end is rejected with the sequence's actual duration in the message, so widen
@@ -786,7 +798,7 @@ openreelio-cli state history --path ./demo                     # note currentInd
 openreelio-cli plan execute  --path ./demo --file candidate-a.json
 openreelio-cli render start  --path ./demo --proxy --output ./judge/a.mp4 --progress
 openreelio-cli frame extract --path ./demo --file ./judge/a.mp4 \
-  --grid 4x3 --between 0 <END> --label-cells --out ./judge/a-sheet.jpg
+  --file-range 0 <END> --at-cuts --grid auto --label-cells --out ./judge/a-sheet.jpg
 openreelio-cli verify        --path ./demo --file ./judge/a.mp4 > ./judge/a-verify.json
 openreelio-cli state history --path ./demo                     # re-read: is the baseline still yours?
 openreelio-cli state jump    --path ./demo --index <BASELINE>  # unwind, try the next

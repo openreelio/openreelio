@@ -124,8 +124,10 @@ and assembling a `--times` list, ask for the events:
   show the same picture.
 - Samplers combine as a union, deduplicate to the microsecond, and sort
   ascending. They cannot be combined with `--time`, `--times`, `--between`,
-  `--count`, `--asset` or `--file`, which name their own times, and `--range`
-  and `--affected` are mutually exclusive.
+  `--count` or `--asset`, which name their own times, and `--range` and
+  `--affected` are mutually exclusive. `--file` is the one that can be lifted:
+  add `--file-range START END` and the samplers read the timeline over that
+  range and translate their times into the render (see below).
 - `--limit <N>` thins an oversized selection evenly, keeping its first and last
   entry.
 - The payload gains `sampler: {kinds, candidates, selected, limited,
@@ -176,7 +178,27 @@ extracted.
 rendered video instead of the project timeline — times are in the file's own
 timebase and cells map back as `fileSec`. This is the cheap way to inspect the
 render you just made (fast seeks, no per-cell timeline renders), and it shows
-exactly the pixels `verify --file` measured. See
+exactly the pixels `verify --file` measured.
+
+Add `--file-range START END` — the timeline seconds that file covers, i.e. the
+`--start`/`--end` you rendered — and the **event samplers work on it**:
+
+```bash
+openreelio-cli render start  --path ./demo --proxy --start 2 --end 6 \
+  --output ./proxy.mp4
+openreelio-cli frame extract --path ./demo --file ./proxy.mp4 \
+  --file-range 2 6 --at-cuts --grid auto --label-cells --out ./cuts.jpg
+```
+
+The samplers read the timeline restricted to `[START, END]` and every time is
+translated into the file as `t − START`, so each frame and cell carries both
+`fileSec` and `timelineSec` plus its `reason`, `source.timelineRange` echoes the
+declaration, and any sample the file does not hold is dropped and counted as
+`sampler.droppedOutsideFile` rather than clamped onto a frame it is not of.
+`--range` and `--affected` are clipped to the declared range as well. Without a
+sampler the flag is only an annotation — `--time`, `--times` and `--between`
+stay file-relative. A sampled `--file` reads the active sequence, since
+`--sequence` is not accepted with `--file`. See
 [Judging](../judging/REFERENCE.md) for the loop built on it.
 
 Every timeline time has to be inside the sequence. One at or past the end is

@@ -82,6 +82,14 @@ pub struct TimelineFrameProbeRequestDto {
     /// Rendered video inside the project to read instead of the timeline.
     #[serde(default)]
     pub file: Option<String>,
+    /// Timeline range the `file` covers, as `[start, end]` seconds.
+    ///
+    /// What lets a sampler run against a rendered file: the samplers read the
+    /// timeline restricted to this range and every time they choose is
+    /// translated into the file as `t - start`. `render_proxy` reports the
+    /// `start` and `end` it rendered, so the pair is handed straight back.
+    #[serde(default)]
+    pub file_range: Option<Vec<f64>>,
     /// Asset to extract from, in the asset's own media timebase.
     #[serde(default)]
     pub asset: Option<String>,
@@ -275,6 +283,7 @@ impl TimelineFrameProbeRequestDto {
         FrameProbeRequest {
             out,
             file,
+            file_range: self.file_range,
             asset: self.asset,
             source_time: self.source_time,
             time: self.time,
@@ -748,6 +757,7 @@ mod tests {
             around_count: Some(7),
             affected: true,
             time: Some(9.5),
+            file_range: Some(vec![2.0, 6.0]),
             ..Default::default()
         };
 
@@ -762,6 +772,7 @@ mod tests {
         // mapping is written out by hand: a transposed pair would still compile.
         assert_eq!(probe.out, PathBuf::from("cache/entry/sheet.jpg"));
         assert_eq!(probe.file, Some(PathBuf::from("render.mp4")));
+        assert_eq!(probe.file_range, Some(vec![2.0, 6.0]));
         assert_eq!(probe.sequence.as_deref(), Some("seq"));
         assert_eq!(probe.time, Some(9.5));
         assert_eq!(probe.times, Some(vec![0.0, 1.5]));

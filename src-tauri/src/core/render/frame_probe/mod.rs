@@ -115,6 +115,15 @@ pub struct FrameProbeRequest {
     pub out: PathBuf,
     /// Rendered video file to read instead of the project timeline.
     pub file: Option<PathBuf>,
+    /// Timeline range the `file` covers, as `[start, end]` seconds.
+    ///
+    /// A rendered file has its own timebase starting at zero, so nothing about
+    /// it says which seconds of the edit it holds. Declaring that is what lets
+    /// a sampler run against one: the samplers read the timeline restricted to
+    /// this range, and every time they choose is translated into the file as
+    /// `t - start`. Without a sampler it is recorded on the payload and changes
+    /// nothing — `times` and `between` stay file-relative either way.
+    pub file_range: Option<Vec<f64>>,
     /// Asset to extract from, in the asset's own media timebase.
     pub asset: Option<String>,
     /// Time inside the asset's own media, in seconds.
@@ -541,19 +550,33 @@ const SAMPLER_EXCLUSIVE_FLAGS: [&str; 6] = [
     "--file",
 ];
 
+/// What a caller is told when a sampler meets a rendered file with no declared
+/// range.
+///
+/// The refusal is the same one it has always been — a file has no timeline to
+/// sample — but the answer to it is now a flag rather than a different command,
+/// so the message says which one.
+const FILE_RANGE_HINT: &str = " A rendered file can be sampled once you say which timeline seconds it covers: add --file-range <START> <END> — the range you rendered — and every sampled time is translated into the file's own timebase.";
+
 /// Rejects a sampler combined with a selector that already names its times.
 ///
 /// Samplers union with each other, but not with a hand-written list: a request
 /// carrying both is ambiguous about which times the pictures are of, and
 /// silently preferring either one hides the other from the caller.
+///
+/// `--file` is the one selector that can be lifted: it names no times at all,
+/// it names a *timebase*, and a declared [`file_range`](FrameProbeRequest::file_range)
+/// is the missing half — the timeline seconds the file holds — that lets the
+/// samplers run and their answers be translated into it.
 fn ensure_sampler_selectors_unused(request: &FrameProbeRequest) -> FrameProbeResult<()> {
+    let file_without_range = request.file.is_some() && request.file_range.is_none();
     let present: Vec<&str> = [
         request.time.is_some(),
         request.times.is_some(),
         request.between.is_some(),
         request.count.is_some(),
         request.asset.is_some(),
-        request.file.is_some(),
+        file_without_range,
     ]
     .iter()
     .zip(SAMPLER_EXCLUSIVE_FLAGS)
@@ -564,11 +587,47 @@ fn ensure_sampler_selectors_unused(request: &FrameProbeRequest) -> FrameProbeRes
         return Ok(());
     }
 
+    let hint = if file_without_range {
+        FILE_RANGE_HINT
+    } else {
+        ""
+    };
+
     Err(FrameProbeError::new(format!(
-        "A sampler chooses its own times, so it cannot be combined with {}. Drop the sampler flags, or drop {}.",
+        "A sampler chooses its own times, so it cannot be combined with {}. Drop the sampler flags, or drop {}.{hint}",
         present.join(", "),
         present.join(" and ")
     )))
+}
+
+/// Resolves the timeline range a rendered `file` was declared to cover.
+///
+/// Validated here rather than at each surface so `--file-range 5 2` is refused
+/// in the same words however it arrived. The range must be a real span: a
+/// zero-width one would translate every sample onto one instant, and a reversed
+/// one is a typo the caller has to see rather than a silently swapped pair.
+fn resolve_file_range(request: &FrameProbeRequest) -> FrameProbeResult<Option<TimeRange>> {
+    let Some(values) = request.file_range.as_deref() else {
+        return Ok(None);
+    };
+    if request.file.is_none() {
+        return Err(FrameProbeError::new(
+            "--file-range declares which timeline seconds a rendered file covers, so it only means something with --file <RENDER>."
+                .to_string(),
+        ));
+    }
+    if values.len() != 2 {
+        return Err(FrameProbeError::new(format!(
+            "--file-range takes exactly two values: START END (got {})",
+            values.len()
+        )));
+    }
+    ensure_time_range_ordered(values[0], values[1], "file-range START", "file-range END")?;
+
+    Ok(Some(TimeRange {
+        start_sec: values[0],
+        end_sec: values[1],
+    }))
 }
 
 /// Rejects a `ranges` list the sampler could not sample.
@@ -708,6 +767,8 @@ pub struct FrameProbePlan {
     selection: Selection,
     format: ImageFormat,
     mode: TimelineMode,
+    /// Timeline range the rendered `file` was declared to cover.
+    file_range: Option<TimeRange>,
 }
 
 impl FrameProbePlan {
@@ -716,13 +777,14 @@ impl FrameProbePlan {
     /// Every guard the CLI relies on lives here rather than in its clap layer,
     /// because clap validates only the CLI's own callers.
     pub fn resolve(request: FrameProbeRequest) -> FrameProbeResult<Self> {
-        let (selection, format, mode) = Self::check(&request)?;
+        let (selection, format, mode, file_range) = Self::check(&request)?;
 
         Ok(Self {
             request,
             selection,
             format,
             mode,
+            file_range,
         })
     }
 
@@ -742,7 +804,10 @@ impl FrameProbePlan {
     /// [`validate`](Self::validate) so the two can never disagree.
     fn check(
         request: &FrameProbeRequest,
-    ) -> FrameProbeResult<(Selection, ImageFormat, TimelineMode)> {
+    ) -> FrameProbeResult<(Selection, ImageFormat, TimelineMode, Option<TimeRange>)> {
+        // Before the selection, so a malformed range is reported as itself
+        // rather than as the sampler refusal it would otherwise trigger.
+        let file_range = resolve_file_range(request)?;
         let selection = resolve_selection(request)?;
         let format = resolve_image_format(request.format.as_deref(), &request.out)?;
         let mode = TimelineMode::resolve(request.mode.as_deref())?;
@@ -750,16 +815,21 @@ impl FrameProbePlan {
         ensure_max_width_in_range(request)?;
         ensure_sheet_fits(request, &selection)?;
 
-        Ok((selection, format, mode))
+        Ok((selection, format, mode, file_range))
     }
 
     /// Whether serving this plan needs the project opened.
     ///
-    /// A rendered file is self-contained, so the judging path never opens the
+    /// A rendered file is normally self-contained, so the judging path skips the
     /// project: it costs an ops replay it has no use for, and it keeps sheeting
     /// a finished render independent of whatever the project is doing meanwhile.
+    ///
+    /// A sampled file is the exception. The times come from the timeline — cuts,
+    /// captions, markers, changed ranges — and only their translation into the
+    /// file's timebase comes from the declared range, so the sequence has to be
+    /// read even though not one pixel comes from it.
     pub fn needs_project(&self) -> bool {
-        self.request.file.is_none()
+        self.request.file.is_none() || matches!(self.selection, Selection::Sampled { .. })
     }
 
     /// Runs the probe and returns the payload the caller reports.
@@ -772,8 +842,43 @@ impl FrameProbePlan {
         project: Option<&FrameProbeProject<'_>>,
     ) -> FrameProbeResult<serde_json::Value> {
         if let Some(file) = self.request.file.clone() {
-            return file::run_file_mode(runner, &file, &self.request, self.format, &self.selection)
+            if let Selection::Sampled { ref spec, grid } = self.selection {
+                let range = self.file_range.clone().ok_or_else(|| {
+                    FrameProbeError::new(format!(
+                        "A sampler reads the timeline, and a rendered file has none.{FILE_RANGE_HINT}"
+                    ))
+                })?;
+                let project = project.ok_or_else(|| {
+                    FrameProbeError::new(
+                        "Sampling a rendered file reads the timeline it was rendered from, so it needs an open project; none was supplied"
+                            .to_string(),
+                    )
+                })?;
+                let (outcome, warnings) =
+                    run_samplers(project, &self.request, spec, Some(range.clone()))?;
+
+                return file::run_file_sampled_mode(
+                    runner,
+                    &file,
+                    &self.request,
+                    self.format,
+                    &range,
+                    outcome,
+                    grid,
+                    warnings,
+                )
                 .await;
+            }
+
+            return file::run_file_mode(
+                runner,
+                &file,
+                &self.request,
+                self.format,
+                &self.selection,
+                self.file_range.as_ref(),
+            )
+            .await;
         }
 
         let project = project.ok_or_else(|| {
@@ -843,7 +948,7 @@ impl FrameProbePlan {
                 .await
             }
             Selection::Sampled { ref spec, grid } => {
-                let (outcome, warnings) = run_samplers(project, &self.request, spec)?;
+                let (outcome, warnings) = run_samplers(project, &self.request, spec, None)?;
                 let times: Vec<f64> = outcome
                     .samples
                     .iter()
@@ -899,10 +1004,15 @@ impl FrameProbePlan {
 /// raised — a hand-off record that turned out to describe somebody else's edit
 /// is not a failure, but it is something the caller has to be told before it
 /// judges the pictures as its own.
+/// `restrict` bounds every sampler to one stretch of the timeline. It is what a
+/// rendered file's declared range becomes: the samplers must not choose seconds
+/// the file does not hold, or the judge would be handed a picture of the wrong
+/// moment under the right label.
 fn run_samplers(
     project: &FrameProbeProject<'_>,
     request: &FrameProbeRequest,
     spec: &SamplerSpec,
+    restrict: Option<TimeRange>,
 ) -> FrameProbeResult<(SamplerOutcome, Vec<String>)> {
     let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
     let (affected_ranges, warnings) = if spec.affected {
@@ -917,6 +1027,7 @@ fn run_samplers(
             sequence,
             effects: &project.state.effects,
             affected_ranges: &affected_ranges,
+            restrict,
         },
     )?;
 
@@ -1157,12 +1268,23 @@ pub(super) struct GridCell {
 ///
 /// The time field is deliberately not `timeSec`: a rendered range starts at
 /// zero regardless of where it sat on the timeline, so calling it a timeline
-/// time would be a lie the judge could act on.
+/// time would be a lie the judge could act on. When the caller declared the
+/// range the file covers, the timeline second the picture came from is carried
+/// alongside it as `timelineSec` — both are true, and each answers a different
+/// question ("where in this file" versus "where in the edit").
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct FileFrameEntry {
     pub index: usize,
     pub file_sec: f64,
+    /// Timeline second this file time was translated from.
+    ///
+    /// Absent unless a declared `file_range` made the translation possible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline_sec: Option<f64>,
+    /// Why a sampler chose this time; absent when the caller named it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SampleReason>,
     pub path: String,
     pub width: u32,
     pub height: u32,
@@ -1176,6 +1298,12 @@ pub(super) struct FileGridCell {
     pub row: usize,
     pub col: usize,
     pub file_sec: f64,
+    /// Timeline second this cell's file time was translated from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline_sec: Option<f64>,
+    /// Why a sampler chose this cell's time; absent when the caller named it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SampleReason>,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -2145,5 +2273,121 @@ mod tests {
             resolve_single_output_path(Path::new("sheet.jpg"), 0.0, format).unwrap(),
             PathBuf::from("sheet.jpg")
         );
+    }
+
+    /// A request that judges a rendered proxy of a range with `--at-cuts`.
+    fn sampled_file_request(file_range: Option<Vec<f64>>) -> FrameProbeRequest {
+        FrameProbeRequest {
+            out: PathBuf::from("cuts.jpg"),
+            file: Some(PathBuf::from("proxy.mp4")),
+            file_range,
+            at_cuts: true,
+            grid: Some("auto".to_string()),
+            ..FrameProbeRequest::default()
+        }
+    }
+
+    #[test]
+    fn resolve_selection_should_refuse_a_sampler_on_a_file_with_no_declared_range() {
+        let error = resolve_selection(&sampled_file_request(None))
+            .expect_err("a rendered file alone has no timeline to sample");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("--file"),
+            "the refusal must name the flag it is about: {message}"
+        );
+        assert!(
+            message.contains("--file-range"),
+            "the refusal must name the flag that lifts it: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_sample_a_file_that_declares_its_range() {
+        let selection = resolve_selection(&sampled_file_request(Some(vec![2.0, 6.0])))
+            .expect("a declared range makes the render samplable");
+
+        let Selection::Sampled { spec, grid } = selection else {
+            panic!("Expected a sampled selection");
+        };
+        assert!(spec.at_cuts);
+        assert_eq!(grid, Some(GridLayout::Auto));
+    }
+
+    #[test]
+    fn resolve_file_range_should_reject_a_range_no_file_was_named_for() {
+        let request = FrameProbeRequest {
+            out: PathBuf::from("frame.png"),
+            time: Some(1.0),
+            file_range: Some(vec![2.0, 6.0]),
+            ..FrameProbeRequest::default()
+        };
+
+        let error = resolve_file_range(&request).expect_err("a range without a file means nothing");
+        assert!(error.to_string().contains("--file"), "{error}");
+    }
+
+    #[test]
+    fn resolve_file_range_should_reject_a_malformed_range() {
+        for values in [
+            vec![6.0, 2.0],
+            vec![2.0, 2.0],
+            vec![-1.0, 6.0],
+            vec![f64::NAN, 6.0],
+            vec![2.0, f64::INFINITY],
+            vec![2.0],
+            vec![2.0, 4.0, 6.0],
+        ] {
+            let mut request = sampled_file_request(Some(values.clone()));
+            request.at_cuts = false;
+            request.grid = None;
+            request.time = Some(1.0);
+
+            assert!(
+                resolve_file_range(&request).is_err(),
+                "{values:?} is not a usable range"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_file_range_should_accept_a_declared_range_without_a_sampler() {
+        // Harmless and useful: `--times` stays file-relative, and the payload
+        // still records which seconds of the edit the file holds.
+        let mut request = sampled_file_request(Some(vec![2.0, 6.0]));
+        request.at_cuts = false;
+        request.grid = None;
+        request.times = Some(vec![0.5, 1.5]);
+
+        assert_eq!(
+            resolve_file_range(&request).expect("a declared range needs no sampler"),
+            Some(TimeRange {
+                start_sec: 2.0,
+                end_sec: 6.0,
+            })
+        );
+        assert!(matches!(
+            resolve_selection(&request).expect("a file-relative batch is unaffected"),
+            Selection::BatchTimes(_)
+        ));
+    }
+
+    #[test]
+    fn needs_project_should_be_true_only_for_a_sampled_file() {
+        let sampled = FrameProbePlan::resolve(sampled_file_request(Some(vec![2.0, 6.0])))
+            .expect("a declared range makes the render samplable");
+        assert!(
+            sampled.needs_project(),
+            "the times come from the timeline even though the pixels do not"
+        );
+
+        let mut listed = sampled_file_request(Some(vec![2.0, 6.0]));
+        listed.at_cuts = false;
+        listed.grid = None;
+        listed.times = Some(vec![0.5, 1.5]);
+        listed.out = PathBuf::from("stills");
+        let listed = FrameProbePlan::resolve(listed).expect("a file-relative batch resolves");
+        assert!(!listed.needs_project());
     }
 }

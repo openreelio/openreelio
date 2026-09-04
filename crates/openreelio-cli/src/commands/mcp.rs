@@ -759,7 +759,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.frame.extract",
             "OpenReelio frame extract",
-            &format!("See the edit — and above all, see what you just changed. Right after applying an edit, call this with the affectedRanges it reported as ranges and grid:'auto': it samples only the seconds that moved and returns them as ONE contact sheet whose cells[] name their timecode and their reason. (affected:true reads the last recorded edit instead, which is a shared slot — pair it with afterOp when you use it.) Other event samplers answer the other standing questions without any arithmetic: atCuts for continuity (each cut gives the outgoing shot's last frame and the incoming shot's first), atTransitions for a blend's start/cut/end, atCaptions for readability (pass cellWidth 640 or more so the words are legible), atMarkers, perShot for coverage, and around+span for one moment in detail. Samplers combine, and 'limit' caps how many frames come back. Reach for 'between' — evenly spaced midpoints that land on no event at all — only when nothing event-driven fits. Timeline stills show the COMPOSITED edit by default: captions, text, transforms and blends, exactly what export produces. Without 'grid' the result is up to {MAX_INLINE_FRAME_STILLS} separate stills; with it, one sheet. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' reads an already rendered video instead of the timeline, must be inside the project directory, and takes no sampler."),
+            &format!("See the edit — and above all, see what you just changed. Right after applying an edit, call this with the affectedRanges it reported as ranges and grid:'auto': it samples only the seconds that moved and returns them as ONE contact sheet whose cells[] name their timecode and their reason. (affected:true reads the last recorded edit instead, which is a shared slot — pair it with afterOp when you use it.) Other event samplers answer the other standing questions without any arithmetic: atCuts for continuity (each cut gives the outgoing shot's last frame and the incoming shot's first), atTransitions for a blend's start/cut/end, atCaptions for readability (pass cellWidth 640 or more so the words are legible), atMarkers, perShot for coverage, and around+span for one moment in detail. Samplers combine, and 'limit' caps how many frames come back. Reach for 'between' — evenly spaced midpoints that land on no event at all — only when nothing event-driven fits. Timeline stills show the COMPOSITED edit by default: captions, text, transforms and blends, exactly what export produces. Without 'grid' the result is up to {MAX_INLINE_FRAME_STILLS} separate stills; with it, one sheet. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' reads an already rendered video instead of the timeline and must be inside the project directory; to judge a partial render with the samplers, pass 'fileRange' [start, end] with the timeline range you rendered — the samplers then read those seconds of the timeline and every cell carries both fileSec and timelineSec."),
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -852,7 +852,14 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     },
                     "file": {
                         "type": "string",
-                        "description": "Rendered video to read instead of the timeline, in the file's own timebase. Must be inside the project directory; a relative path resolves against the project root and anything outside it is rejected. Cannot be combined with sequenceId or mode."
+                        "description": "Rendered video to read instead of the timeline, in the file's own timebase. Must be inside the project directory; a relative path resolves against the project root and anything outside it is rejected. Cannot be combined with sequenceId or mode. Add 'fileRange' to sample it with the event samplers."
+                    },
+                    "fileRange": {
+                        "type": "array",
+                        "items": { "type": "number", "minimum": 0 },
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "The timeline range [start, end] the 'file' covers — the range you rendered. With a sampler this is what makes the samplers work on a render: they read the timeline over this range and every time is translated into the file as t - start, so cells carry BOTH fileSec and timelineSec plus their reason, and any sample the file turns out not to hold is dropped and counted as sampler.droppedOutsideFile. Without a sampler it is only recorded as source.timelineRange; 'time', 'times' and 'between' stay file-relative either way. Only with 'file'."
                     },
                     "sequenceId": {
                         "type": "string",
@@ -2181,6 +2188,7 @@ struct FrameExtractRequest {
     grid: Option<String>,
     between: Option<Vec<f64>>,
     file: Option<String>,
+    file_range: Option<Vec<f64>>,
     sequence_id: Option<String>,
     mode: Option<String>,
     cell_width: Option<u32>,
@@ -2209,6 +2217,7 @@ impl FrameExtractRequest {
             grid: optional_string_argument(arguments, "grid")?,
             between: optional_non_negative_number_array(arguments, "between")?,
             file: optional_string_argument(arguments, "file")?,
+            file_range: optional_non_negative_number_array(arguments, "fileRange")?,
             sequence_id: optional_string_argument(arguments, "sequenceId")?,
             mode: optional_string_argument(arguments, "mode")?,
             cell_width: optional_pixel_argument(arguments, "cellWidth")?,
@@ -2278,8 +2287,9 @@ impl FrameExtractRequest {
             }
         }
         if self.file.is_some() {
-            // A rendered file is read in its own timebase and never opens the
-            // project, so neither of these could mean anything.
+            // A rendered file is read in its own timebase and holds finished
+            // frames, so neither of these could mean anything: a sampled file
+            // reads the ACTIVE sequence, and nothing here is ever re-rendered.
             if self.sequence_id.is_some() || self.mode.is_some() {
                 return Err(ToolError::InvalidArguments(
                     "file reads a rendered video, so it cannot be combined with sequenceId or mode"
@@ -2287,10 +2297,42 @@ impl FrameExtractRequest {
                 ));
             }
         }
+        self.validate_file_range()?;
 
         self.validate_cell_geometry()?;
         self.validate_still_width()?;
         self.validate_selection_size()
+    }
+
+    /// Rejects a `fileRange` that names no usable stretch of timeline.
+    ///
+    /// The engine applies the same rules, but a malformed range is a client
+    /// mistake and belongs in the argument error rather than in an execution
+    /// failure it has to read the message of to understand.
+    fn validate_file_range(&self) -> Result<(), ToolError> {
+        let Some(range) = self.file_range.as_deref() else {
+            return Ok(());
+        };
+        if self.file.is_none() {
+            return Err(ToolError::InvalidArguments(
+                "fileRange declares which timeline seconds a rendered file covers, so it only means something with file"
+                    .to_string(),
+            ));
+        }
+        if range.len() != 2 {
+            return Err(ToolError::InvalidArguments(format!(
+                "fileRange takes exactly two values: [start, end] (got {})",
+                range.len()
+            )));
+        }
+        if range[0] >= range[1] {
+            return Err(ToolError::InvalidArguments(format!(
+                "fileRange needs start ({}) below end ({})",
+                range[0], range[1]
+            )));
+        }
+
+        Ok(())
     }
 
     /// Rejects the two range sources asked for together, and `afterOp` asked
@@ -2325,19 +2367,29 @@ impl FrameExtractRequest {
     /// argument error rather than an execution failure.
     fn validate_sampler_combination(&self) -> Result<(), ToolError> {
         if self.has_sampler() {
+            // `file` alone is still a refusal — a rendered video has no
+            // timeline to sample — but `file` with `fileRange` is not: the
+            // range says which timeline seconds the file holds, so the samplers
+            // read those seconds and their times are translated into the file.
+            let file_without_range = self.file.is_some() && self.file_range.is_none();
             let conflicting = [
                 ("time", self.time.is_some()),
                 ("times", self.times.is_some()),
                 ("between", self.between.is_some()),
-                ("file", self.file.is_some()),
+                ("file", file_without_range),
             ]
             .into_iter()
             .filter_map(|(name, used)| used.then_some(name))
             .collect::<Vec<_>>();
 
             if !conflicting.is_empty() {
+                let hint = if file_without_range {
+                    ". A rendered file can be sampled once you say which timeline seconds it covers: pass fileRange [start, end] — the range you rendered — and every sampled time is translated into the file's own timebase"
+                } else {
+                    ""
+                };
                 return Err(ToolError::InvalidArguments(format!(
-                    "A sampler chooses its own times, so it cannot be combined with {}",
+                    "A sampler chooses its own times, so it cannot be combined with {}{hint}",
                     conflicting.join(", ")
                 )));
             }
@@ -2590,6 +2642,7 @@ impl FrameExtractRequest {
             path: project_path,
             out,
             file,
+            file_range: self.file_range,
             asset: None,
             source_time: None,
             time: self.time,
@@ -2746,7 +2799,26 @@ fn run_frame_extract_tool(
     // confined like every other one. Timeline extraction instead opens the media
     // the sequence's clips point at, which arrives as project state and is
     // confined there — the same split `openreelio.transcription.generate` makes.
+    //
+    // A sampled file needs both halves: the pictures come from the confined
+    // file, and the times come from the sequence, which has to be opened and
+    // its media confined exactly as a timeline extraction's is.
     let (file, project, sequence_id) = match request.file.as_deref() {
+        Some(requested) if request.has_sampler() => {
+            let file = confine_to_project(project_path, "file", requested)?;
+            let project = super::load_project(project_path).map_err(|error| {
+                ToolError::Execution(format!(
+                    "Failed to open project '{}': {error}",
+                    project_path.display()
+                ))
+            })?;
+            // `sequenceId` is refused alongside `file`, so a sampled file always
+            // reads the active sequence — the one the render came from.
+            let sequence_id = super::resolve_sequence_id(&project, None)
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            confine_sequence_media(&project, &sequence_id)?;
+            (Some(file), Some(project), Some(sequence_id))
+        }
         Some(requested) => (
             Some(confine_to_project(project_path, "file", requested)?),
             None,
@@ -4999,6 +5071,175 @@ mod tests {
         assert_eq!(payload["sampler"]["limited"], false);
     }
 
+    /// Writes a decodable `render.mp4` of `duration_sec` inside the project.
+    ///
+    /// Stands in for a draft render of one stretch of the timeline: what the
+    /// file samplers need from it is a real video stream of the right length in
+    /// its own timebase, which is what a range render produces. The end-to-end
+    /// path through `render start --proxy` is covered by the CLI integration
+    /// tests, which drive the real binary.
+    fn rendered_range_file(project_path: &Path, duration_sec: f64) -> Option<String> {
+        let ffmpeg = ffmpeg_for_tests()?;
+        let output = project_path.join("render.mp4");
+        let status = std::process::Command::new(ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("color=c=white:s=320x240:r=25:d={duration_sec}"),
+                "-c:v",
+                "mpeg4",
+            ])
+            .arg(&output)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() || !output.exists() {
+            eprintln!("Skipping file-sampler test: ffmpeg could not write the render fixture");
+            return None;
+        }
+
+        Some("render.mp4".to_string())
+    }
+
+    #[test]
+    fn should_sheet_both_sides_of_a_cut_inside_a_rendered_range() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let Some(project_path) = project_with_real_media(&temp_dir, "frame_file_range_project")
+        else {
+            return;
+        };
+        split_the_only_clip(&project_path, 3.0);
+        // A draft of timeline 2.0s-5.0s: three seconds of picture starting at
+        // the file's own zero.
+        let Some(file) = rendered_range_file(&project_path, 3.0) else {
+            return;
+        };
+        let state = frame_extract_state(project_path);
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.frame.extract",
+                    "arguments": {
+                        "file": file,
+                        "fileRange": [2.0, 5.0],
+                        "atCuts": true,
+                        "grid": "auto"
+                    }
+                }),
+            ),
+        );
+
+        let content = response["result"]["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("frame extract failed: {response}"));
+        assert_eq!(content.len(), 2, "an auto sheet is one image plus metadata");
+        assert_image_block(&content[0], "image/jpeg");
+
+        let payload: Value =
+            serde_json::from_str(content[1]["text"].as_str().expect("text block")).expect("JSON");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["mode"], "file");
+        assert_eq!(
+            payload["source"]["timelineRange"],
+            serde_json::json!([2.0, 5.0])
+        );
+
+        let cells = payload["sheet"]["cells"].as_array().expect("cells");
+        assert_eq!(cells.len(), 2, "{payload}");
+        assert_eq!(cells[0]["reason"], "cutBefore");
+        assert_eq!(cells[1]["reason"], "cutAfter");
+        // Both keys, because they answer different questions: where in this
+        // file, and where in the edit.
+        assert_eq!(cells[1]["timelineSec"].as_f64(), Some(3.0));
+        assert_eq!(cells[1]["fileSec"].as_f64(), Some(1.0));
+        let before_file_sec = cells[0]["fileSec"].as_f64().expect("cell file time");
+        assert!(
+            before_file_sec < 1.0 && before_file_sec > 0.0,
+            "the outgoing frame sits just before the cut, inside the file: {payload}"
+        );
+
+        assert_eq!(payload["sampler"]["kinds"][0], "atCuts");
+        assert_eq!(payload["sampler"]["selected"], 2);
+        assert_eq!(payload["sampler"]["droppedOutsideFile"], 0);
+    }
+
+    #[test]
+    fn should_refuse_a_sampler_on_a_rendered_file_that_declares_no_range() {
+        let error = FrameExtractRequest::parse(&serde_json::json!({
+            "file": "render.mp4",
+            "atCuts": true,
+            "grid": "auto"
+        }))
+        .expect_err("a rendered video has no timeline of its own to sample");
+
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected an argument refusal");
+        };
+        assert!(
+            message.contains("fileRange"),
+            "the refusal must name the argument that lifts it: {message}"
+        );
+    }
+
+    #[test]
+    fn should_accept_a_sampler_on_a_rendered_file_that_declares_its_range() {
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "file": "render.mp4",
+            "fileRange": [2.0, 6.0],
+            "atCuts": true,
+            "grid": "auto"
+        }))
+        .expect("a declared range makes the render samplable");
+
+        let args = request.into_extract_args(
+            PathBuf::from("project"),
+            PathBuf::from("project/sheet.jpg"),
+            Some(PathBuf::from("project/render.mp4")),
+            Some("seq-resolved".to_string()),
+        );
+        assert_eq!(args.file_range, Some(vec![2.0, 6.0]));
+        assert!(args.at_cuts);
+    }
+
+    #[test]
+    fn should_reject_a_file_range_that_names_nothing_usable() {
+        for arguments in [
+            // No file to declare a range for.
+            serde_json::json!({ "time": 1.0, "fileRange": [2.0, 6.0] }),
+            // Reversed, and zero-width.
+            serde_json::json!({ "file": "render.mp4", "time": 1.0, "fileRange": [6.0, 2.0] }),
+            serde_json::json!({ "file": "render.mp4", "time": 1.0, "fileRange": [2.0, 2.0] }),
+            // Negative, and the wrong number of values.
+            serde_json::json!({ "file": "render.mp4", "time": 1.0, "fileRange": [-1.0, 6.0] }),
+            serde_json::json!({ "file": "render.mp4", "time": 1.0, "fileRange": [2.0] }),
+        ] {
+            assert!(
+                FrameExtractRequest::parse(&arguments).is_err(),
+                "{arguments} is not a usable declaration"
+            );
+        }
+    }
+
+    #[test]
+    fn should_accept_a_declared_range_alongside_file_relative_times() {
+        // Allowed and useful: the times stay file-relative, and the payload
+        // still records which seconds of the edit the file holds.
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "file": "render.mp4",
+            "fileRange": [2.0, 6.0],
+            "times": [0.5, 1.5]
+        }))
+        .expect("a declared range needs no sampler");
+
+        assert_eq!(request.file_range, Some(vec![2.0, 6.0]));
+    }
+
     #[test]
     fn should_refuse_a_sampler_combined_with_a_hand_written_time_list() {
         let error = FrameExtractRequest::parse(&serde_json::json!({
@@ -5461,6 +5702,7 @@ mod tests {
             path: temp_dir.path().join("this_directory_does_not_exist"),
             out: out.clone(),
             file: None,
+            file_range: None,
             asset: None,
             source_time: None,
             time: Some(1.0),

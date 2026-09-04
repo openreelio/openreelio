@@ -255,13 +255,14 @@ describe('openreelio.render_proxy', () => {
     expect(result.jobId).toBe('job-1');
     expect(result.outputPath).toBe('D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4');
     expect(result.durationSec).toBe(4);
-    // The follow-up must be a request the probe accepts: samplers are not
-    // available with `file`, and `between` needs an explicit grid.
+    // The follow-up must be a request the probe accepts, and it must carry the
+    // range that was rendered: without `fileRange` the probe refuses a sampler
+    // on a file, and with it the cells map back to the timeline seconds judged.
     expect(result.nextStep).toContain('openreelio.frame_extract');
     expect(result.nextStep).toContain('file: outputPath');
-    expect(result.nextStep).toContain('between: [0, 4]');
-    expect(result.nextStep).toContain("grid: '4x3'");
-    expect(result.nextStep).not.toContain("grid: 'auto'");
+    expect(result.nextStep).toContain('fileRange: [2, 6]');
+    expect(result.nextStep).toContain('atCuts: true');
+    expect(result.nextStep).toContain("grid: 'auto'");
     // Looking is only half of it: the draft is also what the QC pass measures.
     expect(result.nextStep).toContain('openreelio.verify { file: outputPath }');
     expect(unlistened()).toBe(2);
@@ -1140,6 +1141,7 @@ interface FrameProbeRecipe {
   count?: number;
   asset?: string;
   file?: string;
+  fileRange?: [number, number];
   grid?: string;
   cellWidth?: number;
   cellHeight?: number;
@@ -1171,11 +1173,11 @@ const RANGES_EXCLUSIVE_KEYS = [
 ] as const;
 
 /**
- * Mirror of the three request checks the Rust frame probe applies, so a recipe
- * the instructions hand an agent cannot silently become one the probe rejects.
+ * Mirror of the request checks the Rust frame probe applies, so a recipe the
+ * instructions hand an agent cannot silently become one the probe rejects.
  *
- * Sources: `ensure_sampler_selectors_unused`, `ensure_grid_only_flags_unused`
- * and `resolve_auto_grid_selection` in
+ * Sources: `ensure_sampler_selectors_unused`, `resolve_file_range`,
+ * `ensure_grid_only_flags_unused` and `resolve_auto_grid_selection` in
  * `src-tauri/src/core/render/frame_probe/mod.rs`.
  */
 function frameProbeRejection(recipe: FrameProbeRecipe): string | null {
@@ -1190,7 +1192,20 @@ function frameProbeRejection(recipe: FrameProbeRecipe): string | null {
     recipe.around !== undefined,
   );
 
-  const named = SAMPLER_EXCLUSIVE_KEYS.filter((key) => recipe[key] !== undefined);
+  if (recipe.fileRange !== undefined && recipe.file === undefined) {
+    return 'fileRange requires file';
+  }
+  if (recipe.fileRange !== undefined && recipe.fileRange[0] >= recipe.fileRange[1]) {
+    return 'fileRange needs start below end';
+  }
+
+  // `file` names a timebase rather than a list of times, so declaring the
+  // timeline range it covers is what lets a sampler run against it.
+  const named = SAMPLER_EXCLUSIVE_KEYS.filter((key) =>
+    key === 'file'
+      ? recipe.file !== undefined && recipe.fileRange === undefined
+      : recipe[key] !== undefined,
+  );
   if (samplerActive && named.length > 0) {
     return `a sampler cannot be combined with ${named.join(', ')}`;
   }
@@ -1249,8 +1264,14 @@ const INSTRUCTION_RECIPES: Array<{ text: string; request: FrameProbeRecipe }> = 
     request: { perShot: true, grid: 'auto', limit: 24 },
   },
   {
-    text: "{ file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true }",
-    request: { file: 'draft.mp4', between: [0, 12], grid: '4x3', labelCells: true },
+    text: "{ file: outputPath, fileRange: [start, end], atCuts: true, grid: 'auto', labelCells: true }",
+    request: {
+      file: 'draft.mp4',
+      fileRange: [2, 6],
+      atCuts: true,
+      grid: 'auto',
+      labelCells: true,
+    },
   },
   {
     text: "ranges: <the violation timeRanges>, grid: 'auto', labelCells: true",
@@ -1265,6 +1286,10 @@ describe('frameProbeRejection', () => {
     expect(frameProbeRejection({ between: [0, 10], grid: 'auto' })).toContain('sampler or times');
     expect(frameProbeRejection({ file: 'draft.mp4', atCuts: true, grid: 'auto' })).toContain(
       'sampler cannot be combined',
+    );
+    expect(frameProbeRejection({ fileRange: [0, 4] })).toContain('fileRange requires file');
+    expect(frameProbeRejection({ file: 'draft.mp4', fileRange: [4, 2] })).toContain(
+      'start below end',
     );
   });
 
@@ -1284,6 +1309,14 @@ describe('frameProbeRejection', () => {
   it('should accept a sampler sheet and a file sweep', () => {
     expect(frameProbeRejection({ atCuts: true, grid: 'auto' })).toBeNull();
     expect(frameProbeRejection({ file: 'draft.mp4', between: [0, 5], grid: '4x3' })).toBeNull();
+    // A declared range is what turns a render into something a sampler can read.
+    expect(
+      frameProbeRejection({ file: 'draft.mp4', fileRange: [2, 6], atCuts: true, grid: 'auto' }),
+    ).toBeNull();
+    // Without a sampler it is a harmless annotation on a file-relative sweep.
+    expect(
+      frameProbeRejection({ file: 'draft.mp4', fileRange: [2, 6], between: [0, 4], grid: '2x2' }),
+    ).toBeNull();
     expect(frameProbeRejection({ times: [1, 2], grid: 'auto' })).toBeNull();
     expect(
       frameProbeRejection({ ranges: [{ startSec: 2, endSec: 6 }], grid: 'auto', labelCells: true }),
