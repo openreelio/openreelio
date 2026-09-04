@@ -4872,7 +4872,7 @@ temperatureShift: number }
  * RGBA color in straight alpha byte space.
  */
 export type ColorRgba = { r: number; g: number; b: number; a: number }
-export type CommandPayload = { commandType: "insertClip"; payload: InsertClipPayload } | { commandType: "insertMedia"; payload: InsertMediaPayload } | { commandType: "insertEdit"; payload: InsertEditPayload } | { commandType: "overwriteEdit"; payload: OverwriteEditPayload } | { commandType: "rippleDelete"; payload: RippleDeletePayload } | { commandType: "lift"; payload: LiftPayload } | { commandType: "extractEdit"; payload: ExtractEditPayload } | { commandType: "closeGap"; payload: CloseGapPayload } | { commandType: "closeAllGaps"; payload: CloseAllGapsPayload } | { commandType: "removeClip"; payload: RemoveClipPayload } | { commandType: "moveClip"; payload: MoveClipPayload } | { commandType: "trimClip"; payload: TrimClipPayload } | { commandType: "splitClip"; payload: SplitClipPayload } | { commandType: "setClipTransform"; payload: SetClipTransformPayload } | { commandType: "setClipMotionKeyframes"; payload: SetClipMotionKeyframesPayload } | { commandType: "setClipOpacity"; payload: SetClipOpacityPayload } | { commandType: "setClipSpeed"; payload: SetClipSpeedPayload } | { commandType: "setClipSlowMotionInterpolation"; payload: SetClipSlowMotionInterpolationPayload } | { commandType: "reverseClip"; payload: ReverseClipPayload } | { commandType: "setClipEnabled"; payload: SetClipEnabledPayload } | { commandType: "linkClips"; payload: LinkClipsPayload } | { commandType: "unlinkClips"; payload: UnlinkClipsPayload } | { commandType: "groupClips"; payload: GroupClipsPayload } | { commandType: "ungroupClips"; payload: UngroupClipsPayload } | { commandType: "detachAudio"; payload: DetachAudioPayload } | { commandType: "createFreezeFrame"; payload: CreateFreezeFramePayload } | { commandType: "setTimeRemap"; payload: SetTimeRemapPayload } | { commandType: "clearTimeRemap"; payload: ClearTimeRemapPayload } | { commandType: "setClipMute"; payload: SetClipMutePayload } | { commandType: "setClipAudio"; payload: SetClipAudioPayload } | { commandType: "addAudioKeyframe"; payload: AddAudioKeyframePayload } | { commandType: "removeAudioKeyframe"; payload: RemoveAudioKeyframePayload } | { commandType: "moveAudioKeyframe"; payload: MoveAudioKeyframePayload } | { commandType: "setAudioKeyframeValue"; payload: SetAudioKeyframeValuePayload } | { commandType: "setAudioFadeIn"; payload: SetAudioFadeInPayload } | { commandType: "setAudioFadeOut"; payload: SetAudioFadeOutPayload } | { commandType: "setTrackBlendMode"; payload: SetTrackBlendModePayload } | { commandType: "setClipBlendMode"; payload: SetClipBlendModePayload } | { commandType: "importAsset"; payload: ImportAssetPayload } | { commandType: "removeAsset"; payload: RemoveAssetPayload } | { commandType: "updateAsset"; payload: UpdateAssetPayload } | { commandType: "createSequence"; payload: CreateSequencePayload } | { commandType: "setMasterVolume"; payload: SetMasterVolumePayload } | { commandType: "updateSequenceHdrSettings"; payload: UpdateSequenceHdrSettingsPayload } | { commandType: "createTrack"; payload: CreateTrackPayload } | { commandType: "removeTrack"; payload: RemoveTrackPayload } | { commandType: "renameTrack"; payload: RenameTrackPayload } | { commandType: "setCaptionTrackLanguage"; payload: SetCaptionTrackLanguagePayload } | { commandType: "reorderTracks"; payload: ReorderTracksPayload } | { commandType: "setTrackVolume"; payload: SetTrackVolumePayload } | { commandType: "toggleTrackMute"; payload: ToggleTrackMutePayload } | { commandType: "toggleTrackLock"; payload: ToggleTrackLockPayload } | { commandType: "toggleTrackVisibility"; payload: ToggleTrackVisibilityPayload } | { commandType: "addMarker"; payload: AddMarkerPayload } | { commandType: "removeMarker"; payload: RemoveMarkerPayload } | { commandType: "createCaption"; payload: CreateCaptionPayload } | { commandType: "importGeneratedCaptions"; payload: ImportGeneratedCaptionsPayload } | { commandType: "deleteCaption"; payload: DeleteCaptionPayload } | { commandType: "updateCaption"; payload: UpdateCaptionPayload } | { commandType: "addEffect"; payload: AddEffectPayload } | { commandType: "removeEffect"; payload: RemoveEffectPayload } | { commandType: "updateEffect"; payload: UpdateEffectPayload } | { commandType: "addMask"; payload: AddMaskPayload } | { commandType: "updateMask"; payload: UpdateMaskPayload } | { commandType: "removeMask"; payload: RemoveMaskPayload } | { commandType: "addTextClip"; payload: AddTextClipPayload } | { commandType: "updateTextClip"; payload: UpdateTextClipPayload } | { commandType: "removeTextClip"; payload: RemoveTextClipPayload } | { commandType: "createFolder"; payload: CreateFolderPayload } | { commandType: "renameFile"; payload: RenameFilePayload } | { commandType: "moveFile"; payload: MoveFilePayload } | { commandType: "deleteFile"; payload: DeleteFilePayload } | { commandType: "applyAudioDucking"; payload: ApplyAudioDuckingPayload } | { commandType: "createCompoundClip"; payload: CreateCompoundClipPayload } | { commandType: "unnestCompoundClip"; payload: UnnestCompoundClipPayload } | { commandType: "createAdjustmentLayer"; payload: CreateAdjustmentLayerPayload } | { commandType: "pasteEffects"; payload: PasteEffectsPayload } | { commandType: "pasteAttributes"; payload: PasteAttributesPayload } | { commandType: "removeAttributes"; payload: RemoveAttributesPayload }
+export type CommandPayload = { commandType: "insertClip"; payload: InsertClipPayload } | { commandType: "insertMedia"; payload: InsertMediaPayload } | { commandType: "insertEdit"; payload: InsertEditPayload } | { commandType: "overwriteEdit"; payload: OverwriteEditPayload } | { commandType: "rippleDelete"; payload: RippleDeletePayload } | { commandType: "lift"; payload: LiftPayload } | { commandType: "extractEdit"; payload: ExtractEditPayload } | { commandType: "closeGap"; payload: CloseGapPayload } | { commandType: "closeAllGaps"; payload: CloseAllGapsPayload } | { commandType: "removeClip"; payload: RemoveClipPayload } | { commandType: "moveClip"; payload: MoveClipPayload } | { commandType: "trimClip"; payload: TrimClipPayload } | { commandType: "splitClip"; payload: SplitClipPayload } | { commandType: "setClipTransform"; payload: SetClipTransformPayload } | { commandType: "setClipMotionKeyframes"; payload: SetClipMotionKeyframesPayload } | { commandType: "setClipOpacity"; payload: SetClipOpacityPayload } | { commandType: "setClipSpeed"; payload: SetClipSpeedPayload } | { commandType: "setClipSlowMotionInterpolation"; payload: SetClipSlowMotionInterpolationPayload } | { commandType: "reverseClip"; payload: ReverseClipPayload } | { commandType: "setClipEnabled"; payload: SetClipEnabledPayload } | { commandType: "linkClips"; payload: LinkClipsPayload } | { commandType: "unlinkClips"; payload: UnlinkClipsPayload } | { commandType: "groupClips"; payload: GroupClipsPayload } | { commandType: "ungroupClips"; payload: UngroupClipsPayload } | { commandType: "detachAudio"; payload: DetachAudioPayload } | { commandType: "createFreezeFrame"; payload: CreateFreezeFramePayload } | { commandType: "setTimeRemap"; payload: SetTimeRemapPayload } | { commandType: "clearTimeRemap"; payload: ClearTimeRemapPayload } | { commandType: "setClipMute"; payload: SetClipMutePayload } | { commandType: "setClipAudio"; payload: SetClipAudioPayload } | { commandType: "addAudioKeyframe"; payload: AddAudioKeyframePayload } | { commandType: "removeAudioKeyframe"; payload: RemoveAudioKeyframePayload } | { commandType: "moveAudioKeyframe"; payload: MoveAudioKeyframePayload } | { commandType: "setAudioKeyframeValue"; payload: SetAudioKeyframeValuePayload } | { commandType: "setAudioFadeIn"; payload: SetAudioFadeInPayload } | { commandType: "setAudioFadeOut"; payload: SetAudioFadeOutPayload } | { commandType: "setTrackBlendMode"; payload: SetTrackBlendModePayload } | { commandType: "setClipBlendMode"; payload: SetClipBlendModePayload } | { commandType: "importAsset"; payload: ImportAssetPayload } | { commandType: "removeAsset"; payload: RemoveAssetPayload } | { commandType: "updateAsset"; payload: UpdateAssetPayload } | { commandType: "createSequence"; payload: CreateSequencePayload } | { commandType: "setMasterVolume"; payload: SetMasterVolumePayload } | { commandType: "updateSequenceHdrSettings"; payload: UpdateSequenceHdrSettingsPayload } | { commandType: "setSequenceFormat"; payload: SetSequenceFormatPayload } | { commandType: "createTrack"; payload: CreateTrackPayload } | { commandType: "removeTrack"; payload: RemoveTrackPayload } | { commandType: "renameTrack"; payload: RenameTrackPayload } | { commandType: "setCaptionTrackLanguage"; payload: SetCaptionTrackLanguagePayload } | { commandType: "reorderTracks"; payload: ReorderTracksPayload } | { commandType: "setTrackVolume"; payload: SetTrackVolumePayload } | { commandType: "toggleTrackMute"; payload: ToggleTrackMutePayload } | { commandType: "toggleTrackLock"; payload: ToggleTrackLockPayload } | { commandType: "toggleTrackVisibility"; payload: ToggleTrackVisibilityPayload } | { commandType: "addMarker"; payload: AddMarkerPayload } | { commandType: "removeMarker"; payload: RemoveMarkerPayload } | { commandType: "createCaption"; payload: CreateCaptionPayload } | { commandType: "importGeneratedCaptions"; payload: ImportGeneratedCaptionsPayload } | { commandType: "deleteCaption"; payload: DeleteCaptionPayload } | { commandType: "updateCaption"; payload: UpdateCaptionPayload } | { commandType: "addEffect"; payload: AddEffectPayload } | { commandType: "removeEffect"; payload: RemoveEffectPayload } | { commandType: "updateEffect"; payload: UpdateEffectPayload } | { commandType: "addMask"; payload: AddMaskPayload } | { commandType: "updateMask"; payload: UpdateMaskPayload } | { commandType: "removeMask"; payload: RemoveMaskPayload } | { commandType: "addTextClip"; payload: AddTextClipPayload } | { commandType: "updateTextClip"; payload: UpdateTextClipPayload } | { commandType: "removeTextClip"; payload: RemoveTextClipPayload } | { commandType: "createFolder"; payload: CreateFolderPayload } | { commandType: "renameFile"; payload: RenameFilePayload } | { commandType: "moveFile"; payload: MoveFilePayload } | { commandType: "deleteFile"; payload: DeleteFilePayload } | { commandType: "applyAudioDucking"; payload: ApplyAudioDuckingPayload } | { commandType: "createCompoundClip"; payload: CreateCompoundClipPayload } | { commandType: "unnestCompoundClip"; payload: UnnestCompoundClipPayload } | { commandType: "createAdjustmentLayer"; payload: CreateAdjustmentLayerPayload } | { commandType: "pasteEffects"; payload: PasteEffectsPayload } | { commandType: "pasteAttributes"; payload: PasteAttributesPayload } | { commandType: "removeAttributes"; payload: RemoveAttributesPayload }
 /**
  * Result of executing an edit command.
  */
@@ -5700,6 +5700,26 @@ missing?: boolean;
  * Child entries (for directories)
  */
 children: FileTreeEntryDto[] }
+/**
+ * How a caller may spell a frame rate.
+ * 
+ * Agents write frame rates both ways: `29.97` is what a human says and what a
+ * media probe prints, while `{"num": 30000, "den": 1001}` is what the timeline
+ * actually stores. Accepting only the ratio would make the common case a trap
+ * — `{"num": 2997, "den": 100}` is a *different* rate from broadcast 29.97,
+ * off by 30ppm, and nothing downstream would flag it. So the decimal form is
+ * accepted and snapped to the exact rational the caller meant; see
+ * [`FpsSpec::to_ratio`] for the rule.
+ */
+export type FpsSpec = 
+/**
+ * An exact rational rate, e.g. `{"num": 30000, "den": 1001}`.
+ */
+Ratio | 
+/**
+ * A decimal rate, e.g. `29.97`, snapped to an exact rational.
+ */
+number
 /**
  * Visual composition analysis for a single shot's keyframe
  */
@@ -7997,6 +8017,39 @@ isPlaying: boolean | null;
  * Timeline duration in seconds (if known).
  */
 durationSec: number | null }
+/**
+ * Payload for `SetSequenceFormat`.
+ * 
+ * Every field is optional and at least one must be given; the omitted fields
+ * keep their current value. `sequenceId` defaults to the active sequence.
+ * `fps` takes either an exact ratio (`{"num": 30000, "den": 1001}`) or a
+ * decimal (`29.97`), which is snapped to the exact rational it names.
+ */
+export type SetSequenceFormatPayload = { 
+/**
+ * Sequence to change; the active sequence when omitted.
+ */
+sequenceId?: string | null; 
+/**
+ * New frame rate, as an exact ratio or a decimal.
+ */
+fps?: FpsSpec | null; 
+/**
+ * New canvas width in pixels (even, 16..=16384).
+ */
+width?: number | null; 
+/**
+ * New canvas height in pixels (even, 16..=16384).
+ */
+height?: number | null; 
+/**
+ * New audio sample rate in Hz.
+ */
+audioSampleRate?: number | null; 
+/**
+ * New audio channel count (1 or 2).
+ */
+audioChannels?: number | null }
 /**
  * Input payload for loading an asset into the source monitor.
  */

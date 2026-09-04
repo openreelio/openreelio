@@ -53,12 +53,15 @@ pub(crate) fn build_schema() -> serde_json::Value {
         "description": "OpenReelio CLI — Headless AI agent-driven video editing",
         "commands": {
             "project.create": {
-                "description": "Create a new project",
+                "description": "Create a new project. The sequence defaults to 30fps 1920x1080; pass --fps/--width/--height to match the delivery format, which is applied through the same logged, undoable 'SetSequenceFormat' command 'timeline set-format' runs",
                 "params": {
                     "name": { "type": "string", "required": true, "desc": "Project name" },
-                    "path": { "type": "string", "required": true, "desc": "Project directory path" }
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "fps": { "type": "number", "required": false, "desc": "Sequence frame rate, e.g. 25, 29.97, 23.976. Decimals snap to the exact broadcast rational (29.97 becomes 30000/1001). Default 30" },
+                    "width": { "type": "number", "required": false, "desc": "Canvas width in pixels; even, 16..=16384. Default 1920" },
+                    "height": { "type": "number", "required": false, "desc": "Canvas height in pixels; even, 16..=16384. Default 1080" }
                 },
-                "example": "openreelio-cli project create --name \"My Project\" --path ./project"
+                "example": "openreelio-cli project create --name \"My Project\" --path ./project --fps 25 --width 1080 --height 1920"
             },
             "project.open": {
                 "description": "Open an existing project and display metadata",
@@ -322,6 +325,19 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli timeline remove-track --path ./project --track track_v2"
+            },
+            "timeline.set-format": {
+                "description": "Change the sequence delivery format: frame rate, canvas size, audio. At least one option is required; the rest keep their current value. Changing the frame rate re-times nothing (the timeline is stored in seconds) — it changes the grid the renderer quantises cuts and transitions to. Changing the canvas leaves clip transforms alone, because they are canvas-relative; what changes is how each source fits the new frame. Reports 'affectedRanges' covering the whole timeline, since both changes reach every clip. Verify with 'timeline info', which reports 'fps', 'fpsRatio' and 'canvas'",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "fps": { "type": "number", "required": false, "desc": "Frame rate, e.g. 25, 29.97, 23.976. Decimals snap to the exact broadcast rational (29.97 becomes 30000/1001, 23.976 becomes 24000/1001); a whole number stays n/1" },
+                    "width": { "type": "number", "required": false, "desc": "Canvas width in pixels; even, 16..=16384" },
+                    "height": { "type": "number", "required": false, "desc": "Canvas height in pixels; even, 16..=16384" },
+                    "audio-sample-rate": { "type": "number", "required": false, "desc": "Audio sample rate in Hz: 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000, 176400 or 192000" },
+                    "audio-channels": { "type": "number", "required": false, "desc": "Audio channel count: 1 or 2 (the export pipeline mixes to stereo)" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli timeline set-format --path ./project --fps 25 --width 1080 --height 1920"
             },
             "timeline.undo": {
                 "description": "Undo the last editing operation",

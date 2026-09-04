@@ -1255,10 +1255,24 @@ impl CommandExecutor {
             }
 
             OpKind::SequenceUpdate => {
-                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
-                    CoreError::Internal("SequenceUpdate payload missing sequenceId".to_string())
-                })?;
-                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                // A command may leave the sequence to the caller's active one
+                // (`SetSequenceFormat`), and `command_json` is captured before
+                // the command runs — so the sequence it resolved to is only
+                // knowable from the change it reported.
+                let seq_id = get_str(&command_json, "sequenceId")
+                    .map(str::to_string)
+                    .or_else(|| {
+                        result.changes.iter().find_map(|change| match change {
+                            StateChange::SequenceModified { sequence_id } => {
+                                Some(sequence_id.clone())
+                            }
+                            _ => None,
+                        })
+                    })
+                    .ok_or_else(|| {
+                        CoreError::Internal("SequenceUpdate payload missing sequenceId".to_string())
+                    })?;
+                let sequence = state.sequences.get(&seq_id).ok_or_else(|| {
                     CoreError::Internal(format!("SequenceUpdate could not find sequence: {seq_id}"))
                 })?;
 
@@ -1266,10 +1280,15 @@ impl CommandExecutor {
                     .as_object()
                     .cloned()
                     .unwrap_or_else(serde_json::Map::new);
+                payload.insert("sequenceId".to_string(), serde_json::Value::String(seq_id));
                 payload.insert(
                     "name".to_string(),
                     serde_json::Value::String(sequence.name.clone()),
                 );
+                // The realized format, not the requested fields: a replay then
+                // reproduces the whole delivery format in one step, the way the
+                // name and master volume beside it already do.
+                payload.insert("format".to_string(), to_value(&sequence.format)?);
                 payload.insert(
                     "masterVolumeDb".to_string(),
                     serde_json::json!(sequence.master_volume_db),
@@ -2165,9 +2184,10 @@ impl CommandExecutor {
             "CreateCaption" => OpKind::CaptionAdd,
             "DeleteCaption" => OpKind::CaptionRemove,
             "CreateSequence" => OpKind::SequenceCreate,
-            "UpdateSequence" | "SetMasterVolume" | "UpdateSequenceHdrSettings" => {
-                OpKind::SequenceUpdate
-            }
+            "UpdateSequence"
+            | "SetMasterVolume"
+            | "UpdateSequenceHdrSettings"
+            | "SetSequenceFormat" => OpKind::SequenceUpdate,
             "RemoveSequence" | "DeleteSequence" => OpKind::SequenceRemove,
             "CreateProject" => OpKind::ProjectCreate,
             "UpdateProjectSettings" => OpKind::ProjectSettings,
@@ -2326,12 +2346,14 @@ mod tests {
         RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
         SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMotionKeyframesCommand,
         SetClipOpacityCommand, SetClipSlowMotionInterpolationCommand, SetClipSpeedCommand,
-        SetMasterVolumeCommand, SetTrackBlendModeCommand, SplitClipCommand, StateChange,
-        TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
+        SetMasterVolumeCommand, SetSequenceFormatCommand, SetTrackBlendModeCommand,
+        SplitClipCommand, StateChange, TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand,
+        UnnestCompoundClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::masks::{MaskShape, RectMask};
     use crate::core::project::{OpKind, Operation, OpsLog, ProjectMeta, ProjectState};
+    use crate::core::timeline::FpsSpec;
     use crate::core::timeline::SlowMotionInterpolation;
     use crate::core::timeline::{
         BlendMode, Clip, FadeType, KeyframeInterpolation, Sequence, SequenceFormat, Track,
@@ -3892,6 +3914,7 @@ mod tests {
         assert_kind("SetAudioFadeIn", OpKind::ClipUpdate);
         assert_kind("SetClipMotionKeyframes", OpKind::ClipUpdate);
         assert_kind("SetMasterVolume", OpKind::SequenceUpdate);
+        assert_kind("SetSequenceFormat", OpKind::SequenceUpdate);
         assert_kind("CreateCompoundClip", OpKind::CompoundClipCreate);
         assert_kind("UnnestCompoundClip", OpKind::CompoundClipUnnest);
         assert_kind("GroupClips", OpKind::ClipGroup);
@@ -4890,6 +4913,59 @@ mod tests {
         // Ensure deterministic ordering after replay.
         let ordered: Vec<_> = replayed_track.clips.iter().map(|c| c.id.clone()).collect();
         assert_eq!(ordered, vec![clip_id, new_clip_id]);
+    }
+
+    #[test]
+    fn should_replay_a_sequence_format_change_from_the_ops_log() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test");
+
+        executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Main", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        // No sequenceId: the command resolves the active one, and the logged op
+        // has to name it even though the payload was captured before it ran.
+        executor
+            .execute(
+                Box::new(
+                    SetSequenceFormatCommand::new()
+                        .with_fps(FpsSpec::Decimal(29.97))
+                        .with_canvas(1080, 1920),
+                ),
+                &mut state,
+            )
+            .unwrap();
+
+        let ops_log = OpsLog::new(&ops_path);
+        let ops = ops_log.read_all().unwrap().operations;
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[1].kind, OpKind::SequenceUpdate);
+        assert_eq!(ops[1].payload["sequenceId"], serde_json::json!(seq_id));
+
+        let replayed = ProjectState::from_ops_log(&ops_log, ProjectMeta::new("Test")).unwrap();
+        let format = &replayed.sequences[&seq_id].format;
+        assert_eq!((format.fps.num, format.fps.den), (30000, 1001));
+        assert_eq!((format.canvas.width, format.canvas.height), (1080, 1920));
+        assert_eq!(format.audio_sample_rate, 48000);
+
+        // Undo is modelled as "this op is no longer applied", so a replay of the
+        // remaining ops has to land back on the created sequence's own format.
+        let without_format_change =
+            ProjectState::from_operations(vec![ops[0].clone()], ProjectMeta::new("Test")).unwrap();
+        let reverted = &without_format_change.sequences[&seq_id].format;
+        assert_eq!((reverted.fps.num, reverted.fps.den), (30, 1));
+        assert_eq!(
+            (reverted.canvas.width, reverted.canvas.height),
+            (1920, 1080)
+        );
     }
 
     #[test]

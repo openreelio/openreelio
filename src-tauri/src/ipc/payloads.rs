@@ -4,7 +4,8 @@ use crate::core::masks::{MaskBlendMode, MaskKeyframe, MaskShape};
 use crate::core::project::ProjectState;
 use crate::core::text::TextClipData;
 use crate::core::timeline::{
-    BlendMode, MarkerType, SequenceHdrSettings, Track, TrackKind, Transform, TransformKeyframe,
+    BlendMode, FpsSpec, MarkerType, SequenceHdrSettings, Track, TrackKind, Transform,
+    TransformKeyframe,
 };
 use crate::core::{AssetId, ClipId, Color, EffectId, MaskId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
@@ -536,6 +537,35 @@ pub struct SetMasterVolumePayload {
 pub struct UpdateSequenceHdrSettingsPayload {
     pub sequence_id: SequenceId,
     pub settings: SequenceHdrSettings,
+}
+
+/// Payload for `SetSequenceFormat`.
+///
+/// Every field is optional and at least one must be given; the omitted fields
+/// keep their current value. `sequenceId` defaults to the active sequence.
+/// `fps` takes either an exact ratio (`{"num": 30000, "den": 1001}`) or a
+/// decimal (`29.97`), which is snapped to the exact rational it names.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetSequenceFormatPayload {
+    /// Sequence to change; the active sequence when omitted.
+    #[serde(default)]
+    pub sequence_id: Option<SequenceId>,
+    /// New frame rate, as an exact ratio or a decimal.
+    #[serde(default)]
+    pub fps: Option<FpsSpec>,
+    /// New canvas width in pixels (even, 16..=16384).
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// New canvas height in pixels (even, 16..=16384).
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// New audio sample rate in Hz.
+    #[serde(default)]
+    pub audio_sample_rate: Option<u32>,
+    /// New audio channel count (1 or 2).
+    #[serde(default)]
+    pub audio_channels: Option<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
@@ -1340,6 +1370,9 @@ pub enum CommandPayload {
     )]
     UpdateSequenceHdrSettings(UpdateSequenceHdrSettingsPayload),
 
+    #[serde(alias = "setSequenceFormat", alias = "SetSequenceFormat")]
+    SetSequenceFormat(SetSequenceFormatPayload),
+
     #[serde(
         alias = "createTrack",
         alias = "CreateTrack",
@@ -1533,6 +1566,7 @@ impl CommandPayload {
         "CreateSequence",
         "SetMasterVolume",
         "UpdateSequenceHdrSettings",
+        "SetSequenceFormat",
         "CreateTrack",
         "RemoveTrack",
         "RenameTrack",
@@ -1709,12 +1743,12 @@ impl CommandPayload {
             SetClipAudioCommand, SetClipBlendModeCommand, SetClipEnabledCommand,
             SetClipMotionKeyframesCommand, SetClipMuteCommand, SetClipOpacityCommand,
             SetClipSlowMotionInterpolationCommand, SetClipSpeedCommand, SetClipTransformCommand,
-            SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand,
-            SetTrackVolumeCommand, SplitClipCommand, ToggleTrackLockCommand,
-            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
-            UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand, UpdateAssetCommand,
-            UpdateEffectCommand, UpdateMaskCommand, UpdateSequenceHdrSettingsCommand,
-            UpdateTextCommand,
+            SetMasterVolumeCommand, SetSequenceFormatCommand, SetTimeRemapCommand,
+            SetTrackBlendModeCommand, SetTrackVolumeCommand, SplitClipCommand,
+            ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
+            TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
+            UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand,
+            UpdateSequenceHdrSettingsCommand, UpdateTextCommand,
         };
 
         use crate::core::commands::{
@@ -2059,6 +2093,16 @@ impl CommandPayload {
             CommandPayload::UpdateSequenceHdrSettings(p) => Box::new(
                 UpdateSequenceHdrSettingsCommand::new(&p.sequence_id, p.settings),
             ),
+            CommandPayload::SetSequenceFormat(p) => {
+                let mut cmd = SetSequenceFormatCommand::new();
+                cmd.sequence_id = p.sequence_id;
+                cmd.fps = p.fps;
+                cmd.width = p.width;
+                cmd.height = p.height;
+                cmd.audio_sample_rate = p.audio_sample_rate;
+                cmd.audio_channels = p.audio_channels;
+                Box::new(cmd)
+            }
             CommandPayload::CreateTrack(p) => {
                 let mut cmd = AddTrackCommand::new(&p.sequence_id, &p.name, p.kind);
                 if let Some(position) = p.position {
@@ -2572,6 +2616,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn parse_set_sequence_format_accepts_both_frame_rate_spellings() {
+        let decimal = CommandPayload::parse(
+            "SetSequenceFormat".to_string(),
+            serde_json::json!({ "fps": 29.97, "width": 1080, "height": 1920 }),
+        );
+        match decimal {
+            Ok(CommandPayload::SetSequenceFormat(inner)) => {
+                assert_eq!(inner.sequence_id, None);
+                assert_eq!(inner.fps, Some(FpsSpec::Decimal(29.97)));
+                assert_eq!(inner.width, Some(1080));
+                assert_eq!(inner.height, Some(1920));
+                assert_eq!(inner.audio_sample_rate, None);
+            }
+            other => panic!("expected SetSequenceFormat payload, got: {other:?}"),
+        }
+
+        let ratio = CommandPayload::parse(
+            "SetSequenceFormat".to_string(),
+            serde_json::json!({ "fps": { "num": 24000, "den": 1001 } }),
+        );
+        match ratio {
+            Ok(CommandPayload::SetSequenceFormat(inner)) => {
+                assert_eq!(
+                    inner.fps,
+                    Some(FpsSpec::Ratio(crate::core::Ratio::new(24000, 1001)))
+                );
+            }
+            other => panic!("expected SetSequenceFormat payload, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_set_sequence_format_rejects_an_unknown_field() {
+        let error = CommandPayload::parse(
+            "SetSequenceFormat".to_string(),
+            serde_json::json!({ "fps": 25, "framerate": 25 }),
+        )
+        .expect_err("unknown fields are refused");
+
+        assert!(error.contains("framerate"), "unexpected error: {error}");
     }
 
     #[test]

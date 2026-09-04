@@ -51,7 +51,9 @@ stdin using the Node you already have from npm:
 pick() { node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8'))$1"; }
 
 # 1. Create a project and import media
-openreelio-cli project create --name "Demo" --path ./demo
+#    The sequence defaults to 30fps 1920x1080; --fps/--width/--height create it
+#    in the delivery format instead (or change it later with timeline set-format).
+openreelio-cli project create --name "Demo" --path ./demo [--fps 25 --width 1080 --height 1920]
 openreelio-cli asset import --path ./demo --file ./footage.mp4
 # -> {"status":"ok","createdIds":["01KZW64VJ4JPBS5B9YZEA335J8"],...}
 
@@ -82,6 +84,18 @@ openreelio-cli verify --path ./demo --file ./out/proxy.mp4
 
 Clip-scoped verbs (`split`, `trim`, `move`, `speed`, `remove`) all need
 `--track` as well as `--clip`; `timeline clips` prints both.
+
+`asset import` records no probed duration, so every clip `timeline insert` places
+is 10 seconds long regardless of the file — and a second insert at 4.0s is
+refused as an overlap. Read the real length from `analysis shots`
+(`totalDurationSec`) and `timeline trim --clip <CLIP> --track <TRACK>
+--source-in 0 --source-out <DURATION>` before building on it.
+
+`timeline set-format --fps 25 --width 1080 --height 1920` changes the sequence's
+frame rate, canvas and audio format at any time, as a logged and undoable edit. A
+decimal `--fps` snaps to the exact broadcast rational (`29.97` → `30000/1001`).
+Changing the frame rate re-times nothing (the timeline is stored in seconds), and
+changing the canvas leaves clip transforms alone (they are canvas-relative).
 
 Every mutating verb reports where the edit landed. `command execute` and
 `plan execute` return `affectedRanges` - a sorted `[{startSec, endSec}]` list

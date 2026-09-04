@@ -545,16 +545,74 @@ interface DeleteSequencePayload {
 
 ### SetSequenceFormat
 
-Changes sequence format.
+Changes a sequence's delivery format: frame rate, canvas size and audio format.
 
 #### Payload
 
 ```typescript
 interface SetSequenceFormatPayload {
-  sequenceId: SequenceId;
-  format: Partial<SequenceFormat>;
+  /** Sequence to change. Defaults to the project's active sequence. */
+  sequenceId?: SequenceId;
+  /** Exact rational, or a decimal that is snapped to one (see below). */
+  fps?: { num: number; den: number } | number;
+  /** Canvas width in pixels: even, 16..=16384. */
+  width?: number;
+  /** Canvas height in pixels: even, 16..=16384. */
+  height?: number;
+  /** 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000, 176400 or 192000. */
+  audioSampleRate?: number;
+  /** 1 or 2. The export pipeline mixes to stereo. */
+  audioChannels?: number;
 }
 ```
+
+Every field is optional and **at least one must be given**; the omitted fields
+keep their current value. The command is refused — leaving the sequence exactly
+as it was — when nothing was requested, when a canvas edge is odd or outside
+`16..=16384`, when the frame rate is not a positive rate of at most 1000fps, or
+when the audio format is not one of the values above.
+
+#### Frame-rate rounding
+
+`fps` may be an exact ratio (`{"num": 30000, "den": 1001}`) or a decimal, which
+is snapped in this order:
+
+| Rule | Condition | Result | Example |
+|------|-----------|--------|---------|
+| NTSC family | within `1e-3` of `n * 1000 / 1001` for the nearest integer `n` | `n * 1000 / 1001` | `29.97` → `30000/1001`, `23.976` → `24000/1001`, `59.94` → `60000/1001` |
+| Integer | a whole number | `n / 1` | `25` → `25/1`, `30` → `30/1` |
+| Otherwise | anything else | `round(fps * 1000) / 1000`, reduced | `12.5` → `25/2` |
+
+Integers can never fall inside the NTSC window (`24` is 0.024 away from
+`23.976`), so the first rule never steals one. Writing `{"num": 2997, "den":
+100}` is a *different* rate from broadcast 29.97 — 30ppm fast — which is why the
+decimal spelling exists.
+
+#### What does and does not move
+
+- **Frame rate re-times nothing.** The timeline is stored in seconds, so every
+  clip keeps the instant it starts and ends at. What changes is the grid the
+  renderer quantises to: cut positions land on the nearest new frame, and
+  transition durations are re-derived in frames.
+- **Canvas leaves transforms alone.** Clip transforms are canvas-relative
+  (normalized position and scale), so a clip centered at half scale stays
+  centered at half scale. What changes is how each source *fits* the new frame —
+  a 16:9 clip on a canvas that became 9:16 will letterbox or crop according to
+  the clip's own fit behaviour. This command does not re-fit anything.
+
+Because both changes reach every clip, the CLI verb reports `affectedRanges`
+covering the whole timeline.
+
+#### CLI
+
+```bash
+openreelio-cli timeline set-format --path ./project --fps 25 --width 1080 --height 1920
+openreelio-cli project create --name Vertical --path ./project --fps 25 --width 1080 --height 1920
+```
+
+`project create` applies the format *after* creating the project, through this
+same command, so it is an entry in the ops log like any other edit — replayable,
+undoable and visible to `state history`.
 
 ---
 

@@ -25,9 +25,17 @@ or `failed` (none written — detection worked but the verb did not, exit `1`).
 Cut on shot boundaries, not round numbers.
 
 > `asset import` does not probe media duration, so a clip placed by
-> `timeline insert` gets the 10-second default length. `totalDurationSec` from
-> `analysis shots` (or `durationSec` from `analysis audio`) is how you learn the
-> real length; then `timeline trim --source-in 0 --source-out <duration>`.
+> `timeline insert` gets the 10-second default length — which is also why a
+> second `timeline insert --at 4.0` is refused as an overlap. `totalDurationSec`
+> from `analysis shots` (or `durationSec` from `analysis audio`) is how you learn
+> the real length; then trim the clip to it, naming the clip and its track:
+>
+> ```bash
+> openreelio-cli timeline trim --path ./demo --clip <CLIP_ID> --track <TRACK_ID> \
+>                              --source-in 0 --source-out <TOTAL_DURATION_SEC>
+> ```
+>
+> `--clip` and `--track` are required; read both from `timeline clips`.
 
 **`analysis silence`** returns `regions[{startSec,endSec,durationSec}]`,
 `totalSilenceSec`, and a boolean `persisted`. Results reach the shared cache only

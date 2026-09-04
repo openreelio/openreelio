@@ -210,6 +210,43 @@ pub enum TimelineAction {
         sequence: Option<String>,
     },
 
+    /// Change the sequence delivery format (frame rate, canvas, audio)
+    ///
+    /// Every option is optional and at least one must be given; the rest keep
+    /// their current value. Changing the frame rate re-times nothing — the
+    /// timeline is stored in seconds — and changing the canvas leaves clip
+    /// transforms alone, because they are canvas-relative.
+    SetFormat {
+        /// Project directory path
+        #[arg(long)]
+        path: PathBuf,
+
+        /// Frame rate, e.g. 25, 29.97, 23.976 (decimals snap to the exact
+        /// broadcast rational: 29.97 becomes 30000/1001)
+        #[arg(long)]
+        fps: Option<f64>,
+
+        /// Canvas width in pixels (even, 16..=16384)
+        #[arg(long)]
+        width: Option<u32>,
+
+        /// Canvas height in pixels (even, 16..=16384)
+        #[arg(long)]
+        height: Option<u32>,
+
+        /// Audio sample rate in Hz, e.g. 48000
+        #[arg(long)]
+        audio_sample_rate: Option<u32>,
+
+        /// Audio channel count (1 or 2)
+        #[arg(long)]
+        audio_channels: Option<u8>,
+
+        /// Sequence ID (defaults to active sequence)
+        #[arg(long)]
+        sequence: Option<String>,
+    },
+
     /// Remove a track from the timeline
     RemoveTrack {
         /// Project directory path
@@ -594,6 +631,28 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             }))
         }
 
+        TimelineAction::SetFormat {
+            path,
+            fps,
+            width,
+            height,
+            audio_sample_rate,
+            audio_channels,
+            sequence,
+        } => {
+            let request = SequenceFormatRequest {
+                fps,
+                width,
+                height,
+                audio_sample_rate,
+                audio_channels,
+            };
+            let mut project = super::load_project(&path)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
+            let outcome = apply_sequence_format(&mut project, &seq_id, &request)?;
+            output::print_json(&outcome)
+        }
+
         TimelineAction::Undo { path } => {
             let mut project = super::load_project(&path)?;
             let op_id = project
@@ -619,6 +678,82 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             }))
         }
     }
+}
+
+/// The delivery-format fields a caller asked to change.
+///
+/// Shared by `timeline set-format` and `project create`, so a project created
+/// at 25fps and one retimed to 25fps go through exactly the same command and
+/// the same validation.
+#[derive(Debug, Default)]
+pub(crate) struct SequenceFormatRequest {
+    /// Frame rate as a decimal; snapped to an exact rational by the command.
+    pub(crate) fps: Option<f64>,
+    /// Canvas width in pixels.
+    pub(crate) width: Option<u32>,
+    /// Canvas height in pixels.
+    pub(crate) height: Option<u32>,
+    /// Audio sample rate in Hz.
+    pub(crate) audio_sample_rate: Option<u32>,
+    /// Audio channel count.
+    pub(crate) audio_channels: Option<u8>,
+}
+
+impl SequenceFormatRequest {
+    /// True when the caller asked for no change at all.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.fps.is_none()
+            && self.width.is_none()
+            && self.height.is_none()
+            && self.audio_sample_rate.is_none()
+            && self.audio_channels.is_none()
+    }
+}
+
+/// Applies a format change as a logged, undoable command and reports the result.
+///
+/// Routed through [`super::EditRecorder`] like every other mutating verb, so
+/// `affectedRanges` is populated: a frame rate or canvas change re-quantises and
+/// re-fits the whole timeline, which is why the recorder reports the entire
+/// sequence rather than a clip-sized window.
+pub(crate) fn apply_sequence_format(
+    project: &mut openreelio_core::ActiveProject,
+    sequence_id: &str,
+    request: &SequenceFormatRequest,
+) -> anyhow::Result<serde_json::Value> {
+    let mut cmd = SetSequenceFormatCommand::new().for_sequence(sequence_id);
+    if let Some(fps) = request.fps {
+        cmd = cmd.with_fps(openreelio_core::timeline::FpsSpec::Decimal(fps));
+    }
+    cmd.width = request.width;
+    cmd.height = request.height;
+    cmd.audio_sample_rate = request.audio_sample_rate;
+    cmd.audio_channels = request.audio_channels;
+
+    let mut edit = super::EditRecorder::begin(project, sequence_id);
+    let result = edit
+        .execute(project, Box::new(cmd))
+        .map_err(|e| anyhow::anyhow!("Set format failed: {}", e))?;
+    let affected_ranges = edit.finish(project)?;
+
+    let format = project
+        .state
+        .sequences
+        .get(sequence_id)
+        .map(|sequence| sequence.format.clone())
+        .ok_or_else(|| anyhow::anyhow!("Sequence '{}' not found", sequence_id))?;
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "opId": result.op_id,
+        "sequenceId": sequence_id,
+        "fps": format.fps.as_f64(),
+        "fpsRatio": format.fps,
+        "canvas": format.canvas,
+        "audioSampleRate": format.audio_sample_rate,
+        "audioChannels": format.audio_channels,
+        "affectedRanges": affected_ranges,
+    }))
 }
 
 /// Merges a serialized [`openreelio_core::timeline::InspectionSummary`] into an
