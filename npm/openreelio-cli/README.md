@@ -52,8 +52,9 @@ pick() { node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8'))$1"; }
 
 # 1. Create a project and import media
 #    The sequence defaults to 30fps 1920x1080; --fps/--width/--height create it
-#    in the delivery format instead (or change it later with timeline set-format).
-openreelio-cli project create --name "Demo" --path ./demo [--fps 25 --width 1080 --height 1920]
+#    in the delivery format instead (or change it later with timeline set-format):
+#    openreelio-cli project create --name "Demo" --path ./demo --fps 25 --width 1080 --height 1920
+openreelio-cli project create --name "Demo" --path ./demo
 openreelio-cli asset import --path ./demo --file ./footage.mp4
 # -> {"status":"ok","createdIds":["01KZW64VJ4JPBS5B9YZEA335J8"],...}
 

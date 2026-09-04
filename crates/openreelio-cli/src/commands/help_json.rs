@@ -53,7 +53,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
         "description": "OpenReelio CLI — Headless AI agent-driven video editing",
         "commands": {
             "project.create": {
-                "description": "Create a new project. The sequence defaults to 30fps 1920x1080; pass --fps/--width/--height to match the delivery format, which is applied through the same logged, undoable 'SetSequenceFormat' command 'timeline set-format' runs",
+                "description": "Create a new project. The sequence defaults to 30fps 1920x1080; pass --fps/--width/--height to match the delivery format, which is applied through the same logged, undoable 'SetSequenceFormat' command 'timeline set-format' runs. When any of the three is given the result carries a nested 'sequenceFormat' object holding that command's own report — its 'status', 'opId', 'sequenceId', 'fps', 'fpsRatio', 'canvas', 'audioSampleRate', 'audioChannels' and whole-timeline 'affectedRanges' — exactly as 'timeline set-format' prints them at the top level; the key is absent when none was given",
                 "params": {
                     "name": { "type": "string", "required": true, "desc": "Project name" },
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
@@ -643,7 +643,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli plan template --type split-and-move"
             },
             "command.execute": {
-                "description": "Execute any supported backend edit command using the shared CommandPayload parser. Curated packs are resolved by that parser, so CreateCaption/UpdateCaption/ImportGeneratedCaptions accept stylePack, AddEffect accepts recipe, and AddTextClip accepts preset (its textData then carries only the overrides); see packs.list for the ids. The result reports 'affectedRanges' — the sorted, merged [{startSec,endSec}] the edit changed, including ripple shifts no id in 'changes' names — alongside the raw 'changes' list and the 'sequenceId' they were measured against, so the next inspection step knows where to look. The same ranges are written to <project>/.openreelio/cache/agent/last_affected_ranges.json",
+                "description": "Execute any supported backend edit command using the shared CommandPayload parser. Curated packs are resolved by that parser, so CreateCaption/UpdateCaption/ImportGeneratedCaptions accept stylePack, AddEffect accepts recipe, and AddTextClip accepts preset (its textData then carries only the overrides); see packs.list for the ids. The result reports 'affectedRanges' — the sorted, merged [{startSec,endSec}] the edit changed, including ripple shifts no id in 'changes' names — alongside the raw 'changes' list and the 'sequenceId' they were measured against, so the next inspection step knows where to look. The same ranges are written to <project>/.openreelio/cache/agent/last_affected_ranges.json. A payload that names no 'sequenceId' but whose command targets the active sequence by design ('SetSequenceFormat') is measured against that sequence and reports it; a payload that names no timeline at all — an asset import, a 'CreateSequence' — reports no sequence, no ranges and writes no hand-off",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "type": { "type": "string", "required": true, "desc": "Backend command type, e.g. SplitClip or AddMask" },

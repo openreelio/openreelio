@@ -579,14 +579,16 @@ is snapped in this order:
 
 | Rule | Condition | Result | Example |
 |------|-----------|--------|---------|
-| NTSC family | within `1e-3` of `n * 1000 / 1001` for the nearest integer `n` | `n * 1000 / 1001` | `29.97` → `30000/1001`, `23.976` → `24000/1001`, `59.94` → `60000/1001` |
-| Integer | a whole number | `n / 1` | `25` → `25/1`, `30` → `30/1` |
+| NTSC family | within `1e-3` of `n * 1000 / 1001` for the nearest integer `n`, where `n >= 2` | `n * 1000 / 1001` | `29.97` → `30000/1001`, `23.976` → `24000/1001`, `59.94` → `60000/1001` |
+| Integer | a whole number | `n / 1` | `1` → `1/1`, `25` → `25/1`, `30` → `30/1` |
 | Otherwise | anything else | `round(fps * 1000) / 1000`, reduced | `12.5` → `25/2` |
 
-Integers can never fall inside the NTSC window (`24` is 0.024 away from
-`23.976`), so the first rule never steals one. Writing `{"num": 2997, "den":
-100}` is a *different* rate from broadcast 29.97 — 30ppm fast — which is why the
-decimal spelling exists.
+An integer of 2 or more can never fall inside the NTSC window (`24` is 0.024
+away from `23.976`), so the first rule never steals one. `1` is the exception —
+it sits 0.000999 from `1000/1001`, inside the window — so the NTSC rule starts
+at 2 and `1` stays `1/1`. Writing `{"num": 2997, "den": 100}` is a *different*
+rate from broadcast 29.97 — 30ppm fast — which is why the decimal spelling
+exists.
 
 #### What does and does not move
 

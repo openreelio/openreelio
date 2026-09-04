@@ -524,11 +524,20 @@ impl SetSequenceFormatCommand {
             })?;
         }
 
-        let width = self.width.unwrap_or(current.canvas.width);
-        let height = self.height.unwrap_or(current.canvas.height);
-        Self::validate_canvas_dimension(width, "width")?;
-        Self::validate_canvas_dimension(height, "height")?;
-        next.canvas = Canvas::new(width, height);
+        // Only a *requested* edge is validated. A sequence already on disk may
+        // carry an odd or out-of-range canvas (an older project, a hand-edited
+        // snapshot), and refusing an unrelated `--fps 25` because of it would
+        // leave the caller with no way to change anything at all.
+        if let Some(width) = self.width {
+            Self::validate_canvas_dimension(width, "width")?;
+        }
+        if let Some(height) = self.height {
+            Self::validate_canvas_dimension(height, "height")?;
+        }
+        next.canvas = Canvas::new(
+            self.width.unwrap_or(current.canvas.width),
+            self.height.unwrap_or(current.canvas.height),
+        );
 
         if let Some(sample_rate) = self.audio_sample_rate {
             if !SUPPORTED_AUDIO_SAMPLE_RATES.contains(&sample_rate) {
@@ -645,15 +654,12 @@ impl Command for SetSequenceFormatCommand {
     }
 
     fn to_json(&self) -> serde_json::Value {
-        // The resolved sequence is preferred so a replayed op names the timeline
-        // it actually changed rather than "whichever was active at replay time".
-        let sequence_id = self
-            .resolved_sequence_id
-            .clone()
-            .or_else(|| self.sequence_id.clone());
-
+        // Only the requested sequence. `CommandExecutor` captures `to_json()`
+        // *before* `execute` runs, so `resolved_sequence_id` is always `None`
+        // here; a payload that names no sequence is completed from the
+        // `SequenceModified` change the execution reports.
         let mut payload = serde_json::Map::new();
-        if let Some(sequence_id) = sequence_id {
+        if let Some(sequence_id) = self.sequence_id.clone() {
             payload.insert(
                 "sequenceId".to_string(),
                 serde_json::Value::String(sequence_id),
@@ -1068,14 +1074,40 @@ mod tests {
     }
 
     #[test]
-    fn should_report_the_resolved_sequence_in_the_logged_payload() {
-        let (mut state, seq_id) = create_test_state_with_sequence();
+    fn should_omit_the_sequence_from_the_logged_payload_when_none_was_named() {
+        // `CommandExecutor` captures `to_json()` before `execute`, so the
+        // resolved sequence is never in it. The executor fills the gap from the
+        // `SequenceModified` change instead — see
+        // `should_replay_a_sequence_format_change_from_the_ops_log`.
+        let (mut state, _seq_id) = create_test_state_with_sequence();
 
         let mut cmd = SetSequenceFormatCommand::new().with_fps(FpsSpec::Decimal(25.0));
         assert!(cmd.to_json().get("sequenceId").is_none());
 
         cmd.execute(&mut state).expect("format applies");
-        assert_eq!(cmd.to_json()["sequenceId"], serde_json::json!(seq_id));
+        assert!(cmd.to_json().get("sequenceId").is_none());
+    }
+
+    #[test]
+    fn should_accept_a_frame_rate_change_on_a_sequence_whose_canvas_is_invalid() {
+        // A project written before the canvas rules existed, or hand-edited.
+        // Changing only the frame rate must not be refused because of it.
+        let (mut state, seq_id) = create_test_state_with_sequence();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .expect("sequence exists")
+            .format
+            .canvas = Canvas::new(1920, 1081);
+
+        SetSequenceFormatCommand::new()
+            .with_fps(FpsSpec::Decimal(25.0))
+            .execute(&mut state)
+            .expect("fps applies over an odd canvas");
+
+        let format = &state.sequences[&seq_id].format;
+        assert_eq!((format.fps.num, format.fps.den), (25, 1));
+        assert_eq!((format.canvas.width, format.canvas.height), (1920, 1081));
     }
 
     #[test]

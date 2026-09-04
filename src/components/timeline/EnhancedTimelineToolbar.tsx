@@ -50,6 +50,7 @@ import {
 } from '@/stores/editorToolStore';
 import { formatTimecode } from '@/utils/formatters';
 import { MIN_ZOOM, MAX_ZOOM } from './constants';
+import { DEFAULT_FPS } from '@/constants/precision';
 
 // =============================================================================
 // Types
@@ -80,7 +81,12 @@ export interface EnhancedTimelineToolbarProps {
   hasSelectedClips?: boolean;
   /** Whether the selected clips can create a multicam group */
   canCreateMulticamGroup?: boolean;
-  /** Current FPS for timecode display */
+  /**
+   * Frame rate the timecode and frame stepping use.
+   *
+   * Pass the active sequence's rate (see `useSequenceFps`); the constant is
+   * only a fallback for a caller that has no sequence.
+   */
   fps?: number;
   /** Total duration in seconds */
   duration?: number;
@@ -171,7 +177,7 @@ function EnhancedTimelineToolbarComponent({
   hasActiveSequence = false,
   hasSelectedClips = false,
   canCreateMulticamGroup = false,
-  fps = 30,
+  fps = DEFAULT_FPS,
   duration = 0,
 }: EnhancedTimelineToolbarProps) {
   // Store state

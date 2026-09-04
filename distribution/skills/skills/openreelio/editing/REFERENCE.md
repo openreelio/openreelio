@@ -49,7 +49,7 @@ enough to plan the next edit without dumping full state.
 
 ## Every backend command: `command execute`
 
-The convenience verbs cover the common cuts. The full editor surface — 79
+The convenience verbs cover the common cuts. The full editor surface — 80
 command types including effects, masks, keyframes, compound clips, adjustment
 layers, audio ducking, blend modes, markers, freeze frames, time remapping — is
 reachable directly.

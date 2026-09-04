@@ -24,6 +24,7 @@ import { useTimelineEngine } from '@/hooks/useTimelineEngine';
 import { useScrubbing } from '@/hooks/useScrubbing';
 import { useTimelineCoordinates } from '@/hooks/useTimelineCoordinates';
 import { usePlayheadDrag } from '@/hooks/usePlayheadDrag';
+import { useSequenceFps } from '@/hooks/useSequenceFps';
 import { useAssetDrop } from '@/hooks/useAssetDrop';
 import { useTimelineKeyboard } from '@/hooks/useTimelineKeyboard';
 import { useTimelineClipOperations } from '@/hooks/useTimelineClipOperations';
@@ -50,12 +51,7 @@ import { TimelineOperationsProvider, type TimelineOperations } from './TimelineO
 import type { ClipWaveformConfig, ClipThumbnailConfig, ClipAudioSettingsPatch } from './Clip';
 import type { TimelineProps } from './types';
 import type { Caption } from '@/types';
-import {
-  TRACK_HEADER_WIDTH,
-  TRACK_HEIGHT,
-  DEFAULT_TIMELINE_DURATION,
-  DEFAULT_FPS,
-} from './constants';
+import { TRACK_HEADER_WIDTH, TRACK_HEIGHT, DEFAULT_TIMELINE_DURATION } from './constants';
 import { resolveTrackDropTarget } from '@/utils/trackDropTarget';
 import {
   expandClipIdsWithLinkedCompanions,
@@ -437,6 +433,11 @@ export function Timeline({
   // ===========================================================================
   // Playback Engine
   // ===========================================================================
+  // Frame stepping, playhead snapping and the toolbar timecode all quantise to
+  // the grid the renderer will use, so they follow the sequence's own frame
+  // rate rather than a fixed 30.
+  const sequenceFps = useSequenceFps(sequence);
+
   const {
     currentTime: playhead,
     isPlaying,
@@ -444,7 +445,7 @@ export function Timeline({
     seek: setPlayhead,
     stepForward,
     stepBackward,
-  } = useTimelineEngine({ duration: playbackDuration, fps: DEFAULT_FPS });
+  } = useTimelineEngine({ duration: playbackDuration, fps: sequenceFps });
 
   const seekFromTimelineClick = useCallback(
     (time: number) => setPlayhead(time, 'timeline-click-release'),
@@ -534,6 +535,7 @@ export function Timeline({
     onSnapChange: setActiveSnapPoint,
     scrollContainerRef: playheadViewportRef,
     onScrollChange: setScrollX,
+    fps: sequenceFps,
   });
 
   // ===========================================================================
@@ -2021,7 +2023,7 @@ export function Timeline({
           hasActiveSequence={sequence !== null}
           hasSelectedClips={selectedClipIds.length > 0}
           canCreateMulticamGroup={selectedClipIds.length >= 2}
-          fps={DEFAULT_FPS}
+          fps={sequenceFps}
           duration={playbackDuration}
         />
 

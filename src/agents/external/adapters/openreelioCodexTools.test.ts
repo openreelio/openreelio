@@ -1333,3 +1333,103 @@ describe('openreelio.preview_describe', () => {
     expect(String(parsed.mediaInspection.message)).not.toContain('openreelio.frame_extract');
   });
 });
+
+describe('SetSequenceFormat plan targeting', () => {
+  const APPROVING_CONTEXT: OpenReelioCodexToolContext = {
+    ...CONTEXT,
+    approvalDecisionProvider: () => 'accept',
+  };
+
+  /** Answer every backend call one approved command makes. */
+  function stubApprovedCommand(): void {
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      switch (command) {
+        case 'get_project_state':
+          return Promise.resolve({ activeSequenceId: 'seq-1', assets: [], sequences: [] });
+        case 'validate_command_payload':
+          return Promise.resolve(null);
+        case 'create_external_agent_approval_token':
+          return Promise.resolve({
+            token: 'approval-token',
+            tokenId: 'token-1',
+            projectId: 'project-1',
+            runtimeId: 'codex',
+          });
+        case 'execute_agent_plan':
+          return Promise.resolve({
+            planId: 'plan-1',
+            success: true,
+            totalSteps: 1,
+            stepsCompleted: 1,
+            stepResults: [{ stepId: 'step-1', success: true, durationMs: 1, operationId: 'op-1' }],
+            operationIds: ['op-1'],
+            executionTimeMs: 1,
+            affectedRanges: [],
+          });
+        default:
+          return Promise.reject(new Error(`unexpected command '${command}'`));
+      }
+    });
+  }
+
+  it('should accept a plan that creates a sequence and then sets its format', async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+
+    const response = await callTool('plan_validate', {
+      plan: {
+        id: 'plan-1',
+        goal: 'Create a vertical 25fps timeline',
+        steps: [
+          {
+            id: 'step-1',
+            toolName: 'CreateSequence',
+            params: { name: 'Vertical', preset: '1080p' },
+          },
+          {
+            id: 'step-2',
+            toolName: 'SetSequenceFormat',
+            dependsOn: ['step-1'],
+            params: {
+              sequenceId: { $fromStep: 'step-1', $path: 'data.sequenceId' },
+              fps: 25,
+              width: 1080,
+              height: 1920,
+            },
+          },
+        ],
+      },
+    });
+
+    const result = JSON.parse(responseText(response)) as { status: string; message?: string };
+    expect(result.status).toBe('ok');
+  });
+
+  it('should keep an explicit non-active sequenceId on a format change', async () => {
+    stubApprovedCommand();
+
+    const state = await handleOpenReelioCodexDynamicToolCall(
+      callRequest('project_state'),
+      APPROVING_CONTEXT,
+    );
+    if (!state) {
+      throw new Error('Expected a project_state response');
+    }
+    const { contextToken } = JSON.parse(responseText(state)) as { contextToken: string };
+
+    await handleOpenReelioCodexDynamicToolCall(
+      callRequest('command_execute', {
+        commandType: 'SetSequenceFormat',
+        payload: { sequenceId: 'seq-2', fps: 25 },
+        contextToken,
+      }),
+      APPROVING_CONTEXT,
+    );
+
+    const applied = vi
+      .mocked(invoke)
+      .mock.calls.find(([name]) => name === 'execute_agent_plan')?.[1] as
+      | { plan: { steps: { params: Record<string, unknown> }[] } }
+      | undefined;
+    expect(applied?.plan.steps[0]?.params.sequenceId).toBe('seq-2');
+  });
+});

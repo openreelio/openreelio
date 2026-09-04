@@ -132,9 +132,18 @@ const MAX_SEQUENCE_FPS: f64 = 1000.0;
 ///
 /// The NTSC family is always written truncated (`23.976`, `29.97`, `59.94`),
 /// which is at most ~3e-5 away from the exact value. The neighbouring integer
-/// rate is 0.1% away — `24` is 0.024 from 23.976 — so this window separates the
-/// two families without ever capturing an integer.
+/// rate is 0.1% of `n` away — `24` is 0.024 from 23.976 — so this window
+/// separates the two families for every `n >= 2`. It does *not* separate them
+/// at `n == 1`: `1` is only 0.000999 from `1000/1001`, inside the window, so
+/// [`MIN_NTSC_FPS`] excludes that rate from the rule instead.
 const NTSC_FPS_TOLERANCE: f64 = 1e-3;
+
+/// Smallest rate the NTSC rule may claim.
+///
+/// `1000/1001` is closer to `1` than [`NTSC_FPS_TOLERANCE`], so without this
+/// floor a requested `1` fps would silently become `1000/1001`. No NTSC rate
+/// below 2 fps exists, so nothing real is lost by refusing the rule there.
+const MIN_NTSC_FPS: f64 = 2.0;
 
 /// Denominator used for a decimal that matches no standard rate.
 const FALLBACK_FPS_DENOMINATOR: i32 = 1000;
@@ -146,11 +155,13 @@ impl FpsSpec {
     /// snapped, in this order:
     ///
     /// 1. **NTSC family** — within [`NTSC_FPS_TOLERANCE`] of `n * 1000 / 1001`
-    ///    for the nearest integer `n`, it becomes `n * 1000 / 1001`. So `23.976`
-    ///    → `24000/1001`, `29.97` → `30000/1001`, `59.94` → `60000/1001`.
-    /// 2. **Integer** — a whole number becomes `n / 1`. `25` → `25/1`, `30` →
-    ///    `30/1`. Integers can never fall in the NTSC window, so rule 1 does not
-    ///    steal them.
+    ///    for the nearest integer `n` of at least [`MIN_NTSC_FPS`], it becomes
+    ///    `n * 1000 / 1001`. So `23.976` → `24000/1001`, `29.97` →
+    ///    `30000/1001`, `59.94` → `60000/1001`.
+    /// 2. **Integer** — a whole number becomes `n / 1`. `1` → `1/1`, `25` →
+    ///    `25/1`, `30` → `30/1`. Above [`MIN_NTSC_FPS`] an integer can never
+    ///    fall in the NTSC window, and `1` is kept out of it by that floor, so
+    ///    rule 1 never steals an integer.
     /// 3. **Anything else** — `round(fps * 1000) / 1000`, reduced. `12.5` →
     ///    `25/2`. The rate is then within 0.0005fps of what was asked for.
     ///
@@ -177,7 +188,9 @@ impl FpsSpec {
         let nearest = value.round();
         // `nearest` is at most 1000.0 here, so the casts and the `* 1000` below
         // stay far inside i32.
-        if nearest >= 1.0 && (value - nearest * 1000.0 / 1001.0).abs() <= NTSC_FPS_TOLERANCE {
+        if nearest >= MIN_NTSC_FPS
+            && (value - nearest * 1000.0 / 1001.0).abs() <= NTSC_FPS_TOLERANCE
+        {
             return Some(Ratio::new(nearest as i32 * 1000, 1001));
         }
 
@@ -2213,7 +2226,7 @@ mod tests {
 
     #[test]
     fn should_keep_a_whole_frame_rate_as_an_integer_ratio() {
-        for whole in [24.0, 25.0, 30.0, 50.0, 60.0] {
+        for whole in [1.0, 2.0, 24.0, 25.0, 30.0, 50.0, 60.0] {
             let ratio = FpsSpec::Decimal(whole)
                 .to_ratio()
                 .unwrap_or_else(|| panic!("{whole} should resolve"));

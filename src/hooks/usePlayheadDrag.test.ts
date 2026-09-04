@@ -1379,4 +1379,74 @@ describe('usePlayheadDrag', () => {
       });
     });
   });
+  // ===========================================================================
+  // Frame-Accurate Seeking Tests
+  // ===========================================================================
+
+  describe('frame-accurate seeking', () => {
+    // Container left 200, trackHeaderWidth 192, zoom 100px/s, so clientX 495
+    // is 1.03s: frame 26 at 25 fps (1.04s) and frame 31 at 30 fps (1.0333s).
+    const CLIENT_X_AT_1_03_SEC = 495;
+
+    it('should snap to the frame grid of the fps it was given', () => {
+      const options = createDefaultOptions();
+      const { result } = renderHook(() =>
+        usePlayheadDrag({ ...options, frameAccurateSeeking: true, fps: 25 }),
+      );
+
+      act(() => {
+        result.current.handleDragStart(createMockMouseEvent({ clientX: CLIENT_X_AT_1_03_SEC }));
+      });
+
+      expect(options.seek).toHaveBeenCalledTimes(1);
+      expect(options.seek.mock.calls[0][0]).toBeCloseTo(26 / 25, 6);
+    });
+
+    it('should snap to a 30 fps grid when that is the sequence rate', () => {
+      const options = createDefaultOptions();
+      const { result } = renderHook(() =>
+        usePlayheadDrag({ ...options, frameAccurateSeeking: true, fps: 30 }),
+      );
+
+      act(() => {
+        result.current.handleDragStart(createMockMouseEvent({ clientX: CLIENT_X_AT_1_03_SEC }));
+      });
+
+      expect(options.seek.mock.calls[0][0]).toBeCloseTo(31 / 30, 6);
+    });
+
+    it('should keep snapping to the 25 fps grid while the drag moves', () => {
+      const options = createDefaultOptions();
+      const { result } = renderHook(() =>
+        usePlayheadDrag({ ...options, frameAccurateSeeking: true, fps: 25 }),
+      );
+
+      act(() => {
+        result.current.handleDragStart(createMockMouseEvent({ clientX: 392 }));
+      });
+
+      const moveHandler = addEventListenerSpy.mock.calls.find(
+        ([type]) => type === 'mousemove',
+      )?.[1] as (event: MouseEvent) => void;
+
+      act(() => {
+        moveHandler(createMockNativeEvent({ clientX: CLIENT_X_AT_1_03_SEC }) as MouseEvent);
+        flushRaf();
+      });
+
+      const lastSeek = options.seek.mock.calls.at(-1)?.[0] as number;
+      expect(lastSeek).toBeCloseTo(26 / 25, 6);
+    });
+
+    it('should leave the time alone when frame-accurate seeking is off', () => {
+      const options = createDefaultOptions();
+      const { result } = renderHook(() => usePlayheadDrag({ ...options, fps: 25 }));
+
+      act(() => {
+        result.current.handleDragStart(createMockMouseEvent({ clientX: CLIENT_X_AT_1_03_SEC }));
+      });
+
+      expect(options.seek.mock.calls[0][0]).toBeCloseTo(1.03, 6);
+    });
+  });
 });

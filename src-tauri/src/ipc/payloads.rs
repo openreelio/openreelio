@@ -1646,6 +1646,26 @@ impl CommandPayload {
         Ok(parsed)
     }
 
+    /// Whether this payload leaves the sequence to the project's active one.
+    ///
+    /// Every surface that applies a command has to know which timeline the edit
+    /// is measured against *before* it runs, and it reads that off the raw
+    /// payload. A payload that carries no `sequenceId` normally names no
+    /// timeline at all — an asset import, a `CreateSequence` — and is reported
+    /// with no sequence and no affected ranges rather than a guess.
+    ///
+    /// `SetSequenceFormat` is the exception: its `sequenceId` is optional and
+    /// the command itself falls back to `ProjectState::active_sequence_id`. It
+    /// is the only such payload today — every other sequence-scoped payload
+    /// declares `sequence_id` as required and fails to parse without one — so
+    /// this is a match rather than a set of type names.
+    pub fn targets_active_sequence(&self) -> bool {
+        match self {
+            Self::SetSequenceFormat(payload) => payload.sequence_id.is_none(),
+            _ => false,
+        }
+    }
+
     /// Expands curated caption packs and transition recipes into explicit values.
     ///
     /// This runs at the single strict-parsing chokepoint every JSON entry point

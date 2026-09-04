@@ -176,6 +176,17 @@ const WHISPER_MODEL_SELECTION_PREFERENCE = [
   'tiny',
 ];
 
+/**
+ * Commands whose `sequenceId` is rewritten to the active timeline, and which a
+ * plan may therefore not mix with a `CreateSequence` step.
+ *
+ * `SetSequenceFormat` is deliberately absent: it is the one command that
+ * legitimately targets a sequence other than the active one — setting the
+ * format of the sequence a plan just created — and its backend payload already
+ * resolves the active sequence itself when `sequenceId` is omitted. Listing it
+ * here made `[CreateSequence, SetSequenceFormat]` a refused plan and overwrote
+ * an explicit `sequenceId` with the active one.
+ */
 const ACTIVE_TIMELINE_SCOPED_COMMAND_TYPES = new Set<string>([
   'InsertClip',
   'InsertEdit',
@@ -216,7 +227,6 @@ const ACTIVE_TIMELINE_SCOPED_COMMAND_TYPES = new Set<string>([
   'SetCaptionTrackLanguage',
   'SetClipBlendMode',
   'SetMasterVolume',
-  'SetSequenceFormat',
   'CreateTrack',
   'RemoveTrack',
   'RenameTrack',

@@ -11517,3 +11517,71 @@ fn test_set_sequence_format_refuses_an_unusable_format() {
 
     assert_eq!(sequence_format(&path), (30.0, 1920, 1080));
 }
+
+/// A `SetSequenceFormat` payload names no sequence, and the command resolves the
+/// active one. `command execute` has to resolve it the same way, or the edit
+/// applies while the result reports no sequence, no ranges, and writes no
+/// `--affected` hand-off — leaving the agent with nothing to look at.
+#[test]
+fn test_command_execute_resolves_the_active_sequence_for_a_format_change() {
+    let Some((dir, path, sequence_id, _track_id, _outgoing)) =
+        create_two_shot_project("cmd_active_seq")
+    else {
+        return;
+    };
+
+    let result = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetSequenceFormat",
+        "--payload",
+        r#"{"fps":25}"#,
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["sequenceId"], sequence_id,
+        "an omitted sequenceId must resolve to the active sequence: {result}"
+    );
+
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+    assert_eq!(info["fps"], 25.0);
+    let ranges = affected_pairs(&result["affectedRanges"]);
+    assert_eq!(
+        ranges.len(),
+        1,
+        "a format change reaches every frame, so it is one range: {result}"
+    );
+    assert_eq!(ranges[0].0, 0.0);
+    assert_eq!(
+        ranges[0].1,
+        info["durationSec"].as_f64().expect("durationSec"),
+        "the reported range must span the whole timeline: {result}"
+    );
+
+    // The hand-off is what `frame extract --affected` reads; without it the
+    // sampler refuses rather than showing the change.
+    let record = last_affected_record(&path);
+    assert_eq!(record["sequenceId"], sequence_id);
+    assert_eq!(record["opIds"][0], result["opId"]);
+    assert_eq!(affected_pairs(&record["affectedRanges"]), ranges);
+
+    let sheet_path = dir.path().join("format_affected.jpg");
+    let sheet = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--affected",
+        "--grid",
+        "auto",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+    assert_eq!(sheet["status"], "ok");
+    assert_eq!(sheet["sampler"]["kinds"][0], "affected");
+    assert!(sheet_path.exists());
+}

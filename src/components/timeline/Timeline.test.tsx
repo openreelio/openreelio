@@ -1709,4 +1709,81 @@ describe('Timeline', () => {
       expect(onAssetDrop).not.toHaveBeenCalled();
     });
   });
+  // ===========================================================================
+  // Sequence Frame Rate Tests
+  // ===========================================================================
+
+  describe('sequence frame rate', () => {
+    /** A PAL sequence: 25/1 rather than the 30/1 the timeline used to assume. */
+    const palSequence: Sequence = {
+      ...mockSequence,
+      format: { ...mockSequence.format, fps: { num: 25, den: 1 } },
+    };
+
+    function activate(sequence: Sequence): void {
+      useProjectStore.setState({
+        sequences: new Map([[sequence.id, sequence]]),
+        activeSequenceId: sequence.id,
+      });
+    }
+
+    it('should step one 25 fps frame when ArrowRight is pressed', () => {
+      activate(palSequence);
+      render(<Timeline sequence={palSequence} />);
+
+      act(() => {
+        fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'ArrowRight' });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeCloseTo(1 / 25, 6);
+    });
+
+    it('should step one 30 fps frame when the sequence declares 30 fps', () => {
+      activate(mockSequence);
+      render(<Timeline sequence={mockSequence} />);
+
+      act(() => {
+        fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'ArrowRight' });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeCloseTo(1 / 30, 6);
+    });
+
+    it('should step back one 25 fps frame when ArrowLeft is pressed', () => {
+      activate(palSequence);
+      usePlaybackStore.setState({ currentTime: 1 });
+      render(<Timeline sequence={palSequence} />);
+
+      act(() => {
+        fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'ArrowLeft' });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeCloseTo(1 - 1 / 25, 6);
+    });
+
+    it('should count toolbar timecode frames at the sequence frame rate', () => {
+      activate(palSequence);
+      // 0.4s is frame 10 at 25 fps and frame 12 at 30 fps.
+      usePlaybackStore.setState({ currentTime: 0.4 });
+      render(<Timeline sequence={palSequence} />);
+
+      expect(screen.getByText('00:00:00:10')).toBeInTheDocument();
+      expect(screen.queryByText('00:00:00:12')).not.toBeInTheDocument();
+    });
+
+    it('should fall back to 30 fps when the sequence declares an unusable rate', () => {
+      const broken: Sequence = {
+        ...mockSequence,
+        format: { ...mockSequence.format, fps: { num: 25, den: 0 } },
+      };
+      activate(broken);
+      render(<Timeline sequence={broken} />);
+
+      act(() => {
+        fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'ArrowRight' });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeCloseTo(1 / 30, 6);
+    });
+  });
 });

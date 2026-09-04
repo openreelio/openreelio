@@ -12,7 +12,7 @@ import {
   type PlaybackSeekEventDetail,
   usePlaybackStore,
 } from '@/stores/playbackStore';
-import { PRECISION, isApproximatelyEqual } from '@/constants/precision';
+import { PRECISION, DEFAULT_FPS, isApproximatelyEqual } from '@/constants/precision';
 
 // =============================================================================
 // Types
@@ -21,7 +21,12 @@ import { PRECISION, isApproximatelyEqual } from '@/constants/precision';
 export interface UseTimelineEngineOptions {
   /** Total duration in seconds */
   duration: number;
-  /** Frames per second for frame stepping */
+  /**
+   * Frames per second for frame stepping.
+   *
+   * Pass the active sequence's rate (see `useSequenceFps`); the constant is
+   * only a fallback for a caller that has no sequence.
+   */
   fps?: number;
   /** Whether to auto-dispose on unmount */
   autoDispose?: boolean;
@@ -69,7 +74,7 @@ export interface UseTimelineEngineReturn {
 // =============================================================================
 
 export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelineEngineReturn {
-  const { duration, fps = 30, autoDispose = true } = options;
+  const { duration, fps = DEFAULT_FPS, autoDispose = true } = options;
 
   // Get store actions and state
   const playbackStore = usePlaybackStore();
