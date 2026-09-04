@@ -805,6 +805,28 @@ mod tests {
         assert!(retrieved.is_some());
     }
 
+    /// Polls the pool until at least `count` tasks have completed.
+    ///
+    /// A fixed sleep is not enough on a loaded CI runner: the simulated work
+    /// is scheduled on the runtime and can finish well after 50 ms, which made
+    /// the completion assertions below flaky. Polling with a generous deadline
+    /// keeps the tests fast when the runtime is idle and correct when it is not.
+    async fn wait_for_completed(pool: &WorkerPool, count: usize) -> Vec<ParallelTask> {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            let completed = pool.get_tasks_by_status(TaskStatus::Completed).await;
+            if completed.len() >= count {
+                return completed;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "expected {count} completed task(s), found {}",
+                completed.len()
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     async fn test_worker_pool_get_tasks_by_status() {
         let pool = WorkerPool::new();
@@ -813,10 +835,7 @@ mod tests {
         let task = ParallelTask::new(TaskType::Rendering, TaskPriority::Normal);
         pool.submit(task).await.unwrap();
 
-        // Wait for completion
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        let completed = pool.get_tasks_by_status(TaskStatus::Completed).await;
+        let completed = wait_for_completed(&pool, 1).await;
         assert!(!completed.is_empty());
     }
 
@@ -824,10 +843,10 @@ mod tests {
     async fn test_worker_pool_cleanup() {
         let pool = WorkerPool::new();
 
-        // Submit and wait for task
+        // Submit and wait for the task to complete
         let task = ParallelTask::new(TaskType::Compute, TaskPriority::Normal);
         pool.submit(task).await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        wait_for_completed(&pool, 1).await;
 
         // Cleanup
         let cleaned = pool.cleanup_completed().await;
