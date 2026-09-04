@@ -13,8 +13,8 @@ use crate::core::ffmpeg::SharedFFmpegState;
 use crate::core::render::frame_probe::{FrameOutput, FrameProbeProject};
 use crate::ipc::commands::analysis::{resolve_ffmpeg_runner_for, resolve_project_snapshot};
 use crate::ipc::dto::frame_probe::{
-    check_asset_media, collect_images, confine_requested_file, plan_frame_probe,
-    TimelineFrameProbeRequestDto, TimelineFrameProbeResultDto,
+    check_asset_media, check_sequence_media, collect_images, confine_requested_file,
+    plan_frame_probe, TimelineFrameProbeRequestDto, TimelineFrameProbeResultDto,
 };
 use crate::AppState;
 
@@ -36,7 +36,6 @@ pub async fn extract_timeline_frames(
     let inline = request.inline;
 
     let (project_path, project_state) = resolve_project_snapshot(&state).await?;
-    let runner = resolve_ffmpeg_runner_for(&ffmpeg_state, "frame extraction").await?;
 
     // A rendered file is a caller-supplied path handed straight to FFmpeg, so it
     // is confined outright. Resolving the project root and the path against it
@@ -50,6 +49,19 @@ pub async fn extract_timeline_frames(
     if let Some(asset_id) = request.asset.as_deref() {
         check_asset_media(&project_path, &project_state, asset_id)?;
     }
+    // A timeline still is a render, and a render reads every asset the graph
+    // references — not just an explicitly named one. Checking only `asset` let a
+    // sequence of off-host clips reach FFmpeg, where the stat of a UNC path is
+    // itself the outbound connection this rule exists to prevent.
+    if request.file.is_none() && request.asset.is_none() {
+        if let Some(sequence_id) = request
+            .sequence
+            .clone()
+            .or_else(|| project_state.active_sequence_id.clone())
+        {
+            check_sequence_media(&project_path, &project_state, &sequence_id)?;
+        }
+    }
 
     let (plan, output) = {
         let project_path = project_path.clone();
@@ -58,6 +70,18 @@ pub async fn extract_timeline_frames(
         })
         .await
         .map_err(|error| format!("Frame probe planning failed: {error}"))??
+    };
+
+    // Resolved last, after confinement and planning: a machine without FFmpeg
+    // must be told which argument is wrong before it is told what is missing,
+    // or every malformed request reads as "FFmpeg not found". `verify_sequence`
+    // orders itself the same way.
+    let runner = match resolve_ffmpeg_runner_for(&ffmpeg_state, "frame extraction").await {
+        Ok(runner) => runner,
+        Err(error) => {
+            discard_frame_output(output).await;
+            return Err(error);
+        }
     };
 
     let probe_project = FrameProbeProject {

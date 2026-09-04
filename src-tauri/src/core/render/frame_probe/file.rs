@@ -5,7 +5,7 @@
 //! judge sees is exactly what `verify --file` measured. All times are in the
 //! file's own timebase.
 
-use super::sampler::{Sample, SampleReason, SamplerOutcome, SamplerReport};
+use super::sampler::{Sample, SampleReason, SamplerOutcome, SamplerReport, CUT_LEAD_FRAMES};
 use super::sheet::{build_contact_sheet, grid_cell_extract_width, resolve_cell_size, CellStaging};
 use super::{
     batch_frame_name, create_batch_output_dir, ensure_frame_written, remove_stale_output,
@@ -230,17 +230,29 @@ pub(super) struct TranslatedSample {
 /// point: a sample nudged to the nearest frame the file happens to hold would
 /// come back labelled with the timeline second it was *supposed* to show, which
 /// is the one mistake a judging tool must not make.
+///
+/// The bound is the last *decodable* time, a frame and a half back from the end
+/// of the video, not the end itself. FFmpeg's seek resolves forward, so a
+/// request inside the final frame interval lands past the last frame, exits 0
+/// and writes nothing — which reached the caller as a hard extraction failure
+/// on an otherwise correct render. Those times are counted as dropped like any
+/// other the file does not hold, which is what `droppedOutsideFile` reports.
 pub(super) fn translate_samples(
     samples: &[Sample],
     range_start_sec: f64,
     video_end_sec: f64,
+    frame_sec: f64,
 ) -> (Vec<TranslatedSample>, usize) {
     let mut translated = Vec::with_capacity(samples.len());
     let mut dropped = 0_usize;
+    // Never negative: a file shorter than the backoff still holds its first
+    // frame, and refusing every sample of it would be a worse answer than
+    // letting the extraction report what it found.
+    let last_decodable_sec = (video_end_sec - frame_sec * CUT_LEAD_FRAMES).max(0.0);
 
     for sample in samples {
         let file_sec = sample.time_sec - range_start_sec;
-        if !file_sec.is_finite() || file_sec < 0.0 || file_sec >= video_end_sec {
+        if !file_sec.is_finite() || file_sec < 0.0 || file_sec > last_decodable_sec + TIME_EPSILON {
             dropped += 1;
             continue;
         }
@@ -277,17 +289,19 @@ pub(super) async fn run_file_mode(
         .collect::<Vec<String>>();
 
     match selection {
-        Selection::AssetTime { .. } => Err(FrameProbeError::new(
-            "--file reads a rendered video, so it cannot be combined with --asset".to_string(),
-        )),
+        Selection::AssetTime { .. } => Err(FrameProbeError::new(format!(
+            "{} reads a rendered video, so it cannot be combined with {}",
+            request.names.file, request.names.asset
+        ))),
         // Unreachable through `resolve_selection`, which routes a sampled file
-        // to `run_file_sampled_mode` and refuses one without `--file-range` up
+        // to `run_file_sampled_mode` and refuses one that declares no range up
         // front; restated here so the refusal survives a future caller that
         // builds a `Selection` some other way.
-        Selection::Sampled { .. } => Err(FrameProbeError::new(
-            "--file reads a rendered video and has no timeline of its own to sample. Declare the timeline range it covers with --file-range <START> <END>, and the samplers read the timeline over that range and translate every time into the file."
-                .to_string(),
-        )),
+        Selection::Sampled { .. } => Err(FrameProbeError::new(format!(
+            "{} reads a rendered video and has no timeline of its own to sample. Declare the timeline range it covers with {}, and the samplers read the timeline over that range and translate every time into the file.",
+            request.names.file,
+            request.names.file_range_values()
+        ))),
         Selection::SingleTime(time) => {
             source.ensure_times_inside(std::slice::from_ref(time))?;
             let output_path = resolve_single_output_path(&request.out, *time, format)?;
@@ -391,6 +405,7 @@ pub(super) async fn run_file_sampled_mode(
         &outcome.samples,
         timeline_range.start_sec,
         source.video_end_sec(),
+        source.frame_sec(),
     );
     if samples.is_empty() {
         return Err(FrameProbeError::new(format!(
@@ -496,7 +511,21 @@ async fn run_file_grid_mode(
         source
             .extract(runner, time, &staging.extract_path(index), extract_width)
             .await?;
-        cell_paths.push(staging.finish(runner, index, time).await?);
+        // A translated cell is labelled with the second of the *timeline* it
+        // shows, not with its offset into the file: the file's own timebase is
+        // an artefact of where the render started, and a judge quoting a burnt-in
+        // number has to be quoting one that means something in the edit. The
+        // file-relative time is still reported as `fileSec` in the JSON.
+        cell_paths.push(
+            staging
+                .finish(
+                    runner,
+                    index,
+                    time,
+                    requested_cell.timeline_sec.unwrap_or(time),
+                )
+                .await?,
+        );
         cells.push(FileGridCell {
             index,
             row: index / columns,
@@ -614,7 +643,7 @@ mod tests {
             sample(4.0, SampleReason::CutAfter),
         ];
 
-        let (translated, dropped) = translate_samples(&samples, 2.0, 4.0);
+        let (translated, dropped) = translate_samples(&samples, 2.0, 4.0, FRAME_SEC);
 
         assert_eq!(dropped, 0);
         assert_eq!(translated.len(), 2);
@@ -634,11 +663,15 @@ mod tests {
             sample(3.0, SampleReason::ShotMid),
             // At the file's end, which holds no frame: seeks resolve forward.
             sample(6.0, SampleReason::ShotMid),
+            // Inside the file's LAST frame interval. FFmpeg's forward seek lands
+            // past the final frame here and writes nothing, so this used to fail
+            // the whole extraction on an otherwise correct render.
+            sample(5.95, SampleReason::ShotMid),
             // Past it.
             sample(9.0, SampleReason::ShotMid),
         ];
 
-        let (translated, dropped) = translate_samples(&samples, 2.0, 4.0);
+        let (translated, dropped) = translate_samples(&samples, 2.0, 4.0, FRAME_SEC);
 
         assert_eq!(
             translated
@@ -646,9 +679,9 @@ mod tests {
                 .map(|sample| sample.timeline_sec)
                 .collect::<Vec<_>>(),
             vec![3.0],
-            "only the sample inside [start, start + video duration) survives"
+            "only the sample the file can still be decoded at survives"
         );
-        assert_eq!(dropped, 3);
+        assert_eq!(dropped, 4);
     }
 
     #[test]

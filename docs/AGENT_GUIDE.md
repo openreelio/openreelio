@@ -578,12 +578,15 @@ The lead before a cut is a frame and a half because seeks resolve **forward**: a
 smaller backoff lands on the incoming shot, and both samples then show the same
 picture. Samplers union, deduplicate and sort; `--limit <N>` thins an oversized
 selection evenly while keeping its first and last entry; and the payload gains
-`sampler: {kinds, candidates, selected, limited, affectedRanges?}` so a thinned
-list cannot be mistaken for a short timeline — `--range` reports
-`kinds: ["ranges"]` and echoes the ranges it was handed. They are refused
-alongside `--time`, `--times`, `--between`, `--count`, `--asset` and `--file`,
-all of which name their own times, and `--range` and `--affected` are refused
-together.
+`sampler: {kinds, candidates, selected, limited, affectedRanges?, droppedOutsideFile?}`
+so a thinned list cannot be mistaken for a short timeline — `--range` reports
+`kinds: ["ranges"]` and echoes the ranges it was handed, and
+`droppedOutsideFile` appears on a `--file-range` run to count the samples the
+rendered file turned out not to hold. Samplers are refused alongside `--time`,
+`--times`, `--between`, `--count` and `--asset`, all of which name their own
+times, and `--range` and `--affected` are refused together. `--file` is refused
+too *unless* it is paired with `--file-range START END`, which is what supplies
+the timeline the file itself does not carry — see below.
 
 **After an apply, reach for `--range` before `--affected`.** `--range` takes the
 `affectedRanges` the edit itself returned and reads no hand-off file.
@@ -696,6 +699,26 @@ vertical edit is never pillarboxed into a landscape frame. Combine it with
 to stderr. The result carries `outputPath`, `durationSec`, `fileSize`,
 `encodingTimeSec`, `planHash` and `warnings`. `render presets` lists the
 presets; `render graph` prints the render graph without encoding anything.
+
+**Agent draft renders are bounded twice.** A render whose output lands in the
+project's own agent render directory — `.openreelio/cache/renders/agent/`, which
+is where `openreelio.render.range` and the in-app bridge's `render_proxy` write,
+and where the caller does not choose the path — may cover at most **300 s of
+timeline in one call**, and only the **8 newest** drafts are kept. Both bounds
+come from `MAX_AGENT_RENDER_RANGE_SEC` and `MAX_AGENT_RENDERS` in the core, and
+neither applies to a normal export to a path you name: a draft is a look at one
+moment, so render around the question rather than over the whole edit, and use
+the reported `outputPath` before it ages out.
+
+Once the draft exists, judge it without re-rendering. The unconditional look is
+an even sweep of the file — `frame extract --file <RENDER> --between 0 <DURATION>
+--grid 4x3 --label-cells` — which always has something to show. When the range
+you rendered contains cuts, captions or transitions, judge those instead by
+adding `--file-range START END` (the start you asked for and the duration the
+render reported) with `--at-cuts`, `--at-captions`, `--at-transitions` or
+`--per-shot` and `--grid auto`. A sampler over a range that holds no such event
+is an error, not an empty sheet, so it is the second choice rather than the
+first.
 
 ## 6. The verify loop
 
@@ -1224,11 +1247,25 @@ the same report document the CLI prints — so an MCP client gets the fix loop
 without shelling out. `file` must be inside the project directory, so render
 into the project before verifying.
 
+**`openreelio.render.range`** draws the draft the judge loop looks at, over the
+same core path as `render start --proxy --start/--end`. It accepts
+`{start, end, preset?: "proxy_480p" | "mp4_draft", sequenceId?}` and returns
+`{outputPath, durationSec, fileSize, encodingTimeSec, warnings, timelineRange,
+nextStep}`. The caller does not choose where it lands: the file is written to
+`.openreelio/cache/renders/agent/proxy-<stamp>.mp4`, only the 8 newest drafts
+are kept, and one call may cover at most 300 s of timeline — see
+[Draft renders](#draft-renders). `nextStep` names the follow-ups: an even sweep
+of the file with `frame.extract {file, between: [0, durationSec], grid: "4x3"}`,
+which always has something to show; `frame.extract {file, fileRange: [start,
+start + durationSec], atCuts: true, grid: "auto"}` when the rendered range holds
+cuts; and `verify {file}` for the measurements.
+
 **`openreelio.frame.extract`** is the judge loop over MCP: it answers with the
 picture itself, as an MCP `image` content block, so a vision model can look at
 the edit without a Bash or file-reading tool. It accepts
-`{time?, times?[], grid?, between?[start,end], file?, sequenceId?, mode?,
-cellWidth?, cellHeight?, labelCells?, maxWidth?}` plus the samplers —
+`{time?, times?[], grid?, between?[start,end], file?, fileRange?[start,end],
+assetId?, sourceTime?, sequenceId?, mode?, cellWidth?, cellHeight?, labelCells?,
+maxWidth?}` plus the samplers —
 `{ranges?[{startSec, endSec}], affected?, afterOp?, atCuts?, atTransitions?,
 atCaptions?, atMarkers?, perShot?, around?, span?, aroundCount?, limit?}` and
 `grid: "auto"` — the same selectors as

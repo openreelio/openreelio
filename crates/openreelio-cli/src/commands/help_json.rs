@@ -3,6 +3,7 @@
 //! This enables AI agents to discover and use the CLI without parsing --help text.
 //! The schema includes command names, descriptions, parameters, types, and examples.
 
+use openreelio_core::qc::{QCEngine, OPT_IN_CHECK_IDS};
 use openreelio_core::style::{pacing_profile_ids, text_preset_ids, NO_TEXT_PRESET, TEXT_PRESETS};
 
 use crate::output;
@@ -43,6 +44,45 @@ fn text_preset_desc() -> String {
         NO_TEXT_PRESET,
         TEXT_PRESETS.len()
     )
+}
+
+/// Every QC check id the `verify` engine registers, in registration order.
+///
+/// Read from the engine rather than restated, because the hand-kept copy in
+/// this schema had already lost `transition.no_handles`: an agent that asked
+/// the schema for the full set never learned the check existed, so it could
+/// neither select nor skip it by id.
+fn qc_check_ids() -> Vec<String> {
+    QCEngine::new()
+        .rules()
+        .iter()
+        .map(|rule| rule.check_id().to_string())
+        .collect()
+}
+
+/// `verify --checks` description, listing exactly the registered check ids.
+fn verify_checks_desc() -> String {
+    format!(
+        "Comma-separated check IDs to run exclusively ({} are opt-in and only run when named \
+         here): {}",
+        OPT_IN_CHECK_IDS.join(" and "),
+        qc_check_ids().join(", ")
+    )
+}
+
+/// The `affectedRanges` sentence every mutating edit verb carries.
+///
+/// Stated once so the `timeline`, `text` and `caption` verbs cannot drift apart
+/// in how they describe the one key that tells an agent where to look next.
+const AFFECTED_RANGES_NOTE: &str = " Reports 'affectedRanges' — the sorted, merged \
+     [{startSec,endSec}] stretches of timeline this edit changed, including ripple shifts no id \
+     in the result names, measured against the sequence the edit ran on. Pass them straight to \
+     'frame extract --range START END' to inspect exactly what moved; the same ranges are also \
+     written to <project>/.openreelio/cache/agent/last_affected_ranges.json.";
+
+/// One mutating verb's description: its own summary plus the shared ranges note.
+fn edit_desc(summary: &str) -> String {
+    format!("{summary}{AFFECTED_RANGES_NOTE}")
 }
 
 pub(crate) fn build_schema() -> serde_json::Value {
@@ -240,7 +280,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline tracks --path ./project"
             },
             "timeline.insert": {
-                "description": "Insert a clip onto the timeline from an asset",
+                "description": edit_desc("Insert a clip onto the timeline from an asset"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "asset": { "type": "string", "required": true, "desc": "Asset ID to insert" },
@@ -251,7 +291,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline insert --path ./project --asset asset_001 --track track_v1 --at 0.0"
             },
             "timeline.remove": {
-                "description": "Remove a clip from the timeline",
+                "description": edit_desc("Remove a clip from the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -261,7 +301,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline remove --path ./project --clip clip_001 --track track_v1"
             },
             "timeline.move": {
-                "description": "Move a clip to a new timeline position",
+                "description": edit_desc("Move a clip to a new timeline position"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -273,7 +313,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline move --path ./project --clip clip_001 --to 10.0 --track track_v1"
             },
             "timeline.trim": {
-                "description": "Trim a clip's source in/out points",
+                "description": edit_desc("Trim a clip's source in/out points"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -285,7 +325,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline trim --path ./project --clip clip_001 --track track_v1 --source-in 2.0 --source-out 8.0"
             },
             "timeline.split": {
-                "description": "Split a clip at a specific timeline position",
+                "description": edit_desc("Split a clip at a specific timeline position"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -296,7 +336,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline split --path ./project --clip clip_001 --track track_v1 --at 5.0"
             },
             "timeline.speed": {
-                "description": "Change clip playback speed",
+                "description": edit_desc("Change clip playback speed"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
@@ -308,7 +348,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline speed --path ./project --clip clip_001 --track track_v1 --speed 2.0"
             },
             "timeline.add-track": {
-                "description": "Add a new track to the timeline",
+                "description": edit_desc("Add a new track to the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "kind": { "type": "string", "required": true, "desc": "Track type: video, audio, caption, or overlay" },
@@ -318,7 +358,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline add-track --path ./project --kind video --name \"Video 2\""
             },
             "timeline.remove-track": {
-                "description": "Remove a track from the timeline",
+                "description": edit_desc("Remove a track from the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "track": { "type": "string", "required": true, "desc": "Track ID" },
@@ -354,7 +394,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline redo --path ./project"
             },
             "caption.add": {
-                "description": "Add a caption to the timeline",
+                "description": edit_desc("Add a caption to the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "track": { "type": "string", "required": false, "desc": "Caption track ID (auto-created when omitted)" },
@@ -415,7 +455,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli caption export --path ./project --format srt --output captions.srt"
             },
             "caption.import": {
-                "description": "Import captions from an SRT, VTT, or transcription JSON file",
+                "description": edit_desc("Import captions from an SRT, VTT, or transcription JSON file"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "file": { "type": "string", "required": true, "desc": "Subtitle or transcription JSON file path" },
@@ -475,7 +515,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli transcription generate-sequence --path ./project --sequence seq_001 --language auto --model auto --import"
             },
             "caption.update": {
-                "description": "Update a caption's text, timing, and style",
+                "description": edit_desc("Update a caption's text, timing, and style"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Caption ID to update" },
@@ -492,7 +532,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli caption update --path ./project --id cap_001 --text \"Updated text\""
             },
             "caption.remove": {
-                "description": "Remove a caption from the timeline",
+                "description": edit_desc("Remove a caption from the timeline"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Caption ID to remove" },
@@ -502,7 +542,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli caption remove --path ./project --id cap_001"
             },
             "text.add": {
-                "description": "Add an editable text overlay clip with full style, effect, position, and timing data",
+                "description": edit_desc("Add an editable text overlay clip with full style, effect, position, and timing data"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "track": { "type": "string", "required": false, "desc": "Video or overlay track ID (auto-created when omitted)" },
@@ -536,7 +576,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli text add --path ./project --text \"Directed by OpenReelio\" --start 90 --preset credits"
             },
             "text.update": {
-                "description": "Update an editable text clip's content, style, position, effects, and timing",
+                "description": edit_desc("Update an editable text clip's content, style, position, effects, and timing"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Text clip ID" },
@@ -573,7 +613,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli text update --path ./project --id clip_001 --text \"Updated\" --font-weight 600 --start 1.25 --duration 4.5"
             },
             "text.transform": {
-                "description": "Move, scale, rotate, or re-anchor an editable text clip in preview space",
+                "description": edit_desc("Move, scale, rotate, or re-anchor an editable text clip in preview space"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Text clip ID" },
@@ -590,7 +630,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli text transform --path ./project --id clip_001 --x 0.38 --y 0.42 --scale-x 1.2 --scale-y 1.2 --rotation 8"
             },
             "text.remove": {
-                "description": "Remove an editable text overlay clip",
+                "description": edit_desc("Remove an editable text overlay clip"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Text clip ID" },
@@ -769,7 +809,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "count": { "type": "number", "required": false, "desc": "Number of --between samples (default: columns * rows; must not exceed the grid capacity). Requires --grid and is rejected without it. Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for. Meaningless with --times, which already fixes the cell count." },
                     "cell-width": { "type": "number", "required": false, "desc": "Contact sheet cell width in pixels, 64-1024 (default: 320); requires --grid and is rejected without it. Out-of-range values are rejected rather than clamped. Passing it alone derives the height from the default 16:9 cell (--cell-width 640 gives a 640x360 cell), because cells are fitted with force_original_aspect_ratio=decrease: a 640x180 cell would only pad black around the same 320x180 picture. Grid cells are extracted at the cell width, so raising the pair really does buy detail; --max-width overrides the extraction width." },
                     "cell-height": { "type": "number", "required": false, "desc": "Contact sheet cell height in pixels, 64-1024 (default: 180); requires --grid and is rejected without it. Passing it alone derives the width at 16:9 the same way --cell-width does; passing both keeps exactly what was asked for, including a deliberately non-16:9 cell. A derived dimension is clamped into the 64-1024 range. The reported sheet.cellWidth/cellHeight always name the values actually used." },
-                    "label-cells": { "type": "boolean", "required": false, "desc": "Burn '<index> | <seconds>s' into the bottom-left of every cell so the sheet.cells mapping is readable from the image itself; requires --grid and is rejected without it. The label carries the REQUESTED time, not the decoded frame's PTS, so it identifies the cell rather than proving which frame was decoded. Costs one extra FFmpeg pass per cell and needs an FFmpeg build with the drawtext filter. The sheet reports 'labeled': true when it was applied." }
+                    "label-cells": { "type": "boolean", "required": false, "desc": "Burn '<index> | <seconds>s' into the bottom-left of every cell so the sheet.cells mapping is readable from the image itself; requires --grid and is rejected without it. The label carries the REQUESTED time, not the decoded frame's PTS, so it identifies the cell rather than proving which frame was decoded. On a --file-range sheet it carries the TIMELINE second the cell shows rather than the file offset, because that is the number a judgement has to quote; the file offset is still reported as cells[].fileSec. Costs one extra FFmpeg pass per cell and needs an FFmpeg build with the drawtext filter. The sheet reports 'labeled': true when it was applied." }
                 },
                 "example": "openreelio-cli frame extract --path ./project --file proxy.mp4 --file-range 2 6 --at-cuts --grid auto --label-cells --out sheet.jpg"
             },
@@ -780,7 +820,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
                     "file": { "type": "string", "required": false, "desc": "Rendered file to measure (black/freeze/silence detection, EBU R128 loudness, peaks). Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and are compared against timeline times, so pass a full-sequence render rather than a partial one." },
                     "structural-only": { "type": "boolean", "required": false, "desc": "Run structural checks only and never touch FFmpeg; conflicts with --file" },
-                    "checks": { "type": "string", "required": false, "desc": "Comma-separated check IDs to run exclusively (asset.license and sequence.duration are opt-in and only run when named here): sequence.empty, timeline.gap, clip.orphan, clip.missing_asset, audio.silent_clip, caption.overlap, caption.reading_rate, caption.out_of_bounds, caption.safe_area, shot.length_stats, shot.cut_rhythm, clip.aspect_ratio, asset.license, sequence.duration, render.duration_mismatch, render.missing_video, render.resolution_mismatch, render.black_frames, render.frozen, audio.peak, audio.clipping, audio.loudness" },
+                    "checks": { "type": "string", "required": false, "desc": verify_checks_desc() },
                     "skip": { "type": "string", "required": false, "desc": "Comma-separated check IDs to disable" },
                     "target-lufs": { "type": "number", "required": false, "desc": "Integrated loudness target in LUFS (default -14). Negative values need the '=' form: --target-lufs=-14. Deviation over 1 LU warns, over 3 LU errors." },
                     "max-true-peak": { "type": "number", "required": false, "desc": "Maximum acceptable true peak in dBTP (default -1). Negative values need the '=' form: --max-true-peak=-1. Sample peak is used when the encoder reports no true peak." },
@@ -811,9 +851,10 @@ pub(crate) fn build_schema() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_schema, text_preset_ids, NO_TEXT_PRESET};
+    use super::{build_schema, qc_check_ids, text_preset_ids, verify_checks_desc, NO_TEXT_PRESET};
     use crate::commands::Cli;
     use clap::{Command, CommandFactory};
+    use std::collections::BTreeSet;
 
     fn collect_leaf_paths(command: &Command, prefix: &[String], acc: &mut Vec<String>) {
         let mut has_subcommands = false;
@@ -986,5 +1027,152 @@ mod tests {
                 .contains("redo"),
             "The jump verb must warn that a new edit clears the redo branch"
         );
+    }
+
+    /// Every dotted id mentioned in a prose description.
+    ///
+    /// The `--checks` text is generated, so this parses it back out to prove the
+    /// generated sentence really names the registry rather than merely being
+    /// built from a list that happens to sit beside it.
+    fn dotted_ids(text: &str) -> BTreeSet<String> {
+        text.split(|character: char| {
+            !(character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || character == '_'
+                || character == '.')
+        })
+        .map(|token| token.trim_matches('.'))
+        .filter(|token| token.contains('.'))
+        .map(str::to_string)
+        .collect()
+    }
+
+    #[test]
+    fn verify_checks_description_names_exactly_the_registered_qc_checks() {
+        // The bug this replaces: the schema listed 22 ids while the engine
+        // registered 23, so `transition.no_handles` was invisible to any agent
+        // that discovered the surface through help-json.
+        let registered: BTreeSet<String> = qc_check_ids().into_iter().collect();
+        assert!(!registered.is_empty(), "the QC engine must register rules");
+
+        let schema = build_schema();
+        let described = schema["commands"]["verify"]["params"]["checks"]["desc"]
+            .as_str()
+            .expect("verify --checks must document its ids")
+            .to_string();
+        assert_eq!(described, verify_checks_desc());
+
+        assert_eq!(
+            dotted_ids(&described),
+            registered,
+            "verify --checks must advertise exactly the ids the QC registry holds"
+        );
+    }
+
+    /// Every long flag a clap argument set declares, minus clap's own extras.
+    fn long_flags(command: &Command) -> BTreeSet<String> {
+        command
+            .get_arguments()
+            .filter(|argument| !matches!(argument.get_id().as_str(), "help" | "version"))
+            .filter_map(|argument| argument.get_long().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn build_schema_documents_exactly_the_flags_the_perception_verbs_parse() {
+        // `ExtractArgs` and `VerifyArgs` derive `Args`, not `Parser`, so they
+        // carry no `CommandFactory`; `augment_args` is how their metadata is
+        // reached without giving either struct a parser it does not need.
+        let schema = build_schema();
+        let cases = [
+            (
+                "frame.extract",
+                <crate::commands::frame::ExtractArgs as clap::Args>::augment_args(Command::new(
+                    "extract",
+                )),
+            ),
+            (
+                "verify",
+                <crate::commands::verify::VerifyArgs as clap::Args>::augment_args(Command::new(
+                    "verify",
+                )),
+            ),
+        ];
+
+        for (verb, command) in cases {
+            let documented: BTreeSet<String> = schema["commands"][verb]["params"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{verb} must document its params"))
+                .keys()
+                .cloned()
+                .collect();
+            let parsed = long_flags(&command);
+
+            let missing: Vec<&String> = parsed.difference(&documented).collect();
+            assert!(
+                missing.is_empty(),
+                "{verb} parses flags the schema never mentions: {missing:?}"
+            );
+
+            let phantom: Vec<&String> = documented.difference(&parsed).collect();
+            assert!(
+                phantom.is_empty(),
+                "{verb} documents flags the parser rejects: {phantom:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_schema_says_every_mutating_edit_verb_reports_affected_ranges() {
+        // The edit verbs hand back the seconds that moved; an agent that reads
+        // only the schema has to learn that from the schema.
+        let schema = build_schema();
+
+        for verb in [
+            "timeline.insert",
+            "timeline.remove",
+            "timeline.move",
+            "timeline.trim",
+            "timeline.split",
+            "timeline.speed",
+            "timeline.add-track",
+            "timeline.remove-track",
+            "text.add",
+            "text.update",
+            "text.transform",
+            "text.remove",
+            "caption.add",
+            "caption.update",
+            "caption.remove",
+            "caption.import",
+        ] {
+            let description = schema["commands"][verb]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{verb} must have a description"));
+            assert!(
+                description.contains("affectedRanges"),
+                "{verb} reports affectedRanges and the schema must say so: {description}"
+            );
+            assert!(
+                description.contains("frame extract --range"),
+                "{verb} must point at the inspection step its ranges feed: {description}"
+            );
+        }
+
+        // Read-only and history verbs report nothing of the kind.
+        for verb in [
+            "timeline.info",
+            "timeline.undo",
+            "text.list",
+            "caption.list",
+        ] {
+            let description = schema["commands"][verb]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{verb} must have a description"));
+            assert!(
+                !description.contains("affectedRanges"),
+                "{verb} does not report affectedRanges: {description}"
+            );
+        }
     }
 }

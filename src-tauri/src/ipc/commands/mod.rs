@@ -84,6 +84,9 @@ pub mod export_dialog;
 // Frame probe (stills and contact sheets of the composited edit, for agents)
 pub mod frame_probe;
 
+// Sequence inspection signals (where to look), for agents
+pub mod inspection;
+
 // Deterministic QC over a sequence and its render, for agents
 pub mod verify;
 
@@ -139,6 +142,9 @@ pub use export_dialog::*;
 
 // Re-export frame probe commands
 pub use frame_probe::*;
+
+// Re-export sequence inspection commands
+pub use inspection::*;
 
 // Re-export verification commands
 pub use verify::*;

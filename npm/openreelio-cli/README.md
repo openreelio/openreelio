@@ -73,8 +73,9 @@ openreelio-cli timeline undo  --path ./demo
 
 # 4. See the result, not just the JSON
 #    Contact-sheet times must land inside the sequence, so read its end first.
-#    `timeline info` reports it directly, along with fps, editPoints (cut times),
-#    markers and transition spans - no reducing over the clip list.
+#    `timeline info` reports it directly, along with fps, cuts (the times the
+#    picture changes), editPoints, markers, caption/text spans and transition
+#    spans - no reducing over the clip list.
 END=$(openreelio-cli timeline info --path ./demo | pick '.durationSec')
 openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 "$END" --out ./frames/sheet.jpg
 openreelio-cli render start --path ./demo --proxy --output ./out/proxy.mp4 --progress

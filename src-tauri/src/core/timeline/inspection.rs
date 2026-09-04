@@ -32,7 +32,7 @@ use crate::core::{
 const TIME_EPSILON: f64 = 1e-6;
 
 /// A span of timeline occupied by words on screen — a caption or a text clip.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TextSpan {
     /// Clip id carrying the words.
@@ -64,7 +64,7 @@ pub struct TextSpan {
 /// [`refusal_reason`](Self::refusal_reason) saying why — an agent that asked for
 /// a dissolve needs to learn that the file will show a hard cut, and a span it
 /// can go and look at is how it checks.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TransitionSpan {
     /// Outgoing clip the transition effect hangs on.
@@ -94,7 +94,7 @@ pub struct TransitionSpan {
 /// Counts only; the detail sits in the corresponding lists on
 /// [`InspectionSummary`]. A caller deciding how many frames to sample can read
 /// these without pulling the whole summary apart.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectionHints {
     /// Cuts the render actually shows — see [`collect_video_cuts`].
@@ -116,7 +116,7 @@ pub struct InspectionHints {
 /// Additive by contract: every field here is a *new* signal, and the surfaces
 /// that serialize it (`timeline info`, `openreelio.timeline.snapshot`) merge it
 /// alongside their existing keys rather than replacing any of them.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectionSummary {
     /// Editing length — the last out point of any clip, enabled or not.

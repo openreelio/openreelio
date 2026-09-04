@@ -89,6 +89,23 @@ pub fn ensure_sheet_dimensions_in_range(
     Ok(())
 }
 
+/// Rejects a contact sheet whose finished *width* exceeds the cap.
+///
+/// The half of the geometry a sampled sheet already knows. How many rows a
+/// sampler fills is not knowable until the sequence has been read, but the
+/// column count is stated outright, so an 8-wide sheet of 1024px cells is a
+/// 8192px image whatever the samplers find — and refusing it up front costs
+/// nothing, while discovering it after sampling costs a full extraction.
+pub fn ensure_sheet_width_in_range(
+    columns: usize,
+    cell_width: Option<u32>,
+    cell_height: Option<u32>,
+) -> FrameProbeResult<()> {
+    // The row count is the one dimension that cannot grow the width, so a
+    // single row measures exactly the edge under test.
+    ensure_sheet_dimensions_in_range(columns, 1, cell_width, cell_height)
+}
+
 /// Resolves the contact-sheet cell geometry from the request.
 ///
 /// One dimension on its own derives the other from the default cell's 16:9
@@ -204,11 +221,18 @@ impl CellStaging {
     /// tiler reads the cells back as a `%d.jpg` image sequence, which stops at
     /// the first missing index and pads the rest of the sheet with black, while
     /// `sheet.cells` still claims a timecode for every one of them.
+    ///
+    /// `time_sec` is the time the cell was extracted at, which is what a missing
+    /// cell is reported against. `label_sec` is the time *written into the
+    /// picture*, and the two differ on a sheet built from a rendered file: the
+    /// extraction is file-relative, while the number a judge has to quote is the
+    /// timeline second the frame belongs to.
     pub(super) async fn finish(
         &self,
         runner: &FFmpegRunner,
         index: usize,
         time_sec: f64,
+        label_sec: f64,
     ) -> FrameProbeResult<PathBuf> {
         ensure_cell_written(&self.extract_path(index), index, time_sec)?;
 
@@ -217,7 +241,7 @@ impl CellStaging {
             return Ok(sheet_path);
         }
 
-        let filter = build_cell_label_filter(index, time_sec, self.cell);
+        let filter = build_cell_label_filter(index, label_sec, self.cell);
         runner
             .filter_image(&self.extract_path(index), &sheet_path, &filter, None)
             .await

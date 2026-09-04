@@ -20,11 +20,12 @@ use crate::ffmpeg_env::ensure_ffmpeg;
 use crate::output;
 use clap::{Args, Subcommand};
 use openreelio_core::ffmpeg::FFmpegRunner;
-use openreelio_core::render::frame_probe::{FrameProbePlan, FrameProbeProject, FrameProbeRequest};
+use openreelio_core::render::frame_probe::{FrameProbeProject, FrameProbeRequest};
 use openreelio_core::{ActiveProject, TimeRange};
 use std::path::PathBuf;
 
 pub use openreelio_core::render::frame_probe::{
+    FrameProbeArgumentNames, FrameProbePlan, API_ARGUMENT_NAMES, CLI_ARGUMENT_NAMES,
     DEFAULT_AROUND_COUNT, DEFAULT_AROUND_SPAN_SEC, DEFAULT_MAX_WIDTH, MAX_CELL_SIZE_PX,
     MAX_GRID_CELLS, MAX_SHEET_DIMENSION_PX, MAX_STILL_WIDTH_PX, MIN_CELL_SIZE_PX,
     MIN_STILL_WIDTH_PX,
@@ -121,7 +122,7 @@ pub struct ExtractArgs {
     #[arg(long, requires = "grid", value_parser = cell_size_parser())]
     pub cell_height: Option<u32>,
 
-    /// Burn each cell's index and timecode into the contact sheet
+    /// Burn each cell's index and timecode into the contact sheet; on a --file-range sheet the timecode burnt in is the timeline second, not the file offset
     #[arg(long, requires = "grid")]
     pub label_cells: bool,
 
@@ -179,6 +180,15 @@ pub struct ExtractArgs {
     /// Largest number of sampler times to keep; the rest are thinned out evenly
     #[arg(long)]
     pub limit: Option<usize>,
+
+    /// How the calling surface spells these arguments back to its own caller.
+    ///
+    /// Not an argument: clap skips it, and it defaults to the long flags this
+    /// struct's own callers type. The MCP server builds the same struct from a
+    /// JSON payload and overrides it, so a refusal there names `cellWidth`
+    /// rather than a flag no MCP client can pass.
+    #[arg(skip = openreelio_core::render::frame_probe::CLI_ARGUMENT_NAMES)]
+    pub names: &'static FrameProbeArgumentNames,
 }
 
 impl ExtractArgs {
@@ -187,7 +197,12 @@ impl ExtractArgs {
     /// The project directory is the CLI's own concern: the engine is handed the
     /// opened project instead, so a caller that already replayed `ops.jsonl`
     /// does not pay for a second replay.
-    fn into_request(self) -> FrameProbeRequest {
+    ///
+    /// Public so the MCP server can hand its own request to the engine's guards
+    /// before anything is reserved — its refusals are argument errors, not
+    /// execution failures, and that is the only way to have both without
+    /// restating a single rule.
+    pub fn into_request(self) -> FrameProbeRequest {
         FrameProbeRequest {
             out: self.out,
             file: self.file,
@@ -218,6 +233,7 @@ impl ExtractArgs {
             after_op: self.after_op,
             ranges: self.range.as_deref().map(pair_ranges),
             limit: self.limit,
+            names: self.names,
         }
     }
 }
@@ -318,37 +334,4 @@ fn extract_with_project(
     };
 
     Ok(runtime.block_on(plan.run(&runner, Some(&probe_project)))?)
-}
-
-/// Rejects contact-sheet geometry whose finished image exceeds the pixel cap.
-///
-/// Shared with the MCP surface so both reject the same geometry, in the same
-/// terms, before anything is extracted.
-pub fn ensure_sheet_dimensions_in_range(
-    columns: usize,
-    rows: usize,
-    cell_width: Option<u32>,
-    cell_height: Option<u32>,
-) -> anyhow::Result<()> {
-    Ok(
-        openreelio_core::render::frame_probe::ensure_sheet_dimensions_in_range(
-            columns,
-            rows,
-            cell_width,
-            cell_height,
-        )?,
-    )
-}
-
-/// Parses a `COLSxROWS` grid specification.
-pub fn parse_grid_spec(raw: &str) -> anyhow::Result<(usize, usize)> {
-    Ok(openreelio_core::render::frame_probe::parse_grid_spec(raw)?)
-}
-
-/// Chooses a contact-sheet layout for a known number of samples.
-///
-/// Shared with the MCP surface so `grid: "auto"` means the same shape there as
-/// it does on the command line.
-pub fn auto_grid(count: usize) -> anyhow::Result<(usize, usize)> {
-    Ok(openreelio_core::render::frame_probe::auto_grid(count)?)
 }

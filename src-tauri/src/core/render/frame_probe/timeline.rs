@@ -242,8 +242,9 @@ pub(super) async fn run_timeline_mode(
     batch: bool,
     sampler: Option<&SamplerContext<'_>>,
 ) -> FrameProbeResult<serde_json::Value> {
-    let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
-    ensure_times_inside_sequence(sequence, times)?;
+    let (sequence_id, sequence) =
+        resolve_sequence(project, request.sequence.clone(), request.names)?;
+    ensure_times_inside_sequence(sequence, times, request.names)?;
     let mut context = TimelineFrameContext::new(
         runner,
         project,
@@ -296,8 +297,9 @@ pub(super) async fn run_grid_mode(
     times: &[f64],
     sampler: Option<&SamplerContext<'_>>,
 ) -> FrameProbeResult<serde_json::Value> {
-    let (sequence_id, sequence) = resolve_sequence(project, request.sequence.clone())?;
-    ensure_times_inside_sequence(sequence, times)?;
+    let (sequence_id, sequence) =
+        resolve_sequence(project, request.sequence.clone(), request.names)?;
+    ensure_times_inside_sequence(sequence, times, request.names)?;
     let cell = resolve_cell_size(request);
     let mut context = TimelineFrameContext::new(
         runner,
@@ -322,7 +324,7 @@ pub(super) async fn run_grid_mode(
             .extract(index, *time, &staging.extract_path(index))
             .await?;
         sources.record(entry.source);
-        cell_paths.push(staging.finish(runner, index, *time).await?);
+        cell_paths.push(staging.finish(runner, index, *time, *time).await?);
         cells.push(GridCell {
             index,
             row: index / columns,

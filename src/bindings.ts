@@ -591,6 +591,11 @@ async startRender(sequenceId: string, outputPath: string, preset: string, settin
  * that renders a draft per iteration of a judge loop would otherwise leave
  * every intermediate cut inside the user's project. Renders anywhere else are
  * untouched.
+ * 
+ * The same output path is also what bounds the range: an agent draft may cover
+ * at most `MAX_AGENT_RENDER_RANGE_SEC` (300s) of timeline, because a draft is a
+ * look at one moment rather than a deliverable. A user-initiated export to
+ * their own path is not range-bounded.
  */
 async renderRange(sequenceId: string, outputPath: string, preset: string, settings: VideoExportRequest | null, inPoint: number, outPoint: number) : Promise<Result<RenderStartResult, string>> {
     try {
@@ -652,6 +657,24 @@ async exportFrame(sequenceId: string, timeSec: number, format: string, outputPat
 async extractTimelineFrames(request: TimelineFrameProbeRequestDto) : Promise<Result<TimelineFrameProbeResultDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("extract_timeline_frames", { request }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns the where-to-look signals for a sequence.
+ * 
+ * Cuts, edit points, transition spans (refused ones included), caption and
+ * text spans, markers, the sequence's timebase and canvas, and the counts
+ * derived from all of it. The same summary `openreelio-cli timeline info`
+ * prints, so an agent working inside the app and one driving the CLI reason
+ * over identical numbers.
+ * 
+ * `sequence_id` names a sequence; absent, it means the active one.
+ */
+async sequenceInspectionSummary(sequenceId: string | null) : Promise<Result<InspectionSummary, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sequence_inspection_summary", { sequenceId }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -4750,7 +4773,17 @@ export type ClipPerceptionBundle = { schemaVersion: number; perceptionFingerprin
 export type ClipPerceptionBundleSource = "cached" | "generated"
 export type ClipPerceptionDetail = "low" | "auto" | "high"
 export type ClipPerceptionEvidenceSource = "sourceAnalysis" | "providerVision" | "localFallback"
-export type ClipPerceptionOptions = { provider?: string | null; model?: string | null; detail?: ClipPerceptionDetail; maxFrames?: number | null; reuseSourceAnalysis?: boolean; allowCloud?: boolean; forceRefresh?: boolean; includeContactSheet?: boolean }
+export type ClipPerceptionOptions = { provider?: string | null; model?: string | null; detail?: ClipPerceptionDetail; maxFrames?: number | null; reuseSourceAnalysis?: boolean; allowCloud?: boolean; forceRefresh?: boolean; 
+/**
+ * Send the provider a contact sheet of the clip's sampled frames as well
+ * as the frames themselves.
+ * 
+ * Only a provider call reads it, so it has no effect unless `allow_cloud`
+ * is set and a provider is configured. See
+ * [`resolve_perception_contact_sheet`] for how the sheet is obtained and
+ * what is recorded when it cannot be.
+ */
+includeContactSheet?: boolean }
 export type ClipPerceptionQuality = { status: ClipPerceptionQualityStatus; semanticCoverage: ClipSemanticCoverage; matchedObservationCount: number; providerObservationCount: number; fallbackObservationCount: number; missingSampleIds: string[]; recommendedActions: string[] }
 export type ClipPerceptionQualityStatus = "ready" | "partial" | "insufficient"
 export type ClipPerceptionResponse = { source: ClipPerceptionBundleSource; bundle: ClipPerceptionBundle }
@@ -6153,6 +6186,100 @@ audioOnly?: boolean;
  * Auto-extract a linked audio clip for video assets that have audio.
  */
 autoExtractLinkedAudio?: boolean }
+/**
+ * How much there is to look at, at a glance.
+ * 
+ * Counts only; the detail sits in the corresponding lists on
+ * [`InspectionSummary`]. A caller deciding how many frames to sample can read
+ * these without pulling the whole summary apart.
+ */
+export type InspectionHints = { 
+/**
+ * Cuts the render actually shows — see [`collect_video_cuts`].
+ */
+cutCount: number; 
+/**
+ * Two-input transitions the render will really blend.
+ */
+transitionCount: number; 
+/**
+ * Stored two-input transitions the render refuses and writes as cuts.
+ */
+refusedTransitionCount: number; 
+/**
+ * Clips on caption tracks.
+ */
+captionCount: number; 
+/**
+ * Text clips.
+ */
+textCount: number; 
+/**
+ * Sequence markers.
+ */
+markerCount: number }
+/**
+ * Everything a caller needs to decide where on a sequence to look.
+ * 
+ * Additive by contract: every field here is a *new* signal, and the surfaces
+ * that serialize it (`timeline info`, `openreelio.timeline.snapshot`) merge it
+ * alongside their existing keys rather than replacing any of them.
+ */
+export type InspectionSummary = { 
+/**
+ * Editing length — the last out point of any clip, enabled or not.
+ * See [`Sequence::duration`].
+ */
+durationSec: number; 
+/**
+ * Render length — what a full-range export writes.
+ * See [`Sequence::output_duration`].
+ */
+outputDurationSec: number; 
+/**
+ * Frame rate as a float, for arithmetic.
+ */
+fps: number; 
+/**
+ * Frame rate as the exact ratio the sequence stores.
+ */
+fpsRatio: Ratio; 
+/**
+ * Output canvas size.
+ */
+canvas: Canvas; 
+/**
+ * Sorted, deduplicated clip boundaries on *every* track, including `0.0`
+ * and the timeline's end, and including disabled clips.
+ * 
+ * This is the editing view of the timeline. For "where does the picture
+ * change" read [`cuts`](Self::cuts) instead.
+ */
+editPoints: number[]; 
+/**
+ * Cuts the render actually shows — see [`collect_video_cuts`].
+ */
+cuts: number[]; 
+/**
+ * Sequence markers, in timeline order.
+ */
+markers: Marker[]; 
+/**
+ * Two-input transition spans, in cut order, refused ones included.
+ */
+transitions: TransitionSpan[]; 
+/**
+ * Caption-track clips, in timeline order.
+ */
+captionSpans: TextSpan[]; 
+/**
+ * Text clips, in timeline order.
+ */
+textSpans: TextSpan[]; 
+/**
+ * Counts derived from the lists above.
+ */
+inspectionHints: InspectionHints }
 /**
  * Result of an interchange format export operation
  */
@@ -8977,6 +9104,30 @@ offsetY: number;
  */
 blur?: number }
 /**
+ * A span of timeline occupied by words on screen — a caption or a text clip.
+ */
+export type TextSpan = { 
+/**
+ * Clip id carrying the words.
+ */
+id: string; 
+/**
+ * Track the clip sits on.
+ */
+trackId: string; 
+/**
+ * Timeline in point, in seconds.
+ */
+startSec: number; 
+/**
+ * Timeline out point, in seconds.
+ */
+endSec: number; 
+/**
+ * The words the span shows, as far as the project state records them.
+ */
+text: string }
+/**
  * Text styling configuration.
  * 
  * Controls the visual appearance of text including font, size, color,
@@ -9786,6 +9937,66 @@ typeFrequency: { [key in string]: number };
  * Most frequently used transition type
  */
 dominantType: string }
+/**
+ * The stretch of timeline a two-input transition blends across.
+ * 
+ * Transitions are stored on the **outgoing** clip and rendered around the cut,
+ * so the span reaches back into the outgoing shot and forward into the incoming
+ * one. Neither boundary is a clip boundary, which is exactly why a caller
+ * cannot derive this from a clip list.
+ * 
+ * The span is frame-quantised the way the render stitcher quantises it, and is
+ * therefore *asymmetric* for an odd frame count: the extra frame goes after the
+ * cut, so the blend still starts on the cut's own frame. See
+ * [`transition_span_sec`].
+ * 
+ * A stored transition the renderer refuses is still listed, with
+ * [`renders_as_cut`](Self::renders_as_cut) set and
+ * [`refusal_reason`](Self::refusal_reason) saying why — an agent that asked for
+ * a dissolve needs to learn that the file will show a hard cut, and a span it
+ * can go and look at is how it checks.
+ */
+export type TransitionSpan = { 
+/**
+ * Outgoing clip the transition effect hangs on.
+ */
+clipId: string; 
+/**
+ * Track the outgoing clip sits on.
+ */
+trackId: string; 
+/**
+ * The transition effect itself.
+ */
+effectId: string; 
+/**
+ * Effect type, e.g. `cross_dissolve`.
+ */
+effectType: EffectType; 
+/**
+ * The cut the transition is centred on — the outgoing clip's out point.
+ */
+cutSec: number; 
+/**
+ * First instant of the blend, clamped at the timeline start.
+ */
+startSec: number; 
+/**
+ * Last instant of the blend.
+ */
+endSec: number; 
+/**
+ * The blend length, quantised to whole output frames.
+ */
+durationSec: number; 
+/**
+ * Whether the renderer refuses this transition and writes a hard cut.
+ */
+rendersAsCut: boolean; 
+/**
+ * Why the renderer refuses it; `None` when the file really gets the blend.
+ */
+refusalReason: string | null }
 export type TrimClipPayload = { sequenceId: string; 
 /**
  * Track containing the clip.

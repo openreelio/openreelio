@@ -30,6 +30,22 @@ const DEFAULT_MAX_PERCEPTION_FRAMES: u32 = 12;
 const MAX_PERCEPTION_FRAMES: u32 = 24;
 const SOURCE_OBSERVATION_TOLERANCE_SEC: f64 = 0.25;
 
+/// File name of the contact sheet built for a clip's sampled frames.
+///
+/// It lives beside the perception bundles of the same clip fingerprint, and a
+/// fingerprint pins the frames it was tiled from, so an existing file is always
+/// a sheet of exactly these frames and is reused rather than re-encoded.
+const PERCEPTION_CONTACT_SHEET_FILE: &str = "contact-sheet.jpg";
+
+/// Directory the sampled frames are staged into before tiling.
+///
+/// The contact-sheet builder reads its inputs as an FFmpeg image sequence —
+/// `<dir>/%d.jpg` from zero — while clip frames are named `f0001.jpg` and share
+/// their directory with frames the sheet does not include. Copies under the
+/// expected names are the cheapest way to bridge the two, and the directory is
+/// removed again once the sheet exists.
+const PERCEPTION_CONTACT_SHEET_STAGING_DIR: &str = "contact-sheet-frames";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ClipPerceptionDetail {
@@ -66,6 +82,13 @@ pub struct ClipPerceptionOptions {
     pub allow_cloud: bool,
     #[serde(default)]
     pub force_refresh: bool,
+    /// Send the provider a contact sheet of the clip's sampled frames as well
+    /// as the frames themselves.
+    ///
+    /// Only a provider call reads it, so it has no effect unless `allow_cloud`
+    /// is set and a provider is configured. See
+    /// [`resolve_perception_contact_sheet`] for how the sheet is obtained and
+    /// what is recorded when it cannot be.
     #[serde(default)]
     pub include_contact_sheet: bool,
 }
@@ -226,6 +249,14 @@ pub struct ClipPerceptionProviderRequest {
     pub asset_id: String,
     pub samples: Vec<ClipPerceptionProviderSample>,
     pub detail: ClipPerceptionDetail,
+    /// Overview image tiling the clip's sampled frames in timeline order.
+    ///
+    /// Present only when the caller asked for it with
+    /// [`ClipPerceptionOptions::include_contact_sheet`] and one could be
+    /// produced. The individual frames are sent as well; the sheet is what lets
+    /// a model see them side by side, so it can answer about continuity and
+    /// motion across the clip rather than about each frame alone.
+    pub contact_sheet_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -291,6 +322,19 @@ impl ClipPerceptionProvider for OpenAiResponsesClipPerceptionProvider {
             "text": build_provider_prompt(&request),
         })];
 
+        // The sheet goes first so the model reads the clip as a whole before it
+        // reads the frames one by one, which is the order the prompt describes.
+        if let Some(contact_sheet) = request
+            .contact_sheet_path
+            .as_deref()
+            .filter(|path| path.is_file())
+        {
+            content.push(
+                build_openai_responses_image_input(contact_sheet, request.detail.as_api_value())
+                    .await?,
+            );
+        }
+
         for sample in &request.samples {
             content.push(
                 build_openai_responses_image_input(
@@ -355,7 +399,9 @@ pub async fn enrich_clip_perception_bundle(
     validate_cache_key(clip_fingerprint, "clip analysis fingerprint")?;
     let clip_bundle = load_clip_analysis_bundle_optional(project_path, clip_fingerprint)?
         .ok_or_else(|| CoreError::AnalysisBundleNotFound(clip_fingerprint.to_string()))?;
-    enrich_loaded_clip_perception_bundle(project_path, clip_bundle, options, provider).await
+    // No FFmpeg runner reaches this entry point, so a contact sheet can only be
+    // reused here, never built — see [`resolve_perception_contact_sheet`].
+    enrich_loaded_clip_perception_bundle(project_path, clip_bundle, options, provider, None).await
 }
 
 pub struct TimelineClipPerceptionInput<'a> {
@@ -394,6 +440,7 @@ pub async fn describe_timeline_clip_perception(
         analysis.bundle,
         input.perception_options,
         provider,
+        Some(ffmpeg.info().ffmpeg_path.as_path()),
     )
     .await
 }
@@ -421,6 +468,7 @@ pub async fn describe_timeline_range_perception(
                 response.bundle,
                 input.perception_options.clone(),
                 provider,
+                Some(ffmpeg.info().ffmpeg_path.as_path()),
             )
             .await?,
         );
@@ -428,11 +476,17 @@ pub async fn describe_timeline_range_perception(
     Ok(perception)
 }
 
+/// Adds semantic observations to a loaded clip bundle and caches the result.
+///
+/// `ffmpeg_path` is the binary a contact sheet would be built with when the
+/// caller asked for one and none exists yet; an entry point that holds no
+/// runner passes `None` and can then only reuse a sheet already on disk.
 async fn enrich_loaded_clip_perception_bundle(
     project_path: &Path,
     clip_bundle: ClipAnalysisBundle,
     options: ClipPerceptionOptions,
     provider: Option<&(dyn ClipPerceptionProvider + Send + Sync)>,
+    ffmpeg_path: Option<&Path>,
 ) -> CoreResult<ClipPerceptionResponse> {
     let policy = resolve_perception_policy(&options);
     let source_bundle = if policy.reuse_source_analysis {
@@ -490,12 +544,32 @@ async fn enrich_loaded_clip_perception_bundle(
                 .map(provider_sample_from_frame_sample)
                 .collect::<Vec<_>>();
             if !request_samples.is_empty() {
+                let contact_sheet_path = if policy.include_contact_sheet {
+                    match resolve_perception_contact_sheet(
+                        project_path,
+                        &clip_bundle.fingerprint,
+                        &ready_samples,
+                        ffmpeg_path,
+                    )
+                    .await
+                    {
+                        Ok(path) => Some(path),
+                        Err(reason) => {
+                            errors.push(reason);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 match provider
                     .analyze_clip_samples(ClipPerceptionProviderRequest {
                         clip_fingerprint: clip_bundle.fingerprint.clone(),
                         asset_id: clip_bundle.asset_id.clone(),
                         samples: request_samples,
                         detail: policy.detail.clone(),
+                        contact_sheet_path,
                     })
                     .await
                 {
@@ -662,12 +736,125 @@ fn clip_perception_bundle_path(
     clip_fingerprint: &str,
     perception_fingerprint: &str,
 ) -> CoreResult<PathBuf> {
-    validate_cache_key(clip_fingerprint, "clip analysis fingerprint")?;
+    let directory = clip_perception_dir(project_path, clip_fingerprint)?;
     validate_cache_key(perception_fingerprint, "clip perception fingerprint")?;
+    Ok(directory.join(format!("{perception_fingerprint}.json")))
+}
+
+/// Directory holding one clip's perception artefacts.
+fn clip_perception_dir(project_path: &Path, clip_fingerprint: &str) -> CoreResult<PathBuf> {
+    validate_cache_key(clip_fingerprint, "clip analysis fingerprint")?;
     Ok(clip_analysis_root_dir(project_path)
         .join(clip_fingerprint)
-        .join("perception")
-        .join(format!("{perception_fingerprint}.json")))
+        .join("perception"))
+}
+
+/// Produces the contact sheet a provider request carries, building it if needed.
+///
+/// Answers [`ClipPerceptionOptions::include_contact_sheet`]: the model already
+/// receives every sampled frame on its own, and the sheet is what lets it see
+/// them side by side in timeline order, so it can speak to continuity and
+/// motion across the clip instead of frame by frame.
+///
+/// The sheet is keyed by the clip fingerprint, which pins the frames it tiles,
+/// so an existing file is reused instead of re-encoded — that is also what lets
+/// an entry point without an FFmpeg runner still attach one. `Err` carries the
+/// reason in the caller's own terms; it is recorded on the bundle rather than
+/// failing the perception run, because a missing overview image degrades the
+/// answer without invalidating it.
+async fn resolve_perception_contact_sheet(
+    project_path: &Path,
+    clip_fingerprint: &str,
+    samples: &[FrameSample],
+    ffmpeg_path: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let directory = clip_perception_dir(project_path, clip_fingerprint)
+        .map_err(|error| format!("Contact sheet context was requested, but {error}"))?;
+    let sheet_path = directory.join(PERCEPTION_CONTACT_SHEET_FILE);
+    if sheet_path.is_file() {
+        return Ok(sheet_path);
+    }
+
+    let Some(ffmpeg_path) = ffmpeg_path else {
+        return Err(
+            "Contact sheet context was requested, but this clip has no contact sheet yet and this \
+             request cannot build one. Ask for perception through a timeline clip or range call, \
+             which can."
+                .to_string(),
+        );
+    };
+
+    let staging_dir = directory.join(PERCEPTION_CONTACT_SHEET_STAGING_DIR);
+    let staged = stage_contact_sheet_frames(samples, &staging_dir)
+        .await
+        .map_err(|error| format!("Contact sheet context was requested, but {error}"))?;
+
+    let result =
+        if staged.is_empty() {
+            Err("Contact sheet context was requested, but none of the sampled frames could be read \
+             from disk."
+            .to_string())
+        } else {
+            let (columns, rows) = contact_sheet_layout(staged.len());
+            crate::core::analysis::visual::VisualAnalyzer::new(ffmpeg_path.to_path_buf())
+                .generate_contact_sheet_with_layout(&staged, &sheet_path, Some((columns, rows)))
+                .await
+                .map_err(|error| format!("Contact sheet generation failed: {error}"))
+                .and_then(|artifact| {
+                    artifact.map(|_| sheet_path.clone()).ok_or_else(|| {
+                        "Contact sheet generation produced no sheet for this clip.".to_string()
+                    })
+                })
+        };
+
+    // Staged copies exist only to feed one FFmpeg invocation; leaving them
+    // behind would double the on-disk cost of every analysed clip.
+    let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+
+    result
+}
+
+/// Copies the sampled frames into `staging_dir` under the names FFmpeg expects.
+///
+/// The contact-sheet builder reads `<dir>/%d.jpg` from zero, so the copies are
+/// numbered contiguously in sample order. A frame that cannot be read is
+/// skipped rather than numbered, because a gap in the sequence would silently
+/// truncate the sheet at the hole. At most [`MAX_PERCEPTION_FRAMES`] frames are
+/// staged, which is the same ceiling a provider request itself carries and what
+/// keeps a densely sampled clip from tiling a sheet nobody can read. Returns
+/// the staged paths in sheet order.
+async fn stage_contact_sheet_frames(
+    samples: &[FrameSample],
+    staging_dir: &Path,
+) -> std::io::Result<Vec<PathBuf>> {
+    if staging_dir.exists() {
+        tokio::fs::remove_dir_all(staging_dir).await?;
+    }
+    tokio::fs::create_dir_all(staging_dir).await?;
+
+    let mut staged = Vec::new();
+    for sample in samples {
+        if staged.len() >= MAX_PERCEPTION_FRAMES as usize {
+            break;
+        }
+        let destination = staging_dir.join(format!("{}.jpg", staged.len()));
+        if tokio::fs::copy(&sample.image_path, &destination)
+            .await
+            .is_ok()
+        {
+            staged.push(destination);
+        }
+    }
+    Ok(staged)
+}
+
+/// Picks the squarest grid that holds `frame_count` cells.
+fn contact_sheet_layout(frame_count: usize) -> (usize, usize) {
+    let frame_count = frame_count.max(1);
+    let columns = (frame_count as f64).sqrt().ceil() as usize;
+    let columns = columns.max(1);
+    let rows = frame_count.div_ceil(columns);
+    (columns, rows.max(1))
 }
 
 fn clip_analysis_root_dir(project_path: &Path) -> PathBuf {
@@ -1111,8 +1298,13 @@ fn build_provider_prompt(request: &ClipPerceptionProviderRequest) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let contact_sheet_note = if request.contact_sheet_path.is_some() {
+        "\nThe first image is a contact sheet of the clip's sampled frames in timeline order, for continuity across the clip; the images after it are the samples listed above, one per image.\n"
+    } else {
+        ""
+    };
     format!(
-        "Analyze these timeline clip frame samples for a video editing agent.\n{sample_map}\n\nReturn compact JSON only with this shape:\n{{\"observations\":[{{\"sampleId\":\"f0001\",\"description\":\"one sentence\",\"subjects\":[\"person\"],\"actions\":[\"speaking\"],\"visibleText\":[\"text\"],\"objects\":[\"microphone\"],\"setting\":\"studio\",\"editUsefulness\":\"how this frame helps an edit\",\"confidence\":0.0}}]}}\nUse only provided sample IDs. Keep arrays short. Do not infer uncertain identity."
+        "Analyze these timeline clip frame samples for a video editing agent.\n{sample_map}\n{contact_sheet_note}\nReturn compact JSON only with this shape:\n{{\"observations\":[{{\"sampleId\":\"f0001\",\"description\":\"one sentence\",\"subjects\":[\"person\"],\"actions\":[\"speaking\"],\"visibleText\":[\"text\"],\"objects\":[\"microphone\"],\"setting\":\"studio\",\"editUsefulness\":\"how this frame helps an edit\",\"confidence\":0.0}}]}}\nUse only provided sample IDs. Keep arrays short. Do not infer uncertain identity."
     )
 }
 
@@ -1429,6 +1621,181 @@ mod tests {
         assert_eq!(loaded.perception_fingerprint, "perception_cache");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].sample_id, "f0001");
+    }
+
+    /// Records the request it was handed so a test can assert on the plumbing.
+    ///
+    /// Nothing here reaches the network: the response is fixed.
+    #[derive(Default)]
+    struct RecordingProvider {
+        request: std::sync::Mutex<Option<ClipPerceptionProviderRequest>>,
+    }
+
+    impl RecordingProvider {
+        fn captured(&self) -> ClipPerceptionProviderRequest {
+            self.request
+                .lock()
+                .expect("recorded request")
+                .clone()
+                .expect("provider was called")
+        }
+    }
+
+    #[async_trait]
+    impl ClipPerceptionProvider for RecordingProvider {
+        async fn analyze_clip_samples(
+            &self,
+            request: ClipPerceptionProviderRequest,
+        ) -> CoreResult<ClipPerceptionProviderResponse> {
+            *self.request.lock().expect("record request") = Some(request);
+            Ok(ClipPerceptionProviderResponse {
+                provider: PerceptionProviderMetadata::new("mock", "mock-model"),
+                observations: Vec::new(),
+            })
+        }
+    }
+
+    fn cloud_options(include_contact_sheet: bool) -> ClipPerceptionOptions {
+        ClipPerceptionOptions {
+            allow_cloud: true,
+            reuse_source_analysis: false,
+            include_contact_sheet,
+            ..ClipPerceptionOptions::default()
+        }
+    }
+
+    fn write_existing_contact_sheet(project_path: &Path, clip_fingerprint: &str) -> PathBuf {
+        let directory =
+            clip_perception_dir(project_path, clip_fingerprint).expect("perception dir");
+        std::fs::create_dir_all(&directory).expect("create perception dir");
+        let sheet = directory.join(PERCEPTION_CONTACT_SHEET_FILE);
+        std::fs::write(&sheet, b"sheet").expect("write contact sheet");
+        sheet
+    }
+
+    /// Feature: Clip perception contact sheet
+    /// Scenario: should hand the provider an existing sheet when one is asked for
+    #[tokio::test]
+    async fn sends_the_contact_sheet_when_the_option_is_set() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let bundle = clip_bundle(vec![sample("f0001", 1.0)]);
+        let sheet = write_existing_contact_sheet(temp_dir.path(), &bundle.fingerprint);
+        let provider = RecordingProvider::default();
+
+        let response = enrich_loaded_clip_perception_bundle(
+            temp_dir.path(),
+            bundle,
+            cloud_options(true),
+            Some(&provider),
+            None,
+        )
+        .await
+        .expect("perception runs");
+
+        assert_eq!(provider.captured().contact_sheet_path, Some(sheet));
+        assert!(
+            response.bundle.errors.is_empty(),
+            "reusing an existing sheet reports nothing: {:?}",
+            response.bundle.errors
+        );
+    }
+
+    /// Feature: Clip perception contact sheet
+    /// Scenario: should send no sheet when the option is not set
+    #[tokio::test]
+    async fn omits_the_contact_sheet_when_the_option_is_unset() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let bundle = clip_bundle(vec![sample("f0001", 1.0)]);
+        write_existing_contact_sheet(temp_dir.path(), &bundle.fingerprint);
+        let provider = RecordingProvider::default();
+
+        let response = enrich_loaded_clip_perception_bundle(
+            temp_dir.path(),
+            bundle,
+            cloud_options(false),
+            Some(&provider),
+            None,
+        )
+        .await
+        .expect("perception runs");
+
+        assert_eq!(provider.captured().contact_sheet_path, None);
+        assert!(response.bundle.errors.is_empty());
+    }
+
+    /// Feature: Clip perception contact sheet
+    /// Scenario: should record why no sheet could be attached
+    #[tokio::test]
+    async fn reports_when_a_requested_contact_sheet_cannot_be_built() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let bundle = clip_bundle(vec![sample("f0001", 1.0)]);
+        let provider = RecordingProvider::default();
+
+        let response = enrich_loaded_clip_perception_bundle(
+            temp_dir.path(),
+            bundle,
+            cloud_options(true),
+            Some(&provider),
+            None,
+        )
+        .await
+        .expect("perception runs");
+
+        assert_eq!(provider.captured().contact_sheet_path, None);
+        assert!(
+            response
+                .bundle
+                .errors
+                .iter()
+                .any(|error| error.contains("Contact sheet context was requested")),
+            "the reason is recorded on the bundle: {:?}",
+            response.bundle.errors
+        );
+    }
+
+    /// Feature: Clip perception contact sheet
+    /// Scenario: should stage readable frames as a contiguous image sequence
+    #[tokio::test]
+    async fn stages_only_readable_frames_under_sequential_names() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let frames_dir = temp_dir.path().join("frames");
+        std::fs::create_dir_all(&frames_dir).expect("create frames dir");
+
+        let mut present = sample("f0001", 1.0);
+        present.image_path = frames_dir.join("f0001.jpg").to_string_lossy().to_string();
+        std::fs::write(&present.image_path, b"jpg").expect("write frame");
+        let mut missing = sample("f0002", 2.0);
+        missing.image_path = frames_dir.join("f0002.jpg").to_string_lossy().to_string();
+        let mut last = sample("f0003", 3.0);
+        last.image_path = frames_dir.join("f0003.jpg").to_string_lossy().to_string();
+        std::fs::write(&last.image_path, b"jpg").expect("write frame");
+
+        let staging = temp_dir.path().join("staging");
+        let staged = stage_contact_sheet_frames(&[present, missing, last], &staging)
+            .await
+            .expect("staging runs");
+
+        assert_eq!(staged, vec![staging.join("0.jpg"), staging.join("1.jpg")]);
+    }
+
+    /// Feature: Clip perception contact sheet
+    /// Scenario: should tell the model what the first image is
+    #[test]
+    fn prompt_names_the_contact_sheet_only_when_one_is_attached() {
+        let request = ClipPerceptionProviderRequest {
+            clip_fingerprint: "clip_test".to_string(),
+            asset_id: "asset-1".to_string(),
+            samples: vec![provider_sample_from_frame_sample(&sample("f0001", 1.0))],
+            detail: ClipPerceptionDetail::Low,
+            contact_sheet_path: None,
+        };
+
+        assert!(!build_provider_prompt(&request).contains("contact sheet"));
+        assert!(build_provider_prompt(&ClipPerceptionProviderRequest {
+            contact_sheet_path: Some(PathBuf::from("sheet.jpg")),
+            ..request
+        })
+        .contains("contact sheet"));
     }
 
     #[test]

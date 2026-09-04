@@ -25,7 +25,18 @@ const RENDER_PRESETS: &[(&str, &str, &str)] = &[
 ];
 
 /// Preset identifier selected by the `--proxy` shorthand.
-const PROXY_PRESET_ID: &str = "proxy_480p";
+///
+/// Public so the MCP render tool can default to the same draft preset by name
+/// rather than by a second copy of the string.
+pub const PROXY_PRESET_ID: &str = "proxy_480p";
+
+/// Draft preset the MCP render tool accepts alongside [`PROXY_PRESET_ID`].
+///
+/// A 720p draft is the one step up worth offering an agent: enough resolution
+/// to judge legibility of burned-in text, still fast enough to be a look rather
+/// than a deliverable. Everything above it is an export, which is the user's
+/// decision and not a tool call.
+pub const DRAFT_PRESET_ID: &str = "mp4_draft";
 
 /// Progress channel depth. Bounded so a slow stderr consumer applies
 /// backpressure to the progress reader instead of growing without limit.
@@ -130,18 +141,39 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
 ///
 /// Kept as a struct so the `Commands` enum stays small (see the crate-level
 /// `large_enum_variant` allowance) and the handler signature stays readable.
-struct StartArgs {
-    path: PathBuf,
-    output_path: PathBuf,
-    preset: String,
-    proxy: bool,
-    sequence: Option<String>,
-    start: Option<f64>,
-    end: Option<f64>,
-    progress: bool,
+///
+/// Public because the MCP server renders through this same path: one preset
+/// table, one validation pass, one result shape, so a draft an agent asks for
+/// over MCP is the file `render start` would have produced.
+pub struct StartArgs {
+    /// Project directory path.
+    pub path: PathBuf,
+    /// Output file the render is written to.
+    pub output_path: PathBuf,
+    /// Render preset id; ignored when `proxy` is set.
+    pub preset: String,
+    /// Use the draft proxy preset regardless of `preset`.
+    pub proxy: bool,
+    /// Sequence to render; the project's active sequence when absent.
+    pub sequence: Option<String>,
+    /// First timeline second to render.
+    pub start: Option<f64>,
+    /// Last timeline second to render.
+    pub end: Option<f64>,
+    /// Stream NDJSON progress records to stderr.
+    pub progress: bool,
 }
 
 fn start_render(args: StartArgs) -> anyhow::Result<()> {
+    output::print_json_pretty(&run_start_render(args)?)
+}
+
+/// Runs one render and returns the report `render start` would have printed.
+///
+/// Split from [`start_render`] so the MCP server can serve the same render —
+/// same preset table, same validation, same result shape — without going
+/// through stdout.
+pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
     let StartArgs {
         path,
         output_path,
@@ -256,7 +288,7 @@ fn start_render(args: StartArgs) -> anyhow::Result<()> {
         other => anyhow::anyhow!(other),
     })?;
 
-    output::print_json_pretty(&serde_json::json!({
+    Ok(serde_json::json!({
         "status": "ok",
         "sequenceId": seq_id,
         "preset": preset_id,

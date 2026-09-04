@@ -27,7 +27,10 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use super::{sequence_duration_sec, FrameProbeError, FrameProbeResult, MAX_GRID_CELLS};
+use super::{
+    sequence_duration_sec, FrameProbeArgumentNames, FrameProbeError, FrameProbeResult,
+    MAX_GRID_CELLS,
+};
 use crate::core::effects::Effect;
 use crate::core::render::{is_text_clip, track_included_in_export};
 use crate::core::timeline::{
@@ -47,7 +50,7 @@ const TIME_EPSILON: f64 = 1e-6;
 ///
 /// See the module docs: seeks resolve forward, so a whole frame is not enough to
 /// guarantee the earlier picture once rounding is involved.
-const CUT_LEAD_FRAMES: f64 = 1.5;
+pub(super) const CUT_LEAD_FRAMES: f64 = 1.5;
 
 /// Frame rate assumed when the sequence states an unusable one.
 ///
@@ -142,11 +145,13 @@ impl Sample {
 /// Which samplers a request asked for, exactly as the caller expressed it.
 ///
 /// Field names mirror the CLI flags they came from. Samplers combine as a union;
-/// what they cannot combine with — `--time`, `--times`, `--between`, `--count`,
-/// `--asset`, `--file` — is enforced where the selection is resolved, because
-/// every surface has to be told the same thing in the same words.
+/// what they cannot combine with — a time, a time list, a swept range, a count,
+/// an asset, a rendered file — is enforced where the selection is resolved,
+/// because every surface has to be told the same thing in the same words.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SamplerSpec {
+    /// How the calling surface spells these arguments in a refusal.
+    pub names: &'static FrameProbeArgumentNames,
     /// Sample both sides of every cut.
     pub at_cuts: bool,
     /// Sample the start, cut and end of every two-input transition.
@@ -220,16 +225,15 @@ impl SamplerSpec {
     /// Names the shaping flags that were passed without any sampler to shape.
     ///
     /// Empty when the request is coherent. Reported rather than ignored: a
-    /// `--limit` nothing reads looks to the caller like a budget that was
-    /// honoured.
+    /// budget nothing reads looks to the caller like one that was honoured.
     pub fn orphaned_modifiers(&self) -> Vec<&'static str> {
         if self.is_active() {
             return Vec::new();
         }
         [
-            (self.span.is_some(), "--span"),
-            (self.around_count.is_some(), "--around-count"),
-            (self.limit.is_some(), "--limit"),
+            (self.span.is_some(), self.names.span),
+            (self.around_count.is_some(), self.names.around_count),
+            (self.limit.is_some(), self.names.limit),
         ]
         .into_iter()
         .filter_map(|(used, flag)| used.then_some(flag))
@@ -353,6 +357,7 @@ pub fn run(spec: &SamplerSpec, inputs: &SamplerInputs<'_>) -> FrameProbeResult<S
             time,
             spec.span.unwrap_or(DEFAULT_AROUND_SPAN_SEC),
             spec.around_count.unwrap_or(DEFAULT_AROUND_COUNT),
+            spec.names,
         )?
         .into_iter()
         .filter(|sample| within(restrict, sample.time_sec))
@@ -378,6 +383,17 @@ pub fn run(spec: &SamplerSpec, inputs: &SamplerInputs<'_>) -> FrameProbeResult<S
         );
     }
 
+    // The samplers gate their own events with `within`, which includes both
+    // boundaries. The END boundary cannot survive translation into a rendered
+    // file's timebase, so it is trimmed here, once, over the whole union —
+    // including the cuts `affected` collects, whose ranges were already clipped
+    // to this one. The START boundary is left alone: a cut at the head of the
+    // range still owes the caller the outgoing frame that sits a frame and a
+    // half in front of it.
+    if let Some(restrict) = restrict {
+        raw.retain(|sample| before_restriction_end(restrict, sample.time_sec));
+    }
+
     let candidates = normalize(sequence, raw);
     if candidates.is_empty() {
         // "Nothing to look at" is a confusing answer to `--at-transitions` on a
@@ -392,8 +408,9 @@ pub fn run(spec: &SamplerSpec, inputs: &SamplerInputs<'_>) -> FrameProbeResult<S
             String::new()
         } else {
             format!(
-                " Every stored transition renders as a hard cut, so there is no blend to sample: {}. Sample those boundaries with --at-cuts, or fix the transitions.",
-                refused.join("; ")
+                " Every stored transition renders as a hard cut, so there is no blend to sample: {}. Sample those boundaries with {}, or fix the transitions.",
+                refused.join("; "),
+                spec.names.at_cuts
             )
         };
 
@@ -409,15 +426,16 @@ pub fn run(spec: &SamplerSpec, inputs: &SamplerInputs<'_>) -> FrameProbeResult<S
         };
 
         return Err(FrameProbeError::new(format!(
-            "{} found nothing to look at on sequence '{}'{where_looked}.{refusals} Try another sampler, or --between <START> <END> for an even sweep.",
+            "{} found nothing to look at on sequence '{}'{where_looked}.{refusals} Try another sampler, or {} for an even sweep.",
             spec.kinds().join(" + "),
-            sequence.name
+            sequence.name,
+            spec.names.between_range()
         )));
     }
 
     let candidate_count = candidates.len();
     let (samples, limited) = match spec.limit {
-        Some(limit) => limit_samples(candidates, limit)?,
+        Some(limit) => limit_samples(candidates, limit, spec.names)?,
         None => (candidates, false),
     };
 
@@ -440,6 +458,13 @@ pub fn run(spec: &SamplerSpec, inputs: &SamplerInputs<'_>) -> FrameProbeResult<S
 ///
 /// Ranges that do not overlap it are dropped outright. Without a restriction
 /// the list is returned as it arrived, which is what every timeline run gets.
+///
+/// A range that merely *touches* the restriction — one ending exactly where the
+/// restriction begins, or beginning exactly where it ends — is dropped rather
+/// than collapsed to a zero-width range, because a zero-width clip is reported
+/// as a single-instant change and would put a picture of an unrelated frame in
+/// front of the caller. A range that arrived zero-width is a real single
+/// instant, so that one is kept when the restriction holds it.
 fn clip_ranges(ranges: &[TimeRange], restrict: Option<&TimeRange>) -> Vec<TimeRange> {
     let Some(restrict) = restrict else {
         return ranges.to_vec();
@@ -450,7 +475,13 @@ fn clip_ranges(ranges: &[TimeRange], restrict: Option<&TimeRange>) -> Vec<TimeRa
         .filter_map(|range| {
             let start_sec = range.start_sec.max(restrict.start_sec);
             let end_sec = range.end_sec.min(restrict.end_sec);
-            (start_sec <= end_sec).then_some(TimeRange { start_sec, end_sec })
+            let width_sec = end_sec - start_sec;
+            let kept = if range.end_sec - range.start_sec <= TIME_EPSILON {
+                width_sec >= -TIME_EPSILON
+            } else {
+                width_sec > TIME_EPSILON
+            };
+            kept.then_some(TimeRange { start_sec, end_sec })
         })
         .collect()
 }
@@ -507,25 +538,23 @@ pub fn at_transitions(
         if span.renders_as_cut {
             continue;
         }
-        if !within(range, span.cut_sec) {
+        // Overlap, not the cut alone: a blend that begins before the range and
+        // resolves inside it is visible in the range, and gating on `cut_sec`
+        // dropped the whole transition rather than the landmarks the range does
+        // not hold. Each landmark is then kept on its own.
+        if clip_span(range, span.start_sec, span.end_sec).is_none() {
             continue;
         }
         let group = group as u32;
-        samples.push(Sample::grouped(
-            span.start_sec,
-            SampleReason::TransitionStart,
-            group,
-        ));
-        samples.push(Sample::grouped(
-            span.cut_sec,
-            SampleReason::TransitionCut,
-            group,
-        ));
-        samples.push(Sample::grouped(
-            span.end_sec,
-            SampleReason::TransitionEnd,
-            group,
-        ));
+        for (time_sec, reason) in [
+            (span.start_sec, SampleReason::TransitionStart),
+            (span.cut_sec, SampleReason::TransitionCut),
+            (span.end_sec, SampleReason::TransitionEnd),
+        ] {
+            if within(range, time_sec) {
+                samples.push(Sample::grouped(time_sec, reason, group));
+            }
+        }
     }
 
     samples
@@ -547,10 +576,14 @@ pub fn at_captions(
         (collect_text_spans(sequence, effects), SampleReason::TextMid),
     ] {
         for span in spans {
-            let mid_sec = midpoint(span.start_sec, span.end_sec);
-            if within(range, mid_sec) {
-                samples.push(Sample::new(mid_sec, reason));
-            }
+            // The midpoint of the part that is *inside* the range, not of the
+            // whole span: a caption that starts before the range and runs into
+            // it is on screen for seconds the caller is looking at, and judging
+            // it by a midpoint that lands outside dropped it entirely.
+            let Some((start_sec, end_sec)) = clip_span(range, span.start_sec, span.end_sec) else {
+                continue;
+            };
+            samples.push(Sample::new(midpoint(start_sec, end_sec), reason));
         }
     }
 
@@ -590,10 +623,21 @@ pub fn per_shot(sequence: &Sequence, range: Option<&TimeRange>) -> Vec<Sample> {
             if !clip.enabled || is_text_clip(clip) {
                 continue;
             }
-            let mid_sec = midpoint(clip.place.timeline_in_sec, clip.place.timeline_out_sec());
-            if within(range, mid_sec) {
-                samples.push(Sample::new(mid_sec, SampleReason::ShotMid));
-            }
+            // The midpoint of the part inside the range: a shot that straddles
+            // the range being looked at is one of the shots in it, and judging
+            // it by the whole clip's midpoint dropped exactly the long takes a
+            // coverage sweep most needs to see.
+            let Some((start_sec, end_sec)) = clip_span(
+                range,
+                clip.place.timeline_in_sec,
+                clip.place.timeline_out_sec(),
+            ) else {
+                continue;
+            };
+            samples.push(Sample::new(
+                midpoint(start_sec, end_sec),
+                SampleReason::ShotMid,
+            ));
         }
     }
 
@@ -618,21 +662,25 @@ pub fn around(
     time_sec: f64,
     span_sec: f64,
     count: usize,
+    names: &FrameProbeArgumentNames,
 ) -> FrameProbeResult<Vec<Sample>> {
     if !time_sec.is_finite() || time_sec < 0.0 {
         return Err(FrameProbeError::new(format!(
-            "Invalid value for --around: must be a finite, non-negative time (got {time_sec})"
+            "Invalid value for {}: must be a finite, non-negative time (got {time_sec})",
+            names.around
         )));
     }
     if !span_sec.is_finite() || span_sec <= 0.0 {
         return Err(FrameProbeError::new(format!(
-            "Invalid value for --span: must be a positive number of seconds (got {span_sec})"
+            "Invalid value for {}: must be a positive number of seconds (got {span_sec})",
+            names.span
         )));
     }
     if count == 0 {
-        return Err(FrameProbeError::new(
-            "Invalid value for --around-count: must be >= 1".to_string(),
-        ));
+        return Err(FrameProbeError::new(format!(
+            "Invalid value for {}: must be >= 1",
+            names.around_count
+        )));
     }
 
     let duration_sec = sequence_duration_sec(sequence);
@@ -648,8 +696,8 @@ pub fn around(
     // a mistyped time reads the same however it reached the probe.
     if time_sec >= duration_sec {
         return Err(FrameProbeError::new(format!(
-            "Requested time {:.3}s is at or past the end of sequence '{}' ({:.3}s). Ask for a time inside the sequence, or narrow --between to the edited range.",
-            time_sec, sequence.name, duration_sec
+            "Requested time {:.3}s is at or past the end of sequence '{}' ({:.3}s). Ask for a time inside the sequence, or narrow {} to the edited range.",
+            time_sec, sequence.name, duration_sec, names.between
         )));
     }
 
@@ -768,11 +816,16 @@ pub fn normalize(sequence: &Sequence, samples: Vec<Sample>) -> Vec<Sample> {
 ///
 /// The one case that still truncates is a single event larger than the whole
 /// budget, where there is no whole-event answer to round down to.
-pub fn limit_samples(samples: Vec<Sample>, limit: usize) -> FrameProbeResult<(Vec<Sample>, bool)> {
+pub fn limit_samples(
+    samples: Vec<Sample>,
+    limit: usize,
+    names: &FrameProbeArgumentNames,
+) -> FrameProbeResult<(Vec<Sample>, bool)> {
     if limit == 0 {
-        return Err(FrameProbeError::new(
-            "Invalid value for --limit: must be >= 1".to_string(),
-        ));
+        return Err(FrameProbeError::new(format!(
+            "Invalid value for {}: must be >= 1",
+            names.limit
+        )));
     }
     if samples.len() <= limit {
         return Ok((samples, false));
@@ -848,7 +901,10 @@ fn selected_event_size(events: &[Vec<Sample>], count: usize) -> usize {
 /// handful as a 3-wide block, and only a long sweep is worth 6 columns of
 /// smaller pictures. A single sample gets a 1x1 sheet — a second column with
 /// nothing in it is half a sheet of blank.
-pub fn auto_grid(count: usize) -> FrameProbeResult<(usize, usize)> {
+pub fn auto_grid(
+    count: usize,
+    names: &FrameProbeArgumentNames,
+) -> FrameProbeResult<(usize, usize)> {
     if count == 0 {
         return Err(FrameProbeError::new(
             "A contact sheet needs at least one sample".to_string(),
@@ -856,8 +912,12 @@ pub fn auto_grid(count: usize) -> FrameProbeResult<(usize, usize)> {
     }
     if count > MAX_GRID_CELLS {
         return Err(FrameProbeError::new(format!(
-            "The samplers selected {} times, more than the {} cells a contact sheet holds. Add --limit <N>, narrow the sampler, or use --between <START> <END> with an explicit --grid.",
-            count, MAX_GRID_CELLS
+            "The samplers selected {} times, more than the {} cells a contact sheet holds. Add {}, narrow the sampler, or use {} with an explicit {}.",
+            count,
+            MAX_GRID_CELLS,
+            names.limit_value(MAX_GRID_CELLS),
+            names.between_range(),
+            names.grid_layout()
         )));
     }
 
@@ -942,6 +1002,54 @@ fn within(range: Option<&TimeRange>, time_sec: f64) -> bool {
     }
 }
 
+/// Whether a sample lies before the END of the stretch a restricted run is
+/// confined to.
+///
+/// Only the END edge, and exclusive there — unlike [`within`], which includes
+/// both. The restriction is the timeline range a rendered file covers, and
+/// translating a time into that file's timebase is exclusive at the end: the
+/// last frame of a range running to `END` sits before `END`, not at it. Keeping
+/// an event exactly at `END` only to have the translation drop it produced the
+/// worst possible answer — a run whose only event sat on the boundary came back
+/// as "all sampled times fall outside the file, declare the range it was really
+/// rendered from", which sends the caller to re-render a file that was correct.
+///
+/// The START edge is deliberately not enforced here: the restriction bounds
+/// which *events* are sampled, not which samples they produce, and a cut at the
+/// head of the range legitimately puts its outgoing frame a frame and a half
+/// earlier. A zero-width restriction is a declared instant rather than a
+/// stretch, so nothing is dropped for it.
+fn before_restriction_end(restrict: &TimeRange, time_sec: f64) -> bool {
+    if restrict.end_sec - restrict.start_sec <= TIME_EPSILON {
+        return true;
+    }
+    time_sec < restrict.end_sec - TIME_EPSILON
+}
+
+/// Intersects one span with an optional restriction.
+///
+/// `None` when the restriction leaves nothing of the span. A span that merely
+/// *touches* the restriction leaves nothing: the overlap has no width, and
+/// sampling its single instant would put a picture of an unrelated moment in
+/// front of the caller. A span that was itself an instant is kept when the
+/// restriction holds it, which is how a zero-length event survives.
+fn clip_span(restrict: Option<&TimeRange>, start_sec: f64, end_sec: f64) -> Option<(f64, f64)> {
+    let Some(restrict) = restrict else {
+        return Some((start_sec, end_sec));
+    };
+
+    let clipped_start = start_sec.max(restrict.start_sec);
+    let clipped_end = end_sec.min(restrict.end_sec);
+    let width_sec = clipped_end - clipped_start;
+    let kept = if end_sec - start_sec <= TIME_EPSILON {
+        width_sec >= -TIME_EPSILON
+    } else {
+        width_sec > TIME_EPSILON
+    };
+
+    kept.then_some((clipped_start, clipped_end))
+}
+
 /// Midpoint of a span.
 fn midpoint(start_sec: f64, end_sec: f64) -> f64 {
     start_sec + (end_sec - start_sec) / 2.0
@@ -950,6 +1058,20 @@ fn midpoint(start_sec: f64, end_sec: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::render::frame_probe::CLI_ARGUMENT_NAMES;
+
+    /// The CLI vocabulary, which these tests read their refusals in.
+    fn names() -> &'static FrameProbeArgumentNames {
+        CLI_ARGUMENT_NAMES
+    }
+
+    /// An empty spec that refuses in long flags.
+    fn cli_spec() -> SamplerSpec {
+        SamplerSpec {
+            names: names(),
+            ..SamplerSpec::default()
+        }
+    }
     use crate::core::commands::TEXT_ASSET_PREFIX;
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::timeline::{Clip, ClipPlace, Marker, SequenceFormat, Track};
@@ -1195,6 +1317,21 @@ mod tests {
     }
 
     #[test]
+    fn per_shot_should_sample_the_part_of_a_straddling_shot_the_range_holds() {
+        // The second shot runs 4.0-8.0s and its own midpoint, 6.0s, is outside
+        // the restriction. Judging the clip by that midpoint dropped it — which
+        // is exactly backwards: a shot that fills the range being looked at is
+        // the most important shot in it.
+        let samples = per_shot(&two_shot_sequence(), Some(&TimeRange::new(3.0, 5.0)));
+
+        assert_eq!(
+            times(&samples),
+            vec![3.5, 4.5],
+            "each shot is sampled at the middle of its overlap with the range"
+        );
+    }
+
+    #[test]
     fn per_shot_should_skip_a_track_the_export_leaves_out() {
         let mut seq = two_shot_sequence();
         seq.tracks[0].visible = false;
@@ -1274,7 +1411,7 @@ mod tests {
 
     #[test]
     fn around_should_spread_samples_across_the_window_including_its_edges() {
-        let samples = around(&two_shot_sequence(), 4.0, 0.5, 5).expect("window resolves");
+        let samples = around(&two_shot_sequence(), 4.0, 0.5, 5, names()).expect("window resolves");
 
         assert_eq!(times(&samples), vec![3.5, 3.75, 4.0, 4.25, 4.5]);
         assert!(samples
@@ -1284,7 +1421,7 @@ mod tests {
 
     #[test]
     fn around_should_clamp_the_window_into_the_sequence() {
-        let samples = around(&two_shot_sequence(), 0.1, 0.5, 3).expect("window resolves");
+        let samples = around(&two_shot_sequence(), 0.1, 0.5, 3, names()).expect("window resolves");
 
         assert_close(samples[0].time_sec, 0.0);
         assert_close(samples[2].time_sec, 0.6);
@@ -1294,7 +1431,7 @@ mod tests {
     fn around_should_refuse_a_centre_at_or_past_the_end() {
         // Clamping it silently handed back one still of the last frame as
         // though it were the moment the caller asked about.
-        let message = around(&two_shot_sequence(), 8.0, 0.5, 5)
+        let message = around(&two_shot_sequence(), 8.0, 0.5, 5, names())
             .expect_err("a time outside the sequence is not a window")
             .to_string();
 
@@ -1308,7 +1445,7 @@ mod tests {
     fn around_should_stop_a_window_at_the_last_decodable_frame() {
         // Seeks resolve forward, so a time inside the final frame's interval
         // has no frame at or after it to return.
-        let samples = around(&two_shot_sequence(), 7.9, 0.5, 3).expect("window resolves");
+        let samples = around(&two_shot_sequence(), 7.9, 0.5, 3, names()).expect("window resolves");
 
         for sample in &samples {
             assert!(
@@ -1323,9 +1460,9 @@ mod tests {
     fn around_should_reject_a_window_with_no_width_or_no_samples() {
         let seq = two_shot_sequence();
 
-        assert!(around(&seq, 1.0, 0.0, 3).is_err());
-        assert!(around(&seq, 1.0, 0.5, 0).is_err());
-        assert!(around(&seq, -1.0, 0.5, 3).is_err());
+        assert!(around(&seq, 1.0, 0.0, 3, names()).is_err());
+        assert!(around(&seq, 1.0, 0.5, 0, names()).is_err());
+        assert!(around(&seq, -1.0, 0.5, 3, names()).is_err());
     }
 
     #[test]
@@ -1410,7 +1547,7 @@ mod tests {
             .map(|index| Sample::new(index as f64, SampleReason::ShotMid))
             .collect();
 
-        let (thinned, limited) = limit_samples(samples, 4).expect("thinning succeeds");
+        let (thinned, limited) = limit_samples(samples, 4, names()).expect("thinning succeeds");
 
         assert!(limited);
         assert_eq!(times(&thinned), vec![0.0, 3.0, 6.0, 9.0]);
@@ -1432,7 +1569,7 @@ mod tests {
             })
             .collect();
 
-        let (thinned, limited) = limit_samples(samples, 12).expect("thinning succeeds");
+        let (thinned, limited) = limit_samples(samples, 12, names()).expect("thinning succeeds");
 
         assert!(limited);
         assert_eq!(thinned.len(), 12, "six whole pairs, not twelve strays");
@@ -1467,7 +1604,7 @@ mod tests {
             })
             .collect();
 
-        let (thinned, limited) = limit_samples(samples, 5).expect("thinning succeeds");
+        let (thinned, limited) = limit_samples(samples, 5, names()).expect("thinning succeeds");
 
         assert!(limited);
         assert_eq!(thinned.len(), 3);
@@ -1487,7 +1624,7 @@ mod tests {
             .map(|index| Sample::new(index as f64, SampleReason::ShotMid))
             .collect();
 
-        let (kept, limited) = limit_samples(samples, 8).expect("thinning succeeds");
+        let (kept, limited) = limit_samples(samples, 8, names()).expect("thinning succeeds");
 
         assert!(!limited);
         assert_eq!(kept.len(), 3);
@@ -1495,18 +1632,18 @@ mod tests {
 
     #[test]
     fn limit_samples_should_reject_a_budget_of_nothing() {
-        assert!(limit_samples(vec![Sample::new(1.0, SampleReason::Marker)], 0).is_err());
+        assert!(limit_samples(vec![Sample::new(1.0, SampleReason::Marker)], 0, names()).is_err());
     }
 
     #[test]
     fn auto_grid_should_widen_the_layout_with_the_sample_count() {
-        assert_eq!(auto_grid(1).unwrap(), (1, 1));
-        assert_eq!(auto_grid(2).unwrap(), (2, 1));
-        assert_eq!(auto_grid(3).unwrap(), (3, 1));
-        assert_eq!(auto_grid(9).unwrap(), (3, 3));
-        assert_eq!(auto_grid(10).unwrap(), (4, 3));
-        assert_eq!(auto_grid(16).unwrap(), (4, 4));
-        assert_eq!(auto_grid(17).unwrap(), (6, 3));
+        assert_eq!(auto_grid(1, names()).unwrap(), (1, 1));
+        assert_eq!(auto_grid(2, names()).unwrap(), (2, 1));
+        assert_eq!(auto_grid(3, names()).unwrap(), (3, 1));
+        assert_eq!(auto_grid(9, names()).unwrap(), (3, 3));
+        assert_eq!(auto_grid(10, names()).unwrap(), (4, 3));
+        assert_eq!(auto_grid(16, names()).unwrap(), (4, 4));
+        assert_eq!(auto_grid(17, names()).unwrap(), (6, 3));
     }
 
     #[test]
@@ -1514,7 +1651,7 @@ mod tests {
         // 100 samples in 6 columns is 17 rows and 102 cells — a layout the very
         // cap that let the count through would then refuse.
         for count in 1..=MAX_GRID_CELLS {
-            let (columns, rows) = auto_grid(count).expect("a layout exists");
+            let (columns, rows) = auto_grid(count, names()).expect("a layout exists");
             assert!(
                 columns * rows <= MAX_GRID_CELLS,
                 "auto_grid({count}) laid out {columns}x{rows} cells"
@@ -1528,7 +1665,7 @@ mod tests {
 
     #[test]
     fn auto_grid_should_reject_more_samples_than_a_sheet_holds() {
-        let message = auto_grid(MAX_GRID_CELLS + 1)
+        let message = auto_grid(MAX_GRID_CELLS + 1, names())
             .expect_err("a sheet cannot hold an unbounded sampler")
             .to_string();
 
@@ -1538,7 +1675,7 @@ mod tests {
                 && message.contains("--between"),
             "Error should name the count and the ways out, got: {message}"
         );
-        assert!(auto_grid(0).is_err());
+        assert!(auto_grid(0, names()).is_err());
     }
 
     #[test]
@@ -1546,7 +1683,7 @@ mod tests {
         let spec = SamplerSpec {
             at_cuts: true,
             affected: true,
-            ..SamplerSpec::default()
+            ..cli_spec()
         };
         assert_eq!(
             spec.kinds(),
@@ -1557,7 +1694,7 @@ mod tests {
         let orphaned = SamplerSpec {
             limit: Some(4),
             span: Some(0.5),
-            ..SamplerSpec::default()
+            ..cli_spec()
         };
         assert!(!orphaned.is_active());
         assert_eq!(orphaned.orphaned_modifiers(), vec!["--span", "--limit"]);
@@ -1575,7 +1712,7 @@ mod tests {
                 at_markers: true,
                 per_shot: true,
                 limit: Some(3),
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1613,7 +1750,7 @@ mod tests {
         let message = run(
             &SamplerSpec {
                 at_markers: true,
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1646,7 +1783,7 @@ mod tests {
         let message = run(
             &SamplerSpec {
                 at_transitions: true,
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1673,7 +1810,7 @@ mod tests {
         let outcome = run(
             &SamplerSpec {
                 affected: true,
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1696,7 +1833,7 @@ mod tests {
         let named = run(
             &SamplerSpec {
                 ranges: Some(ranges.clone()),
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1712,7 +1849,7 @@ mod tests {
         let recorded = run(
             &SamplerSpec {
                 affected: true,
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1745,7 +1882,7 @@ mod tests {
         let outcome = run(
             &SamplerSpec {
                 per_shot: true,
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1771,7 +1908,7 @@ mod tests {
         let outcome = run(
             &SamplerSpec {
                 at_cuts: true,
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1801,7 +1938,7 @@ mod tests {
                 // One range straddling the restriction's start, one wholly
                 // outside it.
                 ranges: Some(vec![TimeRange::new(2.0, 6.0), TimeRange::new(0.0, 1.0)]),
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1834,7 +1971,7 @@ mod tests {
         let error = run(
             &SamplerSpec {
                 at_cuts: true,
-                ..SamplerSpec::default()
+                ..cli_spec()
             },
             &SamplerInputs {
                 sequence: &seq,
@@ -1850,6 +1987,74 @@ mod tests {
         assert!(
             message.contains("0.000s") && message.contains("1.000s"),
             "the caller cannot tell an empty sequence from an empty window unless the window is named: {message}"
+        );
+    }
+
+    #[test]
+    fn before_restriction_end_should_exclude_the_end_and_leave_the_start_alone() {
+        let restrict = TimeRange::new(2.0, 6.0);
+
+        assert!(before_restriction_end(&restrict, 5.9));
+        assert!(
+            !before_restriction_end(&restrict, 6.0),
+            "translation into the file is exclusive at END, so sampling there only produces a time the file cannot show"
+        );
+        assert!(
+            before_restriction_end(&restrict, 1.9),
+            "the START edge belongs to each sampler's own event gate: a cut at the head of the range still owes its outgoing frame"
+        );
+    }
+
+    #[test]
+    fn before_restriction_end_should_keep_a_declared_instant() {
+        // A zero-width restriction is a declared instant rather than a stretch,
+        // so an exclusive END would empty it.
+        let instant = TimeRange::new(3.0, 3.0);
+
+        assert!(before_restriction_end(&instant, 3.0));
+    }
+
+    #[test]
+    fn run_should_drop_an_event_sitting_exactly_on_the_restrictions_end() {
+        let seq = two_shot_sequence();
+        let effects = HashMap::new();
+
+        // The only cut is at 4.0s, which is this restriction's END. Its
+        // `cutBefore` sample sits inside, so the run still has something to
+        // show; the cut itself does not, because the file stops before it.
+        let outcome = run(
+            &SamplerSpec {
+                at_cuts: true,
+                ..cli_spec()
+            },
+            &SamplerInputs {
+                sequence: &seq,
+                effects: &effects,
+                affected_ranges: &[],
+                restrict: Some(TimeRange::new(0.0, 4.0)),
+            },
+        )
+        .expect("the outgoing frame is inside the declared range");
+
+        assert_eq!(
+            sample_reasons(&outcome.samples),
+            vec![SampleReason::CutBefore],
+            "the cut time itself is at END, which the file does not hold"
+        );
+    }
+
+    #[test]
+    fn clip_ranges_should_drop_a_range_that_only_touches_the_restriction() {
+        let restrict = TimeRange::new(4.0, 8.0);
+
+        assert!(
+            clip_ranges(&[TimeRange::new(1.0, 4.0)], Some(&restrict)).is_empty(),
+            "a range ending where the restriction begins has no width inside it,              and a zero-width clip reads as a single-instant change that never happened"
+        );
+        assert_eq!(
+            clip_ranges(&[TimeRange::new(4.0, 4.0)], Some(&restrict)),
+            vec![TimeRange::new(4.0, 4.0)],
+            "a range that ARRIVED zero-width is a real instant, so it survives"
         );
     }
 

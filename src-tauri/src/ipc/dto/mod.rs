@@ -5,6 +5,7 @@
 //! cross-layer type stability with normal `cargo test`.
 
 pub mod frame_probe;
+pub mod inspection;
 pub mod verify;
 
 use serde::Serialize;
