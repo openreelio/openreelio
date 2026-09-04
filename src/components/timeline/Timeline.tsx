@@ -433,9 +433,11 @@ export function Timeline({
   // ===========================================================================
   // Playback Engine
   // ===========================================================================
-  // Frame stepping, playhead snapping and the toolbar timecode all quantise to
+  // Frame stepping, playhead dragging and the toolbar timecode all quantise to
   // the grid the renderer will use, so they follow the sequence's own frame
-  // rate rather than a fixed 30.
+  // rate rather than a fixed 30. Playhead drags pass this rate together with
+  // `frameAccurateSeeking` below; clip snapping still uses the snap points,
+  // which are positions rather than a frame grid.
   const sequenceFps = useSequenceFps(sequence);
 
   const {
@@ -535,6 +537,10 @@ export function Timeline({
     onSnapChange: setActiveSnapPoint,
     scrollContainerRef: playheadViewportRef,
     onScrollChange: setScrollX,
+    // No editor setting exposes frame-accurate seeking yet, and the sequence
+    // now tells us the grid the renderer will quantise to, so a dragged
+    // playhead always lands on a frame boundary unless a snap point wins.
+    frameAccurateSeeking: true,
     fps: sequenceFps,
   });
 

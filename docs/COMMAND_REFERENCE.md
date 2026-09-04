@@ -568,9 +568,11 @@ interface SetSequenceFormatPayload {
 
 Every field is optional and **at least one must be given**; the omitted fields
 keep their current value. The command is refused — leaving the sequence exactly
-as it was — when nothing was requested, when a canvas edge is odd or outside
-`16..=16384`, when the frame rate is not a positive rate of at most 1000fps, or
-when the audio format is not one of the values above.
+as it was — when nothing was requested, when a requested canvas edge is odd or
+outside `16..=16384`, when the frame rate is not a positive rate of at most
+1000fps, or when the audio format is not one of the values above. A canvas edge
+that is left out is never re-validated, so a sequence already holding an odd
+edge can still have its frame rate or audio format changed.
 
 #### Frame-rate rounding
 

@@ -4,6 +4,8 @@
  * Shared formatting functions for time, file sizes, and other values.
  */
 
+import { formatTimecode as formatTimecodeAtRate } from '@/constants/precision';
+
 // =============================================================================
 // Time Formatting
 // =============================================================================
@@ -35,27 +37,21 @@ export function formatDuration(seconds: number): string {
 /**
  * Format seconds to SMPTE timecode (HH:MM:SS:FF)
  *
+ * Thin alias for the timecode formatter in `@/constants/precision`, which owns
+ * the single implementation. That one counts frames per timecode second at
+ * `Math.round(fps)`, so a broadcast rate such as 30000/1001 still yields whole
+ * frame numbers instead of the fractional remainder a raw `%` would leave.
+ *
  * @param seconds - Time in seconds
  * @param fps - Frames per second
  * @returns Formatted timecode string
  *
  * @example
  * formatTimecode(61.5, 30) // "00:01:01:15"
+ * formatTimecode(2, 30000 / 1001) // "00:00:01:29"
  */
 export function formatTimecode(seconds: number, fps: number): string {
-  const totalFrames = Math.floor(seconds * fps);
-  const frames = totalFrames % fps;
-  const totalSeconds = Math.floor(totalFrames / fps);
-  const secs = totalSeconds % 60;
-  const mins = Math.floor((totalSeconds % 3600) / 60);
-  const hrs = Math.floor(totalSeconds / 3600);
-
-  return [
-    hrs.toString().padStart(2, '0'),
-    mins.toString().padStart(2, '0'),
-    secs.toString().padStart(2, '0'),
-    frames.toString().padStart(2, '0'),
-  ].join(':');
+  return formatTimecodeAtRate(seconds, fps);
 }
 
 /**

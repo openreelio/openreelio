@@ -1771,6 +1771,56 @@ describe('Timeline', () => {
       expect(screen.queryByText('00:00:00:12')).not.toBeInTheDocument();
     });
 
+    it('should count toolbar timecode frames whole at 29.97 fps', () => {
+      const ntsc: Sequence = {
+        ...mockSequence,
+        format: { ...mockSequence.format, fps: { num: 30000, den: 1001 } },
+      };
+      activate(ntsc);
+      // Frame 59 of 30000/1001 — the fractional modulo this used to do would
+      // render "00:00:01:29.029...".
+      usePlaybackStore.setState({ currentTime: 2 });
+      render(<Timeline sequence={ntsc} />);
+
+      expect(screen.getByText('00:00:01:29')).toBeInTheDocument();
+    });
+
+    it('should step one 30000/1001 frame when ArrowRight is pressed', () => {
+      const ntsc: Sequence = {
+        ...mockSequence,
+        format: { ...mockSequence.format, fps: { num: 30000, den: 1001 } },
+      };
+      activate(ntsc);
+      render(<Timeline sequence={ntsc} />);
+
+      act(() => {
+        fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'ArrowRight' });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeCloseTo(1001 / 30000, 6);
+    });
+
+    it('should land a dragged playhead on the sequence frame grid', async () => {
+      // Snapping off so the frame grid is the only quantiser under test.
+      useTimelineStore.setState({ snapEnabled: false });
+      activate(palSequence);
+      render(<Timeline sequence={palSequence} />);
+
+      const head = screen.getByTestId('playhead-head');
+
+      await act(async () => {
+        // Container left 0, header 192, zoom 100 => (295 - 192) / 100 = 1.03s,
+        // which is frame 26 at 25 fps (1.04s) but frame 31 at 30 fps (1.0333s).
+        fireEvent.mouseDown(head, { clientX: 295, button: 0 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeCloseTo(26 / 25, 6);
+
+      await act(async () => {
+        fireEvent.mouseUp(document);
+      });
+    });
+
     it('should fall back to 30 fps when the sequence declares an unusable rate', () => {
       const broken: Sequence = {
         ...mockSequence,

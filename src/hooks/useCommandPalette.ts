@@ -8,7 +8,6 @@
 
 import { useMemo, useCallback } from 'react';
 import { createLogger } from '@/services/logger';
-import { PLAYBACK } from '@/constants/preview';
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
@@ -19,6 +18,7 @@ import {
   type PaletteAction,
   type ActionCategory,
 } from '@/stores/commandPaletteStore';
+import { useSequenceFps } from './useSequenceFps';
 
 // =============================================================================
 // Types
@@ -172,6 +172,10 @@ export function useCommandPalette(
   const { setActiveTool } = useEditorToolStore();
   const { openSettings } = useUIStore();
 
+  // One frame is one frame of the active sequence, not of the preview's target
+  // rate, so the transport actions quantise to the grid the renderer will use.
+  const sequenceFps = useSequenceFps();
+
   // Build the complete action registry
   const allActions: PaletteAction[] = useMemo(() => {
     const actions: PaletteAction[] = [];
@@ -185,14 +189,14 @@ export function useCommandPalette(
         'transport.previous-frame',
         'Previous Frame',
         'Transport',
-        () => stepBackward(PLAYBACK.TARGET_FPS),
+        () => stepBackward(sequenceFps),
         'Left',
       ),
       action(
         'transport.next-frame',
         'Next Frame',
         'Transport',
-        () => stepForward(PLAYBACK.TARGET_FPS),
+        () => stepForward(sequenceFps),
         'Right',
       ),
     );
@@ -441,6 +445,7 @@ export function useCommandPalette(
     duration,
     stepForward,
     stepBackward,
+    sequenceFps,
     isLoaded,
     undo,
     redo,

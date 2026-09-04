@@ -39,6 +39,17 @@ describe('resolveSequenceFps', () => {
     expect(resolveSequenceFps({ num: 0, den: 1 })).toBe(30);
     expect(resolveSequenceFps({ num: -25, den: 1 })).toBe(30);
   });
+
+  it('should accept the rates at the edges of the range the backend allows', () => {
+    expect(resolveSequenceFps({ num: 1, den: 1 })).toBe(1);
+    expect(resolveSequenceFps({ num: 1000, den: 1 })).toBe(1000);
+  });
+
+  it('should fall back to 30 for a rate outside (0, 1000]', () => {
+    expect(resolveSequenceFps({ num: 1001, den: 1 })).toBe(30);
+    expect(resolveSequenceFps({ num: 1, den: 2 })).toBe(30);
+    expect(resolveSequenceFps({ num: 1000, den: 1001 })).toBe(30);
+  });
 });
 
 describe('useSequenceFps', () => {

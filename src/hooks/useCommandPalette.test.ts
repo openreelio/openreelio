@@ -12,6 +12,23 @@ import { useCommandPaletteStore } from '@/stores/commandPaletteStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { TOOL_CONFIGS } from '@/stores/editorToolStore';
+import type { Sequence } from '@/types';
+
+/** Minimal sequence carrying only the frame rate the transport actions read. */
+function makeSequence(id: string, fpsNum: number, fpsDen: number): Sequence {
+  return {
+    id,
+    name: id,
+    format: {
+      canvas: { width: 1920, height: 1080 },
+      fps: { num: fpsNum, den: fpsDen },
+      audioSampleRate: 48000,
+      audioChannels: 2,
+    },
+    tracks: [],
+    markers: [],
+  };
+}
 
 // Mock state refresh helper (thin facade around Tauri IPC boundary)
 // Prevents unhandled rejections when executeAction triggers store methods
@@ -29,8 +46,12 @@ describe('useCommandPalette', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Set real stores to the state the hook needs
-    useProjectStore.setState({ isLoaded: true });
-    usePlaybackStore.setState({ duration: 120 });
+    useProjectStore.setState({
+      isLoaded: true,
+      sequences: new Map(),
+      activeSequenceId: null,
+    });
+    usePlaybackStore.setState({ duration: 120, currentTime: 0 });
     act(() => {
       useCommandPaletteStore.getState().close();
       useCommandPaletteStore.setState({ recentActionIds: [] });
@@ -228,6 +249,40 @@ describe('useCommandPalette', () => {
       act(() => result.current.executeAction('edit.undo'));
 
       expect(useCommandPaletteStore.getState().recentActionIds).toContain('edit.undo');
+    });
+
+    it('should step one sequence frame when the next-frame action runs', async () => {
+      const pal = makeSequence('seq_pal', 25, 1);
+      useProjectStore.setState({
+        sequences: new Map([[pal.id, pal]]),
+        activeSequenceId: pal.id,
+      });
+      usePlaybackStore.setState({ currentTime: 0 });
+
+      const { result } = renderHook(() => useCommandPalette());
+
+      act(() => result.current.executeAction('transport.next-frame'));
+
+      await waitFor(() => {
+        expect(usePlaybackStore.getState().currentTime).toBeCloseTo(1 / 25, 6);
+      });
+    });
+
+    it('should step back one sequence frame when the previous-frame action runs', async () => {
+      const pal = makeSequence('seq_pal', 25, 1);
+      useProjectStore.setState({
+        sequences: new Map([[pal.id, pal]]),
+        activeSequenceId: pal.id,
+      });
+      usePlaybackStore.setState({ currentTime: 1 });
+
+      const { result } = renderHook(() => useCommandPalette());
+
+      act(() => result.current.executeAction('transport.previous-frame'));
+
+      await waitFor(() => {
+        expect(usePlaybackStore.getState().currentTime).toBeCloseTo(1 - 1 / 25, 6);
+      });
     });
 
     it('should not throw when executing non-existent action', () => {

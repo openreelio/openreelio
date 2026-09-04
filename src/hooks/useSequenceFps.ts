@@ -7,9 +7,25 @@
  * they read the active sequence's `format.fps` rather than a fixed constant.
  */
 
+import { useCallback } from 'react';
 import { useProjectStore } from '@/stores/projectStore';
 import { DEFAULT_FPS } from '@/constants/precision';
 import type { Ratio, Sequence } from '@/types';
+
+/**
+ * Lowest rate the editor will follow.
+ *
+ * `SetSequenceFormat` accepts any rate in `(0, 1000]`, but a grid coarser than
+ * one frame per second makes stepping and snapping unusable, so the UI treats
+ * such a snapshot as broken rather than rendering a timeline nobody can drive.
+ */
+const MIN_SEQUENCE_FPS = 1;
+
+/**
+ * Highest rate the editor will follow, matching the backend's own bound
+ * (`MAX_SEQUENCE_FPS` in `src-tauri/src/core/timeline/models.rs`).
+ */
+const MAX_SEQUENCE_FPS = 1000;
 
 /**
  * Converts a stored frame-rate ratio into frames per second.
@@ -17,7 +33,8 @@ import type { Ratio, Sequence } from '@/types';
  * @param fps Sequence frame rate as `{num, den}`, if the sequence declares one
  * @returns The rate in frames per second, or {@link DEFAULT_FPS} when the ratio
  *   is missing or not a usable positive rate (a zero denominator, a snapshot
- *   written with a broken timebase)
+ *   written with a broken timebase, or a rate outside the
+ *   `[MIN_SEQUENCE_FPS, MAX_SEQUENCE_FPS]` range the backend would accept)
  */
 export function resolveSequenceFps(fps: Ratio | null | undefined): number {
   if (!fps) {
@@ -29,7 +46,12 @@ export function resolveSequenceFps(fps: Ratio | null | undefined): number {
     return DEFAULT_FPS;
   }
 
-  return num / den;
+  const rate = num / den;
+  if (rate < MIN_SEQUENCE_FPS || rate > MAX_SEQUENCE_FPS) {
+    return DEFAULT_FPS;
+  }
+
+  return rate;
 }
 
 /**
@@ -44,7 +66,7 @@ function selectActiveSequenceFps(state: ReturnType<typeof useProjectStore.getSta
     return DEFAULT_FPS;
   }
 
-  return resolveSequenceFps(state.sequences.get(activeSequenceId)?.format?.fps);
+  return resolveSequenceFps(state.sequences.get(activeSequenceId)?.format.fps);
 }
 
 /**
@@ -56,8 +78,18 @@ function selectActiveSequenceFps(state: ReturnType<typeof useProjectStore.getSta
  *   active sequence.
  * @returns The sequence frame rate, or {@link DEFAULT_FPS} when there is no
  *   sequence or its ratio is unusable
+ *
+ * @remarks
+ * The selector is gated on `sequence` rather than always reading the active
+ * one: a caller that supplies its own sequence should not re-render because a
+ * different sequence became active.
  */
 export function useSequenceFps(sequence?: Sequence | null): number {
-  const activeFps = useProjectStore(selectActiveSequenceFps);
-  return sequence ? resolveSequenceFps(sequence.format?.fps) : activeFps;
+  const selectFps = useCallback(
+    (state: ReturnType<typeof useProjectStore.getState>): number =>
+      sequence ? resolveSequenceFps(sequence.format.fps) : selectActiveSequenceFps(state),
+    [sequence],
+  );
+
+  return useProjectStore(selectFps);
 }
