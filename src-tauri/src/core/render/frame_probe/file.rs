@@ -6,7 +6,9 @@
 //! file's own timebase.
 
 use super::sampler::{Sample, SampleReason, SamplerOutcome, SamplerReport, CUT_LEAD_FRAMES};
-use super::sheet::{build_contact_sheet, grid_cell_extract_width, resolve_cell_size, CellStaging};
+use super::sheet::{
+    build_contact_sheet, grid_cell_extract_width, resolve_cell_size, CellStaging, LabelTimebase,
+};
 use super::{
     batch_frame_name, create_batch_output_dir, ensure_frame_written, remove_stale_output,
     resolve_sampled_grid, resolve_single_output_path, FileFrameEntry, FileGridCell,
@@ -223,47 +225,81 @@ pub(super) struct TranslatedSample {
     pub reason: SampleReason,
 }
 
+/// What a translation into a rendered file's timebase produced.
+pub(super) struct TranslatedSamples {
+    /// The samples the file can actually show, in order.
+    pub kept: Vec<TranslatedSample>,
+    /// Samples the file does not reach: past its last decodable frame, or so
+    /// far in front of it that no cut lead explains them.
+    pub dropped_outside: usize,
+    /// Samples that sat within one cut lead in front of the file's first frame.
+    ///
+    /// See [`SamplerReport::dropped_before_file`]: this is a range that starts
+    /// on a cut, not a file that disagrees with its declared range.
+    pub dropped_before: usize,
+}
+
 /// Translates timeline samples into a file that starts at `range_start_sec`.
 ///
 /// Returns the samples the file can actually show, in order, alongside how many
-/// were dropped for falling outside it. Dropping rather than clamping is the
-/// point: a sample nudged to the nearest frame the file happens to hold would
-/// come back labelled with the timeline second it was *supposed* to show, which
-/// is the one mistake a judging tool must not make.
+/// were dropped and why. Dropping rather than clamping is the point: a sample
+/// nudged to the nearest frame the file happens to hold would come back
+/// labelled with the timeline second it was *supposed* to show, which is the one
+/// mistake a judging tool must not make.
 ///
-/// The bound is the last *decodable* time, a frame and a half back from the end
-/// of the video, not the end itself. FFmpeg's seek resolves forward, so a
-/// request inside the final frame interval lands past the last frame, exits 0
-/// and writes nothing — which reached the caller as a hard extraction failure
-/// on an otherwise correct render. Those times are counted as dropped like any
+/// The upper bound is the last *decodable* time, a frame and a half back from
+/// the end of the video, not the end itself. FFmpeg's seek resolves forward, so
+/// a request inside the final frame interval lands past the last frame, exits 0
+/// and writes nothing — which reached the caller as a hard extraction failure on
+/// an otherwise correct render. Those times are counted as dropped like any
 /// other the file does not hold, which is what `droppedOutsideFile` reports.
+///
+/// The lower bound is split in two. A cut sitting exactly at the head of the
+/// declared range puts its outgoing sample a frame and a half in front of the
+/// range — before the render begins — and that is the ordinary consequence of
+/// rendering from the cut, not a mismatch. Those are counted as
+/// `droppedBeforeFile` instead, so the two are never confused.
 pub(super) fn translate_samples(
     samples: &[Sample],
     range_start_sec: f64,
     video_end_sec: f64,
     frame_sec: f64,
-) -> (Vec<TranslatedSample>, usize) {
-    let mut translated = Vec::with_capacity(samples.len());
-    let mut dropped = 0_usize;
+) -> TranslatedSamples {
+    let mut kept = Vec::with_capacity(samples.len());
+    let mut dropped_outside = 0_usize;
+    let mut dropped_before = 0_usize;
     // Never negative: a file shorter than the backoff still holds its first
     // frame, and refusing every sample of it would be a worse answer than
     // letting the extraction report what it found.
     let last_decodable_sec = (video_end_sec - frame_sec * CUT_LEAD_FRAMES).max(0.0);
+    let cut_lead_sec = frame_sec * CUT_LEAD_FRAMES;
 
     for sample in samples {
         let file_sec = sample.time_sec - range_start_sec;
-        if !file_sec.is_finite() || file_sec < 0.0 || file_sec > last_decodable_sec + TIME_EPSILON {
-            dropped += 1;
+        if !file_sec.is_finite() || file_sec > last_decodable_sec + TIME_EPSILON {
+            dropped_outside += 1;
             continue;
         }
-        translated.push(TranslatedSample {
+        if file_sec < 0.0 {
+            if file_sec >= -(cut_lead_sec + TIME_EPSILON) {
+                dropped_before += 1;
+            } else {
+                dropped_outside += 1;
+            }
+            continue;
+        }
+        kept.push(TranslatedSample {
             file_sec,
             timeline_sec: sample.time_sec,
             reason: sample.reason,
         });
     }
 
-    (translated, dropped)
+    TranslatedSamples {
+        kept,
+        dropped_outside,
+        dropped_before,
+    }
 }
 
 /// Extracts stills or a contact sheet from a rendered file rather than the
@@ -353,11 +389,17 @@ pub(super) async fn run_file_mode(
             rows,
             times,
         } => {
+            // `--time`, `--times` and `--between` are file-relative, so these
+            // cells were chosen in the file's own timebase. A declared range
+            // still says which timeline seconds those offsets are, and a judge
+            // has to quote a number that means something in the edit — so the
+            // translation is applied here too, exactly as the sampled path
+            // does it, rather than only when a sampler happened to run.
             let cells = times
                 .iter()
                 .map(|time| TranslatedCell {
                     file_sec: *time,
-                    timeline_sec: None,
+                    timeline_sec: timeline_range.map(|range| range.start_sec + *time),
                     reason: None,
                 })
                 .collect::<Vec<_>>();
@@ -401,7 +443,11 @@ pub(super) async fn run_file_sampled_mode(
     let max_width = request.max_width.unwrap_or(DEFAULT_MAX_WIDTH);
     warnings.extend(source.declared_range_warning(timeline_range));
 
-    let (samples, dropped) = translate_samples(
+    let TranslatedSamples {
+        kept: samples,
+        dropped_outside,
+        dropped_before,
+    } = translate_samples(
         &outcome.samples,
         timeline_range.start_sec,
         source.video_end_sec(),
@@ -410,7 +456,7 @@ pub(super) async fn run_file_sampled_mode(
     if samples.is_empty() {
         return Err(FrameProbeError::new(format!(
             "All {} sampled times fall outside '{}', which holds {:.3}s of picture for the declared range {:.3}s-{:.3}s. Declare the range the file was really rendered from, or sample the timeline directly.",
-            dropped,
+            dropped_outside + dropped_before,
             source.path.display(),
             source.video_end_sec(),
             timeline_range.start_sec,
@@ -422,7 +468,14 @@ pub(super) async fn run_file_sampled_mode(
     // The selection the caller is shown is the one it actually gets: `selected`
     // counted the sampler's own choices, and the file may hold fewer of them.
     report.selected = samples.len();
-    report.dropped_outside_file = Some(dropped);
+    report.dropped_outside_file = Some(dropped_outside);
+    report.dropped_before_file = Some(dropped_before);
+    if dropped_before > 0 {
+        warnings.push(format!(
+            "{dropped_before} sampled time(s) sit just before the start of '{}': the declared range begins on a cut, so this render holds only the incoming side of it. Render from a little earlier to see both sides.",
+            source.path.display()
+        ));
+    }
 
     let Some(layout) = grid else {
         create_batch_output_dir(&request.out)?;
@@ -501,7 +554,7 @@ async fn run_file_grid_mode(
     let times: Vec<f64> = requested.iter().map(|cell| cell.file_sec).collect();
     source.ensure_times_inside(&times)?;
     let cell = resolve_cell_size(request);
-    let staging = CellStaging::new(cell, request.label_cells)?;
+    let staging = CellStaging::new(cell, request.label_cells, request.names)?;
     let extract_width = grid_cell_extract_width(request, cell);
 
     let mut cell_paths = Vec::with_capacity(requested.len());
@@ -516,14 +569,13 @@ async fn run_file_grid_mode(
         // an artefact of where the render started, and a judge quoting a burnt-in
         // number has to be quoting one that means something in the edit. The
         // file-relative time is still reported as `fileSec` in the JSON.
+        let (label_sec, timebase) = match requested_cell.timeline_sec {
+            Some(timeline_sec) => (timeline_sec, LabelTimebase::Timeline),
+            None => (time, LabelTimebase::File),
+        };
         cell_paths.push(
             staging
-                .finish(
-                    runner,
-                    index,
-                    time,
-                    requested_cell.timeline_sec.unwrap_or(time),
-                )
+                .finish(runner, index, time, label_sec, timebase)
                 .await?,
         );
         cells.push(FileGridCell {
@@ -643,9 +695,14 @@ mod tests {
             sample(4.0, SampleReason::CutAfter),
         ];
 
-        let (translated, dropped) = translate_samples(&samples, 2.0, 4.0, FRAME_SEC);
+        let TranslatedSamples {
+            kept: translated,
+            dropped_outside,
+            dropped_before,
+        } = translate_samples(&samples, 2.0, 4.0, FRAME_SEC);
 
-        assert_eq!(dropped, 0);
+        assert_eq!(dropped_outside, 0);
+        assert_eq!(dropped_before, 0);
         assert_eq!(translated.len(), 2);
         assert!((translated[0].file_sec - 1.94).abs() < 1e-9);
         assert_eq!(translated[0].timeline_sec, 3.94);
@@ -671,7 +728,11 @@ mod tests {
             sample(9.0, SampleReason::ShotMid),
         ];
 
-        let (translated, dropped) = translate_samples(&samples, 2.0, 4.0, FRAME_SEC);
+        let TranslatedSamples {
+            kept: translated,
+            dropped_outside,
+            dropped_before,
+        } = translate_samples(&samples, 2.0, 4.0, FRAME_SEC);
 
         assert_eq!(
             translated
@@ -681,7 +742,39 @@ mod tests {
             vec![3.0],
             "only the sample the file can still be decoded at survives"
         );
-        assert_eq!(dropped, 4);
+        assert_eq!(dropped_outside, 4);
+        assert_eq!(
+            dropped_before, 0,
+            "half a second in front of the file is not a cut lead"
+        );
+    }
+
+    #[test]
+    fn translate_samples_should_count_a_cut_at_the_head_of_the_range_separately() {
+        // The range was rendered from the cut at 2.0s, so the sampler's
+        // outgoing frame — a frame and a half in front of it — is not in the
+        // file. Nothing is wrong with the render; only the incoming side of
+        // that cut exists in it.
+        let samples = [
+            sample(2.0 - 1.5 * FRAME_SEC, SampleReason::CutBefore),
+            sample(2.0, SampleReason::CutAfter),
+        ];
+
+        let TranslatedSamples {
+            kept,
+            dropped_outside,
+            dropped_before,
+        } = translate_samples(&samples, 2.0, 4.0, FRAME_SEC);
+
+        assert_eq!(
+            kept.iter().map(|sample| sample.reason).collect::<Vec<_>>(),
+            vec![SampleReason::CutAfter]
+        );
+        assert_eq!(dropped_before, 1);
+        assert_eq!(
+            dropped_outside, 0,
+            "a cut lead must not be reported as the file disagreeing with the range"
+        );
     }
 
     #[test]

@@ -1964,13 +1964,21 @@ function readFrameProbeRanges(args: CodexJsonObject, toolName: string): TimeRang
   });
 }
 
+/**
+ * Read an argument that names times or bounds in seconds.
+ *
+ * NaN and the infinities are rejected here rather than passed on: they are
+ * `typeof 'number'`, they survive JSON as `null` only on the way out, and a
+ * range built from one turns into an arithmetic refusal from the engine that
+ * says nothing about which argument produced it.
+ */
 function readNumberArrayArg(args: CodexJsonObject, key: string, toolName: string): number[] | null {
   const value = args[key];
   if (value === undefined || value === null) {
     return null;
   }
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'number')) {
-    throw new Error(`OpenReelio ${toolName} requires ${key} to be an array of numbers.`);
+  if (!Array.isArray(value) || value.some((entry) => !Number.isFinite(entry))) {
+    throw new Error(`OpenReelio ${toolName} requires ${key} to be an array of finite numbers.`);
   }
   return value as number[];
 }
@@ -2190,10 +2198,13 @@ async function renderProxyToolCall(
   // The file only exists when the encoder finished; naming a path the render
   // never wrote invites the agent to point frame_extract at nothing.
   const producedFile = render.outcome.status === 'ok';
-  // fileRange has to describe the file that was actually written, not the range
-  // that was asked for. A draft render routinely lands a frame short of its
-  // request, and every timelineSec the samplers report is offset by whatever
-  // this declaration gets wrong.
+  // fileRange describes the range the render PLANNED after clamping — the
+  // length the export reported for the range it settled on — not a measurement
+  // of the finished file. The bridge has no probe of its own; the encoder can
+  // still land a frame short of the plan, and a sampled time the file turns out
+  // not to hold is dropped and counted as sampler.droppedOutsideFile rather
+  // than mislabelled. It is still much closer than the requested range, which
+  // is what this falls back to when the render reported no duration at all.
   const renderedDurationSec = render.outcome.durationSec ?? end - start;
   const fileRangeEnd = roundSeconds(start + renderedDurationSec);
 
@@ -4536,29 +4547,40 @@ type SequenceInspectionMap = ReadonlyMap<string, SequenceInspectionResult>;
  * function `openreelio-cli timeline info` and the MCP snapshot call, so the
  * bridge only fetches them. Recomputing cut times or transition spans here
  * would be a second implementation that could disagree with the render.
+ *
+ * One call for every sequence, not one call each: each invocation clones the
+ * whole project state to read from, so a project with a dozen sequences paid
+ * for a dozen clones of every clip, effect and caption in it. The summaries come
+ * back in the order the ids went out — a summary carries no id of its own — so
+ * the two lists are zipped back together here.
  */
 async function readSequenceInspections(state: ProjectStateDto): Promise<SequenceInspectionMap> {
   const sequenceIds = state.sequences
     .map((sequence) => sequence.id)
     .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  if (sequenceIds.length === 0) {
+    return new Map();
+  }
 
-  const entries = await Promise.all(
-    sequenceIds.map(async (id): Promise<[string, SequenceInspectionResult]> => {
-      try {
-        const result = await commands.sequenceInspectionSummary(id);
-        return [
-          id,
-          result.status === 'ok'
-            ? { summary: result.data }
-            : { unavailable: describeInspectionFailure(result.error) },
-        ];
-      } catch (error) {
-        return [id, { unavailable: describeInspectionFailure(error) }];
-      }
-    }),
-  );
+  const unavailable = (reason: string): SequenceInspectionMap =>
+    new Map(sequenceIds.map((id) => [id, { unavailable: reason }]));
 
-  return new Map(entries);
+  try {
+    const result = await commands.sequenceInspectionSummary(null, sequenceIds);
+    if (result.status !== 'ok') {
+      return unavailable(describeInspectionFailure(result.error));
+    }
+    if (result.data.length !== sequenceIds.length) {
+      return unavailable(
+        'The sequence inspection summaries did not line up with the sequences they were asked for.',
+      );
+    }
+    return new Map(
+      sequenceIds.map((id, index) => [id, { summary: result.data[index] as InspectionSummary }]),
+    );
+  } catch (error) {
+    return unavailable(describeInspectionFailure(error));
+  }
 }
 
 /**

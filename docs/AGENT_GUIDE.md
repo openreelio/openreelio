@@ -1201,11 +1201,12 @@ openreelio-cli mcp --stdio --project ./demo     # serves JSON-RPC on stdio
 openreelio-cli mcp --stdio --project ./demo --allow-write
 ```
 
-**Read-only by default.** Fifteen tools are advertised: `host.context`,
+**Read-only by default.** Sixteen tools are advertised: `host.context`,
 `project.info`, `selection.read`, `diagnostics.read`, `timeline.snapshot`,
 `assets.list`, `annotation.read`, `command.schema`, `command.validate`,
-`plan.validate`, `preview.describe`, `frame.extract`, `transcription.status`,
-`transcription.generate` and `verify` — each prefixed `openreelio.`.
+`plan.validate`, `preview.describe`, `frame.extract`, `render.range`,
+`transcription.status`, `transcription.generate` and `verify` — each prefixed
+`openreelio.`.
 
 **`--allow-write` is a local-trust switch.** It adds `openreelio.media.insert`
 and `openreelio.plan.apply` and drops the per-call approval token those tools
@@ -1242,7 +1243,8 @@ stats it, and media that is not readable on this machine is refused as missing.
 Neither error echoes the resolved path.
 
 **`openreelio.verify`** is read-only-safe and always advertised. It accepts
-`{sequenceId?, file?, structuralOnly?, checks?[], skip?[], failOn?}` and returns
+`{sequenceId?, file?, structuralOnly?, checks?[], skip?[], failOn?, targetLufs?,
+maxTruePeak?, durationToleranceSec?, timeoutSec?}` and returns
 the same report document the CLI prints — so an MCP client gets the fix loop
 without shelling out. `file` must be inside the project directory, so render
 into the project before verifying.

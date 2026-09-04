@@ -203,23 +203,55 @@ impl SamplerSpec {
     ///
     /// The order is what decides the reason a shared time keeps: the first
     /// sampler to name a time wins the dedupe.
+    ///
+    /// These are the JSON names, and they are what the `sampler.kinds` field of
+    /// the report carries on every surface — a payload key must not change
+    /// spelling with the caller. A *message* must: see [`kind_labels`].
+    ///
+    /// [`kind_labels`]: Self::kind_labels
     pub fn kinds(&self) -> Vec<String> {
-        let mut kinds = Vec::new();
-        for (active, name) in [
-            (self.at_cuts, "atCuts"),
-            (self.at_transitions, "atTransitions"),
-            (self.at_captions, "atCaptions"),
-            (self.at_markers, "atMarkers"),
-            (self.per_shot, "perShot"),
-            (self.around.is_some(), "around"),
-            (self.affected, "affected"),
-            (self.ranges.is_some(), "ranges"),
-        ] {
-            if active {
-                kinds.push(name.to_string());
-            }
-        }
-        kinds
+        self.active_samplers()
+            .into_iter()
+            .map(|(_, json_name)| json_name.to_string())
+            .collect()
+    }
+
+    /// The samplers asked for, spelled the way the calling surface spells them.
+    ///
+    /// The same list [`kinds`] reports, in the same order, but written in the
+    /// caller's own vocabulary: a CLI refusal that says `atMarkers` names a flag
+    /// nobody can type, while `--at-markers` is the thing to fix.
+    ///
+    /// [`kinds`]: Self::kinds
+    pub fn kind_labels(&self) -> Vec<&'static str> {
+        self.active_samplers()
+            .into_iter()
+            .map(|(surface_name, _)| surface_name)
+            .collect()
+    }
+
+    /// Every sampler that is switched on, as `(surface name, JSON name)`.
+    ///
+    /// One list so the report and the refusals can never disagree about which
+    /// samplers ran, or in what order.
+    fn active_samplers(&self) -> Vec<(&'static str, &'static str)> {
+        [
+            (self.at_cuts, self.names.at_cuts, "atCuts"),
+            (
+                self.at_transitions,
+                self.names.at_transitions,
+                "atTransitions",
+            ),
+            (self.at_captions, self.names.at_captions, "atCaptions"),
+            (self.at_markers, self.names.at_markers, "atMarkers"),
+            (self.per_shot, self.names.per_shot, "perShot"),
+            (self.around.is_some(), self.names.around, "around"),
+            (self.affected, self.names.affected, "affected"),
+            (self.ranges.is_some(), self.names.ranges, "ranges"),
+        ]
+        .into_iter()
+        .filter_map(|(active, surface_name, json_name)| active.then_some((surface_name, json_name)))
+        .collect()
     }
 
     /// Names the shaping flags that were passed without any sampler to shape.
@@ -296,8 +328,26 @@ pub struct SamplerReport {
     /// timebase. Non-zero means the declared range and the file disagree — a
     /// render that stopped early, or a range wider than what was encoded — and
     /// the caller is looking at fewer moments than the sampler chose.
+    ///
+    /// A sample that fell just *before* the file is counted separately, in
+    /// [`dropped_before_file`], because it means something else entirely.
+    ///
+    /// [`dropped_before_file`]: Self::dropped_before_file
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dropped_outside_file: Option<usize>,
+    /// Samples that sat just in front of the file's first frame.
+    ///
+    /// A cut at the very head of the declared range owes the caller the
+    /// outgoing shot's last frame, which the sampler puts a frame and a half
+    /// *before* the cut — that is, before the render begins. Nothing is wrong
+    /// with the file: the range simply starts on the cut, so only the incoming
+    /// side of it exists in the render. Counted apart from
+    /// [`dropped_outside_file`] so this ordinary case is not reported as the
+    /// file disagreeing with the range.
+    ///
+    /// [`dropped_outside_file`]: Self::dropped_outside_file
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_before_file: Option<usize>,
 }
 
 /// A sampler run's times and the report describing them.
@@ -427,7 +477,7 @@ pub fn run(spec: &SamplerSpec, inputs: &SamplerInputs<'_>) -> FrameProbeResult<S
 
         return Err(FrameProbeError::new(format!(
             "{} found nothing to look at on sequence '{}'{where_looked}.{refusals} Try another sampler, or {} for an even sweep.",
-            spec.kinds().join(" + "),
+            spec.kind_labels().join(" + "),
             sequence.name,
             spec.names.between_range()
         )));
@@ -449,6 +499,7 @@ pub fn run(spec: &SamplerSpec, inputs: &SamplerInputs<'_>) -> FrameProbeResult<S
             // Set by the file path once the samples have been translated; a
             // timeline run drops nothing to a file it never reads.
             dropped_outside_file: None,
+            dropped_before_file: None,
         },
         samples,
     })
@@ -1058,7 +1109,7 @@ fn midpoint(start_sec: f64, end_sec: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::render::frame_probe::CLI_ARGUMENT_NAMES;
+    use crate::core::render::frame_probe::{API_ARGUMENT_NAMES, CLI_ARGUMENT_NAMES};
 
     /// The CLI vocabulary, which these tests read their refusals in.
     fn names() -> &'static FrameProbeArgumentNames {
@@ -1743,6 +1794,28 @@ mod tests {
     }
 
     #[test]
+    fn kind_labels_should_follow_the_surface_while_kinds_stay_the_payload_spelling() {
+        let cli = SamplerSpec {
+            at_cuts: true,
+            per_shot: true,
+            ..cli_spec()
+        };
+        assert_eq!(cli.kind_labels(), vec!["--at-cuts", "--per-shot"]);
+        assert_eq!(
+            cli.kinds(),
+            vec!["atCuts".to_string(), "perShot".to_string()],
+            "The reported kinds are a payload key and must not change with the caller"
+        );
+
+        let api = SamplerSpec {
+            names: API_ARGUMENT_NAMES,
+            ..cli.clone()
+        };
+        assert_eq!(api.kind_labels(), vec!["atCuts", "perShot"]);
+        assert_eq!(api.kinds(), cli.kinds());
+    }
+
+    #[test]
     fn run_should_refuse_a_sampler_that_found_nothing() {
         let seq = two_shot_sequence();
         let effects = HashMap::new();
@@ -1762,9 +1835,16 @@ mod tests {
         .expect_err("a batch of no pictures is not a success")
         .to_string();
 
+        // A CLI caller has no `atMarkers` to correct — the flag it typed is
+        // `--at-markers`, and that is what the refusal has to name.
         assert!(
-            message.contains("atMarkers") && message.contains("--between"),
-            "Error should name the sampler and the fallback, got: {message}"
+            message.contains("--at-markers") && message.contains("--between"),
+            "Error should name the sampler and the fallback in the caller's own words, got: \
+             {message}"
+        );
+        assert!(
+            !message.contains("atMarkers"),
+            "A CLI refusal must not mix in the JSON spelling, got: {message}"
         );
     }
 

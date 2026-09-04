@@ -662,7 +662,7 @@ async extractTimelineFrames(request: TimelineFrameProbeRequestDto) : Promise<Res
 }
 },
 /**
- * Returns the where-to-look signals for a sequence.
+ * Returns the where-to-look signals for one or more sequences.
  * 
  * Cuts, edit points, transition spans (refused ones included), caption and
  * text spans, markers, the sequence's timebase and canvas, and the counts
@@ -670,11 +670,16 @@ async extractTimelineFrames(request: TimelineFrameProbeRequestDto) : Promise<Res
  * prints, so an agent working inside the app and one driving the CLI reason
  * over identical numbers.
  * 
- * `sequence_id` names a sequence; absent, it means the active one.
+ * `sequence_id` names one sequence; absent, it means the active one. Answering
+ * with a list is what lets `sequence_ids` name several: the snapshot behind
+ * these signals is a whole clone of the project state, so a bridge building a
+ * timeline overview used to pay for one clone per sequence in the project.
+ * Summaries come back in the order the ids were given — a summary carries no
+ * id of its own — and the two arguments are mutually exclusive.
  */
-async sequenceInspectionSummary(sequenceId: string | null) : Promise<Result<InspectionSummary, string>> {
+async sequenceInspectionSummary(sequenceId: string | null, sequenceIds: string[] | null) : Promise<Result<InspectionSummary[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("sequence_inspection_summary", { sequenceId }) };
+    return { status: "ok", data: await TAURI_INVOKE("sequence_inspection_summary", { sequenceId, sequenceIds }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }

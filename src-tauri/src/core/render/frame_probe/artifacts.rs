@@ -212,16 +212,15 @@ fn claim_cache_entry(root: &Path) -> FrameProbeResult<PathBuf> {
 }
 
 /// Keeps the frame cache to its most recent [`MAX_CACHED_FRAME_DIRECTORIES`]
-/// entries.
+/// entries, leaving `keep` alone whatever its name sorts as.
 ///
 /// The images are already inline in the response, so the on-disk copy exists
 /// only for a follow-up call that wants the path. Without a bound, a judge loop
 /// deposits every frame it ever looked at into the user's project directory.
 /// Best-effort: an extraction whose images are already in hand must not fail
 /// because the cache could not be tidied.
-/// Prunes the cache while leaving `keep` alone, whatever its name sorts as.
 ///
-/// Pass `keep: None` to prune the whole cache.
+/// Pass `keep: None` to prune without protecting anything.
 ///
 /// An extraction in flight owns its entry, and an entry name is a wall-clock
 /// stamp: a clock that stepped backwards, or a directory left behind stamped in

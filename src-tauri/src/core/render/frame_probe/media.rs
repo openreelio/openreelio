@@ -22,6 +22,7 @@
 //! and echoing where a project's media lives — or answering "does this path
 //! exist" per asset — is not something a frame probe owes anybody.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::core::fs::{is_network_path, strip_verbatim_prefix};
@@ -111,6 +112,10 @@ pub fn check_asset_media(
 /// An unknown sequence id is not an error here either, for the same reason an
 /// unknown asset id is not: the probe reports it with a message that says which
 /// sequences do exist.
+///
+/// Each distinct asset is checked once. The check ends in a `stat`, and a
+/// sequence cut from one interview reel is hundreds of clips over a handful of
+/// files; walking them all would pay for the same syscall once per clip.
 pub fn check_sequence_media(
     project_path: &Path,
     state: &ProjectState,
@@ -120,8 +125,12 @@ pub fn check_sequence_media(
         return Ok(());
     };
 
+    let mut checked: HashSet<&str> = HashSet::new();
     for track in &sequence.tracks {
         for clip in &track.clips {
+            if !checked.insert(clip.asset_id.as_str()) {
+                continue;
+            }
             check_asset_media(project_path, state, &clip.asset_id)?;
         }
     }

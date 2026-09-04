@@ -65,9 +65,22 @@ fn verify_checks_desc() -> String {
     format!(
         "Comma-separated check IDs to run exclusively ({} are opt-in and only run when named \
          here): {}",
-        OPT_IN_CHECK_IDS.join(" and "),
+        join_with_and(OPT_IN_CHECK_IDS),
         qc_check_ids().join(", ")
     )
+}
+
+/// Joins a list the way English does: `a`, `a and b`, `a, b and c`.
+///
+/// `join(" and ")` reads correctly for exactly two items, which is how many
+/// opt-in checks there happen to be today; a third would have produced
+/// "a and b and c" in a sentence an agent reads to discover the surface.
+fn join_with_and(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// The `affectedRanges` sentence every mutating edit verb carries.
@@ -466,9 +479,10 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object applied to all cues" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom. A vertical anchor only; the margin comes from --style-pack when one is named, else 5%" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object applied to all cues" },
-                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" },
+                    "source-clip": { "type": "string", "required": false, "desc": "Clip ID to map SOURCE-relative transcript times onto the timeline (transcript-json only). A transcript produced from a source asset counts from the start of the file, so a trimmed, moved or sped-up clip drifts; naming the hosting clip remaps every cue to its timeline position. Omitted, cues are imported as-is - correct only when the times are already timeline-relative. Ignored for SRT/VTT, which always are" }
                 },
-                "example": "openreelio-cli caption import --path ./project --file transcript.json --format transcript-json"
+                "example": "openreelio-cli caption import --path ./project --file transcript.json --format transcript-json --source-clip clip_001"
             },
             "transcription.status": {
                 "description": "Show local Whisper transcription readiness and installed model status",
@@ -495,9 +509,10 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "import": { "type": "boolean", "required": false, "desc": "Import generated captions into the active or selected sequence" },
                     "track": { "type": "string", "required": false, "desc": "Caption track ID for import" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID for import" },
-                    "replace-existing": { "type": "boolean", "required": false, "desc": "Replace existing captions on the target caption track during import" }
+                    "replace-existing": { "type": "boolean", "required": false, "desc": "Replace existing captions on the target caption track during import" },
+                    "source-clip": { "type": "string", "required": false, "desc": "Clip ID to map SOURCE-relative transcript times onto the timeline during import. Transcribing an asset counts from the start of the file, so a trimmed, moved or sped-up clip drifts; naming the hosting clip remaps every segment to its timeline position. When the asset sits on the target sequence as exactly one clip, that clip is resolved automatically and the mapping is applied" }
                 },
-                "example": "openreelio-cli transcription generate --path ./project --asset asset_001 --language auto --model auto --import"
+                "example": "openreelio-cli transcription generate --path ./project --asset asset_001 --language auto --model auto --import --source-clip clip_001"
             },
             "transcription.generate-sequence": {
                 "description": "Generate speech-to-text transcript segments from the audible audio mix of a sequence, with optional caption import",
@@ -809,7 +824,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "count": { "type": "number", "required": false, "desc": "Number of --between samples (default: columns * rows; must not exceed the grid capacity). Requires --grid and is rejected without it. Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for. Meaningless with --times, which already fixes the cell count." },
                     "cell-width": { "type": "number", "required": false, "desc": "Contact sheet cell width in pixels, 64-1024 (default: 320); requires --grid and is rejected without it. Out-of-range values are rejected rather than clamped. Passing it alone derives the height from the default 16:9 cell (--cell-width 640 gives a 640x360 cell), because cells are fitted with force_original_aspect_ratio=decrease: a 640x180 cell would only pad black around the same 320x180 picture. Grid cells are extracted at the cell width, so raising the pair really does buy detail; --max-width overrides the extraction width." },
                     "cell-height": { "type": "number", "required": false, "desc": "Contact sheet cell height in pixels, 64-1024 (default: 180); requires --grid and is rejected without it. Passing it alone derives the width at 16:9 the same way --cell-width does; passing both keeps exactly what was asked for, including a deliberately non-16:9 cell. A derived dimension is clamped into the 64-1024 range. The reported sheet.cellWidth/cellHeight always name the values actually used." },
-                    "label-cells": { "type": "boolean", "required": false, "desc": "Burn '<index> | <seconds>s' into the bottom-left of every cell so the sheet.cells mapping is readable from the image itself; requires --grid and is rejected without it. The label carries the REQUESTED time, not the decoded frame's PTS, so it identifies the cell rather than proving which frame was decoded. On a --file-range sheet it carries the TIMELINE second the cell shows rather than the file offset, because that is the number a judgement has to quote; the file offset is still reported as cells[].fileSec. Costs one extra FFmpeg pass per cell and needs an FFmpeg build with the drawtext filter. The sheet reports 'labeled': true when it was applied." }
+                    "label-cells": { "type": "boolean", "required": false, "desc": "Burn '<index> | <seconds>s <timebase>' into the bottom-left of every cell so the sheet.cells mapping is readable from the image itself; requires --grid and is rejected without it. The trailing marker says which clock the number belongs to: 'tl' a timeline second, 'file' an offset into the rendered file. The label carries the REQUESTED time, not the decoded frame's PTS, so it identifies the cell rather than proving which frame was decoded. On a --file-range sheet it carries the TIMELINE second the cell shows rather than the file offset, because that is the number a judgement has to quote; the file offset is still reported as cells[].fileSec. Without --file-range a --file sheet has no timeline to name, so its cells are labelled 'file'. Costs one extra FFmpeg pass per cell and needs an FFmpeg build with the drawtext filter. The sheet reports 'labeled': true when it was applied." }
                 },
                 "example": "openreelio-cli frame extract --path ./project --file proxy.mp4 --file-range 2 6 --at-cuts --grid auto --label-cells --out sheet.jpg"
             },
@@ -851,24 +866,45 @@ pub(crate) fn build_schema() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_schema, qc_check_ids, text_preset_ids, verify_checks_desc, NO_TEXT_PRESET};
+    use super::{
+        build_schema, join_with_and, qc_check_ids, text_preset_ids, verify_checks_desc,
+        NO_TEXT_PRESET,
+    };
     use crate::commands::Cli;
     use clap::{Command, CommandFactory};
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
 
-    fn collect_leaf_paths(command: &Command, prefix: &[String], acc: &mut Vec<String>) {
+    /// Every runnable command in the clap tree, as `("dotted.path", command)`.
+    fn collect_leaf_commands<'a>(
+        command: &'a Command,
+        prefix: &[String],
+        acc: &mut Vec<(String, &'a Command)>,
+    ) {
         let mut has_subcommands = false;
 
         for subcommand in command.get_subcommands() {
             has_subcommands = true;
             let mut next_prefix = prefix.to_vec();
             next_prefix.push(subcommand.get_name().to_string());
-            collect_leaf_paths(subcommand, &next_prefix, acc);
+            collect_leaf_commands(subcommand, &next_prefix, acc);
         }
 
         if !has_subcommands && !prefix.is_empty() {
-            acc.push(prefix.join("."));
+            acc.push((prefix.join("."), command));
         }
+    }
+
+    /// The clap tree's leaves, keyed by the dotted id the schema uses.
+    fn clap_leaf_commands() -> Vec<(String, Command)> {
+        let root = Cli::command();
+        let mut leaves = Vec::new();
+        collect_leaf_commands(&root, &[], &mut leaves);
+        let mut leaves: Vec<(String, Command)> = leaves
+            .into_iter()
+            .map(|(path, command)| (path, command.clone()))
+            .collect();
+        leaves.sort_by(|left, right| left.0.cmp(&right.0));
+        leaves
     }
 
     #[test]
@@ -878,9 +914,10 @@ mod tests {
             .as_object()
             .expect("schema commands must be an object");
 
-        let mut clap_paths = Vec::new();
-        collect_leaf_paths(&Cli::command(), &[], &mut clap_paths);
-        clap_paths.sort();
+        let clap_paths: Vec<String> = clap_leaf_commands()
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
 
         let mut schema_paths: Vec<String> = schema_commands.keys().cloned().collect();
         schema_paths.sort();
@@ -1029,95 +1066,114 @@ mod tests {
         );
     }
 
-    /// Every dotted id mentioned in a prose description.
-    ///
-    /// The `--checks` text is generated, so this parses it back out to prove the
-    /// generated sentence really names the registry rather than merely being
-    /// built from a list that happens to sit beside it.
-    fn dotted_ids(text: &str) -> BTreeSet<String> {
-        text.split(|character: char| {
-            !(character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'
-                || character == '.')
-        })
-        .map(|token| token.trim_matches('.'))
-        .filter(|token| token.contains('.'))
-        .map(str::to_string)
-        .collect()
-    }
-
     #[test]
     fn verify_checks_description_names_exactly_the_registered_qc_checks() {
         // The bug this replaces: the schema listed 22 ids while the engine
         // registered 23, so `transition.no_handles` was invisible to any agent
-        // that discovered the surface through help-json.
-        let registered: BTreeSet<String> = qc_check_ids().into_iter().collect();
-        assert!(!registered.is_empty(), "the QC engine must register rules");
+        // that discovered the surface through help-json. What stops that coming
+        // back is the schema carrying the generated sentence rather than a
+        // hand-kept copy of it — parsing the ids back out of that sentence and
+        // comparing them to the list it was built from could never fail.
+        assert!(
+            !qc_check_ids().is_empty(),
+            "the QC engine must register rules"
+        );
 
         let schema = build_schema();
         let described = schema["commands"]["verify"]["params"]["checks"]["desc"]
             .as_str()
-            .expect("verify --checks must document its ids")
-            .to_string();
+            .expect("verify --checks must document its ids");
+
         assert_eq!(described, verify_checks_desc());
-
-        assert_eq!(
-            dotted_ids(&described),
-            registered,
-            "verify --checks must advertise exactly the ids the QC registry holds"
-        );
-    }
-
-    /// Every long flag a clap argument set declares, minus clap's own extras.
-    fn long_flags(command: &Command) -> BTreeSet<String> {
-        command
-            .get_arguments()
-            .filter(|argument| !matches!(argument.get_id().as_str(), "help" | "version"))
-            .filter_map(|argument| argument.get_long().map(str::to_string))
-            .collect()
     }
 
     #[test]
-    fn build_schema_documents_exactly_the_flags_the_perception_verbs_parse() {
-        // `ExtractArgs` and `VerifyArgs` derive `Args`, not `Parser`, so they
-        // carry no `CommandFactory`; `augment_args` is how their metadata is
-        // reached without giving either struct a parser it does not need.
+    fn join_with_and_should_read_as_english_at_every_length() {
+        assert_eq!(join_with_and(&[]), "");
+        assert_eq!(join_with_and(&["a"]), "a");
+        assert_eq!(join_with_and(&["a", "b"]), "a and b");
+        // The case `join(" and ")` got wrong, and the one a third opt-in check
+        // would have introduced into a sentence agents read.
+        assert_eq!(join_with_and(&["a", "b", "c"]), "a, b and c");
+    }
+
+    /// Flags clap adds or the root declares for every verb, which no per-verb
+    /// schema entry describes.
+    const GLOBAL_FLAG_IDS: [&str; 4] = ["help", "version", "verbose", "quiet"];
+
+    /// Every long flag a clap command declares, with whether it is required.
+    fn long_flags(command: &Command) -> BTreeMap<String, bool> {
+        command
+            .get_arguments()
+            .filter(|argument| !GLOBAL_FLAG_IDS.contains(&argument.get_id().as_str()))
+            .filter_map(|argument| {
+                argument
+                    .get_long()
+                    .map(|long| (long.to_string(), argument.is_required_set()))
+            })
+            .collect()
+    }
+
+    /// The same table read off one schema entry's `params`.
+    fn documented_flags(params: &serde_json::Value, verb: &str) -> BTreeMap<String, bool> {
+        params
+            .as_object()
+            .unwrap_or_else(|| panic!("{verb} must document its params"))
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    entry["required"].as_bool().unwrap_or_else(|| {
+                        panic!("{verb} --{name} must document whether it is required")
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    /// Feature: help-json schema
+    /// Scenario: every verb documents exactly the flags its parser accepts
+    ///
+    /// The bug this replaces: the guard checked two hand-listed leaves, so
+    /// `caption import --source-clip` and `transcription generate --source-clip`
+    /// — the flags that decide whether transcript times are remapped onto the
+    /// timeline at all — were parsed but invisible to any agent that discovered
+    /// the surface through help-json. Reading the leaves out of the clap tree is
+    /// what makes a flag added tomorrow fail this rather than go unnoticed.
+    #[test]
+    fn build_schema_documents_exactly_the_flags_every_verb_parses() {
         let schema = build_schema();
-        let cases = [
-            (
-                "frame.extract",
-                <crate::commands::frame::ExtractArgs as clap::Args>::augment_args(Command::new(
-                    "extract",
-                )),
-            ),
-            (
-                "verify",
-                <crate::commands::verify::VerifyArgs as clap::Args>::augment_args(Command::new(
-                    "verify",
-                )),
-            ),
-        ];
 
-        for (verb, command) in cases {
-            let documented: BTreeSet<String> = schema["commands"][verb]["params"]
-                .as_object()
-                .unwrap_or_else(|| panic!("{verb} must document its params"))
-                .keys()
-                .cloned()
-                .collect();
+        for (verb, command) in clap_leaf_commands() {
             let parsed = long_flags(&command);
+            let documented = documented_flags(&schema["commands"][&verb]["params"], &verb);
 
-            let missing: Vec<&String> = parsed.difference(&documented).collect();
+            let missing: Vec<&String> = parsed
+                .keys()
+                .filter(|flag| !documented.contains_key(*flag))
+                .collect();
             assert!(
                 missing.is_empty(),
                 "{verb} parses flags the schema never mentions: {missing:?}"
             );
 
-            let phantom: Vec<&String> = documented.difference(&parsed).collect();
+            let phantom: Vec<&String> = documented
+                .keys()
+                .filter(|flag| !parsed.contains_key(*flag))
+                .collect();
             assert!(
                 phantom.is_empty(),
                 "{verb} documents flags the parser rejects: {phantom:?}"
+            );
+
+            let disagreed: Vec<String> = parsed
+                .iter()
+                .filter(|(flag, required)| documented.get(*flag) != Some(required))
+                .map(|(flag, required)| format!("--{flag} (clap requires it: {required})"))
+                .collect();
+            assert!(
+                disagreed.is_empty(),
+                "{verb} disagrees with its parser about which flags are required: {disagreed:?}"
             );
         }
     }

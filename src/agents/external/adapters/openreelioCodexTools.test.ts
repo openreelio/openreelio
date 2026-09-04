@@ -219,6 +219,19 @@ describe('openreelio.frame_extract', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  it('should reject a number list carrying a value that is not finite', async () => {
+    const response = await callTool('frame_extract', {
+      file: 'draft.mp4',
+      fileRange: [0, Number.POSITIVE_INFINITY],
+      atCuts: true,
+      grid: 'auto',
+    });
+
+    expect(response.success).toBe(false);
+    expect(responseText(response)).toContain('fileRange');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('should reject a declared file range whose start is not before its end', async () => {
     const response = await callTool('frame_extract', {
       file: 'draft.mp4',
@@ -259,11 +272,15 @@ describe('openreelio.render_proxy', () => {
       expect(vi.mocked(invoke).mock.calls.some(([name]) => name === 'render_range')).toBe(true);
     });
 
+    // Deliberately half a second short of the 2s-6s that was asked for: a draft
+    // render lands where the encoder lands, and a follow-up built from the
+    // REQUESTED range would be indistinguishable from one built from the
+    // reported one unless the two differ.
     handlers.get('render-complete')?.(
       makeEvent({
         jobId: 'job-1',
         outputPath: 'D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4',
-        durationSec: 4,
+        durationSec: 3.5,
         fileSize: 1024,
         encodingTimeSec: 3,
       }),
@@ -276,17 +293,18 @@ describe('openreelio.render_proxy', () => {
     expect(result.status).toBe('ok');
     expect(result.jobId).toBe('job-1');
     expect(result.outputPath).toBe('D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4');
-    expect(result.durationSec).toBe(4);
+    expect(result.durationSec).toBe(3.5);
     // The follow-up must be a request the probe accepts. The unconditional one
     // is an even sweep of the draft, because a sampler over a rendered window
     // that happens to hold no cut is an error rather than an empty sheet.
     expect(result.nextStep).toContain('openreelio.frame_extract');
     expect(result.nextStep).toContain('file: outputPath');
-    expect(result.nextStep).toContain('between: [0, 4]');
+    expect(result.nextStep).toContain('between: [0, 3.5]');
     expect(result.nextStep).toContain("grid: '4x3'");
     // The sampler follow-up carries the range the render REPORTED, not the one
     // that was asked for, so every cell's timelineSec means what it says.
-    expect(result.nextStep).toContain('fileRange: [2, 6]');
+    expect(result.nextStep).toContain('fileRange: [2, 5.5]');
+    expect(result.nextStep).not.toContain('fileRange: [2, 6]');
     expect(result.nextStep).toContain('atCuts');
     expect(result.nextStep).toContain("grid: 'auto'");
     // Looking is only half of it: the draft is also what the QC pass measures.
@@ -1549,14 +1567,22 @@ describe('openreelio.timeline_snapshot where-to-look signals', () => {
   }
 
   it('should carry the core inspection signals on every sequence', async () => {
-    stubSnapshot(() => Promise.resolve(SUMMARY));
+    stubSnapshot(() => Promise.resolve([SUMMARY]));
 
     const snapshot = JSON.parse(responseText(await callTool('timeline_snapshot'))) as {
       activeSequence: Record<string, unknown>;
       sequences: Array<Record<string, unknown>>;
     };
 
-    expect(invoke).toHaveBeenCalledWith('sequence_inspection_summary', { sequenceId: 'seq-1' });
+    // One call for the whole snapshot: each invocation clones the project
+    // state, so asking per sequence paid for that clone once per sequence.
+    expect(invoke).toHaveBeenCalledWith('sequence_inspection_summary', {
+      sequenceId: null,
+      sequenceIds: ['seq-1'],
+    });
+    expect(
+      vi.mocked(invoke).mock.calls.filter(([name]) => name === 'sequence_inspection_summary'),
+    ).toHaveLength(1);
     for (const sequence of [snapshot.activeSequence, snapshot.sequences[0]]) {
       // The structural half every existing caller reads stays put.
       expect(sequence.id).toBe('seq-1');

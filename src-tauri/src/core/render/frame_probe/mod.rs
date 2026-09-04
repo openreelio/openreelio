@@ -383,10 +383,19 @@ pub const API_ARGUMENT_NAMES: &FrameProbeArgumentNames = &FrameProbeArgumentName
 /// The JSON spelling, because two of the three surfaces speak it and a request
 /// built field by field is far more likely to be one of those than the CLI's.
 ///
+/// This exists so [`FrameProbeRequest`] and [`SamplerSpec`] can derive `Default`
+/// — both carry a `names` field — and it is a footgun worth stating: a request
+/// assembled with `..Default::default()` refuses in JSON whether or not that is
+/// the surface it came from, silently and without a compiler complaint. Anything
+/// speaking for the command line must set `names` explicitly; the CLI does, and
+/// so do the tests that assert CLI wording.
+///
 /// Implemented on the reference rather than the value because that is how
 /// requests carry it: thirty labels is half a kilobyte, and the request is
 /// captured inside the extraction's async state machine, which runs on the
 /// process's main thread.
+///
+/// [`SamplerSpec`]: sampler::SamplerSpec
 impl Default for &'static FrameProbeArgumentNames {
     fn default() -> Self {
         API_ARGUMENT_NAMES
@@ -583,10 +592,12 @@ enum Selection {
     /// that ordering — [`FrameProbePlan::resolve`] still spawns nothing and
     /// reads nothing.
     Sampled {
-        /// Boxed because it carries the surface's whole argument vocabulary,
-        /// which is an order of magnitude larger than any other variant: stored
-        /// inline it would set the size of every `Selection`, including the
-        /// single-still one that is by far the most common.
+        /// Boxed because a `SamplerSpec` is by far the largest thing any
+        /// variant holds — every switch, the window shaping, an owned list of
+        /// named ranges — and stored inline it would set the size of every
+        /// `Selection`, including the single-still one that is by far the most
+        /// common. (The vocabulary itself is only a pointer: `names` is a
+        /// `&'static`.)
         spec: Box<SamplerSpec>,
         /// Contact-sheet layout, or `None` for a batch of stills.
         grid: Option<GridLayout>,
@@ -1953,8 +1964,11 @@ fn resolve_single_output_path(
         return Ok(out.join(batch_frame_name(time_sec, &format)));
     }
     if out.as_os_str().is_empty() {
+        // Deliberately flagless: the output location is the command line's
+        // alone — the MCP and IPC surfaces choose it themselves — so naming
+        // `--out` here would hand a JSON caller an argument it cannot pass.
         return Err(FrameProbeError::new(
-            "Invalid value for --out: cannot be empty".to_string(),
+            "The output path cannot be empty".to_string(),
         ));
     }
     Ok(normalize_extension(out.to_path_buf(), &format))

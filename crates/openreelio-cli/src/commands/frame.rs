@@ -187,7 +187,7 @@ pub struct ExtractArgs {
     /// struct's own callers type. The MCP server builds the same struct from a
     /// JSON payload and overrides it, so a refusal there names `cellWidth`
     /// rather than a flag no MCP client can pass.
-    #[arg(skip = openreelio_core::render::frame_probe::CLI_ARGUMENT_NAMES)]
+    #[arg(skip = CLI_ARGUMENT_NAMES)]
     pub names: &'static FrameProbeArgumentNames,
 }
 
