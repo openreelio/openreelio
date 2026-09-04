@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
-    timeline::{Sequence, SequenceFormat, SequenceHdrSettings, Track, TrackKind},
+    timeline::{Canvas, FpsSpec, Sequence, SequenceFormat, SequenceHdrSettings, Track, TrackKind},
     CoreError, CoreResult, SequenceId,
 };
 
@@ -371,6 +371,324 @@ impl Command for UpdateSequenceHdrSettingsCommand {
 }
 
 // =============================================================================
+// SetSequenceFormatCommand
+// =============================================================================
+
+/// Smallest canvas edge a sequence may declare, in pixels.
+const MIN_CANVAS_DIMENSION: u32 = 16;
+
+/// Largest canvas edge a sequence may declare, in pixels.
+///
+/// Matches the level ceiling of the codecs the exporter drives; anything larger
+/// would be accepted here and refused by every render preset.
+const MAX_CANVAS_DIMENSION: u32 = 16384;
+
+/// Audio sample rates the export pipeline accepts, in Hz.
+///
+/// The renderer validates a requested rate as `1..=192000`, but only the
+/// standard family actually survives a round trip through the encoders it
+/// drives, so a sequence may only declare one of these.
+const SUPPORTED_AUDIO_SAMPLE_RATES: &[u32] = &[
+    8_000, 11_025, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000,
+];
+
+/// Largest audio channel count a sequence may declare.
+///
+/// The export pipeline mixes to stereo, so a higher count would be a promise
+/// the renderer cannot keep.
+const MAX_AUDIO_CHANNELS: u8 = 2;
+
+/// Command to change a sequence's delivery format: frame rate, canvas size and
+/// audio format.
+///
+/// Every field is optional and at least one must be set; the fields left unset
+/// keep their current value. The sequence defaults to the project's active one.
+///
+/// # Frame rate
+///
+/// `fps` accepts either an exact ratio (`{"num": 30000, "den": 1001}`) or a
+/// decimal (`29.97`); [`FpsSpec::to_ratio`] documents how a decimal is snapped.
+/// Changing the frame rate re-times nothing: the timeline is stored in seconds,
+/// so every clip keeps the instant it starts and ends at. What changes is the
+/// grid the renderer quantises to — cut positions land on the nearest new
+/// frame, and transition durations are re-derived in frames.
+///
+/// # Canvas
+///
+/// Clip transforms are canvas-relative (normalized position and scale), so they
+/// are left exactly as they are: a clip centered at half scale stays centered at
+/// half scale. What changes is how the source *fits*: a 16:9 clip on a canvas
+/// that becomes 9:16 will letterbox or crop according to the clip's own fit
+/// behaviour. This command does not re-fit anything, and does not try to guess
+/// which of those the caller wanted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSequenceFormatCommand {
+    /// Sequence to change; the active sequence when omitted.
+    pub sequence_id: Option<SequenceId>,
+    /// New frame rate, as an exact ratio or a decimal.
+    pub fps: Option<FpsSpec>,
+    /// New canvas width in pixels.
+    pub width: Option<u32>,
+    /// New canvas height in pixels.
+    pub height: Option<u32>,
+    /// New audio sample rate in Hz.
+    pub audio_sample_rate: Option<u32>,
+    /// New audio channel count.
+    pub audio_channels: Option<u8>,
+    /// Sequence the command actually changed, kept for undo.
+    #[serde(skip)]
+    resolved_sequence_id: Option<SequenceId>,
+    /// Format replaced by this command, restored on undo.
+    #[serde(skip)]
+    previous_format: Option<SequenceFormat>,
+    /// Modification timestamp replaced by this command, restored on undo.
+    #[serde(skip)]
+    previous_modified_at: Option<String>,
+}
+
+impl SetSequenceFormatCommand {
+    /// Creates a command that changes nothing yet; set at least one field.
+    pub fn new() -> Self {
+        Self {
+            sequence_id: None,
+            fps: None,
+            width: None,
+            height: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+            resolved_sequence_id: None,
+            previous_format: None,
+            previous_modified_at: None,
+        }
+    }
+
+    /// Targets an explicit sequence instead of the active one.
+    pub fn for_sequence(mut self, sequence_id: &str) -> Self {
+        self.sequence_id = Some(sequence_id.to_string());
+        self
+    }
+
+    /// Sets the frame rate.
+    pub fn with_fps(mut self, fps: FpsSpec) -> Self {
+        self.fps = Some(fps);
+        self
+    }
+
+    /// Sets the canvas size in pixels.
+    pub fn with_canvas(mut self, width: u32, height: u32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+
+    /// Sets the audio sample rate in Hz.
+    pub fn with_audio_sample_rate(mut self, sample_rate: u32) -> Self {
+        self.audio_sample_rate = Some(sample_rate);
+        self
+    }
+
+    /// Sets the audio channel count.
+    pub fn with_audio_channels(mut self, channels: u8) -> Self {
+        self.audio_channels = Some(channels);
+        self
+    }
+
+    /// Builds the format this command would produce from `current`.
+    ///
+    /// Separated from [`Command::execute`] so the validation is a pure function
+    /// over the requested fields and can be tested without a project.
+    fn resolve_format(&self, current: &SequenceFormat) -> CoreResult<SequenceFormat> {
+        if self.fps.is_none()
+            && self.width.is_none()
+            && self.height.is_none()
+            && self.audio_sample_rate.is_none()
+            && self.audio_channels.is_none()
+        {
+            return Err(CoreError::InvalidCommand(
+                "SetSequenceFormat requires at least one of fps, width, height, \
+                 audioSampleRate or audioChannels"
+                    .to_string(),
+            ));
+        }
+
+        let mut next = current.clone();
+
+        if let Some(spec) = &self.fps {
+            next.fps = spec.to_ratio().ok_or_else(|| {
+                CoreError::InvalidCommand(
+                    "Frame rate must be a positive rate of at most 1000 fps, given either as \
+                     a number or as {\"num\", \"den\"} with both terms positive"
+                        .to_string(),
+                )
+            })?;
+        }
+
+        // Only a *requested* edge is validated. A sequence already on disk may
+        // carry an odd or out-of-range canvas (an older project, a hand-edited
+        // snapshot), and refusing an unrelated `--fps 25` because of it would
+        // leave the caller with no way to change anything at all.
+        if let Some(width) = self.width {
+            Self::validate_canvas_dimension(width, "width")?;
+        }
+        if let Some(height) = self.height {
+            Self::validate_canvas_dimension(height, "height")?;
+        }
+        next.canvas = Canvas::new(
+            self.width.unwrap_or(current.canvas.width),
+            self.height.unwrap_or(current.canvas.height),
+        );
+
+        if let Some(sample_rate) = self.audio_sample_rate {
+            if !SUPPORTED_AUDIO_SAMPLE_RATES.contains(&sample_rate) {
+                return Err(CoreError::InvalidCommand(format!(
+                    "Audio sample rate {sample_rate} Hz is not supported; use one of: {}",
+                    SUPPORTED_AUDIO_SAMPLE_RATES
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            next.audio_sample_rate = sample_rate;
+        }
+
+        if let Some(channels) = self.audio_channels {
+            if channels == 0 || channels > MAX_AUDIO_CHANNELS {
+                return Err(CoreError::InvalidCommand(format!(
+                    "Audio channel count must be 1 or {MAX_AUDIO_CHANNELS}, got {channels}"
+                )));
+            }
+            next.audio_channels = channels;
+        }
+
+        Ok(next)
+    }
+
+    fn validate_canvas_dimension(value: u32, label: &str) -> CoreResult<()> {
+        if !(MIN_CANVAS_DIMENSION..=MAX_CANVAS_DIMENSION).contains(&value) {
+            return Err(CoreError::InvalidCommand(format!(
+                "Canvas {label} must be between {MIN_CANVAS_DIMENSION} and \
+                 {MAX_CANVAS_DIMENSION} pixels, got {value}"
+            )));
+        }
+        if !value.is_multiple_of(2) {
+            return Err(CoreError::InvalidCommand(format!(
+                "Canvas {label} must be an even number of pixels (4:2:0 chroma \
+                 subsampling halves both edges), got {value}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for SetSequenceFormatCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for SetSequenceFormatCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence_id = self
+            .sequence_id
+            .clone()
+            .or_else(|| state.active_sequence_id.clone())
+            .ok_or_else(|| {
+                CoreError::InvalidCommand(
+                    "SetSequenceFormat needs a sequenceId: the project has no active sequence"
+                        .to_string(),
+                )
+            })?;
+
+        let sequence = state
+            .sequences
+            .get(&sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(sequence_id.clone()))?;
+
+        // Validated before anything is written, so a refused format leaves the
+        // sequence exactly as it was.
+        let next_format = self.resolve_format(&sequence.format)?;
+
+        let sequence = state
+            .sequences
+            .get_mut(&sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(sequence_id.clone()))?;
+
+        self.previous_format = Some(sequence.format.clone());
+        self.previous_modified_at = Some(sequence.modified_at.clone());
+        self.resolved_sequence_id = Some(sequence_id.clone());
+
+        sequence.format = next_format;
+        sequence.modified_at = chrono::Utc::now().to_rfc3339();
+        state.is_dirty = true;
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::SequenceModified {
+                sequence_id: sequence_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let (Some(sequence_id), Some(previous_format)) =
+            (&self.resolved_sequence_id, &self.previous_format)
+        else {
+            return Ok(());
+        };
+
+        if let Some(sequence) = state.sequences.get_mut(sequence_id) {
+            sequence.format = previous_format.clone();
+            if let Some(previous_modified_at) = &self.previous_modified_at {
+                sequence.modified_at = previous_modified_at.clone();
+            }
+            state.is_dirty = true;
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetSequenceFormat"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        // Only the requested sequence. `CommandExecutor` captures `to_json()`
+        // *before* `execute` runs, so `resolved_sequence_id` is always `None`
+        // here; a payload that names no sequence is completed from the
+        // `SequenceModified` change the execution reports.
+        let mut payload = serde_json::Map::new();
+        if let Some(sequence_id) = self.sequence_id.clone() {
+            payload.insert(
+                "sequenceId".to_string(),
+                serde_json::Value::String(sequence_id),
+            );
+        }
+        if let Some(fps) = &self.fps {
+            payload.insert("fps".to_string(), serde_json::json!(fps));
+        }
+        if let Some(width) = self.width {
+            payload.insert("width".to_string(), serde_json::json!(width));
+        }
+        if let Some(height) = self.height {
+            payload.insert("height".to_string(), serde_json::json!(height));
+        }
+        if let Some(sample_rate) = self.audio_sample_rate {
+            payload.insert(
+                "audioSampleRate".to_string(),
+                serde_json::json!(sample_rate),
+            );
+        }
+        if let Some(channels) = self.audio_channels {
+            payload.insert("audioChannels".to_string(), serde_json::json!(channels));
+        }
+
+        serde_json::Value::Object(payload)
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -616,6 +934,180 @@ mod tests {
         assert_eq!(settings.max_cll, None);
         assert_eq!(settings.max_fall, None);
         assert_eq!(state.sequences[&seq_id].modified_at, original_modified_at);
+    }
+
+    // =========================================================================
+    // SetSequenceFormatCommand Tests
+    // =========================================================================
+
+    #[test]
+    fn should_apply_a_vertical_25fps_format_to_the_active_sequence() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+        assert_eq!(state.sequences[&seq_id].format.canvas.width, 1920);
+
+        let mut cmd = SetSequenceFormatCommand::new()
+            .with_fps(FpsSpec::Decimal(25.0))
+            .with_canvas(1080, 1920);
+        let result = cmd.execute(&mut state).expect("format applies");
+
+        let format = &state.sequences[&seq_id].format;
+        assert_eq!((format.fps.num, format.fps.den), (25, 1));
+        assert_eq!((format.canvas.width, format.canvas.height), (1080, 1920));
+        assert!(matches!(
+            result.changes.first(),
+            Some(StateChange::SequenceModified { sequence_id }) if sequence_id == &seq_id
+        ));
+    }
+
+    #[test]
+    fn should_leave_unset_fields_alone() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = SetSequenceFormatCommand::new().with_fps(FpsSpec::Decimal(29.97));
+        cmd.execute(&mut state).expect("format applies");
+
+        let format = &state.sequences[&seq_id].format;
+        assert_eq!((format.fps.num, format.fps.den), (30000, 1001));
+        assert_eq!((format.canvas.width, format.canvas.height), (1920, 1080));
+        assert_eq!(format.audio_sample_rate, 48000);
+    }
+
+    #[test]
+    fn should_restore_the_previous_format_on_undo() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+        let original_modified_at = "2026-01-01T00:00:00Z".to_string();
+        state.sequences.get_mut(&seq_id).unwrap().modified_at = original_modified_at.clone();
+
+        let mut cmd = SetSequenceFormatCommand::new()
+            .with_fps(FpsSpec::Decimal(25.0))
+            .with_canvas(1080, 1920);
+        cmd.execute(&mut state).expect("format applies");
+        cmd.undo(&mut state).expect("undo applies");
+
+        let sequence = &state.sequences[&seq_id];
+        assert_eq!((sequence.format.fps.num, sequence.format.fps.den), (30, 1));
+        assert_eq!(
+            (sequence.format.canvas.width, sequence.format.canvas.height),
+            (1920, 1080)
+        );
+        assert_eq!(sequence.modified_at, original_modified_at);
+    }
+
+    #[test]
+    fn should_refuse_a_request_that_changes_nothing() {
+        let (mut state, _seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = SetSequenceFormatCommand::new();
+        let error = cmd.execute(&mut state).expect_err("empty request refused");
+
+        assert!(matches!(error, CoreError::InvalidCommand(_)));
+    }
+
+    #[test]
+    fn should_refuse_an_odd_or_out_of_range_canvas_and_leave_the_sequence_untouched() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        for (width, height) in [(1081, 1920), (1080, 1921), (8, 1080), (1920, 20000)] {
+            let mut cmd = SetSequenceFormatCommand::new().with_canvas(width, height);
+            assert!(
+                cmd.execute(&mut state).is_err(),
+                "{width}x{height} should be refused"
+            );
+        }
+
+        let format = &state.sequences[&seq_id].format;
+        assert_eq!((format.canvas.width, format.canvas.height), (1920, 1080));
+    }
+
+    #[test]
+    fn should_refuse_an_unsupported_audio_format() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        assert!(SetSequenceFormatCommand::new()
+            .with_audio_sample_rate(47_000)
+            .execute(&mut state)
+            .is_err());
+        assert!(SetSequenceFormatCommand::new()
+            .with_audio_channels(6)
+            .execute(&mut state)
+            .is_err());
+        assert!(SetSequenceFormatCommand::new()
+            .with_audio_channels(0)
+            .execute(&mut state)
+            .is_err());
+
+        assert_eq!(state.sequences[&seq_id].format.audio_sample_rate, 48000);
+        assert_eq!(state.sequences[&seq_id].format.audio_channels, 2);
+    }
+
+    #[test]
+    fn should_refuse_a_frame_rate_that_is_not_a_usable_timebase() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        assert!(SetSequenceFormatCommand::new()
+            // Built as a struct literal on purpose: `Ratio::new` silently
+            // rewrites a zero denominator to 1, but a deserialized payload
+            // keeps the zero, and that is the shape this must refuse.
+            .with_fps(FpsSpec::Ratio(crate::core::Ratio { num: 30, den: 0 }))
+            .execute(&mut state)
+            .is_err());
+        assert!(SetSequenceFormatCommand::new()
+            .with_fps(FpsSpec::Decimal(0.0))
+            .execute(&mut state)
+            .is_err());
+
+        assert_eq!(state.sequences[&seq_id].format.fps.num, 30);
+    }
+
+    #[test]
+    fn should_refuse_a_sequence_that_does_not_exist() {
+        let (mut state, _seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = SetSequenceFormatCommand::new()
+            .for_sequence("nonexistent")
+            .with_fps(FpsSpec::Decimal(25.0));
+
+        assert!(matches!(
+            cmd.execute(&mut state),
+            Err(CoreError::SequenceNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn should_omit_the_sequence_from_the_logged_payload_when_none_was_named() {
+        // `CommandExecutor` captures `to_json()` before `execute`, so the
+        // resolved sequence is never in it. The executor fills the gap from the
+        // `SequenceModified` change instead — see
+        // `should_replay_a_sequence_format_change_from_the_ops_log`.
+        let (mut state, _seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = SetSequenceFormatCommand::new().with_fps(FpsSpec::Decimal(25.0));
+        assert!(cmd.to_json().get("sequenceId").is_none());
+
+        cmd.execute(&mut state).expect("format applies");
+        assert!(cmd.to_json().get("sequenceId").is_none());
+    }
+
+    #[test]
+    fn should_accept_a_frame_rate_change_on_a_sequence_whose_canvas_is_invalid() {
+        // A project written before the canvas rules existed, or hand-edited.
+        // Changing only the frame rate must not be refused because of it.
+        let (mut state, seq_id) = create_test_state_with_sequence();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .expect("sequence exists")
+            .format
+            .canvas = Canvas::new(1920, 1081);
+
+        SetSequenceFormatCommand::new()
+            .with_fps(FpsSpec::Decimal(25.0))
+            .execute(&mut state)
+            .expect("fps applies over an odd canvas");
+
+        let format = &state.sequences[&seq_id].format;
+        assert_eq!((format.fps.num, format.fps.den), (25, 1));
+        assert_eq!((format.canvas.width, format.canvas.height), (1920, 1081));
     }
 
     #[test]

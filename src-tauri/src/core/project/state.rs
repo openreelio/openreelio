@@ -18,7 +18,7 @@ use crate::core::{
     masks::MaskGroup,
     project::{OpKind, Operation, OpsLog},
     timeline::{
-        AudioSettings, BlendMode, Clip, Marker, Sequence, SequenceHdrSettings,
+        AudioSettings, BlendMode, Clip, Marker, Sequence, SequenceFormat, SequenceHdrSettings,
         SlowMotionInterpolation, Track, TransformKeyframe,
     },
     AssetId, CoreError, CoreResult, EffectId, SequenceId,
@@ -740,9 +740,37 @@ impl ProjectState {
                 None
             };
 
+            // The executor snapshots the realized `SequenceFormat` onto every
+            // sequence-update op, so a replay reproduces a frame-rate or canvas
+            // change without having to re-derive it from the requested fields.
+            let next_format = if let Some(format_value) = op.payload.get("format") {
+                let format: SequenceFormat =
+                    serde_json::from_value(format_value.clone()).map_err(|e| {
+                        CoreError::InvalidCommand(format!("Invalid sequence format: {e}"))
+                    })?;
+                if !format.canvas.is_valid() {
+                    return Err(CoreError::InvalidCommand(format!(
+                        "Invalid sequence canvas {}x{}",
+                        format.canvas.width, format.canvas.height
+                    )));
+                }
+                if format.fps.num <= 0 || format.fps.den <= 0 {
+                    return Err(CoreError::InvalidCommand(format!(
+                        "Invalid sequence frame rate {}/{}",
+                        format.fps.num, format.fps.den
+                    )));
+                }
+                Some(format)
+            } else {
+                None
+            };
+
             // Commit all mutations after validation
             if let Some(name) = next_name {
                 sequence.name = name;
+            }
+            if let Some(format) = next_format {
+                sequence.format = format;
             }
             if let Some(volume_db) = next_master_volume_db {
                 sequence.master_volume_db = volume_db;

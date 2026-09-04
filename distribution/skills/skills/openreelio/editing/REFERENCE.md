@@ -22,10 +22,26 @@ openreelio-cli timeline remove  --path ./demo --clip <CLIP_ID> --track <TRACK_ID
 
 openreelio-cli timeline add-track    --path ./demo --kind video --name "Video 2"
 openreelio-cli timeline remove-track --path ./demo --track <TRACK_ID>
+
+openreelio-cli timeline set-format --path ./demo --fps 25 --width 1080 --height 1920
 ```
 
 The trim flags are `--source-in` and `--source-out` (source-media in/out points),
 not `--in` / `--out`.
+
+> **`timeline insert` places a 10-second clip.** `asset import` records no probed
+> duration, so the length is the default regardless of the file, and a second
+> `timeline insert --at 4.0` is refused as an overlap. Trim each clip to its real
+> length — `analysis shots` gives `totalDurationSec` — before inserting after it.
+
+`timeline set-format` changes the sequence's frame rate, canvas size and audio
+format. Every option is optional and at least one is required; the rest keep
+their current value. A decimal `--fps` snaps to the exact broadcast rational
+(`29.97` → `30000/1001`, `23.976` → `24000/1001`); canvas edges must be even and
+within `16..=16384`. Changing the frame rate re-times nothing — the timeline is
+stored in seconds — and changing the canvas leaves clip transforms alone, because
+they are canvas-relative; what changes is how each source fits the new frame.
+`timeline info` reports the result as `fps`, `fpsRatio` and `canvas`.
 
 `timeline clips` returns each clip's `id`, `trackId`, `assetId`,
 `timelineInSec`, `durationSec`, `sourceInSec`, `sourceOutSec`, and `speed` —
@@ -33,13 +49,13 @@ enough to plan the next edit without dumping full state.
 
 ## Every backend command: `command execute`
 
-The convenience verbs cover the common cuts. The full editor surface — 79
+The convenience verbs cover the common cuts. The full editor surface — 80
 command types including effects, masks, keyframes, compound clips, adjustment
 layers, audio ducking, blend modes, markers, freeze frames, time remapping — is
 reachable directly.
 
 ```bash
-openreelio-cli command schema                                    # list all 79 types
+openreelio-cli command schema                                    # list all 80 types
 openreelio-cli command validate --type RenameTrack --payload '{…}'
 openreelio-cli command execute  --path ./demo --type SplitClip \
   --payload '{"sequenceId":"…","trackId":"…","clipId":"…","splitTime":5}'

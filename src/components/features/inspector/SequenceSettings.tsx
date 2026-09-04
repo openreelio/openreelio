@@ -9,7 +9,8 @@ import { useState, useCallback, useMemo, memo } from 'react';
 import { Maximize, Film, Settings } from 'lucide-react';
 import { useProjectStore } from '@/stores/projectStore';
 import { useToastStore } from '@/hooks/useToast';
-import type { SequenceFormat, Sequence, Ratio } from '@/types';
+import type { Sequence, Ratio } from '@/types';
+import { buildSequenceFormatPayload } from './sequenceFormatPayload';
 
 // =============================================================================
 // Types
@@ -99,11 +100,6 @@ export const SequenceSettings = memo(function SequenceSettings({
   // Handle resolution preset change
   const handlePresetChange = useCallback(
     async (preset: ResolutionPreset) => {
-      const newFormat: SequenceFormat = {
-        ...currentFormat,
-        canvas: { width: preset.width, height: preset.height },
-      };
-
       // Update local state for custom inputs
       setCustomWidth(preset.width.toString());
       setCustomHeight(preset.height.toString());
@@ -111,10 +107,10 @@ export const SequenceSettings = memo(function SequenceSettings({
       try {
         await executeCommand({
           type: 'SetSequenceFormat',
-          payload: {
-            sequenceId: sequence.id,
-            format: newFormat,
-          },
+          payload: buildSequenceFormatPayload(sequence.id, {
+            width: preset.width,
+            height: preset.height,
+          }),
         });
         addToast({
           message: `Resolution changed to ${preset.width}x${preset.height}`,
@@ -128,24 +124,16 @@ export const SequenceSettings = memo(function SequenceSettings({
         });
       }
     },
-    [currentFormat, sequence.id, executeCommand, addToast],
+    [sequence.id, executeCommand, addToast],
   );
 
   // Handle FPS change
   const handleFpsChange = useCallback(
     async (fps: Ratio) => {
-      const newFormat: SequenceFormat = {
-        ...currentFormat,
-        fps,
-      };
-
       try {
         await executeCommand({
           type: 'SetSequenceFormat',
-          payload: {
-            sequenceId: sequence.id,
-            format: newFormat,
-          },
+          payload: buildSequenceFormatPayload(sequence.id, { fps }),
         });
         const fpsValue = fps.num / fps.den;
         addToast({
@@ -160,7 +148,7 @@ export const SequenceSettings = memo(function SequenceSettings({
         });
       }
     },
-    [currentFormat, sequence.id, executeCommand, addToast],
+    [sequence.id, executeCommand, addToast],
   );
 
   // Handle custom width change
@@ -206,18 +194,10 @@ export const SequenceSettings = memo(function SequenceSettings({
       return;
     }
 
-    const newFormat: SequenceFormat = {
-      ...currentFormat,
-      canvas: { width, height },
-    };
-
     try {
       await executeCommand({
         type: 'SetSequenceFormat',
-        payload: {
-          sequenceId: sequence.id,
-          format: newFormat,
-        },
+        payload: buildSequenceFormatPayload(sequence.id, { width, height }),
       });
       setIsEditing(false);
       addToast({
@@ -231,7 +211,7 @@ export const SequenceSettings = memo(function SequenceSettings({
         variant: 'error',
       });
     }
-  }, [customWidth, customHeight, currentFormat, sequence.id, executeCommand, addToast]);
+  }, [customWidth, customHeight, sequence.id, executeCommand, addToast]);
 
   // Group presets by category
   const groupedPresets = useMemo(() => {

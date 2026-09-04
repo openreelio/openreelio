@@ -85,7 +85,7 @@ everywhere rather than tracking the exceptions.
 `help-json` prints the whole command schema, but it is ~68 KB — do not preload
 it into a context window. Fetch help per verb instead
 (`openreelio-cli verify --help`, `openreelio-cli frame extract --help`), use
-`openreelio-cli command schema` for the 79 backend command types, and
+`openreelio-cli command schema` for the 80 backend command types, and
 `openreelio-cli packs list` for the curated caption styles, transition recipes,
 text presets, and pacing profiles (`--kind caption|transition|text|pacing`).
 
@@ -101,11 +101,15 @@ this first when a media verb fails for no obvious reason.
 ## 3. Project lifecycle
 
 `project create` makes the directory and a default sequence with one video and
-one audio track. `asset import` returns
+one audio track. The sequence defaults to **30fps 1920x1080**, whatever the
+media is; pass `--fps`, `--width` and `--height` to create it in the delivery
+format instead, or change it later with `timeline set-format`. Both go through
+the same logged, undoable `SetSequenceFormat` command. `asset import` returns
 `{"status","opId","createdIds":[<ASSET_ID>],"assetName","uri"}`.
 
 ```bash
 openreelio-cli project create --name "Demo" --path ./demo
+openreelio-cli project create --name "Vertical" --path ./vertical --fps 25 --width 1080 --height 1920
 openreelio-cli project open   --path ./demo
 openreelio-cli project info   --path ./demo
 openreelio-cli project save   --path ./demo
@@ -141,12 +145,28 @@ openreelio-cli timeline remove  --path ./demo --clip <CLIP_ID> --track <TRACK_ID
 openreelio-cli timeline add-track    --path ./demo --kind video --name "Video 2"
 openreelio-cli timeline remove-track --path ./demo --track <TRACK_ID>
 
+openreelio-cli timeline set-format --path ./demo --fps 25 --width 1080 --height 1920
+
 openreelio-cli timeline undo --path ./demo
 openreelio-cli timeline redo --path ./demo
 ```
 
 The trim flags are `--source-in` / `--source-out` (source-media in/out points),
 not `--in` / `--out`.
+
+> **Insert length.** `timeline insert` gives the clip the 10-second default
+> length, because `asset import` records no probed duration — see the *Duration
+> gap* note in §3. Trim it to the real length before inserting anything after it,
+> or a second `timeline insert --at 4.0` is refused as an overlap.
+
+`timeline set-format` changes the frame rate, canvas size and audio format of a
+sequence; every option is optional and at least one is required. A decimal
+`--fps` snaps to the exact broadcast rational (`29.97` → `30000/1001`, `23.976` →
+`24000/1001`). Canvas edges must be even and within `16..=16384`. Changing the
+frame rate re-times nothing — the timeline is stored in seconds — and changing
+the canvas leaves clip transforms alone, because they are canvas-relative; what
+changes is how each source fits the new frame. Verify with `timeline info`, which
+reports `fps`, `fpsRatio` and `canvas`.
 
 `timeline clips` returns each clip's `id`, `trackId`, `assetId`,
 `timelineInSec`, `durationSec`, `sourceInSec`, `sourceOutSec` and `speed` —
@@ -178,11 +198,11 @@ transition the renderer refuses is still listed, with `rendersAsCut: true` and a
 ### The escape hatch: `command execute`
 
 The convenience verbs cover the common cuts. Everything the editor can do —
-79 command types including effects, masks, keyframes, compound clips,
+80 command types including effects, masks, keyframes, compound clips,
 adjustment layers, audio ducking, blend modes — is reachable directly:
 
 ```bash
-openreelio-cli command schema                       # list all 79 types
+openreelio-cli command schema                       # list all 80 types
 openreelio-cli command validate --type RenameTrack --payload '{…}'
 openreelio-cli command execute  --path ./demo --type SplitClip \
   --payload '{"sequenceId":"…","trackId":"…","clipId":"…","splitTime":5}'

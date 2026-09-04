@@ -70,13 +70,25 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
             // Which timeline the edit is measured against has to be settled
             // before it runs: the ranges are a diff across the mutation, and a
             // ripple move shifts clips no `StateChange` entry names.
-            let sequence_id = named_sequence_id.or_else(|| {
-                openreelio_core::commands::infer_sequence_id(
-                    &project.state,
-                    named_effect_id.as_deref(),
-                    named_clip_id.as_deref(),
-                )
-            });
+            let sequence_id = named_sequence_id
+                .or_else(|| {
+                    openreelio_core::commands::infer_sequence_id(
+                        &project.state,
+                        named_effect_id.as_deref(),
+                        named_clip_id.as_deref(),
+                    )
+                })
+                // A payload whose command resolves the active sequence itself —
+                // `SetSequenceFormat` with no `sequenceId` — has to resolve it
+                // the same way here, or the edit would run but report no
+                // sequence, no ranges and write no `--affected` hand-off.
+                .or_else(|| {
+                    if typed_payload.targets_active_sequence() {
+                        project.state.active_sequence_id.clone()
+                    } else {
+                        None
+                    }
+                });
 
             let command = typed_payload.build_command(&project.path);
             // Through the same recorder every other mutating verb uses, so this
@@ -84,6 +96,8 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
             // A payload naming no timeline — an asset import, a `CreateSequence`
             // — has nothing to diff and nothing to hand off, and says so by
             // reporting no sequence rather than guessing at the active one.
+            // The exception is a command that targets the active sequence by
+            // design, resolved above.
             let (result, affected_ranges) = match sequence_id.as_deref() {
                 Some(sequence_id) => {
                     let mut recorder = super::EditRecorder::begin(&project, sequence_id);

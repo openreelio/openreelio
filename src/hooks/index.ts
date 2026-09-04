@@ -10,6 +10,9 @@ export type { UseProjectReturn } from './useProject';
 export { useTimeline } from './useTimeline';
 export type { UseTimelineReturn } from './useTimeline';
 
+export { useSequenceFps, resolveSequenceFps } from './useSequenceFps';
+export { useSyncPlaybackFps } from './useSyncPlaybackFps';
+
 export { usePreviewSource } from './usePreviewSource';
 export type { PreviewSource } from './usePreviewSource';
 

@@ -18,6 +18,7 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { createLogger } from '@/services/logger';
 import { PlayerControls } from './PlayerControls';
 import { normalizeFileUriToPath } from '@/utils/uri';
+import { resolveSequenceFps } from '@/hooks/useSequenceFps';
 import { useSequenceRenderGraph } from '@/hooks/useSequenceRenderGraph';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { textRenderSpecToTextClipData } from '@/utils/renderGraphText';
@@ -459,11 +460,7 @@ export function ProxyPreviewPlayer({
   // and Timeline to use different duration ranges, breaking positional sync.
 
   // Calculate sequence FPS
-  const sequenceFps = useMemo(() => {
-    if (!sequence?.format?.fps) return 30;
-    const { num, den } = sequence.format.fps;
-    return den > 0 ? num / den : 30;
-  }, [sequence]);
+  const sequenceFps = useMemo(() => resolveSequenceFps(sequence?.format?.fps), [sequence]);
 
   const renderGraph = useSequenceRenderGraph(sequence);
   const textClipDataById = useSequenceTextClipData(sequence);

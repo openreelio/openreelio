@@ -12,7 +12,7 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useEditorToolStore, type EditorTool, type ClipboardItem } from '@/stores/editorToolStore';
-import { PLAYBACK } from '@/constants/preview';
+import { useSequenceFps } from './useSequenceFps';
 import type { Sequence, Clip, Track } from '@/types';
 import { isTextClip } from '@/types';
 import { extractTextDataFromClip } from '@/utils/textRenderer';
@@ -189,6 +189,10 @@ export function useEnhancedKeyboardShortcuts(options: UseEnhancedKeyboardShortcu
 
   const { setActiveTool, toggleRipple, toggleAutoScroll, copyToClipboard, getClipboard } =
     useEditorToolStore();
+
+  // One frame is one frame of the active sequence, not of the preview's target
+  // rate, so every step here quantises to the grid the renderer will use.
+  const sequenceFps = useSequenceFps();
 
   // Track held keys for temporary tool switching
   const heldKeysRef = useRef<Set<string>>(new Set());
@@ -440,7 +444,7 @@ export function useEnhancedKeyboardShortcuts(options: UseEnhancedKeyboardShortcu
         if (shiftKey) {
           seekBackward(SEEK_AMOUNT_SMALL);
         } else {
-          stepBackward(PLAYBACK.TARGET_FPS);
+          stepBackward(sequenceFps);
         }
         return;
       }
@@ -451,7 +455,7 @@ export function useEnhancedKeyboardShortcuts(options: UseEnhancedKeyboardShortcu
         if (shiftKey) {
           seekForward(SEEK_AMOUNT_SMALL);
         } else {
-          stepForward(PLAYBACK.TARGET_FPS);
+          stepForward(sequenceFps);
         }
         return;
       }
@@ -646,6 +650,7 @@ export function useEnhancedKeyboardShortcuts(options: UseEnhancedKeyboardShortcu
       pause,
       stepForward,
       stepBackward,
+      sequenceFps,
       seekForward,
       seekBackward,
       zoomIn,

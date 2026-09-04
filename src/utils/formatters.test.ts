@@ -62,6 +62,20 @@ describe('formatTimecode', () => {
   it('handles hours correctly', () => {
     expect(formatTimecode(3661.5, 30)).toBe('01:01:01:15');
   });
+
+  it('counts whole frames at 29.97fps', () => {
+    expect(formatTimecode(2, 30000 / 1001)).toBe('00:00:01:29');
+    expect(formatTimecode(0, 30000 / 1001)).toBe('00:00:00:00');
+  });
+
+  it('counts whole frames at 23.976fps', () => {
+    expect(formatTimecode(5, 24000 / 1001)).toBe('00:00:04:23');
+  });
+
+  it('counts whole frames at a fractional non-NTSC rate', () => {
+    expect(formatTimecode(1.6, 12.5)).toBe('00:00:01:07');
+    expect(formatTimecode(4, 12.5)).toBe('00:00:03:11');
+  });
 });
 
 describe('parseTimecode', () => {

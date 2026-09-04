@@ -11,6 +11,7 @@
 
 import { useCallback } from 'react';
 import { useTimelineStore, usePlaybackStore } from '@/stores';
+import { useSequenceFps } from './useSequenceFps';
 
 // =============================================================================
 // Types
@@ -59,7 +60,6 @@ export interface UseTimelineReturn {
 // Constants
 // =============================================================================
 
-const DEFAULT_FPS = 30;
 const ZOOM_STEP = 1.2;
 const MIN_ZOOM = 10;
 const MAX_ZOOM = 500;
@@ -110,6 +110,10 @@ export function useTimeline(): UseTimelineReturn {
   const storeDeselectClip = useTimelineStore((state) => state.deselectClip);
   const clearClipSelection = useTimelineStore((state) => state.clearClipSelection);
 
+  // Frame stepping quantises to the grid the renderer uses, so it follows the
+  // active sequence's frame rate rather than a fixed 30.
+  const fps = useSequenceFps();
+
   // Derived values (no useMemo needed - comparison cost > recomputation cost for simple operations)
   const hasSelection = selectedClipIds.length > 0;
 
@@ -138,17 +142,17 @@ export function useTimeline(): UseTimelineReturn {
       // Validate input: must be positive integer
       const validFrames = Math.max(1, Math.floor(Math.abs(frames)));
       // Single batch operation for performance - calculate total delta
-      const frameDuration = 1 / DEFAULT_FPS;
+      const frameDuration = 1 / fps;
       const totalDelta = validFrames * frameDuration;
       // Use seek for multi-frame steps to avoid N state updates
       if (validFrames === 1) {
-        storeStepForward(DEFAULT_FPS);
+        storeStepForward(fps);
       } else {
         const currentTime = usePlaybackStore.getState().currentTime;
         storeSeek(currentTime + totalDelta);
       }
     },
-    [storeStepForward, storeSeek]
+    [storeStepForward, storeSeek, fps]
   );
 
   const stepBackward = useCallback(
@@ -156,17 +160,17 @@ export function useTimeline(): UseTimelineReturn {
       // Validate input: must be positive integer
       const validFrames = Math.max(1, Math.floor(Math.abs(frames)));
       // Single batch operation for performance - calculate total delta
-      const frameDuration = 1 / DEFAULT_FPS;
+      const frameDuration = 1 / fps;
       const totalDelta = validFrames * frameDuration;
       // Use seek for multi-frame steps to avoid N state updates
       if (validFrames === 1) {
-        storeStepBackward(DEFAULT_FPS);
+        storeStepBackward(fps);
       } else {
         const currentTime = usePlaybackStore.getState().currentTime;
         storeSeek(Math.max(0, currentTime - totalDelta));
       }
     },
-    [storeStepBackward, storeSeek]
+    [storeStepBackward, storeSeek, fps]
   );
 
   // Selection actions

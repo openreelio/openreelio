@@ -104,6 +104,122 @@ impl Default for SequenceFormat {
     }
 }
 
+/// How a caller may spell a frame rate.
+///
+/// Agents write frame rates both ways: `29.97` is what a human says and what a
+/// media probe prints, while `{"num": 30000, "den": 1001}` is what the timeline
+/// actually stores. Accepting only the ratio would make the common case a trap
+/// — `{"num": 2997, "den": 100}` is a *different* rate from broadcast 29.97,
+/// off by 30ppm, and nothing downstream would flag it. So the decimal form is
+/// accepted and snapped to the exact rational the caller meant; see
+/// [`FpsSpec::to_ratio`] for the rule.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(untagged)]
+pub enum FpsSpec {
+    /// An exact rational rate, e.g. `{"num": 30000, "den": 1001}`.
+    Ratio(Ratio),
+    /// A decimal rate, e.g. `29.97`, snapped to an exact rational.
+    Decimal(f64),
+}
+
+/// Largest frame rate a sequence may declare.
+///
+/// Well above any delivery format while still keeping `round(fps) * 1000` far
+/// inside `i32`, which is what the NTSC snap below multiplies by.
+const MAX_SEQUENCE_FPS: f64 = 1000.0;
+
+/// How close a decimal must sit to `n * 1000 / 1001` to be read as that rate.
+///
+/// The NTSC family is always written truncated (`23.976`, `29.97`, `59.94`),
+/// which is at most ~3e-5 away from the exact value. The neighbouring integer
+/// rate is 0.1% of `n` away — `24` is 0.024 from 23.976 — so this window
+/// separates the two families for every `n >= 2`. It does *not* separate them
+/// at `n == 1`: `1` is only 0.000999 from `1000/1001`, inside the window, so
+/// [`MIN_NTSC_FPS`] excludes that rate from the rule instead.
+const NTSC_FPS_TOLERANCE: f64 = 1e-3;
+
+/// Smallest rate the NTSC rule may claim.
+///
+/// `1000/1001` is closer to `1` than [`NTSC_FPS_TOLERANCE`], so without this
+/// floor a requested `1` fps would silently become `1000/1001`. No NTSC rate
+/// below 2 fps exists, so nothing real is lost by refusing the rule there.
+const MIN_NTSC_FPS: f64 = 2.0;
+
+/// Denominator used for a decimal that matches no standard rate.
+const FALLBACK_FPS_DENOMINATOR: i32 = 1000;
+
+impl FpsSpec {
+    /// Resolves the spelling into the exact [`Ratio`] the sequence will store.
+    ///
+    /// A ratio is taken as written (both terms must be positive). A decimal is
+    /// snapped, in this order:
+    ///
+    /// 1. **NTSC family** — within [`NTSC_FPS_TOLERANCE`] of `n * 1000 / 1001`
+    ///    for the nearest integer `n` of at least [`MIN_NTSC_FPS`], it becomes
+    ///    `n * 1000 / 1001`. So `23.976` → `24000/1001`, `29.97` →
+    ///    `30000/1001`, `59.94` → `60000/1001`.
+    /// 2. **Integer** — a whole number becomes `n / 1`. `1` → `1/1`, `25` →
+    ///    `25/1`, `30` → `30/1`. Above [`MIN_NTSC_FPS`] an integer can never
+    ///    fall in the NTSC window, and `1` is kept out of it by that floor, so
+    ///    rule 1 never steals an integer.
+    /// 3. **Anything else** — `round(fps * 1000) / 1000`, reduced. `12.5` →
+    ///    `25/2`. The rate is then within 0.0005fps of what was asked for.
+    ///
+    /// Returns `None` when the rate is not a finite number in `(0, 1000]`, so
+    /// the caller can refuse rather than silently store a broken timebase.
+    pub fn to_ratio(&self) -> Option<Ratio> {
+        match self {
+            Self::Ratio(ratio) => {
+                if ratio.num <= 0 || ratio.den <= 0 {
+                    return None;
+                }
+                let value = ratio.num as f64 / ratio.den as f64;
+                (value > 0.0 && value <= MAX_SEQUENCE_FPS).then(|| ratio.clone())
+            }
+            Self::Decimal(value) => Self::decimal_to_ratio(*value),
+        }
+    }
+
+    fn decimal_to_ratio(value: f64) -> Option<Ratio> {
+        if !value.is_finite() || value <= 0.0 || value > MAX_SEQUENCE_FPS {
+            return None;
+        }
+
+        let nearest = value.round();
+        // `nearest` is at most 1000.0 here, so the casts and the `* 1000` below
+        // stay far inside i32.
+        if nearest >= MIN_NTSC_FPS
+            && (value - nearest * 1000.0 / 1001.0).abs() <= NTSC_FPS_TOLERANCE
+        {
+            return Some(Ratio::new(nearest as i32 * 1000, 1001));
+        }
+
+        if nearest >= 1.0 && (value - nearest).abs() <= f64::EPSILON * nearest.max(1.0) {
+            return Some(Ratio::new(nearest as i32, 1));
+        }
+
+        let numerator = (value * FALLBACK_FPS_DENOMINATOR as f64).round();
+        if numerator < 1.0 {
+            return None;
+        }
+        let divisor = greatest_common_divisor(numerator as i32, FALLBACK_FPS_DENOMINATOR);
+        Some(Ratio::new(
+            numerator as i32 / divisor,
+            FALLBACK_FPS_DENOMINATOR / divisor,
+        ))
+    }
+}
+
+/// Euclidean GCD over positive terms, used to reduce a snapped frame rate.
+fn greatest_common_divisor(mut left: i32, mut right: i32) -> i32 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left.max(1)
+}
+
 /// Sequence-level HDR export mode.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -2091,6 +2207,78 @@ mod tests {
         assert!(!Canvas::new(0, 1080).is_valid());
         assert!(!Canvas::new(1920, 0).is_valid());
         assert!(!Canvas::new(0, 0).is_valid());
+    }
+
+    #[test]
+    fn should_snap_a_decimal_frame_rate_to_the_broadcast_rational_it_names() {
+        for (decimal, num, den) in [
+            (23.976, 24000, 1001),
+            (29.97, 30000, 1001),
+            (59.94, 60000, 1001),
+            (119.88, 120000, 1001),
+        ] {
+            let ratio = FpsSpec::Decimal(decimal)
+                .to_ratio()
+                .unwrap_or_else(|| panic!("{decimal} should resolve"));
+            assert_eq!((ratio.num, ratio.den), (num, den), "fps: {decimal}");
+        }
+    }
+
+    #[test]
+    fn should_keep_a_whole_frame_rate_as_an_integer_ratio() {
+        for whole in [1.0, 2.0, 24.0, 25.0, 30.0, 50.0, 60.0] {
+            let ratio = FpsSpec::Decimal(whole)
+                .to_ratio()
+                .unwrap_or_else(|| panic!("{whole} should resolve"));
+            assert_eq!((ratio.num, ratio.den), (whole as i32, 1), "fps: {whole}");
+        }
+    }
+
+    #[test]
+    fn should_reduce_a_non_standard_decimal_frame_rate() {
+        let ratio = FpsSpec::Decimal(12.5).to_ratio().expect("12.5 resolves");
+        assert_eq!((ratio.num, ratio.den), (25, 2));
+    }
+
+    #[test]
+    fn should_take_an_explicit_ratio_exactly_as_written() {
+        let ratio = FpsSpec::Ratio(Ratio::new(24000, 1001))
+            .to_ratio()
+            .expect("explicit ratio resolves");
+        assert_eq!((ratio.num, ratio.den), (24000, 1001));
+    }
+
+    #[test]
+    fn should_refuse_a_frame_rate_that_is_not_a_usable_timebase() {
+        assert!(FpsSpec::Decimal(0.0).to_ratio().is_none());
+        assert!(FpsSpec::Decimal(-25.0).to_ratio().is_none());
+        assert!(FpsSpec::Decimal(f64::NAN).to_ratio().is_none());
+        assert!(FpsSpec::Decimal(f64::INFINITY).to_ratio().is_none());
+        assert!(FpsSpec::Decimal(1001.0).to_ratio().is_none());
+        assert!(FpsSpec::Ratio(Ratio::new(0, 1)).to_ratio().is_none());
+        assert!(FpsSpec::Ratio(Ratio::new(30, -1)).to_ratio().is_none());
+        assert!(FpsSpec::Ratio(Ratio::new(-30, 1)).to_ratio().is_none());
+        // `Ratio::new` rewrites a zero denominator to 1; a payload deserialized
+        // straight into the struct keeps the zero, and that must be refused.
+        assert!(FpsSpec::Ratio(Ratio { num: 30, den: 0 })
+            .to_ratio()
+            .is_none());
+        assert!(FpsSpec::Ratio(Ratio {
+            num: 2_000_000_000,
+            den: 1
+        })
+        .to_ratio()
+        .is_none());
+    }
+
+    #[test]
+    fn should_read_both_frame_rate_spellings_from_json() {
+        let decimal: FpsSpec = serde_json::from_str("29.97").expect("decimal parses");
+        assert_eq!(decimal, FpsSpec::Decimal(29.97));
+
+        let ratio: FpsSpec =
+            serde_json::from_str(r#"{"num":30000,"den":1001}"#).expect("ratio parses");
+        assert_eq!(ratio, FpsSpec::Ratio(Ratio::new(30000, 1001)));
     }
 
     #[test]

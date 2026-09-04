@@ -11,7 +11,7 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useJKLShuttle } from './useJKLShuttle';
-import { PLAYBACK } from '@/constants/preview';
+import { useSequenceFps } from './useSequenceFps';
 import { isInputElement } from '@/utils/dom';
 
 // =============================================================================
@@ -119,9 +119,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
   const { zoomIn, zoomOut, selectedClipIds, clearClipSelection } = useTimelineStore();
   const { undo, redo, saveProject, isLoaded, activeSequenceId } = useProjectStore();
 
+  // One frame is one frame of the active sequence, not of the preview's target
+  // rate, so every step here quantises to the grid the renderer will use.
+  const sequenceFps = useSequenceFps();
+
   // Stable callbacks for shuttle (avoid recreating interval on parent re-render)
-  const shuttleStepFwd = useCallback(() => stepForward(PLAYBACK.TARGET_FPS), [stepForward]);
-  const shuttleStepBwd = useCallback(() => stepBackward(PLAYBACK.TARGET_FPS), [stepBackward]);
+  const shuttleStepFwd = useCallback(() => stepForward(sequenceFps), [stepForward, sequenceFps]);
+  const shuttleStepBwd = useCallback(() => stepBackward(sequenceFps), [stepBackward, sequenceFps]);
   const shuttleSeekRelative = useCallback(
     (delta: number) => {
       if (delta < 0) {
@@ -271,13 +275,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
 
       if (key === 'ArrowLeft' && !ctrl && !shiftKey) {
         e.preventDefault();
-        stepBackward(PLAYBACK.TARGET_FPS);
+        stepBackward(sequenceFps);
         return;
       }
 
       if (key === 'ArrowRight' && !ctrl && !shiftKey) {
         e.preventDefault();
-        stepForward(PLAYBACK.TARGET_FPS);
+        stepForward(sequenceFps);
         return;
       }
 
@@ -502,6 +506,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       seek,
       stepForward,
       stepBackward,
+      sequenceFps,
       zoomIn,
       zoomOut,
       clearClipSelection,

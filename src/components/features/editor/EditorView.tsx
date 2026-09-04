@@ -26,6 +26,7 @@ import {
 // Direct imports instead of barrel to avoid bundling all 100+ hooks
 import { useTimelineActions } from '@/hooks/useTimelineActions';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useSyncPlaybackFps } from '@/hooks/useSyncPlaybackFps';
 import { useIdleCacheFill } from '@/hooks/useIdleCacheFill';
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { useTextClip } from '@/hooks/useTextClip';
@@ -1472,6 +1473,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     },
     onAutoDuck: handleAutoDuck,
   });
+
+  // The playback controller quantises frame-accurate seeks and one-frame steps
+  // to a configured rate; keep it on the active sequence's grid.
+  useSyncPlaybackFps();
 
   // Global keyboard shortcuts
   useKeyboardShortcuts({

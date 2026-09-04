@@ -798,11 +798,12 @@ pub async fn apply_edit_script(
         SetAudioKeyframeValueCommand, SetCaptionTrackLanguageCommand, SetClipAudioCommand,
         SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMotionKeyframesCommand,
         SetClipMuteCommand, SetClipOpacityCommand, SetClipSlowMotionInterpolationCommand,
-        SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
-        SetTrackBlendModeCommand, SetTrackVolumeCommand, SplitClipCommand, ToggleTrackLockCommand,
-        ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand, UngroupClipsCommand,
-        UnlinkClipsCommand, UnnestCompoundClipCommand, UpdateAssetCommand, UpdateEffectCommand,
-        UpdateMaskCommand, UpdateSequenceHdrSettingsCommand, UpdateTextCommand,
+        SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand,
+        SetSequenceFormatCommand, SetTimeRemapCommand, SetTrackBlendModeCommand,
+        SetTrackVolumeCommand, SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
+        ToggleTrackVisibilityCommand, TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand,
+        UnnestCompoundClipCommand, UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand,
+        UpdateSequenceHdrSettingsCommand, UpdateTextCommand,
     };
     use crate::core::commands::{
         CreateAdjustmentLayerCommand, CreateCompoundClipCommand, PasteAttributesCommand,
@@ -1221,6 +1222,16 @@ pub async fn apply_edit_script(
             CommandPayload::UpdateSequenceHdrSettings(p) => Box::new(
                 UpdateSequenceHdrSettingsCommand::new(&p.sequence_id, p.settings),
             ),
+            CommandPayload::SetSequenceFormat(p) => {
+                let mut cmd = SetSequenceFormatCommand::new();
+                cmd.sequence_id = p.sequence_id;
+                cmd.fps = p.fps;
+                cmd.width = p.width;
+                cmd.height = p.height;
+                cmd.audio_sample_rate = p.audio_sample_rate;
+                cmd.audio_channels = p.audio_channels;
+                Box::new(cmd)
+            }
             CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
                 &p.sequence_id,
                 &p.track_id,

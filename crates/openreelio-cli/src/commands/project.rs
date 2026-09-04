@@ -16,6 +16,18 @@ pub enum ProjectAction {
         /// Project directory path
         #[arg(long)]
         path: PathBuf,
+
+        /// Sequence frame rate, e.g. 25, 29.97, 23.976 (default 30)
+        #[arg(long)]
+        fps: Option<f64>,
+
+        /// Sequence canvas width in pixels, even, 16..=16384 (default 1920)
+        #[arg(long)]
+        width: Option<u32>,
+
+        /// Sequence canvas height in pixels, even, 16..=16384 (default 1080)
+        #[arg(long)]
+        height: Option<u32>,
     },
 
     /// Open an existing project and display its metadata
@@ -42,17 +54,58 @@ pub enum ProjectAction {
 
 pub fn execute(action: ProjectAction) -> anyhow::Result<()> {
     match action {
-        ProjectAction::Create { name, path } => {
+        ProjectAction::Create {
+            name,
+            path,
+            fps,
+            width,
+            height,
+        } => {
             std::fs::create_dir_all(&path)?;
-            let project = ActiveProject::create(&name, path.clone())
+            let mut project = ActiveProject::create(&name, path.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to create project: {}", e))?;
 
-            output::print_json(&serde_json::json!({
+            // Applied *after* creation, through the same `SetSequenceFormat`
+            // command an agent would run: the format change is then an entry in
+            // the ops log like any other edit, replayable and undoable, rather
+            // than a hidden property of how the project happened to be created.
+            let request = super::timeline::SequenceFormatRequest {
+                fps,
+                width,
+                height,
+                ..Default::default()
+            };
+            let format = if request.is_empty() {
+                None
+            } else {
+                let sequence_id = super::resolve_sequence_id(&project, None)?;
+                Some(
+                    super::timeline::apply_sequence_format(&mut project, &sequence_id, &request)
+                        // The project is already on disk by this point, so the
+                        // failure has to say so: the caller's next step is
+                        // `timeline set-format` on the project that exists, not
+                        // `project create` again into a non-empty directory.
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "Project '{}' was created but the requested format was \
+                                 refused: {error}. Re-apply it with 'timeline set-format'.",
+                                path.display()
+                            )
+                        })?,
+                )
+            };
+
+            let mut created = serde_json::json!({
                 "status": "ok",
                 "message": "Project created",
                 "name": project.state.meta.name,
                 "path": path.display().to_string(),
-            }))
+            });
+            if let (Some(format), Some(object)) = (format, created.as_object_mut()) {
+                object.insert("sequenceFormat".to_string(), format);
+            }
+
+            output::print_json(&created)
         }
 
         ProjectAction::Open { path } => {

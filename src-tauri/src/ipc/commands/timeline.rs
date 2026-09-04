@@ -232,16 +232,30 @@ pub async fn execute_command(
     // Strict validation via CommandPayload::parse
     let typed_command = CommandPayload::parse(command_type, payload)?;
 
+    // A command that resolves the active sequence itself — `SetSequenceFormat`
+    // with no `sequenceId` — has to be resolved the same way here, or the edit
+    // would run but report no sequence and no affected ranges. Read before
+    // `build_command` consumes the payload.
+    let targets_active_sequence = typed_command.targets_active_sequence();
+
     // Build the Command trait object from the validated payload
     let command = typed_command.build_command(&project.path);
 
-    let sequence_id = named_sequence_id.or_else(|| {
-        infer_sequence_id(
-            &project.state,
-            named_effect_id.as_deref(),
-            named_clip_id.as_deref(),
-        )
-    });
+    let sequence_id = named_sequence_id
+        .or_else(|| {
+            infer_sequence_id(
+                &project.state,
+                named_effect_id.as_deref(),
+                named_clip_id.as_deref(),
+            )
+        })
+        .or_else(|| {
+            if targets_active_sequence {
+                project.state.active_sequence_id.clone()
+            } else {
+                None
+            }
+        });
     let (result, affected_ranges) =
         execute_recorded(project, sequence_id.as_deref(), command).map_err(|e| e.to_ipc_error())?;
 

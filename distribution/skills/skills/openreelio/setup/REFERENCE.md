@@ -49,6 +49,8 @@ Override the toolchain with `OPENREELIO_FFMPEG_PATH` and
 
 ```bash
 openreelio-cli project create --name "Demo" --path ./demo
+openreelio-cli project create --name "Vertical" --path ./vertical \
+                              --fps 25 --width 1080 --height 1920
 openreelio-cli project info   --path ./demo
 openreelio-cli asset import   --path ./demo --file ./footage.mp4 [--name "A-roll"]
 openreelio-cli asset list     --path ./demo
@@ -57,6 +59,21 @@ openreelio-cli asset list     --path ./demo
 `project create` makes the directory and a default sequence with one video and
 one audio track. `asset import` returns
 `{"status","opId","createdIds":[<ASSET_ID>],"assetName","uri"}`.
+
+**Set the delivery format at creation.** The sequence defaults to 30fps
+1920x1080 no matter what the media is. Pass `--fps`, `--width` and `--height` to
+create it as the format you are delivering — 25fps, vertical, whatever — or fix
+it later with `timeline set-format`. Both run the same logged, undoable
+`SetSequenceFormat` command, so neither is a hidden property of how the project
+was made. A decimal `--fps` snaps to the exact broadcast rational (`29.97` →
+`30000/1001`); canvas edges must be even and within `16..=16384`.
+
+> **`asset import` records no probed duration.** Every clip `timeline insert`
+> places is therefore 10 seconds long regardless of the file, so a second
+> `timeline insert --at 4.0` is refused as an overlap. Get the real length from
+> perception — `analysis shots` returns `totalDurationSec`, `analysis audio`
+> returns `durationSec` — and `timeline trim` the clip to it before inserting
+> anything after it.
 
 ## Conventions that apply everywhere
 

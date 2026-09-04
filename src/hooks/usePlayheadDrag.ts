@@ -21,7 +21,7 @@
 import { useState, useCallback, useRef, useEffect, type RefObject } from 'react';
 import type { SnapPoint, TimeSec } from '@/types';
 import type { PlayheadHandle } from '@/components/timeline/Playhead';
-import { snapTimeToFrame } from '@/constants/precision';
+import { snapTimeToFrame, DEFAULT_FPS } from '@/constants/precision';
 import { useEdgeAutoScroll } from './useEdgeAutoScroll';
 import { playbackController } from '@/services/PlaybackController';
 
@@ -81,7 +81,12 @@ export interface UsePlayheadDragOptions {
   onScrollChange?: (scrollX: number) => void;
   /** Whether to enable frame-accurate seeking (snaps to frame boundaries) */
   frameAccurateSeeking?: boolean;
-  /** Frames per second for frame-accurate seeking */
+  /**
+   * Frames per second for frame-accurate seeking.
+   *
+   * Pass the active sequence's rate (see `useSequenceFps`); the constant is
+   * only a fallback for a caller that has no sequence.
+   */
   fps?: number;
 }
 
@@ -323,7 +328,7 @@ export function usePlayheadDrag({
   scrollContainerRef,
   onScrollChange,
   frameAccurateSeeking = false,
-  fps = 30,
+  fps = DEFAULT_FPS,
 }: UsePlayheadDragOptions): UsePlayheadDragResult {
   // Track dragging state
   const [isDragging, setIsDragging] = useState(false);

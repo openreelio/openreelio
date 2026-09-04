@@ -11346,3 +11346,242 @@ fn test_frame_extract_affected_refuses_a_stale_hand_off() {
         "Expected the refusal to say the hand-off is stale and name the fallback, got: {stderr}"
     );
 }
+
+// =============================================================================
+// Sequence format (SetSequenceFormat)
+// =============================================================================
+
+/// Reads the frame rate and canvas a sequence currently declares.
+fn sequence_format(path: &str) -> (f64, u64, u64) {
+    let info = run_cli_ok(&["timeline", "info", "--path", path]);
+    (
+        info["fps"].as_f64().expect("timeline info reports fps"),
+        info["canvas"]["width"]
+            .as_u64()
+            .expect("timeline info reports canvas width"),
+        info["canvas"]["height"]
+            .as_u64()
+            .expect("timeline info reports canvas height"),
+    )
+}
+
+#[test]
+fn test_set_sequence_format_round_trips_through_undo_redo_and_reopen() {
+    let dir = create_temp_project("fmt");
+    let path = project_path(&dir, "fmt");
+
+    assert_eq!(sequence_format(&path), (30.0, 1920, 1080));
+
+    let result = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetSequenceFormat",
+        "--payload",
+        r#"{"fps":25,"width":1080,"height":1920}"#,
+    ]);
+    assert_eq!(result["status"], "ok");
+    assert_eq!(sequence_format(&path), (25.0, 1080, 1920));
+
+    run_cli_ok(&["timeline", "undo", "--path", &path]);
+    assert_eq!(sequence_format(&path), (30.0, 1920, 1080));
+
+    run_cli_ok(&["timeline", "redo", "--path", &path]);
+    assert_eq!(sequence_format(&path), (25.0, 1080, 1920));
+
+    // Reopening replays the ops log from scratch, so the format has to survive
+    // as an operation rather than as a live in-memory edit.
+    let opened = run_cli_ok(&["project", "open", "--path", &path]);
+    assert_eq!(opened["status"], "ok");
+    assert_eq!(sequence_format(&path), (25.0, 1080, 1920));
+}
+
+#[test]
+fn test_timeline_set_format_reports_the_affected_timeline() {
+    let dir = create_temp_project("setfmt");
+    let path = project_path(&dir, "setfmt");
+
+    // A format change moves no clip, so there has to be something on the
+    // timeline to prove the reported range is the whole sequence rather than
+    // the empty diff an unchanged clip list would give.
+    let dummy_file = dir.path().join("setfmt.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"][0]["id"].as_str().unwrap().to_string();
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let result = run_cli_ok(&[
+        "timeline",
+        "set-format",
+        "--path",
+        &path,
+        "--fps",
+        "29.97",
+        "--width",
+        "1280",
+        "--height",
+        "720",
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    // A decimal snaps to the exact broadcast rational rather than 2997/100.
+    assert_eq!(result["fpsRatio"]["num"], 30000);
+    assert_eq!(result["fpsRatio"]["den"], 1001);
+    assert_eq!(result["canvas"]["width"], 1280);
+    assert_eq!(result["canvas"]["height"], 720);
+    let ranges = result["affectedRanges"]
+        .as_array()
+        .expect("set-format must report affectedRanges like every other mutating verb");
+    assert_eq!(
+        ranges.len(),
+        1,
+        "a format change reaches every frame, so it is one range: {ranges:?}"
+    );
+    assert_eq!(ranges[0]["startSec"], 0.0);
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+    assert_eq!(
+        ranges[0]["endSec"], info["durationSec"],
+        "the reported range must span the whole timeline"
+    );
+
+    let (fps, width, height) = sequence_format(&path);
+    assert!(
+        (fps - 30000.0 / 1001.0).abs() < 1e-9,
+        "unexpected fps: {fps}"
+    );
+    assert_eq!((width, height), (1280, 720));
+}
+
+#[test]
+fn test_project_create_applies_the_requested_format_as_a_logged_operation() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let project_dir = dir.path().join("vertical");
+    std::fs::create_dir_all(&project_dir).expect("project dir");
+    let path = project_dir.to_string_lossy().to_string();
+
+    let created = run_cli_ok(&[
+        "project", "create", "--name", "Vertical", "--path", &path, "--fps", "25", "--width",
+        "1080", "--height", "1920",
+    ]);
+    assert_eq!(created["sequenceFormat"]["canvas"]["width"], 1080);
+    assert_eq!(sequence_format(&path), (25.0, 1080, 1920));
+
+    // Applied through a command, so it is in the log and can be undone.
+    run_cli_ok(&["timeline", "undo", "--path", &path]);
+    assert_eq!(sequence_format(&path), (30.0, 1920, 1080));
+}
+
+#[test]
+fn test_set_sequence_format_refuses_an_unusable_format() {
+    let dir = create_temp_project("badfmt");
+    let path = project_path(&dir, "badfmt");
+
+    for payload in [
+        r#"{}"#,
+        r#"{"width":1081}"#,
+        r#"{"height":8}"#,
+        r#"{"fps":0}"#,
+        r#"{"fps":{"num":30,"den":0}}"#,
+        r#"{"audioSampleRate":47000}"#,
+        r#"{"audioChannels":6}"#,
+    ] {
+        let (_stdout, stderr) = run_cli_err(&[
+            "command",
+            "execute",
+            "--path",
+            &path,
+            "--type",
+            "SetSequenceFormat",
+            "--payload",
+            payload,
+        ]);
+        assert!(
+            !stderr.is_empty(),
+            "payload {payload} should be refused with a reason"
+        );
+    }
+
+    assert_eq!(sequence_format(&path), (30.0, 1920, 1080));
+}
+
+/// A `SetSequenceFormat` payload names no sequence, and the command resolves the
+/// active one. `command execute` has to resolve it the same way, or the edit
+/// applies while the result reports no sequence, no ranges, and writes no
+/// `--affected` hand-off — leaving the agent with nothing to look at.
+#[test]
+fn test_command_execute_resolves_the_active_sequence_for_a_format_change() {
+    let Some((dir, path, sequence_id, _track_id, _outgoing)) =
+        create_two_shot_project("cmd_active_seq")
+    else {
+        return;
+    };
+
+    let result = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetSequenceFormat",
+        "--payload",
+        r#"{"fps":25}"#,
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["sequenceId"], sequence_id,
+        "an omitted sequenceId must resolve to the active sequence: {result}"
+    );
+
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+    assert_eq!(info["fps"], 25.0);
+    let ranges = affected_pairs(&result["affectedRanges"]);
+    assert_eq!(
+        ranges.len(),
+        1,
+        "a format change reaches every frame, so it is one range: {result}"
+    );
+    assert_eq!(ranges[0].0, 0.0);
+    assert_eq!(
+        ranges[0].1,
+        info["durationSec"].as_f64().expect("durationSec"),
+        "the reported range must span the whole timeline: {result}"
+    );
+
+    // The hand-off is what `frame extract --affected` reads; without it the
+    // sampler refuses rather than showing the change.
+    let record = last_affected_record(&path);
+    assert_eq!(record["sequenceId"], sequence_id);
+    assert_eq!(record["opIds"][0], result["opId"]);
+    assert_eq!(affected_pairs(&record["affectedRanges"]), ranges);
+
+    let sheet_path = dir.path().join("format_affected.jpg");
+    let sheet = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--affected",
+        "--grid",
+        "auto",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+    assert_eq!(sheet["status"], "ok");
+    assert_eq!(sheet["sampler"]["kinds"][0], "affected");
+    assert!(sheet_path.exists());
+}

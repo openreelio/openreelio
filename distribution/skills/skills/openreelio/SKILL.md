@@ -33,7 +33,7 @@ Treat the binary as the source of truth, not this skill.
 `openreelio-cli help-json` prints the entire command schema as JSON, and
 `openreelio-cli <verb> --help` is authoritative for any single verb. `help-json`
 is roughly 68 KB — fetch per-verb help instead of loading all of it. Use
-`openreelio-cli command schema` for the 79 backend command types, and
+`openreelio-cli command schema` for the 80 backend command types, and
 `openreelio-cli packs list` for the curated caption styles, transition
 recipes, text presets, and pacing profiles
 (`--kind caption|transition|text|pacing`).
@@ -83,6 +83,13 @@ so pin it with `--after-op <OP_ID>`.
 
 Install the CLI, point it at a project, and confirm the media toolchain.
 Load [Setup](./setup/REFERENCE.md).
+
+Two things about a fresh project that will otherwise cost you a render:
+`project create` makes a **30fps 1920x1080** sequence whatever the media is —
+pass `--fps/--width/--height`, or run `timeline set-format` — and `asset import`
+records **no probed duration**, so every clip `timeline insert` places is 10
+seconds long and a second insert at 4.0s is refused as an overlap. Trim to the
+real length (`analysis shots` → `totalDurationSec`) before building on it.
 
 ## Perception
 
