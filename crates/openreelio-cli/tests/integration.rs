@@ -5775,10 +5775,11 @@ fn test_command_schema_type_returns_the_payload_shape() {
     assert_eq!(required, vec!["sequenceId", "trackId"]);
 
     // A required field with a second accepted spelling cannot be named in
-    // `required` without forbidding the other spelling, so it becomes a group.
-    let spellings: Vec<&str> = schema["allOf"][0]["anyOf"]
+    // `required` without forbidding the other spelling, so it becomes a group —
+    // a `oneOf`, because serde reads both spellings as one field sent twice.
+    let spellings: Vec<&str> = schema["allOf"][0]["oneOf"]
         .as_array()
-        .expect("an aliased requirement is an anyOf of one-property groups")
+        .expect("an aliased requirement is a oneOf of one-property groups")
         .iter()
         .map(|option| option["required"][0].as_str().expect("named spellings"))
         .collect();
@@ -5874,6 +5875,47 @@ fn test_command_schema_names_the_closest_match_for_an_unknown_type() {
     );
 }
 
+/// Feature: derived command payload schemas
+/// Scenario: an agent asks by a `commandType` spelling the parser accepts
+///
+/// The bug this replaces: `#[serde(alias)]` on the command enum makes
+/// `addTrack`, `freezeFrame`, `changeClipSpeed` and a hundred more real
+/// command types — `command execute` runs them — while `command schema --type`
+/// answered "not a supported command type" about every one of them.
+#[test]
+fn test_command_schema_type_accepts_every_spelling_the_parser_accepts() {
+    for (spelling, canonical) in [
+        ("freezeFrame", "CreateFreezeFrame"),
+        ("addTrack", "CreateTrack"),
+        ("DeleteClip", "RemoveClip"),
+        ("styleCaption", "UpdateCaption"),
+        ("changeClipSpeed", "SetClipSpeed"),
+        ("LiftEdit", "Lift"),
+        ("addCaptionsFromTranscription", "ImportGeneratedCaptions"),
+    ] {
+        let result = run_cli_ok(&["command", "schema", "--type", spelling]);
+        let entry = &result["schemas"][0];
+        assert_eq!(entry["commandType"], spelling);
+        assert_eq!(
+            entry["canonicalType"], canonical,
+            "{spelling} is answered with {canonical}'s schema and says so"
+        );
+        assert_eq!(entry["schema"]["title"], canonical);
+    }
+
+    // Two spellings of one command are one lookup: a schema runs to a few
+    // thousand tokens and the second copy tells an agent nothing.
+    let deduped = run_cli_ok(&[
+        "command",
+        "schema",
+        "--type",
+        "CreateTrack",
+        "--type",
+        "addTrack",
+    ]);
+    assert_eq!(deduped["count"].as_u64(), Some(1));
+}
+
 /// The schema is only worth reading if the parser agrees with it: a payload
 /// composed from the schema's required list must validate.
 #[test]
@@ -5893,10 +5935,11 @@ fn test_a_payload_built_from_the_schema_passes_command_validate() {
     assert_eq!(required, vec!["clipId", "sequenceId", "trackId"]);
 
     // `splitTime` is required through the group that also accepts the
-    // `atTimelineSec` spelling; a payload has to satisfy those groups too.
-    let spellings: Vec<String> = schema["schemas"][0]["schema"]["allOf"][0]["anyOf"]
+    // `atTimelineSec` spelling; a payload has to satisfy those groups too, and
+    // by exactly one spelling each.
+    let spellings: Vec<String> = schema["schemas"][0]["schema"]["allOf"][0]["oneOf"]
         .as_array()
-        .expect("an aliased requirement is an anyOf of one-property groups")
+        .expect("an aliased requirement is a oneOf of one-property groups")
         .iter()
         .map(|option| {
             option["required"][0]

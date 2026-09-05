@@ -18,10 +18,20 @@
 //! produces a schema that formally forbids the very spelling a field's own
 //! description recommends, so both are declared afterwards from the tables
 //! below: every alias becomes a sibling property, and a required field with
-//! more than one spelling is required through an `anyOf` over them rather than
-//! by name. Two colocated guards in [`super::payloads`] read the payload source
-//! and fail the build when an alias reaches neither the doc comment nor the
-//! schema.
+//! more than one spelling is required through a group over them rather than by
+//! name. The group is a `oneOf` for a `#[serde(alias)]` field, because serde
+//! reads a second spelling as the same field twice and fails with `duplicate
+//! field`; it is an `anyOf` only where the parser really does read two separate
+//! properties, as `RippleDelete` reads `clipIds` and `clipId`. An *optional*
+//! aliased field carries the same exclusivity as a `not` over the pairs.
+//! Guards in [`super::payloads`] read the payload source and fail the build
+//! when an alias reaches neither the doc comment nor the schema, or when the
+//! table names a spelling the parser does not accept.
+//!
+//! A lookup also resolves the `commandType` aliases the `CommandPayload`
+//! variants declare — `changeClipSpeed`, `freezeFrame`, `addTrack` — so the
+//! surface an agent reads before composing a payload accepts every name the
+//! two surfaces beside it accept.
 
 use schemars::JsonSchema;
 use serde_json::{json, Value};
@@ -42,13 +52,20 @@ macro_rules! declare_command_payloads {
 
         /// Returns the JSON Schema of one command's payload object.
         ///
-        /// The command type is matched exactly, in the canonical PascalCase
-        /// spelling [`CommandPayload::SUPPORTED_COMMAND_TYPES`] lists; `None`
-        /// means the name is not a supported command. The returned schema
-        /// describes the `payload` object alone — the `commandType` wrapper is
-        /// the caller's envelope, not part of it.
+        /// The command type is resolved the way the parser resolves it: the
+        /// canonical PascalCase spelling
+        /// [`CommandPayload::SUPPORTED_COMMAND_TYPES`] lists, or any of the
+        /// alternative spellings the variants declare — see
+        /// [`command_schema::canonical_command_type`]. `None` means the name is
+        /// not a supported command. The schema is titled by the canonical name
+        /// however it was asked for, and describes the `payload` object alone —
+        /// the `commandType` wrapper is the caller's envelope, not part of it.
+        ///
+        /// [`command_schema::canonical_command_type`]: crate::ipc::command_schema::canonical_command_type
         pub fn command_payload_schema(command_type: &str) -> Option<serde_json::Value> {
-            match command_type {
+            let canonical =
+                $crate::ipc::command_schema::canonical_command_type(command_type)?;
+            match canonical {
                 $($command_type => Some(
                     $crate::ipc::command_schema::payload_schema::<$payload>($command_type)
                 ),)*
@@ -64,6 +81,153 @@ macro_rules! declare_command_payloads {
 }
 
 pub(crate) use declare_command_payloads;
+
+/// Alternative `commandType` spellings the parser accepts, by canonical name.
+///
+/// `#[serde(alias = "…")]` on the `CommandPayload` variants makes
+/// `changeClipSpeed`, `freezeFrame`, `addTrack`, `LiftEdit` and a hundred more
+/// real command types: `command execute` runs them and `command validate`
+/// accepts them. The schema lookup matched the canonical name alone, so the one
+/// surface an agent reads *before* composing a payload answered "not a
+/// supported command type" about names the two surfaces beside it accept.
+///
+/// Entries are `(spelling, canonical command type)`. A spelling that is already
+/// the canonical name is left out: it is resolved by the exact match first. A
+/// guard in [`super::payloads`] reads the enum's own attributes and fails when
+/// this table and the source disagree in either direction.
+pub(crate) const PAYLOAD_VARIANT_ALIASES: &[(&str, &str)] = &[
+    ("AddCaption", "CreateCaption"),
+    ("AddCaptionsFromTranscription", "ImportGeneratedCaptions"),
+    ("AddTrack", "CreateTrack"),
+    ("CreateCaptionsFromTranscript", "ImportGeneratedCaptions"),
+    ("DeleteClip", "RemoveClip"),
+    ("DeleteMarker", "RemoveMarker"),
+    ("DeleteMask", "RemoveMask"),
+    ("DeleteTrack", "RemoveTrack"),
+    ("Extract", "ExtractEdit"),
+    ("LiftEdit", "Lift"),
+    ("StyleCaption", "UpdateCaption"),
+    ("addAudioKeyframe", "AddAudioKeyframe"),
+    ("addCaption", "CreateCaption"),
+    ("addCaptionsFromTranscription", "ImportGeneratedCaptions"),
+    ("addEffect", "AddEffect"),
+    ("addMarker", "AddMarker"),
+    ("addMask", "AddMask"),
+    ("addTextClip", "AddTextClip"),
+    ("addTrack", "CreateTrack"),
+    ("applyAudioDucking", "ApplyAudioDucking"),
+    ("changeClipSpeed", "SetClipSpeed"),
+    ("clearTimeRemap", "ClearTimeRemap"),
+    ("closeAllGaps", "CloseAllGaps"),
+    ("closeGap", "CloseGap"),
+    ("createAdjustmentLayer", "CreateAdjustmentLayer"),
+    ("createCaption", "CreateCaption"),
+    ("createCaptionsFromTranscript", "ImportGeneratedCaptions"),
+    ("createCompoundClip", "CreateCompoundClip"),
+    ("createFolder", "CreateFolder"),
+    ("createFreezeFrame", "CreateFreezeFrame"),
+    ("createSequence", "CreateSequence"),
+    ("createTrack", "CreateTrack"),
+    ("deleteCaption", "DeleteCaption"),
+    ("deleteClip", "RemoveClip"),
+    ("deleteFile", "DeleteFile"),
+    ("deleteMarker", "RemoveMarker"),
+    ("deleteMask", "RemoveMask"),
+    ("deleteTrack", "RemoveTrack"),
+    ("detachAudio", "DetachAudio"),
+    ("extract", "ExtractEdit"),
+    ("extractEdit", "ExtractEdit"),
+    ("freezeFrame", "CreateFreezeFrame"),
+    ("groupClips", "GroupClips"),
+    ("importAsset", "ImportAsset"),
+    ("importGeneratedCaptions", "ImportGeneratedCaptions"),
+    ("insertClip", "InsertClip"),
+    ("insertEdit", "InsertEdit"),
+    ("insertMedia", "InsertMedia"),
+    ("lift", "Lift"),
+    ("liftEdit", "Lift"),
+    ("linkClips", "LinkClips"),
+    ("moveAudioKeyframe", "MoveAudioKeyframe"),
+    ("moveClip", "MoveClip"),
+    ("moveFile", "MoveFile"),
+    ("overwriteEdit", "OverwriteEdit"),
+    ("pasteAttributes", "PasteAttributes"),
+    ("pasteEffects", "PasteEffects"),
+    ("removeAsset", "RemoveAsset"),
+    ("removeAttributes", "RemoveAttributes"),
+    ("removeAudioKeyframe", "RemoveAudioKeyframe"),
+    ("removeClip", "RemoveClip"),
+    ("removeEffect", "RemoveEffect"),
+    ("removeMarker", "RemoveMarker"),
+    ("removeMask", "RemoveMask"),
+    ("removeTextClip", "RemoveTextClip"),
+    ("removeTrack", "RemoveTrack"),
+    ("renameFile", "RenameFile"),
+    ("renameTrack", "RenameTrack"),
+    ("reorderTracks", "ReorderTracks"),
+    ("reverseClip", "ReverseClip"),
+    ("rippleDelete", "RippleDelete"),
+    ("setAudioFadeIn", "SetAudioFadeIn"),
+    ("setAudioFadeOut", "SetAudioFadeOut"),
+    ("setAudioKeyframeValue", "SetAudioKeyframeValue"),
+    ("setCaptionTrackLanguage", "SetCaptionTrackLanguage"),
+    ("setClipAudio", "SetClipAudio"),
+    ("setClipBlendMode", "SetClipBlendMode"),
+    ("setClipEnabled", "SetClipEnabled"),
+    ("setClipMotionKeyframes", "SetClipMotionKeyframes"),
+    ("setClipMute", "SetClipMute"),
+    ("setClipOpacity", "SetClipOpacity"),
+    (
+        "setClipSlowMotionInterpolation",
+        "SetClipSlowMotionInterpolation",
+    ),
+    ("setClipSpeed", "SetClipSpeed"),
+    ("setClipTransform", "SetClipTransform"),
+    ("setMasterVolume", "SetMasterVolume"),
+    ("setSequenceFormat", "SetSequenceFormat"),
+    ("setTimeRemap", "SetTimeRemap"),
+    ("setTrackBlendMode", "SetTrackBlendMode"),
+    ("setTrackVolume", "SetTrackVolume"),
+    ("splitClip", "SplitClip"),
+    ("styleCaption", "UpdateCaption"),
+    ("toggleTrackLock", "ToggleTrackLock"),
+    ("toggleTrackMute", "ToggleTrackMute"),
+    ("toggleTrackVisibility", "ToggleTrackVisibility"),
+    ("trimClip", "TrimClip"),
+    ("ungroupClips", "UngroupClips"),
+    ("unlinkClips", "UnlinkClips"),
+    ("unnestCompoundClip", "UnnestCompoundClip"),
+    ("updateAsset", "UpdateAsset"),
+    ("updateCaption", "UpdateCaption"),
+    ("updateEffect", "UpdateEffect"),
+    ("updateMask", "UpdateMask"),
+    ("updateSequenceHdrSettings", "UpdateSequenceHdrSettings"),
+    ("updateTextClip", "UpdateTextClip"),
+];
+
+/// Resolves a caller's `commandType` to the canonical name the tables are keyed by.
+///
+/// The exact canonical spelling wins first, then the alternative spellings the
+/// `CommandPayload` variants declare; anything else is not a command and
+/// answers `None`. Surrounding whitespace is trimmed, because
+/// `CommandPayload::parse` trims it and the two have to agree about the same
+/// name. The returned name is the one
+/// [`CommandPayload::SUPPORTED_COMMAND_TYPES`] advertises.
+pub fn canonical_command_type(command_type: &str) -> Option<&'static str> {
+    let candidate = command_type.trim();
+    let supported = super::CommandPayload::SUPPORTED_COMMAND_TYPES;
+
+    if let Some(exact) = supported.iter().find(|name| **name == candidate) {
+        return Some(exact);
+    }
+
+    let canonical = PAYLOAD_VARIANT_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == candidate)
+        .map(|(_, canonical)| *canonical)?;
+
+    supported.iter().find(|name| **name == canonical).copied()
+}
 
 /// The JSON Schema keyword that says whether `command execute` will run a
 /// command, as opposed to merely parsing and validating it.
@@ -307,6 +471,14 @@ pub(crate) struct WireOnlyProperty {
     pub description: &'static str,
     /// The required property this spelling stands in for, if any.
     pub satisfies: Option<&'static str>,
+    /// How many entries the property named by `satisfies` needs before it
+    /// satisfies the requirement without this stand-in.
+    ///
+    /// `RippleDelete` reads `clipIds` only when it is non-empty and falls
+    /// through an empty one to `clipId`, so `{"clipIds": []}` on its own is a
+    /// parse error and the canonical branch of the requirement has to say
+    /// `minItems: 1` rather than merely `required`.
+    pub satisfies_min_items: Option<u64>,
 }
 
 /// Every wire-only property, by the type that reads it.
@@ -316,8 +488,10 @@ pub(crate) const WIRE_ONLY_PROPERTIES: &[WireOnlyProperty] = &[
         name: "clipId",
         json_type: "string",
         description: "A single clip to remove, instead of `clipIds`. Exactly one \
-                      of the two is required; `clipIds` wins when both are sent.",
+                      of the two has to name a clip: a non-empty `clipIds` wins, \
+                      and an empty or absent one falls back to this.",
         satisfies: Some("clipIds"),
+        satisfies_min_items: Some(1),
     },
     WireOnlyProperty {
         owner: "RippleDeletePayload",
@@ -326,24 +500,212 @@ pub(crate) const WIRE_ONLY_PROPERTIES: &[WireOnlyProperty] = &[
         description: "Deprecated and ignored. Accepted so an older caller is not \
                       refused; ripple delete only ever touched `trackId`.",
         satisfies: None,
+        satisfies_min_items: None,
     },
 ];
+
+/// A requirement one payload's parse step enforces that its field types do not.
+///
+/// `AddTextClip` takes `textData` or a `preset` — each optional on its own,
+/// because either supplies what the other leaves out — and refuses a payload
+/// carrying neither. `AddEffect` reads `effectType` or a `recipe` the same way.
+/// Neither shows up in `required`, so a schema derived from the struct alone
+/// accepts a payload `command validate` refuses.
+///
+/// Each entry becomes an `anyOf` over its branches, which is the honest
+/// reading: sending both is fine, and the explicit fields win over the preset
+/// key by key.
+pub(crate) struct EitherOrRequirement {
+    /// Rust type whose parsing enforces it.
+    pub owner: &'static str,
+    /// The branches, at least one of which has to hold.
+    ///
+    /// The first one has to be the branch a caller can satisfy out of the
+    /// payload alone: the schema-minimal sweep in [`super::payloads`] builds
+    /// its sample from it, and a curated `preset` or `recipe` id is a lookup
+    /// into a registry the sweep cannot invent an entry for.
+    pub branches: &'static [EitherOrBranch],
+}
+
+/// One way of satisfying an [`EitherOrRequirement`].
+///
+/// A branch is normally just a property that has to be present. `AddTextClip`
+/// is the one that needs more: without a `preset` there is nothing to merge a
+/// partial `textData` onto, so the object itself has to be complete, and a
+/// schema that only said "textData or preset" would still accept `{}`.
+pub(crate) struct EitherOrBranch {
+    /// The property whose presence takes this branch.
+    pub property: &'static str,
+    /// Properties the value must then carry itself.
+    pub value_requires: &'static [&'static str],
+    /// Properties each named sub-object of the value must then carry.
+    pub nested_requires: &'static [(&'static str, &'static [&'static str])],
+}
+
+impl EitherOrBranch {
+    /// A branch that is satisfied by the property being present at all.
+    const fn present(property: &'static str) -> Self {
+        Self {
+            property,
+            value_requires: &[],
+            nested_requires: &[],
+        }
+    }
+}
+
+/// Every either/or requirement, by the type that enforces it.
+pub(crate) const PAYLOAD_EITHER_OR_REQUIREMENTS: &[EitherOrRequirement] = &[
+    EitherOrRequirement {
+        owner: "AddTextClipPayload",
+        branches: &[
+            EitherOrBranch {
+                property: "textData",
+                value_requires: &["content", "style", "position"],
+                nested_requires: &[
+                    ("style", &["fontFamily", "fontSize", "color"]),
+                    ("position", &["x", "y"]),
+                ],
+            },
+            EitherOrBranch::present("preset"),
+        ],
+    },
+    EitherOrRequirement {
+        owner: "AddEffectPayload",
+        branches: &[
+            EitherOrBranch::present("effectType"),
+            EitherOrBranch::present("recipe"),
+        ],
+    },
+];
+
+impl EitherOrRequirement {
+    /// The `anyOf` group this requirement states.
+    fn group(&self) -> Value {
+        let branches: Vec<Value> = self
+            .branches
+            .iter()
+            .map(|branch| {
+                let mut option = json!({ "required": [branch.property] });
+
+                let mut value = serde_json::Map::new();
+                if !branch.value_requires.is_empty() {
+                    value.insert("required".to_string(), json!(branch.value_requires));
+                }
+                if !branch.nested_requires.is_empty() {
+                    let nested: serde_json::Map<String, Value> = branch
+                        .nested_requires
+                        .iter()
+                        .map(|(name, names)| ((*name).to_string(), json!({ "required": names })))
+                        .collect();
+                    value.insert("properties".to_string(), Value::Object(nested));
+                }
+
+                if let (false, Some(option)) = (value.is_empty(), option.as_object_mut()) {
+                    option.insert(
+                        "properties".to_string(),
+                        json!({ branch.property: Value::Object(value) }),
+                    );
+                }
+
+                option
+            })
+            .collect();
+
+        json!({ "anyOf": branches })
+    }
+}
+
+/// One property and every spelling of it the parser accepts.
+struct SpellingGroup {
+    /// The canonical property name, as `rename_all` spells it.
+    canonical: String,
+    /// Every accepted spelling, the canonical one first.
+    spellings: Vec<String>,
+    /// Whether sending two of these spellings at once is refused.
+    ///
+    /// A `#[serde(alias)]` group is exclusive: serde reads the second spelling
+    /// as the same field a second time and fails with `duplicate field`. A
+    /// wire-only stand-in is not, because the hand written `Deserialize` reads
+    /// it as its own field and picks between them — `RippleDelete` takes
+    /// `clipIds` and `clipId` together without complaint.
+    exclusive: bool,
+    /// What the canonical spelling has to look like to satisfy the requirement
+    /// on its own, beyond merely being present.
+    canonical_constraints: Option<Value>,
+}
+
+impl SpellingGroup {
+    /// The requirement group for a field the parser will not do without.
+    ///
+    /// `oneOf` when the spellings are mutually exclusive, so a payload carrying
+    /// two of them fails against the schema exactly as it fails against serde;
+    /// `anyOf` where the parser really does accept both at once.
+    fn required_group(&self) -> Value {
+        let options: Vec<Value> = self
+            .spellings
+            .iter()
+            .map(|spelling| {
+                let mut option = json!({ "required": [spelling] });
+                match (&self.canonical_constraints, option.as_object_mut()) {
+                    (Some(constraints), Some(option)) if *spelling == self.canonical => {
+                        option.insert(
+                            "properties".to_string(),
+                            json!({ spelling.as_str(): constraints }),
+                        );
+                    }
+                    _ => {}
+                }
+                option
+            })
+            .collect();
+
+        if self.exclusive {
+            json!({ "oneOf": options })
+        } else {
+            json!({ "anyOf": options })
+        }
+    }
+
+    /// The exclusivity constraint for a field that is optional but aliased.
+    ///
+    /// An optional aliased field never reaches `required`, so nothing in the
+    /// schema said that `newSourceIn` and `newStart` cannot both be sent —
+    /// while serde refuses the pair as a duplicate field. `None` when there is
+    /// nothing to forbid.
+    fn at_most_one(&self) -> Option<Value> {
+        if !self.exclusive {
+            return None;
+        }
+
+        let mut pairs: Vec<Value> = Vec::new();
+        for (index, first) in self.spellings.iter().enumerate() {
+            for second in &self.spellings[index + 1..] {
+                pairs.push(json!({ "allOf": [{ "required": [first] }, { "required": [second] }] }));
+            }
+        }
+
+        match pairs.len() {
+            0 => None,
+            1 => pairs.pop().map(|only| json!({ "not": only })),
+            _ => Some(json!({ "not": { "anyOf": pairs } })),
+        }
+    }
+}
 
 /// Adds the spellings the parser accepts but `schemars` cannot derive.
 ///
 /// Each alternative spelling becomes a sibling property carrying the same
 /// subschema as the canonical one, so `additionalProperties: false` stops
-/// forbidding what the field's description recommends. When the canonical
-/// property was required, it is replaced by an `anyOf` over the spellings that
-/// satisfy it: saying `required: ["captionId"]` while accepting `clipId` would
-/// be a different lie in the same place.
+/// forbidding what the field's description recommends. The requirement itself
+/// moves out of `required` and into a group over the spellings that satisfy it:
+/// saying `required: ["captionId"]` while accepting `clipId` would be a
+/// different lie in the same place.
 fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name: &str) {
     if type_name.is_empty() {
         return;
     }
 
-    // (canonical property, every spelling that satisfies it including itself)
-    let mut satisfied_by: Vec<(String, Vec<String>)> = Vec::new();
+    let mut groups: Vec<SpellingGroup> = Vec::new();
 
     let Some(Value::Object(properties)) = object.get_mut("properties") else {
         return;
@@ -364,7 +726,12 @@ fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name
         }
         let mut spellings = vec![(*canonical).to_string()];
         spellings.extend(aliases.iter().map(|alias| (*alias).to_string()));
-        satisfied_by.push(((*canonical).to_string(), spellings));
+        groups.push(SpellingGroup {
+            canonical: (*canonical).to_string(),
+            spellings,
+            exclusive: true,
+            canonical_constraints: None,
+        });
     }
 
     for extra in WIRE_ONLY_PROPERTIES
@@ -378,20 +745,46 @@ fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name
         let Some(canonical) = extra.satisfies else {
             continue;
         };
-        match satisfied_by
-            .iter_mut()
-            .find(|(name, _)| name == canonical)
-            .map(|(_, spellings)| spellings)
-        {
-            Some(spellings) => spellings.push(extra.name.to_string()),
-            None => satisfied_by.push((
-                canonical.to_string(),
-                vec![canonical.to_string(), extra.name.to_string()],
-            )),
+        let constraints = extra
+            .satisfies_min_items
+            .map(|minimum| json!({ "minItems": minimum }));
+        match groups.iter_mut().find(|group| group.canonical == canonical) {
+            // A stand-in the parser reads as a field of its own can be sent
+            // beside the spellings it substitutes for, so a group it joins
+            // stops being mutually exclusive.
+            Some(group) => {
+                group.spellings.push(extra.name.to_string());
+                group.exclusive = false;
+                if constraints.is_some() {
+                    group.canonical_constraints = constraints;
+                }
+            }
+            None => groups.push(SpellingGroup {
+                canonical: canonical.to_string(),
+                spellings: vec![canonical.to_string(), extra.name.to_string()],
+                exclusive: false,
+                canonical_constraints: constraints,
+            }),
         }
     }
 
-    relax_required(object, &satisfied_by);
+    let either_or: Vec<Value> = PAYLOAD_EITHER_OR_REQUIREMENTS
+        .iter()
+        .filter(|requirement| requirement.owner == type_name)
+        .filter(|requirement| {
+            // A requirement naming a property this type no longer has would
+            // forbid every payload; the guard in `super::payloads` fails on it
+            // rather than letting it ship, and this keeps the schema honest
+            // meanwhile.
+            requirement
+                .branches
+                .iter()
+                .all(|branch| properties.contains_key(branch.property))
+        })
+        .map(EitherOrRequirement::group)
+        .collect();
+
+    declare_requirements(object, &groups, either_or);
 }
 
 /// Copies a canonical property's subschema for one of its other spellings.
@@ -400,7 +793,10 @@ fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name
 /// sibling of `$ref` — including the `description` that says which property
 /// this spells.
 fn alias_property(canonical_schema: &Value, canonical: &str) -> Value {
-    let note = format!("Alternative spelling of `{canonical}`; the two mean the same thing.");
+    let note = format!(
+        "Alternative spelling of `{canonical}`; the two mean the same thing. Send only one of \
+         them — a payload carrying both spellings is refused as a duplicate field."
+    );
 
     let mut alias = match canonical_schema.get("$ref") {
         Some(reference) => json!({ "allOf": [{ "$ref": reference }] }),
@@ -418,16 +814,20 @@ fn alias_property(canonical_schema: &Value, canonical: &str) -> Value {
     alias
 }
 
-/// Replaces each required property that has other spellings with an `anyOf`.
+/// Moves every requirement `required` cannot state into an `allOf` of groups.
 ///
 /// The remaining `required` list keeps every property that is spelled exactly
-/// one way, so the common reading of a schema is unchanged; only the handful of
-/// fields with a second spelling move into an `allOf` of `anyOf` groups.
-fn relax_required(
+/// one way and needed by that name, so the common reading of a schema is
+/// unchanged. What moves is the handful of fields with a second spelling, plus
+/// the either/or requirements a parse step enforces; an *optional* field with a
+/// second spelling adds no requirement at all, only the `not` that says the two
+/// spellings cannot both be sent.
+fn declare_requirements(
     object: &mut serde_json::Map<String, Value>,
-    satisfied_by: &[(String, Vec<String>)],
+    spelling_groups: &[SpellingGroup],
+    either_or: Vec<Value>,
 ) {
-    if satisfied_by.is_empty() {
+    if spelling_groups.is_empty() && either_or.is_empty() {
         return;
     }
 
@@ -444,17 +844,16 @@ fn relax_required(
         .unwrap_or_default();
 
     let mut groups: Vec<Value> = Vec::new();
-    for (canonical, spellings) in satisfied_by {
-        let Some(position) = required.iter().position(|name| name == canonical) else {
-            continue;
-        };
-        required.remove(position);
-        let options: Vec<Value> = spellings
-            .iter()
-            .map(|spelling| json!({ "required": [spelling] }))
-            .collect();
-        groups.push(json!({ "anyOf": options }));
+    for group in spelling_groups {
+        match required.iter().position(|name| *name == group.canonical) {
+            Some(position) => {
+                required.remove(position);
+                groups.push(group.required_group());
+            }
+            None => groups.extend(group.at_most_one()),
+        }
     }
+    groups.extend(either_or);
 
     if groups.is_empty() {
         return;
@@ -496,7 +895,8 @@ pub fn all_command_payload_schemas() -> Value {
 
 /// Wraps one derived schema in the `{ commandType, schema }` entry every
 /// surface returns, so the CLI, the MCP tool and the IPC bridge cannot drift
-/// about what a schema lookup looks like.
+/// about what a schema lookup looks like. An entry asked for by an alternative
+/// spelling also carries `canonicalType`, added by the caller that resolved it.
 pub fn command_schema_entry(command_type: &str, schema: Value) -> Value {
     json!({ "commandType": command_type, "schema": schema })
 }
@@ -505,21 +905,32 @@ pub fn command_schema_entry(command_type: &str, schema: Value) -> Value {
 ///
 /// Returns the same `{ count, schemas }` shape as
 /// [`all_command_payload_schemas`], or the first unsupported name's error, so
-/// an agent that misspells one type in a batch is told which one. A name
-/// repeated in the request is answered once: these schemas are large, and a
-/// duplicate spends an agent's context without telling it anything new.
+/// an agent that misspells one type in a batch is told which one. Alternative
+/// spellings are resolved the way the parser resolves them, and an entry asked
+/// for by one carries `canonicalType` beside the name it was asked for. Two
+/// spellings of the same command are answered once: these schemas are large,
+/// and a duplicate spends an agent's context without telling it anything new.
 pub fn command_payload_schemas(command_types: &[String]) -> Result<Value, String> {
     let mut schemas = Vec::with_capacity(command_types.len());
     let mut seen: Vec<&str> = Vec::with_capacity(command_types.len());
     for command_type in command_types {
         let command_type = command_type.trim();
-        let schema = super::command_payload_schema(command_type)
+        let canonical = canonical_command_type(command_type)
             .ok_or_else(|| unsupported_command_type_error(command_type))?;
-        if seen.contains(&command_type) {
+        let schema = super::command_payload_schema(canonical)
+            .ok_or_else(|| unsupported_command_type_error(command_type))?;
+        if seen.contains(&canonical) {
             continue;
         }
-        seen.push(command_type);
-        schemas.push(command_schema_entry(command_type, schema));
+        seen.push(canonical);
+
+        let mut entry = command_schema_entry(command_type, schema);
+        if canonical != command_type {
+            if let Some(entry) = entry.as_object_mut() {
+                entry.insert("canonicalType".to_string(), json!(canonical));
+            }
+        }
+        schemas.push(entry);
     }
 
     Ok(json!({ "count": schemas.len(), "schemas": schemas }))
@@ -687,30 +1098,11 @@ fn check_object_against(
         }
     }
 
-    // A field with more than one accepted spelling is required through an
-    // `anyOf` of one-property `required` groups rather than by name; at least
-    // one spelling in each group has to be present.
+    // A field with more than one accepted spelling, and an either/or a parse
+    // step enforces, are stated as `allOf` groups rather than by name.
     if let Some(groups) = schema.get("allOf").and_then(Value::as_array) {
         for group in groups {
-            let Some(options) = group.get("anyOf").and_then(Value::as_array) else {
-                continue;
-            };
-            let satisfied = options.iter().any(|option| {
-                option
-                    .get("required")
-                    .and_then(Value::as_array)
-                    .is_some_and(|names| {
-                        names
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .all(|name| payload.contains_key(name))
-                    })
-            });
-            if !satisfied {
-                return Err(format!(
-                    "no spelling of a required property is present: {group}"
-                ));
-            }
+            check_requirement_group(payload, group)?;
         }
     }
 
@@ -731,6 +1123,111 @@ fn check_object_against(
     }
 
     Ok(())
+}
+
+/// Checks one payload against one `allOf` requirement group.
+///
+/// The three shapes a derived schema states are `anyOf` (at least one branch),
+/// `oneOf` (exactly one, which is how an aliased field says that two spellings
+/// are a duplicate field) and `not` (an optional aliased field saying the same
+/// thing without requiring either). Anything else is left to a real validator.
+#[cfg(test)]
+fn check_requirement_group(
+    payload: &serde_json::Map<String, Value>,
+    group: &Value,
+) -> Result<(), String> {
+    if let Some(options) = group.get("anyOf").and_then(Value::as_array) {
+        if !options
+            .iter()
+            .any(|option| satisfies_branch(payload, option))
+        {
+            return Err(format!("no branch of a required group is present: {group}"));
+        }
+        return Ok(());
+    }
+
+    if let Some(options) = group.get("oneOf").and_then(Value::as_array) {
+        let matched = options
+            .iter()
+            .filter(|option| satisfies_branch(payload, option))
+            .count();
+        if matched != 1 {
+            return Err(format!(
+                "exactly one branch of a required group must match, {matched} did: {group}"
+            ));
+        }
+        return Ok(());
+    }
+
+    if let Some(forbidden) = group.get("not") {
+        if satisfies_branch(payload, forbidden) {
+            return Err(format!(
+                "two spellings of the same property are present: {group}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether a payload matches one branch of a requirement group.
+///
+/// A branch states `required`, the `minItems` of a property it requires, and
+/// the `allOf`/`anyOf` nesting the exclusivity constraints are built from.
+#[cfg(test)]
+fn satisfies_branch(payload: &serde_json::Map<String, Value>, branch: &Value) -> bool {
+    if let Some(names) = branch.get("required").and_then(Value::as_array) {
+        if !names
+            .iter()
+            .filter_map(Value::as_str)
+            .all(|name| payload.contains_key(name))
+        {
+            return false;
+        }
+    }
+
+    if let Some(properties) = branch.get("properties").and_then(Value::as_object) {
+        for (name, constraints) in properties {
+            let Some(value) = payload.get(name) else {
+                continue;
+            };
+            if let Some(minimum) = constraints.get("minItems").and_then(Value::as_u64) {
+                let length = value.as_array().map_or(0, |entries| entries.len() as u64);
+                if length < minimum {
+                    return false;
+                }
+            }
+            // A branch may also constrain the shape of the value it requires,
+            // as `AddTextClip`'s preset-less branch demands a complete
+            // `textData`. That is the same check one level down.
+            if constraints.get("required").is_some() || constraints.get("properties").is_some() {
+                match value.as_object() {
+                    Some(value) if satisfies_branch(value, constraints) => {}
+                    _ => return false,
+                }
+            }
+        }
+    }
+
+    if let Some(options) = branch.get("allOf").and_then(Value::as_array) {
+        if !options
+            .iter()
+            .all(|option| satisfies_branch(payload, option))
+        {
+            return false;
+        }
+    }
+
+    if let Some(options) = branch.get("anyOf").and_then(Value::as_array) {
+        if !options
+            .iter()
+            .any(|option| satisfies_branch(payload, option))
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Resolves a property's single local `$ref`, directly or through an `allOf`.

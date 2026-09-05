@@ -601,6 +601,15 @@ impl std::error::Error for ToolError {}
 /// advertised list can be derived from it by removing these.
 const MUTATING_TOOL_NAMES: [&str; 2] = ["openreelio.media.insert", "openreelio.plan.apply"];
 
+/// How many payload schemas one `openreelio.command.schema` call may ask for.
+///
+/// A schema runs to a few thousand tokens, so a request for all eighty is not a
+/// lookup — it is a context window spent before the work starts. Ten covers
+/// composing a plan; past that the agent should fetch per command. The
+/// advertised `inputSchema` states the same number, from here, so the cap an
+/// agent reads cannot drift from the cap it hits.
+const MAX_COMMAND_SCHEMA_TYPES: usize = 10;
+
 /// The tools this server advertises to a client.
 ///
 /// The mutating pair is filtered out of [`all_tool_schemas`] rather than left
@@ -714,15 +723,19 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.command.schema",
             "OpenReelio command schema",
-            "Read the command schema, text/caption workflows, and payload conventions available to external agents. Without arguments this lists the command names and the workflow hints. Pass commandType (one name or a list) to get the JSON Schema of those payloads — field names, types, which are required, enums, and the alternative spellings each field accepts — and read it before composing a payload rather than guessing one and reading the parse error.",
+            "Read the command schema, text/caption workflows, and payload conventions available to external agents. Without arguments this lists the command names and the workflow hints. Pass commandType (one name or a list of at most ten) to get the JSON Schema of those payloads — field names, types, which are required, enums, and the alternative spellings each field accepts — and read it before composing a payload rather than guessing one and reading the parse error. Any spelling the parser takes works ('changeClipSpeed', 'freezeFrame', 'addTrack'), answered with the canonical command's schema and its canonicalType. A required field with more than one spelling is a 'oneOf' over them: send exactly one, because two spellings of one field are a duplicate-field parse error.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "commandType": {
-                        "description": "One backend command type, or a list of at most ten, to describe. Omit for the name listing. Ask for the commands you are about to compose rather than the whole surface: each schema costs a few thousand tokens.",
+                        "description": "One backend command type, or a list of at most ten, to describe. Any spelling the parser accepts resolves to the canonical command. Omit for the name listing. Ask for the commands you are about to compose rather than the whole surface: each schema costs a few thousand tokens.",
                         "anyOf": [
                             { "type": "string" },
-                            { "type": "array", "items": { "type": "string" } }
+                            {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "maxItems": MAX_COMMAND_SCHEMA_TYPES
+                            }
                         ]
                     }
                 },
@@ -1887,13 +1900,6 @@ fn text_preset_catalog_line() -> Vec<String> {
 /// payloads in the same `{ commandType, schema }` entries the CLI prints, so
 /// the two surfaces answer the same question the same way.
 fn read_command_schema(arguments: Value) -> Result<Value, ToolError> {
-    /// How many payload schemas one call may ask for.
-    ///
-    /// A schema runs to a few thousand tokens, so a request for all eighty is
-    /// not a lookup — it is a context window spent before the work starts. Ten
-    /// covers composing a plan; past that the agent should fetch per command.
-    const MAX_COMMAND_TYPES: usize = 10;
-
     let requested = match arguments.get("commandType") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::String(one)) => vec![one.clone()],
@@ -1916,17 +1922,21 @@ fn read_command_schema(arguments: Value) -> Result<Value, ToolError> {
         return Ok(build_command_schema());
     }
 
-    // The same name twice is one lookup, and it should not spend two of the ten.
+    // The same name twice is one lookup, and it should not spend two of the
+    // ten. The core lookup trims each name before resolving it, so the same
+    // name with a stray space around it has to be trimmed here too or it
+    // survives the dedup and spends a slot on a schema already fetched.
     let mut deduped: Vec<String> = Vec::with_capacity(requested.len());
     for command_type in requested {
+        let command_type = command_type.trim().to_string();
         if !deduped.contains(&command_type) {
             deduped.push(command_type);
         }
     }
 
-    if deduped.len() > MAX_COMMAND_TYPES {
+    if deduped.len() > MAX_COMMAND_SCHEMA_TYPES {
         return Err(ToolError::InvalidArguments(format!(
-            "commandType names {} commands; at most {MAX_COMMAND_TYPES} may be requested at once. \
+            "commandType names {} commands; at most {MAX_COMMAND_SCHEMA_TYPES} may be requested at once. \
              Ask for the ones you are about to compose, not the whole surface.",
             deduped.len()
         )));
@@ -3667,14 +3677,79 @@ mod tests {
         assert_eq!(required, vec!["sequenceId", "trackId"]);
 
         // The caption id is required through the group that also accepts its
-        // `clipId` spelling, so neither name is listed on its own.
-        let spellings: Vec<&str> = schema["allOf"][0]["anyOf"]
+        // `clipId` spelling, so neither name is listed on its own. It is a
+        // `oneOf`: serde reads the second spelling as the same field twice.
+        let spellings: Vec<&str> = schema["allOf"][0]["oneOf"]
             .as_array()
-            .expect("an aliased requirement is an anyOf of one-property groups")
+            .expect("an aliased requirement is a oneOf of one-property groups")
             .iter()
             .filter_map(|option| option["required"][0].as_str())
             .collect();
         assert_eq!(spellings, vec!["captionId", "clipId"]);
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: an agent asks by a `commandType` spelling the parser accepts
+    #[test]
+    fn should_resolve_a_command_type_alias_to_its_canonical_schema() {
+        let result = read_command_schema(serde_json::json!({ "commandType": "freezeFrame" }))
+            .expect("freezeFrame is a command type the parser accepts");
+
+        assert_eq!(result["count"].as_u64(), Some(1));
+        assert_eq!(result["schemas"][0]["commandType"], "freezeFrame");
+        assert_eq!(result["schemas"][0]["canonicalType"], "CreateFreezeFrame");
+        assert_eq!(
+            result["schemas"][0]["schema"]["title"], "CreateFreezeFrame",
+            "the schema is titled by the name it is really for"
+        );
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: padding around a name does not spend one of the ten
+    ///
+    /// The bug this replaces: the cap was counted before the names were
+    /// trimmed, so `"SplitClip"` and `" SplitClip"` were two of the ten and
+    /// then one schema — an agent assembling a list by hand could be refused
+    /// for asking twice for the same thing.
+    #[test]
+    fn should_count_one_padded_name_and_its_twin_once_against_the_cap() {
+        let requested: Vec<Value> = ["SplitClip", " SplitClip", "SplitClip\n"]
+            .iter()
+            .map(|name| Value::String((*name).to_string()))
+            .collect();
+        let result = read_command_schema(serde_json::json!({ "commandType": requested }))
+            .expect("one name three ways is one lookup");
+
+        assert_eq!(result["count"].as_u64(), Some(1));
+        assert_eq!(result["schemas"][0]["schema"]["title"], "SplitClip");
+    }
+
+    /// The advertised cap and the enforced one are the same number.
+    #[test]
+    fn should_advertise_the_command_schema_cap_it_enforces() {
+        let state = McpServerState::default();
+        let response = handle_jsonrpc_request(&state, request("tools/list", serde_json::json!({})));
+        let schema = response["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|tool| tool["name"] == "openreelio.command.schema")
+            .map(|tool| tool["inputSchema"].clone())
+            .expect("the command schema tool is always advertised");
+
+        assert_eq!(
+            schema["properties"]["commandType"]["anyOf"][1]["maxItems"].as_u64(),
+            Some(MAX_COMMAND_SCHEMA_TYPES as u64),
+            "an agent reads the cap off the tool rather than by being refused: {schema}"
+        );
+
+        let too_many: Vec<Value> = CommandPayload::SUPPORTED_COMMAND_TYPES
+            .iter()
+            .take(MAX_COMMAND_SCHEMA_TYPES + 1)
+            .map(|name| Value::String((*name).to_string()))
+            .collect();
+        read_command_schema(serde_json::json!({ "commandType": too_many }))
+            .expect_err("past the cap the request is refused");
     }
 
     #[test]

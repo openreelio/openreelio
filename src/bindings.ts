@@ -7959,17 +7959,17 @@ tempoClassification: TempoClassification }
  * Payload for Ripple Delete (remove clips + close gaps).
  * 
  * A single clip may also be named as `clipId` instead of `clipIds`, and a
- * legacy `affectAllTracks` flag is accepted and ignored. Both are declared on
- * the derived schema even though the struct does not carry them, because the
- * wire shape below rejects every *other* unknown field — a schema left open
- * here would invite a typo the parser refuses.
+ * legacy `affectAllTracks` flag is accepted and ignored. Every *other* unknown
+ * field is refused, so both are declared as properties of this command's
+ * schema rather than left to `additionalProperties`.
  */
 export type RippleDeletePayload = { sequenceId: string; trackId: string; 
 /**
  * One or more clip IDs to remove.
  * 
- * Accepts `clipIds`, or `clipId` for a single clip; one of the two is
- * required.
+ * Accepts `clipIds`, or `clipId` for a single clip; one of the two has to
+ * name a clip. An empty `clipIds` does not count: it falls back to
+ * `clipId`, and without one the command is refused.
  */
 clipIds: string[] }
 /**

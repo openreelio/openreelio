@@ -100,15 +100,34 @@ types themselves, so it is the authoritative answer to "what goes in this
 payload" — read it before composing one instead of guessing and reading the
 parse error.
 
+`--type` takes any spelling the parser takes, so `changeClipSpeed`,
+`freezeFrame`, `addTrack`, `LiftEdit` and the lowerCamel form of every command
+all resolve. The answer is the canonical command's schema, and the entry names
+it as `canonicalType` when you asked for it by another spelling.
+
 Fetch the commands you are about to compose, not the whole surface: each schema
 runs to a few thousand tokens, so `--all` is ~80 of them and belongs in a file
 you grep, never in a context window. The MCP `openreelio.command.schema` tool
-caps `commandType` at ten names per call for the same reason. A field that is
-required but has more than one accepted spelling is not listed in `required`;
-it appears as an `allOf` of `anyOf` groups, one group per field, each listing
-the spellings that satisfy it. A schema carrying
-`"x-openreelio-executable": false` parses and validates but `command execute`
-refuses it.
+caps `commandType` at ten names per call for the same reason.
+
+Requirements a `required` list cannot state appear as `allOf` groups:
+
+- A **required field with more than one spelling** is a `oneOf` over those
+  spellings — `UpdateCaption`'s `captionId`/`clipId`. Exactly one of them:
+  sending both is a `duplicate field` parse error, not a helpful restatement.
+- An **optional field with more than one spelling** carries the same rule as a
+  `not` over the pairs — `TrimClip`'s `newSourceIn`/`newStart`. Send one or
+  neither.
+- An **either/or a parse step enforces** is an `anyOf`, where both together are
+  fine and the explicit fields win: `AddTextClip` wants `textData` or a
+  `preset`, `AddEffect` an `effectType` or a `recipe`. Without a preset the
+  `textData` branch also spells out the complete object the parser then needs.
+- `RippleDelete` is the one `anyOf` over spellings, because its parser really
+  does read `clipIds` and `clipId` as two properties: a non-empty `clipIds`
+  wins, and an empty one falls back to `clipId`.
+
+A schema carrying `"x-openreelio-executable": false` parses and validates but
+`command execute` refuses it.
 
 ### Self-diagnosis
 

@@ -105,10 +105,9 @@ pub struct OverwriteEditPayload {
 /// Payload for Ripple Delete (remove clips + close gaps).
 ///
 /// A single clip may also be named as `clipId` instead of `clipIds`, and a
-/// legacy `affectAllTracks` flag is accepted and ignored. Both are declared on
-/// the derived schema even though the struct does not carry them, because the
-/// wire shape below rejects every *other* unknown field — a schema left open
-/// here would invite a typo the parser refuses.
+/// legacy `affectAllTracks` flag is accepted and ignored. Every *other* unknown
+/// field is refused, so both are declared as properties of this command's
+/// schema rather than left to `additionalProperties`.
 #[derive(Debug, Serialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(deny_unknown_fields)]
@@ -117,8 +116,9 @@ pub struct RippleDeletePayload {
     pub track_id: TrackId,
     /// One or more clip IDs to remove.
     ///
-    /// Accepts `clipIds`, or `clipId` for a single clip; one of the two is
-    /// required.
+    /// Accepts `clipIds`, or `clipId` for a single clip; one of the two has to
+    /// name a clip. An empty `clipIds` does not count: it falls back to
+    /// `clipId`, and without one the command is refused.
     pub clip_ids: Vec<ClipId>,
 }
 
@@ -4008,8 +4008,11 @@ mod tests {
     // =========================================================================
 
     use crate::ipc::command_schema::{
-        all_command_payload_schemas, check_against_schema, property, required,
+        all_command_payload_schemas, canonical_command_type, check_against_schema,
+        command_payload_schemas, property, required, PAYLOAD_EITHER_OR_REQUIREMENTS,
+        PAYLOAD_FIELD_ALIASES, PAYLOAD_VARIANT_ALIASES,
     };
+    use serde_json::Value;
 
     /// Feature: derived command payload schemas
     /// Scenario: every advertised command can be looked up
@@ -4287,19 +4290,38 @@ mod tests {
         assert_eq!(
             required(&schema),
             vec!["sequenceId", "trackId"],
-            "captionId is required through the anyOf that also accepts clipId"
+            "captionId is required through the group that also accepts clipId"
         );
         let groups = schema["allOf"]
             .as_array()
-            .expect("an aliased requirement becomes an anyOf group");
-        assert_eq!(groups.len(), 1);
-        let spellings: Vec<&str> = groups[0]["anyOf"]
-            .as_array()
-            .expect("the group lists the spellings")
+            .expect("an aliased requirement becomes a group");
+
+        let spellings: Vec<&str> = groups
+            .iter()
+            .find_map(|group| group["oneOf"].as_array())
+            .expect("the required id is a oneOf over its spellings")
             .iter()
             .filter_map(|option| option["required"][0].as_str())
             .collect();
         assert_eq!(spellings, vec!["captionId", "clipId"]);
+
+        // The optional times are aliased too, and serde refuses both spellings
+        // of one field just as firmly — that is a `not` rather than a
+        // requirement, because neither spelling has to be sent at all.
+        let exclusive: Vec<Vec<&str>> = groups
+            .iter()
+            .filter_map(|group| group["not"]["allOf"].as_array())
+            .map(|pair| {
+                pair.iter()
+                    .filter_map(|option| option["required"][0].as_str())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            exclusive,
+            vec![vec!["startSec", "startTime"], vec!["endSec", "endTime"]],
+            "an optional aliased field still cannot be sent under two spellings"
+        );
     }
 
     /// Feature: derived command payload schemas
@@ -4613,37 +4635,80 @@ mod tests {
     /// recognise — a `//` note between the doc comment and the field, a blank
     /// line — is neutral rather than a reset, because a reset silently drops
     /// the aliases and turns the guard into a no-op.
+    ///
+    /// The private wire shapes inside a hand written `Deserialize` are read
+    /// too — indented, and without `pub` on their fields — and what they
+    /// declare is attributed to the payload the `impl` is for, because
+    /// `AddTextClipPayload::Wire` is where `AddTextClipPayload`'s
+    /// `timelineStart` alias actually lives. Two entries for the same field are
+    /// merged, so the doc comment on the public struct documents the alias its
+    /// wire shape declares.
     fn scan_field_aliases(source: &str) -> Vec<ScannedField> {
-        let mut fields = Vec::new();
-        let mut current_struct: Option<String> = None;
+        let mut fields: Vec<ScannedField> = Vec::new();
+        // (owner the fields belong to, indentation of the struct's own fields)
+        let mut current_struct: Option<(String, usize)> = None;
+        // The payload a hand written `Deserialize` is for, which owns the
+        // private wire shapes declared inside it.
+        let mut impl_owner: Option<String> = None;
         let mut doc: Vec<String> = Vec::new();
         let mut aliases: Vec<String> = Vec::new();
         let mut attribute: Option<String> = None;
 
         for line in source.lines() {
             if let Some(name) = line
-                .strip_prefix("pub struct ")
+                .strip_prefix("impl<'de> Deserialize<'de> for ")
                 .and_then(|rest| rest.strip_suffix(" {"))
             {
-                current_struct = Some(name.to_string());
+                impl_owner = Some(name.to_string());
+                continue;
+            }
+
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+
+            if let Some(name) = trimmed
+                .strip_prefix("pub struct ")
+                .or_else(|| trimmed.strip_prefix("struct "))
+                .and_then(|rest| rest.strip_suffix(" {"))
+            {
+                // A struct nested inside a `Deserialize` impl is the wire shape
+                // of the payload that impl is for; the spellings it accepts are
+                // the payload's, and are what the payload's schema has to
+                // declare.
+                let owner = match (indent, &impl_owner) {
+                    (0, _) => name.to_string(),
+                    (_, Some(payload)) => payload.clone(),
+                    (_, None) => name.to_string(),
+                };
+                current_struct = Some((owner, indent + 4));
                 doc.clear();
                 aliases.clear();
                 attribute = None;
                 continue;
             }
+
             if line == "}" {
+                current_struct = None;
+                impl_owner = None;
+                attribute = None;
+                continue;
+            }
+
+            let Some((owner, field_indent)) = current_struct.clone() else {
+                continue;
+            };
+
+            // The struct's own closing brace sits one level in from its fields.
+            if indent == field_indent - 4 && trimmed == "}" {
                 current_struct = None;
                 attribute = None;
                 continue;
             }
-            let Some(owner) = current_struct.clone() else {
-                continue;
-            };
 
             // A wrapped attribute's continuation lines are indented past the
             // field level, so they are collected before the indentation check.
             if let Some(pending) = attribute.as_mut() {
-                pending.push_str(line.trim());
+                pending.push_str(trimmed);
                 if brackets_balance(pending) {
                     aliases.extend(read_aliases(pending));
                     attribute = None;
@@ -4651,33 +4716,26 @@ mod tests {
                 continue;
             }
 
-            // Only the struct's own fields, which sit at one level of
-            // indentation; a `Wire` shape nested inside an `impl` is deeper and
-            // is not what the schema is derived from.
-            let Some(body) = line.strip_prefix("    ") else {
-                continue;
-            };
-            if body.starts_with(' ') {
+            // Only the struct's own fields, which sit at exactly one level of
+            // indentation past the struct itself.
+            if indent != field_indent {
                 continue;
             }
 
-            if let Some(text) = body.strip_prefix("/// ").or(body.strip_prefix("///")) {
+            if let Some(text) = trimmed.strip_prefix("/// ").or(trimmed.strip_prefix("///")) {
                 doc.push(text.to_string());
                 continue;
             }
-            if body.starts_with("#[") {
-                if brackets_balance(body) {
-                    aliases.extend(read_aliases(body));
+            if trimmed.starts_with("#[") {
+                if brackets_balance(trimmed) {
+                    aliases.extend(read_aliases(trimmed));
                 } else {
-                    attribute = Some(body.to_string());
+                    attribute = Some(trimmed.to_string());
                 }
                 continue;
             }
-            if let Some(field) = body
-                .strip_prefix("pub ")
-                .and_then(|rest| rest.split(':').next())
-            {
-                let canonical = to_camel_case(field);
+            if let Some(field) = read_field_name(trimmed) {
+                let canonical = to_camel_case(&field);
                 // An alias equal to the camelCase name serde already derives is
                 // a no-op; there is nothing to tell anyone.
                 let named: Vec<String> = aliases
@@ -4685,13 +4743,17 @@ mod tests {
                     .filter(|alias| **alias != canonical)
                     .cloned()
                     .collect();
-                if !named.is_empty() {
-                    fields.push(ScannedField {
-                        owner,
-                        canonical,
-                        aliases: named,
-                        doc: doc.join(" "),
-                    });
+                let documented = doc.join(" ");
+                if !named.is_empty() || !documented.trim().is_empty() {
+                    merge_scanned_field(
+                        &mut fields,
+                        ScannedField {
+                            owner,
+                            canonical,
+                            aliases: named,
+                            doc: documented,
+                        },
+                    );
                 }
                 doc.clear();
                 aliases.clear();
@@ -4700,7 +4762,60 @@ mod tests {
             // nothing about the next field and is left alone.
         }
 
+        // A field is only interesting here once it accepts a second spelling;
+        // the documented ones were carried this far only so that a doc comment
+        // on a public field can answer for the alias its wire shape declares.
+        fields.retain(|field| !field.aliases.is_empty());
         fields
+    }
+
+    /// Reads a field declaration's name, if the line is one.
+    ///
+    /// A wire shape's fields carry no `pub`, and a struct body holds lines that
+    /// are neither doc comment, attribute nor field — so the name has to look
+    /// like an identifier before it is taken for one.
+    fn read_field_name(declaration: &str) -> Option<String> {
+        let declaration = declaration.strip_prefix("pub ").unwrap_or(declaration);
+        let (name, rest) = declaration.split_once(':')?;
+        if rest.is_empty() {
+            return None;
+        }
+        let name = name.trim();
+        let is_identifier = !name.is_empty()
+            && !name.starts_with(|character: char| character.is_ascii_digit())
+            && name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_');
+        is_identifier.then(|| name.to_string())
+    }
+
+    /// Folds one scanned field into the list, merging a repeated declaration.
+    ///
+    /// A payload and its private wire shape declare the same field twice: the
+    /// doc comment agents read is on one, the alias serde accepts is on the
+    /// other. Keeping the two apart would fail the documentation guard against
+    /// a field that is in fact documented.
+    fn merge_scanned_field(fields: &mut Vec<ScannedField>, field: ScannedField) {
+        let Some(existing) = fields.iter_mut().find(|existing| {
+            existing.owner == field.owner && existing.canonical == field.canonical
+        }) else {
+            fields.push(field);
+            return;
+        };
+
+        for alias in field.aliases {
+            if !existing.aliases.contains(&alias) {
+                existing.aliases.push(alias);
+            }
+        }
+        if !field.doc.trim().is_empty() {
+            if existing.doc.trim().is_empty() {
+                existing.doc = field.doc;
+            } else {
+                existing.doc.push(' ');
+                existing.doc.push_str(&field.doc);
+            }
+        }
     }
 
     /// Whether a snippet's square brackets are all closed.
@@ -4759,6 +4874,753 @@ pub struct SamplePayload {
             }],
             "a rustfmt-wrapped attribute and a `//` note must not hide an alias"
         );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a `commandType` the parser accepts is one the schema answers
+    ///
+    /// The bug this replaces: `#[serde(alias)]` on the `CommandPayload`
+    /// variants makes `addTrack`, `freezeFrame`, `changeClipSpeed`, `LiftEdit`
+    /// and a hundred more real command types — `command execute` runs them —
+    /// while `command schema --type` answered "not a supported command type"
+    /// about every one of them. The surface an agent reads before composing a
+    /// payload was the only one refusing the name.
+    #[test]
+    fn should_answer_a_command_type_alias_with_the_canonical_schema() {
+        for (spelling, canonical) in [
+            ("addTrack", "CreateTrack"),
+            ("DeleteClip", "RemoveClip"),
+            ("freezeFrame", "CreateFreezeFrame"),
+            ("styleCaption", "UpdateCaption"),
+            ("LiftEdit", "Lift"),
+            ("ExtractEdit", "ExtractEdit"),
+            ("changeClipSpeed", "SetClipSpeed"),
+            ("addCaptionsFromTranscription", "ImportGeneratedCaptions"),
+        ] {
+            let schema = command_payload_schema(spelling).unwrap_or_else(|| {
+                panic!("the parser accepts '{spelling}' and so must the schema")
+            });
+            assert_eq!(
+                schema["title"], canonical,
+                "'{spelling}' is answered with the canonical command's schema"
+            );
+        }
+
+        let answered =
+            command_payload_schemas(&["freezeFrame".to_string()]).expect("freezeFrame resolves");
+        assert_eq!(answered["schemas"][0]["commandType"], "freezeFrame");
+        assert_eq!(
+            answered["schemas"][0]["canonicalType"], "CreateFreezeFrame",
+            "an entry asked for by another spelling names the canonical one"
+        );
+
+        let canonical =
+            command_payload_schemas(&["SplitClip".to_string()]).expect("SplitClip resolves");
+        assert!(
+            canonical["schemas"][0].get("canonicalType").is_none(),
+            "a canonical request carries no second name"
+        );
+
+        // Two spellings of one command are one lookup; a schema runs to a few
+        // thousand tokens and the second copy tells an agent nothing.
+        let deduped = command_payload_schemas(&["CreateTrack".to_string(), "addTrack".to_string()])
+            .expect("both spellings resolve");
+        assert_eq!(deduped["count"].as_u64(), Some(1));
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: the alias table and the enum cannot drift apart
+    #[test]
+    fn the_variant_alias_table_should_match_the_command_enum() {
+        let mut scanned = scan_variant_aliases(include_str!("payloads.rs"));
+        scanned.sort();
+
+        let mut declared: Vec<(String, String)> = PAYLOAD_VARIANT_ALIASES
+            .iter()
+            .map(|(spelling, canonical)| ((*spelling).to_string(), (*canonical).to_string()))
+            .collect();
+        declared.sort();
+
+        assert_eq!(
+            scanned, declared,
+            "every `#[serde(alias)]` on a CommandPayload variant is a command type the schema \
+             lookup has to resolve, and nothing else belongs in PAYLOAD_VARIANT_ALIASES"
+        );
+
+        for (spelling, canonical) in PAYLOAD_VARIANT_ALIASES {
+            assert_eq!(
+                canonical_command_type(spelling),
+                Some(*canonical),
+                "'{spelling}' resolves to '{canonical}'"
+            );
+        }
+        for supported in CommandPayload::SUPPORTED_COMMAND_TYPES {
+            assert_eq!(canonical_command_type(supported), Some(*supported));
+        }
+        assert_eq!(canonical_command_type("RenderTheWholeMovie"), None);
+    }
+
+    /// Reads the `commandType` spellings the `CommandPayload` variants accept.
+    ///
+    /// The same shape as [`scan_field_aliases`], one level up: an attribute
+    /// wrapped by rustfmt is accumulated until its brackets balance, and the
+    /// variant that follows owns whatever it declared.
+    fn scan_variant_aliases(source: &str) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let Some(body) = source.split("pub enum CommandPayload {").nth(1) else {
+            return pairs;
+        };
+        let body = body.split("\n}\n").next().unwrap_or(body);
+
+        let mut aliases: Vec<String> = Vec::new();
+        let mut attribute: Option<String> = None;
+
+        for line in body.lines() {
+            let trimmed = line.trim();
+
+            if let Some(pending) = attribute.as_mut() {
+                pending.push_str(trimmed);
+                if brackets_balance(pending) {
+                    aliases.extend(read_aliases(pending));
+                    attribute = None;
+                }
+                continue;
+            }
+            if trimmed.starts_with("#[") {
+                if brackets_balance(trimmed) {
+                    aliases.extend(read_aliases(trimmed));
+                } else {
+                    attribute = Some(trimmed.to_string());
+                }
+                continue;
+            }
+
+            let Some(variant) = trimmed
+                .strip_suffix("),")
+                .and_then(|rest| rest.split('(').next())
+            else {
+                continue;
+            };
+            let is_variant = variant.starts_with(|character: char| character.is_ascii_uppercase())
+                && variant
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric());
+            if !is_variant {
+                continue;
+            }
+            for alias in aliases.drain(..) {
+                if alias != variant {
+                    pairs.push((alias, variant.to_string()));
+                }
+            }
+        }
+
+        pairs
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: the alias table names only spellings the parser really takes
+    ///
+    /// The forward guard proves every alias in the source reaches the schema.
+    /// This is the other direction: a table entry the parser does not back is a
+    /// property an agent is invited to send and will be refused for, and a
+    /// renamed field leaves exactly that behind.
+    #[test]
+    fn every_declared_field_alias_should_be_one_the_parser_accepts() {
+        let scanned = scan_field_aliases(include_str!("payloads.rs"));
+
+        let mut unbacked: Vec<String> = Vec::new();
+        for (owner, canonical, aliases) in PAYLOAD_FIELD_ALIASES {
+            for alias in aliases.iter() {
+                let accepted = scanned.iter().any(|field| {
+                    field.owner == *owner
+                        && field.canonical == *canonical
+                        && field.aliases.iter().any(|scanned| scanned == alias)
+                });
+                if !accepted {
+                    unbacked.push(format!("{owner}.{canonical} declares `{alias}`"));
+                }
+            }
+        }
+
+        assert!(
+            unbacked.is_empty(),
+            "these spellings are advertised by a schema and refused by the parser — remove them \
+             from PAYLOAD_FIELD_ALIASES, or give the field the `#[serde(alias)]` it claims: \
+             {unbacked:#?}"
+        );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: the two spellings of one field cannot both be sent
+    ///
+    /// The bug this replaces: an aliased field's requirement was an `anyOf`,
+    /// which is satisfied by *both* spellings at once, and the alias's own
+    /// description said the two "mean the same thing" — while serde reads the
+    /// second one as the same field twice and fails with `duplicate field`. The
+    /// schema invited a payload the parser refuses.
+    #[test]
+    fn a_field_should_accept_one_spelling_at_a_time_in_the_schema_and_the_parser() {
+        for (owner, canonical, aliases) in PAYLOAD_FIELD_ALIASES {
+            let mut spellings = vec![(*canonical).to_string()];
+            spellings.extend(aliases.iter().map(|alias| (*alias).to_string()));
+
+            let (command_type, struct_name, schema) = schema_declaring(owner);
+            // `check_against_schema` is a shallow guard: it reads the groups on
+            // the object it is handed, so only a root owner can be checked
+            // against the schema here. A nested one is checked structurally
+            // below and against the parser like every other.
+            let checkable = struct_name == *owner;
+
+            for spelling in &spellings {
+                let payload = sample_payload(
+                    &schema,
+                    command_type,
+                    struct_name,
+                    Some(AliasProbe {
+                        owner,
+                        spellings: &spellings,
+                        wanted: vec![spelling.clone()],
+                    }),
+                );
+                CommandPayload::parse(command_type.to_string(), payload.clone()).unwrap_or_else(
+                    |error| panic!("{command_type} must accept `{spelling}` alone: {error}"),
+                );
+                if checkable {
+                    check_against_schema(&schema, &payload).unwrap_or_else(|error| {
+                        panic!("{command_type}'s schema must accept `{spelling}` alone: {error}")
+                    });
+                }
+            }
+
+            for (index, first) in spellings.iter().enumerate() {
+                for second in &spellings[index + 1..] {
+                    let payload = sample_payload(
+                        &schema,
+                        command_type,
+                        struct_name,
+                        Some(AliasProbe {
+                            owner,
+                            spellings: &spellings,
+                            wanted: vec![first.clone(), second.clone()],
+                        }),
+                    );
+                    let error = CommandPayload::parse(command_type.to_string(), payload.clone())
+                        .expect_err(&format!(
+                            "{command_type} must refuse `{first}` and `{second}` together"
+                        ));
+                    assert!(
+                        error.contains("duplicate field"),
+                        "{command_type} refuses `{first}` with `{second}` as a duplicate field, \
+                         not as {error}"
+                    );
+                    if checkable {
+                        check_against_schema(&schema, &payload).expect_err(&format!(
+                            "{command_type}'s schema must refuse `{first}` and `{second}` \
+                             together, as its parser does: {payload}"
+                        ));
+                    }
+                }
+            }
+
+            let declaring = if checkable {
+                schema.clone()
+            } else {
+                schema["definitions"][*owner].clone()
+            };
+            assert!(
+                exclusivity_is_stated(&declaring, &spellings),
+                "{owner} must say in its own schema that its spellings are mutually exclusive: \
+                 {declaring}"
+            );
+
+            for alias in aliases.iter() {
+                let described = declaring["properties"][*alias]["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                assert!(
+                    described.contains("only one"),
+                    "`{alias}` must tell an agent to send one spelling, not both: {described}"
+                );
+            }
+        }
+    }
+
+    /// Whether a schema states that a field's spellings exclude each other.
+    ///
+    /// Either as the `oneOf` a required field's group is, or as the `not` over
+    /// the pairs an optional one carries.
+    fn exclusivity_is_stated(schema: &Value, spellings: &[String]) -> bool {
+        let named = |option: &Value| {
+            option["required"][0]
+                .as_str()
+                .is_some_and(|name| spellings.iter().any(|spelling| spelling == name))
+        };
+
+        schema["allOf"].as_array().is_some_and(|groups| {
+            groups.iter().any(|group| {
+                let exclusive_requirement = group["oneOf"].as_array().is_some_and(|options| {
+                    options.len() == spellings.len() && options.iter().all(named)
+                });
+                let forbidden_pair = group["not"]["allOf"]
+                    .as_array()
+                    .is_some_and(|pair| pair.iter().all(named))
+                    || group["not"]["anyOf"].as_array().is_some_and(|pairs| {
+                        pairs.iter().all(|pair| {
+                            pair["allOf"]
+                                .as_array()
+                                .is_some_and(|pair| pair.iter().all(named))
+                        })
+                    });
+                exclusive_requirement || forbidden_pair
+            })
+        })
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: an empty clip list is refused by the schema, not just the parser
+    ///
+    /// The bug this replaces: `{"clipIds": []}` satisfied `required: clipIds`
+    /// and was then refused by the parser with "missing field `clipIds`", which
+    /// reads like a contradiction of the schema an agent had just followed.
+    #[test]
+    fn ripple_delete_should_refuse_an_empty_clip_list_in_both_places() {
+        let schema = command_payload_schema("RippleDelete").expect("RippleDelete has a schema");
+
+        let empty = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_v1",
+            "clipIds": []
+        });
+        assert!(
+            check_against_schema(&schema, &empty).is_err(),
+            "an empty clipIds names no clip and the schema has to say so"
+        );
+        assert!(CommandPayload::parse("RippleDelete".to_string(), empty).is_err());
+
+        // An empty list beside a single `clipId` is the one shape that saves
+        // it: the parser falls through to `clipId`, and so does the schema.
+        let fallback = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_v1",
+            "clipIds": [],
+            "clipId": "clip_1"
+        });
+        check_against_schema(&schema, &fallback).expect("clipId stands in for an empty clipIds");
+        CommandPayload::parse("RippleDelete".to_string(), fallback).expect("the parser agrees");
+
+        let clip_id = property(&schema, "clipId").expect("clipId is declared");
+        assert!(
+            clip_id["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("non-empty")),
+            "clipId must say that an empty clipIds does not win: {clip_id:?}"
+        );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: the payload a schema demands is one the parser accepts
+    ///
+    /// A schema is only worth reading if what it asks for is enough. Two
+    /// commands enforced a requirement no property carried — `AddTextClip`
+    /// needs `textData` or a `preset`, `AddEffect` an `effectType` or a
+    /// `recipe` — so the smallest payload their schemas described was refused
+    /// by `command validate`. This builds that smallest payload for every
+    /// command from the schema alone and hands it to both.
+    #[test]
+    fn the_payload_every_schema_demands_should_parse() {
+        let mut divergences: Vec<String> = Vec::new();
+
+        for (command_type, struct_name) in COMMAND_PAYLOAD_STRUCT_NAMES {
+            let schema = command_payload_schema(command_type)
+                .unwrap_or_else(|| panic!("{command_type} is advertised but has no schema"));
+            let payload = sample_payload(&schema, command_type, struct_name, None);
+
+            if let Err(error) = check_against_schema(&schema, &payload) {
+                divergences.push(format!(
+                    "{command_type} rejects the payload its own schema demands: {error} — {payload}"
+                ));
+                continue;
+            }
+            if let Err(error) = CommandPayload::parse((*command_type).to_string(), payload.clone())
+            {
+                divergences.push(format!(
+                    "{command_type} needs more than its schema requires: {error} — {payload}"
+                ));
+            }
+        }
+
+        assert!(
+            divergences.is_empty(),
+            "an agent composing a payload from these schemas is refused by the parser — state the \
+             missing requirement in the schema rather than only in the parse error: \
+             {divergences:#?}"
+        );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: an either/or requirement names properties its payload still has
+    #[test]
+    fn every_either_or_requirement_should_name_declared_properties() {
+        let mut missing: Vec<String> = Vec::new();
+
+        for requirement in PAYLOAD_EITHER_OR_REQUIREMENTS {
+            let (_, struct_name, schema) = schema_declaring(requirement.owner);
+            let declaring = if struct_name == requirement.owner {
+                schema.clone()
+            } else {
+                schema["definitions"][requirement.owner].clone()
+            };
+
+            for branch in requirement.branches {
+                if !declaring["properties"][branch.property].is_object() {
+                    missing.push(format!("{}.{}", requirement.owner, branch.property));
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "a requirement naming a property the payload no longer has would forbid every \
+             payload: {missing:#?}"
+        );
+    }
+
+    /// The command whose schema declares one payload type, as root or nested.
+    ///
+    /// Returns `(command type, the struct that command parses into, schema)`.
+    fn schema_declaring(owner: &str) -> (&'static str, &'static str, Value) {
+        for (command_type, struct_name) in COMMAND_PAYLOAD_STRUCT_NAMES {
+            let schema = command_payload_schema(command_type)
+                .unwrap_or_else(|| panic!("{command_type} is advertised but has no schema"));
+            if *struct_name == owner || schema["definitions"][owner].is_object() {
+                return (command_type, struct_name, schema);
+            }
+        }
+        panic!("no command's schema declares {owner}");
+    }
+
+    /// Builds the payload one schema demands and nothing more.
+    fn sample_payload(
+        schema: &Value,
+        command_type: &str,
+        struct_name: &str,
+        probe: Option<AliasProbe<'_>>,
+    ) -> Value {
+        SchemaSampler {
+            root: schema,
+            command_type,
+            probe,
+        }
+        .payload(struct_name)
+    }
+
+    /// Which spellings of one aliased field a sampled payload should carry.
+    struct AliasProbe<'a> {
+        /// The type that declares the field.
+        owner: &'a str,
+        /// Every accepted spelling of it, the canonical one first.
+        spellings: &'a [String],
+        /// The spellings to write; every other one is removed.
+        wanted: Vec<String>,
+    }
+
+    /// Builds the smallest payload a derived schema demands.
+    ///
+    /// The sweeps above ask the parser what it makes of the schema's own
+    /// minimum rather than of a sample somebody kept up to date by hand: a
+    /// requirement that reaches the parser but not the schema shows up as a
+    /// generated payload the parser refuses.
+    struct SchemaSampler<'a> {
+        /// The whole schema, for resolving `#/definitions/…`.
+        root: &'a Value,
+        /// The command it belongs to, for [`free_form_sample`].
+        command_type: &'a str,
+        /// Which spellings of one aliased field to write, when probing one.
+        probe: Option<AliasProbe<'a>>,
+    }
+
+    impl SchemaSampler<'_> {
+        /// How deep a sample may nest before it stops being a sample.
+        const MAX_DEPTH: usize = 16;
+
+        /// The payload the root schema demands.
+        fn payload(&self, type_name: &str) -> Value {
+            self.object(type_name, self.root, None, Self::MAX_DEPTH)
+        }
+
+        /// Builds one object, carrying only the properties it has to.
+        fn object(
+            &self,
+            type_name: &str,
+            schema: &Value,
+            extra: Option<&Value>,
+            depth: usize,
+        ) -> Value {
+            let mut object = serde_json::Map::new();
+            if depth == 0 {
+                return Value::Object(object);
+            }
+
+            for (name, shape) in demanded_properties(schema, extra) {
+                // A property the schema describes in prose rather than as a
+                // subschema cannot be generated from the schema at all.
+                let value = free_form_sample(self.command_type, &name)
+                    .or_else(|| {
+                        let property = schema.get("properties")?.get(&name)?;
+                        Some(self.value(property, shape.as_ref(), depth - 1))
+                    })
+                    .unwrap_or(Value::Null);
+                object.insert(name, value);
+            }
+
+            self.apply_probe(type_name, schema, &mut object, depth);
+            Value::Object(object)
+        }
+
+        /// Builds a value for one property schema.
+        fn value(&self, property: &Value, extra: Option<&Value>, depth: usize) -> Value {
+            if depth == 0 {
+                return Value::Null;
+            }
+            match self.resolve(property) {
+                Some((name, definition)) => self.value_of(name, definition, extra, depth - 1),
+                None => self.value_of("", property, extra, depth),
+            }
+        }
+
+        /// Builds a value for a property schema whose `$ref` is resolved.
+        fn value_of(
+            &self,
+            type_name: &str,
+            schema: &Value,
+            extra: Option<&Value>,
+            depth: usize,
+        ) -> Value {
+            if let Some(first) = schema
+                .get("enum")
+                .and_then(Value::as_array)
+                .and_then(|values| values.first())
+            {
+                return first.clone();
+            }
+
+            let declared = match schema.get("type") {
+                Some(Value::String(declared)) => Some(declared.as_str()),
+                Some(Value::Array(declared)) => declared
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find(|declared| *declared != "null"),
+                _ => None,
+            };
+
+            let Some(declared) = declared else {
+                // A union with no type of its own: an untagged enum, or an
+                // `Option<T>` written out as an `anyOf`. The first branch that
+                // is not `null` is the shape a caller would write.
+                for key in ["anyOf", "oneOf"] {
+                    let Some(branches) = schema.get(key).and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for branch in branches {
+                        if branch.get("type") == Some(&serde_json::json!("null")) {
+                            continue;
+                        }
+                        return self.value(branch, extra, depth);
+                    }
+                }
+                return Value::Null;
+            };
+
+            match declared {
+                "string" => serde_json::json!("x"),
+                "integer" => serde_json::json!(1),
+                "number" => serde_json::json!(1.0),
+                "boolean" => serde_json::json!(false),
+                "null" => Value::Null,
+                "array" => {
+                    let Some(items) = schema.get("items") else {
+                        return serde_json::json!([]);
+                    };
+                    // One entry rather than none: an empty list exercises
+                    // nothing about the shape the list is of.
+                    let wanted = schema
+                        .get("minItems")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1)
+                        .max(1);
+                    let entries: Vec<Value> = (0..wanted)
+                        .map(|_| self.value(items, None, depth.saturating_sub(1)))
+                        .collect();
+                    Value::Array(entries)
+                }
+                "object" => self.object(type_name, schema, extra, depth),
+                _ => Value::Null,
+            }
+        }
+
+        /// Resolves a property's single local `$ref` to its definition.
+        fn resolve<'b>(&'b self, property: &'b Value) -> Option<(&'b str, &'b Value)> {
+            let reference = match property.get("$ref").and_then(Value::as_str) {
+                Some(reference) => Some(reference),
+                None => property
+                    .get("allOf")
+                    .and_then(Value::as_array)
+                    .filter(|entries| entries.len() == 1)
+                    .and_then(|entries| entries[0].get("$ref"))
+                    .and_then(Value::as_str),
+            }?;
+            let name = reference.strip_prefix("#/definitions/")?;
+            let definition = self.root.get("definitions")?.get(name)?;
+            Some((name, definition))
+        }
+
+        /// Writes exactly the spellings the probe asks for, on the type that
+        /// declares them.
+        fn apply_probe(
+            &self,
+            type_name: &str,
+            schema: &Value,
+            object: &mut serde_json::Map<String, Value>,
+            depth: usize,
+        ) {
+            let Some(probe) = &self.probe else {
+                return;
+            };
+            if probe.owner != type_name {
+                return;
+            }
+
+            // An optional aliased field is in no sample until it is probed, so
+            // its value has to be generated from the property's own schema.
+            let value = probe
+                .spellings
+                .iter()
+                .find_map(|spelling| object.get(spelling).cloned())
+                .or_else(|| {
+                    let property = schema.get("properties")?.get(probe.spellings.first()?)?;
+                    Some(self.value(property, None, depth))
+                })
+                .unwrap_or(Value::Null);
+
+            for spelling in probe.spellings {
+                object.remove(spelling);
+            }
+            for spelling in &probe.wanted {
+                object.insert(spelling.clone(), value.clone());
+            }
+        }
+    }
+
+    /// Names every property a schema demands, with the shape a requirement
+    /// branch imposes on it.
+    ///
+    /// A requirement group states alternatives; the sample takes the first
+    /// branch, which is the one written to be satisfiable out of the payload
+    /// alone — a curated `preset` or `recipe` id is a lookup into a registry no
+    /// sample can invent an entry for.
+    fn demanded_properties(schema: &Value, extra: Option<&Value>) -> Vec<(String, Option<Value>)> {
+        let mut demanded: Vec<(String, Option<Value>)> = Vec::new();
+
+        let mut push = |name: &str, shape: Option<Value>| {
+            if !demanded.iter().any(|(seen, _)| seen == name) {
+                demanded.push((name.to_string(), shape));
+            }
+        };
+
+        for source in [Some(schema), extra].into_iter().flatten() {
+            if let Some(names) = source.get("required").and_then(Value::as_array) {
+                for name in names.iter().filter_map(Value::as_str) {
+                    let shape = source
+                        .get("properties")
+                        .and_then(|properties| properties.get(name))
+                        .cloned();
+                    push(name, shape);
+                }
+            }
+        }
+
+        let groups = schema
+            .get("allOf")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for group in groups {
+            let Some(branch) = group
+                .get("anyOf")
+                .or_else(|| group.get("oneOf"))
+                .and_then(Value::as_array)
+                .and_then(|branches| branches.first())
+            else {
+                continue;
+            };
+            let Some(names) = branch.get("required").and_then(Value::as_array) else {
+                continue;
+            };
+            for name in names.iter().filter_map(Value::as_str) {
+                let shape = branch
+                    .get("properties")
+                    .and_then(|properties| properties.get(name))
+                    .cloned();
+                push(name, shape);
+            }
+        }
+
+        demanded
+    }
+
+    /// A value for a required property whose schema declares no shape.
+    ///
+    /// `AddTextClip`'s `textData` reaches the preset resolver as a
+    /// `serde_json::Value`, so what it accepts is prose in its description
+    /// rather than a subschema and no sampler can work out that `content` is a
+    /// string. The sample is the payload's own doc-comment example. Anything
+    /// else that needs an entry here is a property an agent cannot compose from
+    /// the schema either, which is worth noticing — the guard below keeps the
+    /// table to properties that really are free-form.
+    fn free_form_sample(command_type: &str, property: &str) -> Option<Value> {
+        free_form_samples()
+            .into_iter()
+            .find(|(command, name, _)| *command == command_type && *name == property)
+            .map(|(_, _, sample)| sample)
+    }
+
+    /// Every hand-written sample, as `(command type, property, value)`.
+    fn free_form_samples() -> Vec<(&'static str, &'static str, Value)> {
+        vec![(
+            "AddTextClip",
+            "textData",
+            serde_json::json!({
+                "content": "Hello World",
+                "style": { "fontFamily": "Arial", "fontSize": 48, "color": "#FFFFFF" },
+                "position": { "x": 0.5, "y": 0.5 }
+            }),
+        )]
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a hand-written sample only stands in where the schema is silent
+    ///
+    /// The sweep's samples are generated from the schemas, which is what makes
+    /// them evidence. [`free_form_sample`] is the one exception, and it has to
+    /// stay one: a sample for a property the schema does describe would hide
+    /// the very divergence the sweep exists to find.
+    #[test]
+    fn the_free_form_samples_should_only_cover_properties_the_schema_cannot_describe() {
+        for (command_type, property, _) in free_form_samples() {
+            let schema = command_payload_schema(command_type).expect("the command has a schema");
+            let declared = &schema["properties"][property];
+            assert!(
+                declared.is_object(),
+                "{command_type}.{property} must still be a property of the schema"
+            );
+            assert!(
+                !declared["properties"].is_object() && !declared["$ref"].is_string(),
+                "{command_type}.{property} declares a shape now, so the sampler can build it and \
+                 the hand-written sample has to go: {declared}"
+            );
+        }
     }
 
     /// Feature: derived command payload schemas
