@@ -237,7 +237,11 @@ pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
         .enable_all()
         .build()
         .map_err(|error| anyhow::anyhow!("Failed to create Tokio runtime: {error}"))?;
-    let result = runtime.block_on(async move {
+    // Boxed for the same reason `frame::extract_with_project` boxes its probe:
+    // `block_on` copies the future it is given through several of its own frames
+    // in an unoptimised build, so an export state machine costs a multiple of
+    // its size in stack. Only a pointer travels through those frames now.
+    let result = runtime.block_on(Box::pin(async move {
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
         // Ctrl-C must reach FFmpeg: without this the CLI would exit while the
         // child keeps encoding into a half-written output file.
@@ -279,7 +283,7 @@ pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
         }
 
         export
-    });
+    }));
 
     let result = result.map_err(|error| match error {
         openreelio_core::render::ExportError::Cancelled => {

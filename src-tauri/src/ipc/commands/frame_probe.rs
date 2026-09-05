@@ -111,7 +111,13 @@ pub async fn extract_timeline_frames(
         path: &project_path,
         state: &project_state,
     };
-    let payload = match plan.run(&runner, Some(&probe_project)).await {
+    // Boxed to keep the probe's own state machine off this command's future.
+    // Nothing here calls `block_on`, so the stack amplification that overflowed
+    // the CLI's main thread cannot arise on this path — a Tauri command is a
+    // spawned task, and its future already lives on the heap. What boxing buys
+    // is that the probe's tens of kilobytes stop being inlined into every
+    // `extract_timeline_frames` future, whatever the request asked for.
+    let payload = match Box::pin(plan.run(&runner, Some(&probe_project))).await {
         Ok(payload) => payload,
         Err(error) => {
             // Nothing usable came back, so this call's entry is residue: an
