@@ -164,8 +164,12 @@ pub(crate) fn run_verify(path: &Path, request: VerifyRequest) -> anyhow::Result<
         .build()
         .map_err(|error| anyhow::anyhow!("Failed to create Tokio runtime: {error}"))?;
 
+    // Boxed for the same reason `frame::extract_with_project` boxes its probe:
+    // `block_on` copies the future it is given through several of its own frames
+    // in an unoptimised build, so a wide state machine costs a multiple of its
+    // size in stack. Only a pointer travels through those frames now.
     let report = runtime
-        .block_on(plan.run(&project.state, runner.as_ref()))
+        .block_on(Box::pin(plan.run(&project.state, runner.as_ref())))
         .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     let exit_code = i32::from(report.exit_code());

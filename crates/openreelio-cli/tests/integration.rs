@@ -8536,11 +8536,29 @@ fn test_command_execute_resolves_a_text_preset_into_concrete_values() {
 /// server reads until stdin closes — so the requests go in, stdin is dropped,
 /// and the process is left to exit on its own.
 fn run_mcp_stdio(project_path: &str, requests: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    run_mcp_stdio_session(project_path, false, requests).0
+}
+
+/// The same transport, keeping stderr and optionally granting `--allow-write`.
+///
+/// The server writes nothing to stdout when it dies, so a caller that got fewer
+/// responses than it sent has to be able to say why — a stack overflow, for one,
+/// is reported by the runtime on stderr and nowhere else.
+fn run_mcp_stdio_session(
+    project_path: &str,
+    allow_write: bool,
+    requests: &[serde_json::Value],
+) -> (Vec<serde_json::Value>, String) {
     use std::io::Write;
     use std::process::Stdio;
 
+    let mut args = vec!["mcp", "--stdio", "--project", project_path];
+    if allow_write {
+        args.push("--allow-write");
+    }
+
     let mut child = Command::new(cli_bin())
-        .args(["mcp", "--stdio", "--project", project_path])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -8562,19 +8580,19 @@ fn run_mcp_stdio(project_path: &str, requests: &[serde_json::Value]) -> Vec<serd
 
     let output = child.wait_with_output().expect("MCP server output");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    stdout
+    let responses = stdout
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             serde_json::from_str(line).unwrap_or_else(|error| {
-                panic!(
-                    "MCP server wrote a non-JSON line: {error}\nline: {line}\nstderr: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                )
+                panic!("MCP server wrote a non-JSON line: {error}\nline: {line}\nstderr: {stderr}")
             })
         })
-        .collect()
+        .collect();
+
+    (responses, stderr)
 }
 
 fn mcp_request(id: u32, method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -8719,6 +8737,195 @@ fn test_mcp_frame_extract_refuses_a_render_outside_the_project() {
     assert!(
         message.contains("project directory"),
         "the refusal must say what the scope is: {message}"
+    );
+}
+
+/// The handshake every MCP client sends before its first `tools/call`.
+///
+/// `notifications/initialized` carries no id and draws no response, so a caller
+/// counting responses counts one fewer than it sent.
+fn mcp_handshake() -> Vec<serde_json::Value> {
+    vec![
+        mcp_request(
+            1,
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "integration-test", "version": "0" }
+            }),
+        ),
+        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    ]
+}
+
+/// A project with one clip on the timeline and one caption over it.
+///
+/// The caption is what `atCaptions` samples, and it is also what forces every
+/// still here through the composite renderer: the fast path cannot draw one.
+///
+/// The source is longer than the ten seconds `timeline insert` gives a clip
+/// whose asset carries no probed duration. `perShot` samples the middle of the
+/// shot, and over a clip whose source range runs past the end of its media that
+/// midpoint renders nothing at all — a fixture failure that has nothing to say
+/// about what these tests are guarding.
+fn create_project_with_clip_and_caption(name: &str) -> Option<(tempfile::TempDir, String)> {
+    let (dir, path, _asset_id) = create_project_with_timeline_clip(name, 12)?;
+
+    let caption = run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Sampled caption",
+        "--start",
+        "0.5",
+        "--end",
+        "2.0",
+    ]);
+    assert_eq!(caption["status"], "ok");
+
+    Some((dir, path))
+}
+
+/// Feeds one `openreelio.frame.extract` call through a full MCP session.
+///
+/// Each call gets its own server process, which is the point: the crash this
+/// guards against killed the process outright, and sharing one session would let
+/// the first failure hide every later call behind a missing response.
+fn mcp_frame_extract(
+    project_path: &str,
+    arguments: serde_json::Value,
+    label: &str,
+) -> serde_json::Value {
+    let mut requests = mcp_handshake();
+    requests.push(mcp_request(
+        2,
+        "tools/call",
+        serde_json::json!({ "name": "openreelio.frame.extract", "arguments": arguments }),
+    ));
+
+    let (responses, stderr) = run_mcp_stdio_session(project_path, true, &requests);
+    assert_eq!(
+        responses.len(),
+        2,
+        "{label}: expected the initialize result and the tool result, got {}.\nstderr: {stderr}",
+        responses.len()
+    );
+
+    let content = responses[1]["result"]["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} failed: {}\nstderr: {stderr}", responses[1]));
+
+    // An MCP-connected vision agent gets the picture itself, not a path it has
+    // no tool to read.
+    let image = content
+        .iter()
+        .find(|block| block["type"] == "image")
+        .unwrap_or_else(|| panic!("{label} returned no image block: {}", responses[1]));
+    assert_eq!(image["mimeType"], "image/jpeg", "{label}");
+    assert!(
+        image["data"].as_str().expect("image data").len() > 1000,
+        "{label} must carry real image bytes"
+    );
+
+    let text = content
+        .iter()
+        .find(|block| block["type"] == "text")
+        .unwrap_or_else(|| panic!("{label} returned no metadata block: {}", responses[1]));
+    let payload: serde_json::Value =
+        serde_json::from_str(text["text"].as_str().expect("text block"))
+            .expect("frame extract payload");
+    assert_eq!(payload["status"], "ok", "{label}");
+    payload
+}
+
+/// A sampler with an auto grid used to kill the MCP server outright.
+///
+/// `block_on` drives the frame probe on the calling thread and, unoptimised,
+/// copies the future through several frames of Tokio's own entry chain — so a
+/// state machine of tens of kilobytes cost hundreds of kilobytes of stack.
+/// Reached through the JSON-RPC dispatch, which ran on the process main thread
+/// that Windows sizes at 1 MiB, the composite-still path walked off the end of
+/// it: the server died with `has overflowed its stack` and answered nothing at
+/// all. The CLI's own `frame extract` sat just under the same limit, and the
+/// in-process tests never saw it because a Rust test thread gets a far larger
+/// stack than the real main thread does.
+///
+/// Every assertion below is therefore secondary. What is being tested is that
+/// the real binary answers at all.
+#[test]
+fn test_mcp_frame_extract_serves_a_sampled_grid_over_stdio() {
+    let Some((_dir, path)) = create_project_with_clip_and_caption("mcp_frame_sampler_test") else {
+        return;
+    };
+
+    let payload = mcp_frame_extract(
+        &path,
+        serde_json::json!({
+            "atCaptions": true,
+            "grid": "auto",
+            "labelCells": true,
+            "cellWidth": 640
+        }),
+        "atCaptions with an auto grid",
+    );
+
+    assert_eq!(payload["mode"], "grid");
+    assert_eq!(payload["sampler"]["kinds"][0], "atCaptions");
+    assert!(
+        !payload["sheet"]["cells"]
+            .as_array()
+            .expect("cells array")
+            .is_empty(),
+        "the caption must have produced at least one cell: {payload}"
+    );
+}
+
+/// The same call shape through the other two grid selectors.
+///
+/// `perShot` derives its own times the way `atCaptions` does; `between` with an
+/// explicit grid derives none. Both reach the identical composite-render chain,
+/// so both would have died the same way.
+#[test]
+fn test_mcp_frame_extract_serves_per_shot_and_between_grids_over_stdio() {
+    let Some((_dir, path)) = create_project_with_clip_and_caption("mcp_frame_grids_test") else {
+        return;
+    };
+
+    let per_shot = mcp_frame_extract(
+        &path,
+        serde_json::json!({
+            "perShot": true,
+            "grid": "auto",
+            "labelCells": true,
+            "cellWidth": 640
+        }),
+        "perShot with an auto grid",
+    );
+    assert_eq!(per_shot["mode"], "grid");
+    assert_eq!(per_shot["sampler"]["kinds"][0], "perShot");
+
+    let between = mcp_frame_extract(
+        &path,
+        serde_json::json!({
+            "between": [0.0, 3.0],
+            "grid": "4x2",
+            "labelCells": true,
+            "cellWidth": 640
+        }),
+        "between with a 4x2 grid",
+    );
+    assert_eq!(between["mode"], "grid");
+    assert_eq!(between["sheet"]["cols"], 4);
+    assert_eq!(between["sheet"]["rows"], 2);
+    assert_eq!(
+        between["sheet"]["cells"]
+            .as_array()
+            .expect("cells array")
+            .len(),
+        8
     );
 }
 

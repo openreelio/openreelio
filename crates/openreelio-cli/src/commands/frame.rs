@@ -301,6 +301,17 @@ pub fn run_extract_with_project(
     extract_with_project(args, Some(project))
 }
 
+/// Resolves FFmpeg, opens the project if the plan needs it, and runs the probe.
+///
+/// Every `plan.run` here is handed to `block_on` boxed. `block_on` drives the
+/// future on the calling thread, and an unoptimised build of Tokio's entry
+/// chain stores it by value in several frames on the way in — so the cost in
+/// stack is a multiple of the future's own size, not the size itself. The
+/// composite-still state machine is tens of kilobytes wide, which multiplied out
+/// to roughly 650 KiB of stack before the future's body was entered; on the MCP
+/// server, which reaches this through its own JSON-RPC dispatch, that overflowed
+/// the 1 MiB Windows main thread and killed the process. Boxed, only a pointer
+/// is copied through those frames.
 fn extract_with_project(
     args: ExtractArgs,
     project: Option<&ActiveProject>,
@@ -317,7 +328,7 @@ fn extract_with_project(
     let runner = FFmpegRunner::new(ffmpeg_info);
 
     if !plan.needs_project() {
-        return Ok(runtime.block_on(plan.run(&runner, None))?);
+        return Ok(runtime.block_on(Box::pin(plan.run(&runner, None)))?);
     }
 
     let opened;
@@ -333,5 +344,5 @@ fn extract_with_project(
         state: &project.state,
     };
 
-    Ok(runtime.block_on(plan.run(&runner, Some(&probe_project)))?)
+    Ok(runtime.block_on(Box::pin(plan.run(&runner, Some(&probe_project))))?)
 }
