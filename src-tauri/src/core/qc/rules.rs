@@ -15,6 +15,9 @@ use crate::core::captions::{
     CAPTION_SIDE_MARGIN_PERCENT, CAPTION_WRAP_BOX_WIDTH_PERCENT,
 };
 use crate::core::project::ProjectState;
+use crate::core::render::export::{
+    caption_style_vertical_align, caption_vertical_align_y, CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT,
+};
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::CoreResult;
 
@@ -1778,6 +1781,81 @@ impl SafeAreaBand {
 /// says more about the encoder's chroma than about what sits behind the words.
 const MIN_CAPTION_BAND_HEIGHT_PERCENT: f64 = 3.0;
 
+/// Narrowest column sampled for a caption, as a percentage of the canvas width.
+///
+/// A short cue - one word, or a label the estimator reads as a few characters -
+/// would otherwise crop to a column narrower than the glyphs themselves, whose
+/// statistics say more about one letter's background than about the picture the
+/// line has to read over.
+const MIN_CAPTION_SPAN_WIDTH_PERCENT: f64 = 10.0;
+
+/// Returns the column a caption's text block occupies, as `(left, right)`
+/// percentages of canvas width.
+///
+/// The companion of [`caption_band_percent`], built from the same block
+/// estimate. Measuring the whole frame width instead let a bright strip in a
+/// corner the words never reach decide that the cue sat over a mixed
+/// background, so the contrast pass samples only the column the line is drawn
+/// in. Widened to [`MIN_CAPTION_SPAN_WIDTH_PERCENT`] and clamped to the frame,
+/// so it is always a crop FFmpeg can take.
+pub(crate) fn caption_span_percent(
+    clip: &Clip,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (f64, f64) {
+    let position = clip
+        .caption_position
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok())
+        .unwrap_or_default();
+    let alignment = CaptionSafeAreaRule::alignment(clip.caption_style.as_ref());
+
+    let (left, right) = match &position {
+        CaptionPosition::Preset { .. } => {
+            let (box_width, _) = CaptionSafeAreaRule::estimate_text_box_percent(
+                clip,
+                canvas_width,
+                canvas_height,
+                CAPTION_WRAP_BOX_WIDTH_PERCENT,
+            );
+            CaptionSafeAreaRule::horizontal_span(
+                CaptionSafeAreaRule::preset_anchor_x_percent(&alignment),
+                box_width,
+                &alignment,
+            )
+        }
+        CaptionPosition::Custom(custom) => {
+            let (box_width, _) = CaptionSafeAreaRule::estimate_text_box_percent(
+                clip,
+                canvas_width,
+                canvas_height,
+                100.0,
+            );
+            CaptionSafeAreaRule::horizontal_span(custom.x_percent, box_width, &alignment)
+        }
+    };
+
+    let (left, right) = if left.is_finite() && right.is_finite() && right > left {
+        (left, right)
+    } else {
+        // A pathological style produced no usable block; fall back to the whole
+        // frame, which is what the pass measured before it knew any better.
+        (0.0, 100.0)
+    };
+
+    let deficit = MIN_CAPTION_SPAN_WIDTH_PERCENT - (right - left);
+    let (left, right) = if deficit > 0.0 {
+        (left - deficit / 2.0, right + deficit / 2.0)
+    } else {
+        (left, right)
+    };
+
+    let left = left.clamp(0.0, 100.0 - MIN_CAPTION_SPAN_WIDTH_PERCENT);
+    let right = right.clamp(left + MIN_CAPTION_SPAN_WIDTH_PERCENT, 100.0);
+
+    (left, right)
+}
+
 /// Returns the horizontal band a caption occupies, as `(top, bottom)`
 /// percentages of canvas height.
 ///
@@ -1792,11 +1870,32 @@ pub(crate) fn caption_band_percent(
     canvas_width: u32,
     canvas_height: u32,
 ) -> (f64, f64) {
-    let position = clip
+    let stored = clip
         .caption_position
         .as_ref()
-        .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok())
-        .unwrap_or_default();
+        .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok());
+
+    // `resolve_caption_anchor` lets the style's `verticalAlign` override the
+    // vertical axis of whatever the stored position said, so a band read from
+    // the position alone sampled the bottom of the frame for a caption the
+    // renderer draws along the top. The one exception is a position that names
+    // a preset outright: that path returns before the override is read, and the
+    // mirror has to keep the exception or it drifts the other way.
+    let explicit_preset = matches!(stored, Some(CaptionPosition::Preset { .. }));
+    let position = stored.unwrap_or_default();
+    let position = match caption_style_vertical_align(clip.caption_style.as_ref()) {
+        Some(vertical) if !explicit_preset => match position {
+            CaptionPosition::Preset { .. } => CaptionPosition::Preset {
+                vertical,
+                margin_percent: CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT,
+            },
+            CaptionPosition::Custom(custom) => CaptionPosition::Custom(CustomPosition {
+                y_percent: caption_vertical_align_y(vertical) * 100.0,
+                ..custom
+            }),
+        },
+        _ => position,
+    };
 
     let (top, bottom) = match &position {
         CaptionPosition::Preset {

@@ -826,7 +826,7 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
                     "timeoutSec": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": format!("Timeout for the rendered-file measurement pass, in seconds. Defaults to {DEFAULT_MEASURE_TIMEOUT_SEC}.")
+                        "description": format!("Budget for the whole rendered-file measurement stage, in seconds. The probe pass and the caption-band pass share it rather than each taking it. Defaults to {DEFAULT_MEASURE_TIMEOUT_SEC}.")
                     }
                 },
                 "additionalProperties": false

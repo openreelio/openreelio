@@ -1030,7 +1030,8 @@ const VERIFY_SCHEMA: CodexJsonObject = {
     timeoutSec: {
       type: 'integer',
       minimum: 1,
-      description: 'Timeout for the rendered-file measurement pass, in seconds.',
+      description:
+        'Budget for the whole rendered-file measurement stage, in seconds. The probe pass and the caption-band pass share it rather than each taking it.',
     },
   },
   additionalProperties: false,

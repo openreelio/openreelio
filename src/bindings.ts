@@ -10771,7 +10771,10 @@ durationToleranceSec?: number | null;
  */
 failOn?: string | null; 
 /**
- * Timeout for the rendered-file measurement pass, in seconds.
+ * Budget for the whole rendered-file measurement stage, in seconds.
+ * 
+ * The probe pass and the caption-band pass share it rather than each
+ * taking it, so a run cannot cost twice what the caller allowed.
  */
 timeoutSec?: number | null }
 /**

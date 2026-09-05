@@ -83,7 +83,10 @@ pub struct VerifySequenceRequestDto {
     /// or `critical`.
     #[serde(default)]
     pub fail_on: Option<String>,
-    /// Timeout for the rendered-file measurement pass, in seconds.
+    /// Budget for the whole rendered-file measurement stage, in seconds.
+    ///
+    /// The probe pass and the caption-band pass share it rather than each
+    /// taking it, so a run cannot cost twice what the caller allowed.
     #[serde(default)]
     pub timeout_sec: Option<u64>,
 }

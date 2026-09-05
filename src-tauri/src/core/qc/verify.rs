@@ -55,7 +55,7 @@ use crate::core::timeline::Sequence;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Exit code for a report that breached the `fail_on` threshold.
 pub const EXIT_THRESHOLD_BREACHED: u8 = 1;
@@ -66,7 +66,8 @@ pub const EXIT_TOOL_FAILURE: u8 = 2;
 /// Severity threshold applied when the caller names none.
 pub const DEFAULT_FAIL_ON: &str = "error";
 
-/// Timeout for the rendered-file measurement pass when the caller names none.
+/// Budget for the whole rendered-file measurement stage when the caller
+/// names none.
 pub const DEFAULT_MEASURE_TIMEOUT_SEC: u64 = 600;
 
 /// Checks that are disabled unless explicitly requested via `checks`.
@@ -254,7 +255,10 @@ pub struct VerifyRequest {
     pub duration_tolerance_sec: Option<f64>,
     /// Lowest severity that fails the run: info, warning, error, critical.
     pub fail_on: String,
-    /// Timeout for the rendered-file measurement pass, in seconds.
+    /// Budget for the whole rendered-file measurement stage, in seconds.
+    ///
+    /// One deadline, not one per pass: the probe pass and the caption-band
+    /// pass share it, so a run cannot cost twice what the caller allowed.
     pub timeout_sec: u64,
     /// How the calling surface spells these arguments when it has to name one
     /// in a refusal or a warning.
@@ -394,11 +398,17 @@ impl VerifyPlan {
     /// Decoding one frame per bare cue is the most expensive thing the
     /// measurement stage does and it answers exactly one check, so a run that
     /// did not select `caption.contrast` — or skipped it — must not pay for it.
-    /// The caller's timeout bounds the whole pass rather than each decode
-    /// inside it, and the length the probe measured bounds which cues can
-    /// honestly be aimed at: seeking past the end of a file yields its last
-    /// frame rather than nothing.
-    fn caption_sample_options(&self, file_duration_sec: f64) -> Option<CaptionSampleOptions> {
+    ///
+    /// `remaining` is what is left of the run's single measurement budget once
+    /// the probe pass has taken its share: handing this pass the caller's whole
+    /// timeout again let one `--timeout-sec 600` run for twenty minutes. The
+    /// length the probe measured bounds which cues can honestly be aimed at:
+    /// seeking past the end of a file yields its last frame rather than nothing.
+    fn caption_sample_options(
+        &self,
+        file_duration_sec: f64,
+        remaining: Duration,
+    ) -> Option<CaptionSampleOptions> {
         if !self
             .selected_ids
             .iter()
@@ -408,7 +418,7 @@ impl VerifyPlan {
         }
 
         Some(CaptionSampleOptions {
-            run_timeout: Duration::from_secs(self.request.timeout_sec),
+            run_timeout: remaining,
             file_duration_sec: Some(file_duration_sec),
             ..CaptionSampleOptions::default()
         })
@@ -447,8 +457,17 @@ impl VerifyPlan {
             // without a runner is a wiring bug rather than a missing install.
             let runner = runner
                 .ok_or_else(|| VerifyError::new("FFmpeg is required to measure a rendered file"))?;
+            // One deadline for everything FFmpeg is asked to do. The probe pass
+            // and the caption-band pass used to be handed the caller's whole
+            // timeout each, so a run could take twice what it was told it could.
+            let budget = Duration::from_secs(self.request.timeout_sec);
+            let deadline = Instant::now().checked_add(budget);
+            let remaining = || match deadline {
+                Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+                None => budget,
+            };
             let options = MeasureOptions {
-                timeout: Duration::from_secs(self.request.timeout_sec),
+                timeout: remaining(),
                 ..Default::default()
             };
 
@@ -464,7 +483,9 @@ impl VerifyPlan {
                         shift_measured_spans(&mut report, window.start_sec);
                     }
 
-                    if let Some(options) = self.caption_sample_options(report.duration_sec) {
+                    if let Some(options) =
+                        self.caption_sample_options(report.duration_sec, remaining())
+                    {
                         let sampling_window = self
                             .window
                             .map(|window| (window.start_sec, window.end_sec))
@@ -1358,6 +1379,83 @@ mod tests {
         sequence
     }
 
+    /// The gap fixture with one bare caption cue on a caption track.
+    fn sequence_with_a_bare_caption() -> Sequence {
+        let mut sequence = sequence_with_gap();
+        let mut captions = Track::new_caption("Captions");
+        let mut clip = Clip::with_range("caption", 0.0, 2.0);
+        clip.place.timeline_in_sec = 0.0;
+        clip.place.duration_sec = 2.0;
+        clip.label = Some("Readable words".to_string());
+        captions.add_clip(clip);
+        sequence.add_track(captions);
+        sequence
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should report caption contrast as skipped whenever no file was measured
+    ///
+    /// The check used to answer a file-less run with `passed: false,
+    /// skipped: false` plus an `info` finding asking for a render. Under
+    /// `--structural-only` that asked the caller for the very thing it had just
+    /// declined, and made a deliberate structural run look like it had failed
+    /// something. Both file-less states are asserted, because they differ only
+    /// in whether the report adds its own nudge.
+    #[tokio::test]
+    async fn test_caption_contrast_should_be_skipped_when_no_render_was_measured() {
+        let mut state = ProjectState::new("Caption skip");
+        let sequence = sequence_with_a_bare_caption();
+        state.active_sequence_id = Some(sequence.id.clone());
+        state.sequences.insert(sequence.id.clone(), sequence);
+
+        for structural_only in [true, false] {
+            let plan = VerifyPlan::resolve(VerifyRequest {
+                structural_only,
+                ..Default::default()
+            })
+            .expect("plan resolves");
+            let report = plan.run(&state, None).await.expect("verification runs");
+            let payload = report.payload();
+
+            let check = payload["checks"]
+                .as_array()
+                .expect("checks array")
+                .iter()
+                .find(|check| check["id"] == CAPTION_CONTRAST_CHECK_ID)
+                .unwrap_or_else(|| panic!("the check must appear in the document: {payload}"));
+
+            assert_eq!(
+                check["status"], "skipped",
+                "structural_only={structural_only}: {check}"
+            );
+            assert_eq!(check["skipped"], true, "{check}");
+            assert_eq!(
+                check["violationCount"], 0,
+                "a skipped check must not also carry a finding: {check}"
+            );
+
+            let warnings = payload["warnings"]
+                .as_array()
+                .expect("warnings array")
+                .iter()
+                .filter_map(|warning| warning.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            if structural_only {
+                assert!(
+                    warnings.is_empty(),
+                    "a structural run asked for no render, so it is not nudged for one: \
+                     {warnings}"
+                );
+            } else {
+                assert!(
+                    warnings.contains("rendered check(s) were skipped"),
+                    "a run that could have measured is still told what it missed: {warnings}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_parse_severity_should_accept_every_threshold_name() {
         let argument = VerifyArgumentNames::api().fail_on;
@@ -2201,7 +2299,7 @@ mod tests {
 
         assert!(
             plan_for(VerifyRequest::default())
-                .caption_sample_options(12.0)
+                .caption_sample_options(12.0, Duration::from_secs(600))
                 .is_some(),
             "a default run grades caption contrast, so it has to measure it"
         );
@@ -2210,7 +2308,7 @@ mod tests {
                 skip: Some(vec![CAPTION_CONTRAST_CHECK_ID.to_string()]),
                 ..Default::default()
             })
-            .caption_sample_options(12.0)
+            .caption_sample_options(12.0, Duration::from_secs(600))
             .is_none(),
             "a skipped check must not be paid for"
         );
@@ -2219,18 +2317,19 @@ mod tests {
                 checks: Some(vec!["timeline.gap".to_string()]),
                 ..Default::default()
             })
-            .caption_sample_options(12.0)
+            .caption_sample_options(12.0, Duration::from_secs(600))
             .is_none(),
             "a selection that leaves the check out must not be paid for either"
         );
     }
 
     /// Feature: Caption legibility
-    /// Scenario: should bound the caption pass by the caller's own timeout
+    /// Scenario: should spend the caller's timeout once across both passes
     ///
-    /// `--timeout-sec` is a budget for the run. Left at the module default the
-    /// caption pass could spend twenty seconds per cue on top of a measurement
-    /// the caller had already capped.
+    /// `--timeout-sec` is a budget for the run, not per pass. Handing the
+    /// caption pass the whole number again after the probe pass had already
+    /// been given it let one run take twice what the caller allowed, so the
+    /// pass is bounded by what is *left* of a single deadline.
     #[test]
     fn test_caption_sampling_should_take_its_budget_from_the_request() {
         let temp = tempfile::TempDir::new().expect("temp dir");
@@ -2244,11 +2343,16 @@ mod tests {
         })
         .expect("the request is valid");
 
+        let spent = Duration::from_secs(5);
         let options = plan
-            .caption_sample_options(12.5)
+            .caption_sample_options(12.5, Duration::from_secs(7) - spent)
             .expect("the default run grades caption contrast");
 
-        assert_eq!(options.run_timeout, Duration::from_secs(7));
+        assert_eq!(
+            options.run_timeout,
+            Duration::from_secs(2),
+            "the caption pass gets what the probe pass left, not the whole budget again"
+        );
         assert_eq!(
             options.file_duration_sec,
             Some(12.5),

@@ -852,11 +852,19 @@ same way.
 `caption.contrast` (warning) asks the question no structural check can: can the
 words be read? For each caption cue the file covers it decodes one frame at the
 cue's midpoint, measures the luminance of the band the words occupy and compares
-it with the text colour. A cue counts as already protected — and is never
-decoded — only where the export would actually draw the protection: an
-`outlineColor` with a non-zero width, or a `backgroundColor` with a non-zero
-alpha. An `outlineWidth` with no colour renders bare, and so does a cue with no
-style at all, so both are graded like any other bare cue.
+it with the text colour — measuring the rectangle the words occupy, both the
+band they sit on and the column they are drawn in, so a bright strip in a corner
+the line never reaches cannot decide the verdict. The band follows the style's
+`verticalAlign` as well as `captionPosition`, because the renderer does.
+
+A cue counts as already protected — and is never decoded — only where the export
+would actually draw the protection: an `outlineColor` with a non-zero width, or
+a `backgroundColor` that is at least 10% opaque. An `outlineWidth` with no
+colour renders bare, and so does a cue with no style at all, so both are graded
+like any other bare cue. A box faint enough to read through protects nothing;
+and because a painted box replaces the outline in the burn-in, an outline behind
+one is not protection either. A fully transparent `backgroundColor` is no box at
+all, so the outline it would otherwise have replaced stays and counts.
 
 Two numbers decide the verdict. A bare cue whose text sits within `0.35`
 luminance of the picture behind it is reported (`fault: "lowContrast"`), and so
@@ -869,13 +877,16 @@ and an `UpdateCaption` fix applying the `standard-outline` pack — not
 one.
 
 The pass is bounded: at most 60 frames per run (spread evenly across the file),
-`--timeout-sec` as the budget for the whole pass, and no seek past the end of
+whatever is left of `--timeout-sec` after the probe pass — the flag is one budget
+for the whole measurement stage, not one per pass — and no seek past the end of
 the file that was measured. Whatever it could not look at comes back as one
 `info` finding — "Caption contrast: N of M cue(s) not measured (…)" — so a run
 that decoded nothing is never reported as `passed`, and `warnings` says the same
 in prose. The decodes only happen when the check is selected, so `--skip
-caption.contrast` really does skip them. Without `--file` the check emits one
-`info` finding saying it was not measured, rather than silently passing.
+caption.contrast` really does skip them. Without `--file` the check is reported
+as `skipped`, like every other rendered check, and the report's "N rendered
+check(s) were skipped" warning names the flag that would run it — except under
+`--structural-only`, which is the caller saying it already knows.
 
 The caption checks report **one violation per caption track**, not one per cue:
 `caption.safe_area`, `caption.out_of_bounds` and `caption.reading_rate` list

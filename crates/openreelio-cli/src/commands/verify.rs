@@ -72,7 +72,8 @@ pub struct VerifyArgs {
     #[arg(long, default_value = DEFAULT_FAIL_ON)]
     pub fail_on: String,
 
-    /// Timeout for the rendered-file measurement pass, in seconds
+    /// Budget for the whole rendered-file measurement stage, in seconds; the
+    /// probe pass and the caption-band pass share it rather than each taking it
     #[arg(long, default_value_t = DEFAULT_MEASURE_TIMEOUT_SEC)]
     pub timeout_sec: u64,
 

@@ -845,7 +845,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "max-true-peak": { "type": "number", "required": false, "desc": "Maximum acceptable true peak in dBTP (default -1). Negative values need the '=' form: --max-true-peak=-1. Sample peak is used when the encoder reports no true peak." },
                     "duration-tolerance-sec": { "type": "number", "required": false, "desc": "Divergence tolerated between the rendered file and the sequence, in seconds (default: 0.5s, or two frames when that is longer). Honoured exactly, so a tighter value really is tighter." },
                     "fail-on": { "type": "string", "required": false, "desc": "Lowest severity that exits 1: info, warning, error (default), critical" },
-                    "timeout-sec": { "type": "number", "required": false, "desc": "Timeout for the rendered-file measurement pass in seconds (default: 600)" },
+                    "timeout-sec": { "type": "number", "required": false, "desc": "Budget for the whole rendered-file measurement stage in seconds, shared by the probe and caption-band passes (default: 600)" },
                     "json-pretty": { "type": "boolean", "required": false, "desc": "Pretty-print the JSON output" }
                 },
                 "example": "openreelio-cli verify --path ./project --file proxy.mp4 --file-range 10 40 --target-lufs=-14 --fail-on error"

@@ -37,8 +37,13 @@
 //!   only once the colour is there. A style carrying `outlineWidth` and no
 //!   colour therefore renders bare, and so does a style with no `caption_style`
 //!   at all.
-//! * **Box** — same shape for `backgroundColor`/`background_color`, and a box
-//!   whose alpha is zero is painted at zero opacity, which protects nothing.
+//! * **Box** — same shape for `backgroundColor`/`background_color`. A box whose
+//!   alpha is zero is painted at zero opacity and selects no box at all, so the
+//!   ASS path keeps `BorderStyle: 1` and the outline it would otherwise have
+//!   replaced. Where a box *is* painted it takes the stroke's place, so an
+//!   outline behind a box is not protection; and a box has to clear
+//!   [`MIN_PROTECTING_BOX_ALPHA`] before it counts as protection itself, since
+//!   a wash the footage reads straight through hides nothing.
 //! * **Text colour** — the renderers fall back to `#FFFFFF`, not to
 //!   [`CaptionStyle::default`](crate::core::captions::CaptionStyle::default), when the blob names no readable colour.
 //!
@@ -47,8 +52,9 @@
 //! exists to catch. The ideal fix is one shared predicate both sides call; the
 //! renderer's gates are private to a module this check must not reach into, so
 //! the mirror is pinned instead by
-//! `should_agree_with_the_renderer_about_protection`, which drives the real
-//! `drawtext` seam over the same fixtures this module grades.
+//! `should_agree_with_the_renderer_about_protection`, which drives both real
+//! seams — the `drawtext` filter and the ASS style row libass renders from —
+//! over the same fixtures this module grades.
 //!
 //! # Luminance
 //!
@@ -294,21 +300,54 @@ impl Default for CaptionSampleOptions {
 // Style reading
 // =============================================================================
 
+/// Faintest background box that counts as protection, on alpha 0–1.
+///
+/// A box is only a mitigation if it actually hides the picture behind the
+/// words, and a five-percent wash does not: the footage reads straight through
+/// it while the check, seeing a box, declines to measure the cue at all. The
+/// floor is deliberately low - anything a viewer would call a box clears it -
+/// because its job is to catch the styles that carry a box in name only, not to
+/// grade the ones that carry a real, translucent one.
+const MIN_PROTECTING_BOX_ALPHA: f64 = 0.1;
+
 /// What a cue's style says about the words themselves.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CaptionPaint {
     /// Luminance of the text colour, 0–1
     text_luminance: f64,
-    /// Whether a background box will be drawn behind the words
-    has_box: bool,
-    /// Whether the glyphs are outlined
-    has_outline: bool,
+    /// Alpha of the background box the renderer would paint, `0.0` for none
+    box_alpha: f64,
+    /// Whether the style asks for a stroke around the glyphs
+    strokes_glyphs: bool,
 }
 
 impl CaptionPaint {
+    /// Whether the renderer paints a background box at all, however faint.
+    ///
+    /// The gate the ASS path keys `BorderStyle: 3` off, and the one `drawtext`
+    /// keys `box=1` off, so it is what both renderers can be asserted against.
+    fn paints_box(&self) -> bool {
+        self.box_alpha > 0.0
+    }
+
+    /// Whether a box that counts as protection is painted.
+    fn protects_with_box(&self) -> bool {
+        self.box_alpha >= MIN_PROTECTING_BOX_ALPHA
+    }
+
+    /// Whether the outline the style asks for actually reaches the picture.
+    ///
+    /// `BorderStyle: 3` replaces the outline with the box, so on the ASS path -
+    /// the one that renders wherever libass is present - a painted box takes
+    /// the stroke away with it. An outline is therefore only protection where
+    /// no box is painted at all.
+    fn draws_outline(&self) -> bool {
+        self.strokes_glyphs && !self.paints_box()
+    }
+
     /// Whether the style already protects the words from their background.
     fn is_mitigated(&self) -> bool {
-        self.has_box || self.has_outline
+        self.protects_with_box() || self.draws_outline()
     }
 }
 
@@ -419,12 +458,14 @@ fn style_field<'a>(
 /// This is the mirror of the export pipeline described in the module docs: a
 /// style is protection only when the renderer would draw it, so a missing blob,
 /// a blob that is not an object, an outline width with no outline colour and a
-/// fully transparent box all come back bare.
+/// box too faint to hide anything all come back bare. A fully transparent box
+/// is bare *and* leaves the outline standing, which is what the ASS path does
+/// with it.
 fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
     let bare = CaptionPaint {
         text_luminance: DEFAULT_TEXT_LUMINANCE,
-        has_box: false,
-        has_outline: false,
+        box_alpha: 0.0,
+        strokes_glyphs: false,
     };
 
     // `build_caption_text_effect` reads `clip.caption_style.as_object()`; a
@@ -439,15 +480,21 @@ fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
         .map(|colour| colour.luminance)
         .unwrap_or(DEFAULT_TEXT_LUMINANCE);
 
-    let has_box = style_field(style, &["backgroundColor", "background_color"])
+    // A box the renderer cannot paint is not a box: the ASS path leaves
+    // `BorderStyle: 1` and the outline in place for a fully transparent
+    // `backgroundColor`, and `drawtext` writes `box=1` with a colour that draws
+    // nothing. The alpha is carried rather than collapsed to a flag so
+    // `protects_with_box` can hold a box that paints something to a floor.
+    let box_alpha = style_field(style, &["backgroundColor", "background_color"])
         .and_then(parse_paint_colour)
-        .is_some_and(|colour| colour.is_visible());
+        .map(|colour| colour.alpha)
+        .unwrap_or(0.0);
 
     // The outline is keyed off the colour, exactly as both renderers key it:
     // no `outlineColor`, no stroke, whatever `outlineWidth` says. The width
     // then defaults to the renderer's own 2 and is rounded the same way, so a
     // sub-half-pixel width reads as the nothing it renders as.
-    let has_outline = style_field(style, &["outlineColor", "outline_color"])
+    let strokes_glyphs = style_field(style, &["outlineColor", "outline_color"])
         .and_then(parse_paint_colour)
         .is_some_and(|colour| {
             let width = style_field(style, &["outlineWidth", "outline_width"])
@@ -460,8 +507,8 @@ fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
 
     CaptionPaint {
         text_luminance,
-        has_box,
-        has_outline,
+        box_alpha,
+        strokes_glyphs,
     }
 }
 
@@ -480,6 +527,8 @@ struct CaptionCue {
     midpoint_sec: f64,
     /// Band the words occupy, as `(top, bottom)` percentages of canvas height
     band_percent: (f64, f64),
+    /// Column the words occupy, as `(left, right)` percentages of canvas width
+    span_percent: (f64, f64),
     paint: CaptionPaint,
 }
 
@@ -557,6 +606,7 @@ fn caption_cue(
         end_sec,
         midpoint_sec: (start_sec + end_sec) / 2.0,
         band_percent: super::rules::caption_band_percent(clip, canvas_width, canvas_height),
+        span_percent: super::rules::caption_span_percent(clip, canvas_width, canvas_height),
         paint: caption_paint(clip.caption_style.as_ref()),
     })
 }
@@ -591,12 +641,10 @@ fn spread_evenly<T>(items: Vec<T>, limit: usize) -> Vec<T> {
     let total = items.len();
     let step = total as f64 / limit as f64;
     let mut kept: Vec<T> = Vec::with_capacity(limit);
-    let mut last_index: Option<usize> = None;
 
     for (position, item) in items.into_iter().enumerate() {
         let wanted = ((kept.len() as f64) * step).floor() as usize;
-        if kept.len() < limit && position >= wanted && last_index != Some(position) {
-            last_index = Some(position);
+        if kept.len() < limit && position >= wanted {
             kept.push(item);
         }
     }
@@ -687,6 +735,7 @@ pub async fn sample_caption_bands(
             file,
             file_time_sec,
             cue.band_percent,
+            cue.span_percent,
             options.max_width,
             options.timeout.min(budget),
         )
@@ -701,8 +750,8 @@ pub async fn sample_caption_bands(
                 band_luminance: mean,
                 band_luminance_stddev: stddev,
                 text_luminance: cue.paint.text_luminance,
-                has_box: cue.paint.has_box,
-                has_outline: cue.paint.has_outline,
+                has_box: cue.paint.protects_with_box(),
+                has_outline: cue.paint.draws_outline(),
             }),
             Err(error) => {
                 sampling.coverage.decode_failures += 1;
@@ -734,21 +783,31 @@ pub async fn sample_caption_bands(
     sampling
 }
 
-/// Builds the filter chain that isolates a caption band.
+/// Builds the filter chain that isolates the rectangle a caption occupies.
+///
+/// Both axes are cropped. Measuring the full frame width let a bright strip in
+/// a corner the words never reach dominate the spread and report a centred
+/// caption as sitting over a mixed background, so the crop is the column the
+/// line is drawn in as well as the band it sits on.
 ///
 /// The frame is scaled first and cropped second, so the crop arithmetic runs on
-/// a bounded picture and can never ask for a zero-height strip: `max(1,…)` and
-/// `min(ih-1,…)` keep the window inside the scaled frame whatever the band
-/// percentages say.
-fn band_filter(band_percent: (f64, f64), max_width: u32) -> String {
+/// a bounded picture and can never ask for an empty rectangle: `max(1,…)` keeps
+/// each side positive and `min(iw-ow,…)`/`min(ih-oh,…)` keep the window inside
+/// the scaled frame whatever the percentages say.
+fn band_filter(band_percent: (f64, f64), span_percent: (f64, f64), max_width: u32) -> String {
     let (top, bottom) = band_percent;
+    let (left, right) = span_percent;
     let top_fraction = (top / 100.0).clamp(0.0, 1.0);
     let height_fraction = ((bottom - top) / 100.0).clamp(0.0, 1.0);
+    let left_fraction = (left / 100.0).clamp(0.0, 1.0);
+    let width_fraction = ((right - left) / 100.0).clamp(0.0, 1.0);
 
     format!(
-        "scale=w='min({},iw)':h=-2,crop=w=iw:h='max(1,floor(ih*{:.6}))':x=0:y='min(ih-1,floor(ih*{:.6}))',format=rgb24",
+        "scale=w='min({},iw)':h=-2,crop=w='max(1,floor(iw*{:.6}))':h='max(1,floor(ih*{:.6}))':x='min(iw-ow,max(0,floor(iw*{:.6})))':y='min(ih-oh,max(0,floor(ih*{:.6})))',format=rgb24",
         max_width.max(1),
+        width_fraction,
         height_fraction,
+        left_fraction,
         top_fraction
     )
 }
@@ -763,6 +822,7 @@ async fn measure_band(
     file: &Path,
     time_sec: f64,
     band_percent: (f64, f64),
+    span_percent: (f64, f64),
     max_width: u32,
     timeout: Duration,
 ) -> CoreResult<(f64, f64)> {
@@ -778,7 +838,7 @@ async fn measure_band(
         "-frames:v".to_string(),
         "1".to_string(),
         "-vf".to_string(),
-        band_filter(band_percent, max_width),
+        band_filter(band_percent, span_percent, max_width),
         "-f".to_string(),
         "rawvideo".to_string(),
         "-pix_fmt".to_string(),
@@ -899,12 +959,12 @@ fn luminance_statistics(raw_rgb: &[u8]) -> Option<(f64, f64)> {
 /// the band behind it *or* the band's own spread exceeds
 /// [`DEFAULT_MAX_BAND_STDDEV`] — see the module docs on grading.
 ///
-/// Without a rendered file there is nothing to compare against, and the rule
-/// says exactly that — once, as [`Severity::Info`] — rather than staying silent
-/// or guessing. A check that never appears in the report is a check an agent
-/// cannot reason about, and one that guesses from the timeline alone would be
-/// guessing about pixels it has not seen. The same is true, cue by cue, of
-/// everything a sampling pass could not reach.
+/// Without a rendered file there is nothing to compare against, so the rule is
+/// reported as skipped rather than passed — see [`skip_reason`](CaptionContrastRule::skip_reason).
+/// A check that guessed from the timeline alone would be guessing about pixels
+/// it has not seen. The same is true, cue by cue, of everything a sampling pass
+/// could not reach, which is why partial coverage is an [`Severity::Info`]
+/// finding rather than a silent pass.
 #[derive(Debug, Default)]
 pub struct CaptionContrastRule;
 
@@ -1040,20 +1100,9 @@ impl QCRule for CaptionContrastRule {
         }
 
         let Some(measurements) = context.measurements.as_ref() else {
-            // Not skipped: the finding here is that nothing was measured, and
-            // an agent that reads "skipped" learns only that the rule did not
-            // run, not that the answer needs a render.
-            return Ok(vec![QCViolation::new(
-                self.name(),
-                Severity::Info,
-                "Caption contrast not measured (needs a rendered file)",
-            )
-            .with_details(
-                "Whether a caption can be read depends on the picture behind it, which only a \
-                 render carries. Re-run the verification against a rendered file to grade it."
-                    .to_string(),
-            )
-            .with_metric("measured", false)]);
+            // The engine reports this rule as skipped (see `skip_reason`); an
+            // empty result here only guards direct single-rule invocations.
+            return Ok(Vec::new());
         };
 
         let min_contrast = config
@@ -1159,6 +1208,24 @@ impl QCRule for CaptionContrastRule {
         Ok(violations)
     }
 
+    /// Reports the check as skipped when there is no render to read.
+    ///
+    /// Whether a caption can be read depends on the picture behind it, so
+    /// without a rendered file this check has nothing to look at - exactly the
+    /// position every other rendered check is in, and it now says so the same
+    /// way. Reporting `passed: false, skipped: false` plus an `info` finding
+    /// asking for a file instead made a deliberate `--structural-only` run look
+    /// like it had failed something, and asked the caller for a render the run
+    /// had just declared it did not want. A run that *could* have measured is
+    /// still told: the report's own "N rendered check(s) were skipped" warning
+    /// covers it, and only where a file was actually an option.
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        if context.measurements.is_none() {
+            return Some("no rendered measurements available".to_string());
+        }
+        None
+    }
+
     fn supports_auto_fix(&self) -> bool {
         true
     }
@@ -1174,7 +1241,9 @@ mod tests {
     use crate::core::captions::{CaptionPosition, CaptionStyle, Color, VerticalPosition};
     use crate::core::ffmpeg::{FFmpegInfo, FFmpegSource};
     use crate::core::qc::context::RenderMeasurements;
-    use crate::core::render::export::build_caption_drawtext_with_enable;
+    use crate::core::render::export::{
+        build_ass_text_overlay_script, build_caption_drawtext_with_enable,
+    };
     use crate::core::timeline::{Sequence, SequenceFormat, Track};
     use std::path::PathBuf;
 
@@ -1348,21 +1417,30 @@ mod tests {
     }
 
     /// Feature: Caption legibility
-    /// Scenario: should say once that nothing was measured, not once per cue
+    /// Scenario: should be skipped, not reported, without a rendered file
+    ///
+    /// Reporting a finding here made a `--structural-only` run - a run that had
+    /// just said it wanted no render - come back with `passed: false` and a
+    /// line asking for one. Every other rendered check answers this by being
+    /// skipped, and the report's own "N rendered check(s) were skipped" warning
+    /// nudges the callers for whom a file was actually an option.
     #[tokio::test]
-    async fn should_report_one_info_finding_without_a_rendered_file() {
+    async fn should_be_skipped_rather_than_reported_without_a_rendered_file() {
         let sequence = sequence_with_captions(vec![
             caption_clip("First", 1.0, 3.0, Some(bare_white_style())),
             caption_clip("Second", 3.0, 5.0, Some(bare_white_style())),
             caption_clip("Third", 5.0, 7.0, Some(bare_white_style())),
         ]);
 
-        let violations = run_rule(&sequence, None).await;
-
-        assert_eq!(violations.len(), 1, "one line for the run, not one per cue");
-        assert_eq!(violations[0].severity, Severity::Info);
-        assert!(violations[0].message.contains("not measured"));
-        assert!(!violations[0].auto_fixable);
+        let context = QCContext::from_sequence(&sequence);
+        assert!(
+            CaptionContrastRule::new().skip_reason(&context).is_some(),
+            "a rendered check with nothing to read has to report as skipped"
+        );
+        assert!(
+            run_rule(&sequence, None).await.is_empty(),
+            "and it must not also invent a finding on the way past"
+        );
     }
 
     /// Feature: Caption legibility
@@ -1442,12 +1520,35 @@ mod tests {
     #[test]
     fn should_read_mitigation_the_way_the_renderer_draws_it() {
         let boxed = serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 180 } });
-        assert!(caption_paint(Some(&boxed)).has_box);
+        assert!(caption_paint(Some(&boxed)).protects_with_box());
 
-        // A box the viewer cannot see is not a box.
+        // A box the viewer cannot see is not a box, and it does not take the
+        // outline with it either: the ASS path keeps `BorderStyle: 1`.
         let clear_box =
             serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 0 } });
         assert!(!caption_paint(Some(&clear_box)).is_mitigated());
+        let clear_box_outlined = serde_json::json!({
+            "backgroundColor": "#00000000",
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+        });
+        assert!(
+            caption_paint(Some(&clear_box_outlined)).draws_outline(),
+            "an unpaintable box leaves the outline standing"
+        );
+
+        // A box faint enough for the footage to read straight through is not
+        // protection, and because a painted box replaces the outline on the
+        // ASS path, an outline behind one is not protection either.
+        let wash = serde_json::json!({
+            "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 12 },
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+        });
+        assert!(
+            !caption_paint(Some(&wash)).is_mitigated(),
+            "a box below the protection floor hides nothing and hides the stroke"
+        );
 
         // An outline width with no colour renders no outline at all.
         let width_only = serde_json::json!({ "outlineWidth": 4 });
@@ -1458,7 +1559,7 @@ mod tests {
 
         // A colour with no width renders the renderer's own default of 2px.
         let colour_only = serde_json::json!({ "outlineColor": "#000000" });
-        assert!(caption_paint(Some(&colour_only)).has_outline);
+        assert!(caption_paint(Some(&colour_only)).draws_outline());
 
         // An explicit zero width turns it off again.
         let zeroed = serde_json::json!({ "outlineColor": "#000000", "outlineWidth": 0 });
@@ -1501,12 +1602,18 @@ mod tests {
     }
 
     /// Feature: Style reading
-    /// Scenario: should agree with the export pipeline about every fixture
+    /// Scenario: should agree with both export seams about every fixture
     ///
-    /// The renderer's own gates are private, so this drives the real `drawtext`
-    /// seam — `borderw`/`box=1` appear exactly when a stroke or a box is burned
-    /// in — and asserts the check reaches the same verdict from the same blob.
-    /// A change on either side that breaks the mirror fails here.
+    /// The renderer's own gates are private, so this drives the real seams and
+    /// asserts the check reaches the same verdict from the same blob. Two of
+    /// them, because the burn-in has two: the `drawtext` fallback, where
+    /// `borderw`/`box=1` appear exactly when a stroke or a box is drawn, and
+    /// the ASS style row libass renders from wherever it is present, where a
+    /// box is `BorderStyle: 3` with a visible `OutlineColour` and a stroke is
+    /// `BorderStyle: 1` with one. Grading only the fallback is how a fully
+    /// transparent box came to erase the outline on the path that actually
+    /// renders while the check went on counting the outline as protection.
+    /// A change on any side that breaks the mirror fails here.
     #[test]
     fn should_agree_with_the_renderer_about_protection() {
         let fixtures = [
@@ -1543,6 +1650,24 @@ mod tests {
                 Some(serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 0 } })),
             ),
             (
+                "fully transparent box over an outline",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "outlineColor": "#000000",
+                    "outlineWidth": 4,
+                    "backgroundColor": "#00000000",
+                })),
+            ),
+            (
+                "opaque box over an outline",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "outlineColor": "#000000",
+                    "outlineWidth": 4,
+                    "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 200 },
+                })),
+            ),
+            (
                 "fully transparent outline",
                 Some(serde_json::json!({ "outlineColor": "#00000000", "outlineWidth": 4 })),
             ),
@@ -1566,17 +1691,86 @@ mod tests {
                 .unwrap_or_else(|| panic!("{label}: a caption with text renders"));
             let paint = caption_paint(clip.caption_style.as_ref());
 
+            // `drawtext` draws the stroke and the box independently, so the
+            // question there is what the style asks for.
             assert_eq!(
-                paint.has_outline,
+                paint.strokes_glyphs,
                 drawtext_draws_an_outline(&filter),
-                "{label}: the check and the renderer disagree about the outline ({filter})"
+                "{label}: the check and the drawtext path disagree about the outline ({filter})"
             );
             assert_eq!(
-                paint.has_box,
+                paint.paints_box(),
                 drawtext_draws_a_box(&filter),
-                "{label}: the check and the renderer disagree about the box ({filter})"
+                "{label}: the check and the drawtext path disagree about the box ({filter})"
+            );
+
+            // libass draws one or the other, so the question there is what
+            // survives - which is the question the grading actually asks.
+            let style_row = ass_style_row_for(&clip);
+            assert_eq!(
+                paint.draws_outline(),
+                ass_row_draws_an_outline(&style_row),
+                "{label}: the check and the ASS path disagree about the outline ({style_row})"
+            );
+            assert_eq!(
+                paint.paints_box(),
+                ass_row_draws_a_box(&style_row),
+                "{label}: the check and the ASS path disagree about the box ({style_row})"
             );
         }
+    }
+
+    /// Builds the ASS `Style:` row the export writes for one caption clip.
+    fn ass_style_row_for(clip: &Clip) -> String {
+        let mut sequence = Sequence::new("Contrast", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        track.add_clip(clip.clone());
+        sequence.add_track(track);
+
+        build_ass_text_overlay_script(&sequence, &std::collections::HashMap::new())
+            .expect("the script builds")
+            .expect("a caption with text produces a script")
+            .lines()
+            .find(|line| line.starts_with("Style: "))
+            .expect("the script carries a style row")
+            .to_string()
+    }
+
+    /// Reads one column out of an ASS `Style:` row, by its `Format:` index.
+    fn ass_style_column(row: &str, index: usize) -> &str {
+        row.split(',')
+            .nth(index)
+            .unwrap_or_else(|| panic!("the style row has a column {index}: {row}"))
+            .trim()
+    }
+
+    /// Whether an `&HAABBGGRR` colour paints anything; `0xFF` alpha is invisible.
+    fn ass_colour_is_visible(raw: &str) -> bool {
+        let hex = raw.trim().trim_start_matches("&H");
+        u8::from_str_radix(hex.get(0..2).unwrap_or("FF"), 16).is_ok_and(|alpha| alpha != 255)
+    }
+
+    /// `OutlineColour`, the column libass draws both the stroke and the box in.
+    const ASS_BORDER_COLOUR_COLUMN: usize = 5;
+    /// `BorderStyle`: 1 strokes the glyphs, 3 replaces the stroke with a box.
+    const ASS_BORDER_STYLE_COLUMN: usize = 15;
+    /// `Outline`, the stroke width or the box padding depending on the style.
+    const ASS_OUTLINE_WIDTH_COLUMN: usize = 16;
+
+    /// Whether libass would stroke the glyphs from this style row.
+    fn ass_row_draws_an_outline(row: &str) -> bool {
+        let width = ass_style_column(row, ASS_OUTLINE_WIDTH_COLUMN)
+            .parse::<f64>()
+            .unwrap_or(0.0);
+        ass_style_column(row, ASS_BORDER_STYLE_COLUMN) == "1"
+            && width > 0.0
+            && ass_colour_is_visible(ass_style_column(row, ASS_BORDER_COLOUR_COLUMN))
+    }
+
+    /// Whether libass would paint a background box from this style row.
+    fn ass_row_draws_a_box(row: &str) -> bool {
+        ass_style_column(row, ASS_BORDER_STYLE_COLUMN) == "3"
+            && ass_colour_is_visible(ass_style_column(row, ASS_BORDER_COLOUR_COLUMN))
     }
 
     /// Reads one `key=value` pair out of a `drawtext` filter body.
@@ -1667,6 +1861,61 @@ mod tests {
     ///
     /// Every decode it is asked for fails to spawn, which is exactly the shape
     /// of a failed decode and needs no FFmpeg on the machine running the test.
+    /// A runner around a real FFmpeg, or `None` after recording a skip.
+    ///
+    /// The band geometry is the one part of this module that cannot be asserted
+    /// from the filter string alone: whether the crop lands on the picture the
+    /// caption is drawn over is a question only pixels answer.
+    fn ffmpeg_runner_for_tests() -> Option<FFmpegRunner> {
+        let ffmpeg = crate::core::test_ffmpeg::require_or_skip_ffmpeg()?;
+        let ffprobe = ffmpeg.with_file_name(if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        });
+
+        Some(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: ffmpeg,
+            ffprobe_path: ffprobe,
+            version: "test".to_string(),
+            is_bundled: false,
+            source: FFmpegSource::System,
+        }))
+    }
+
+    /// Renders a short fixture clip from a `lavfi` description.
+    async fn render_fixture(runner: &FFmpegRunner, file: &Path, source: &str) {
+        let output = tokio::process::Command::new(&runner.info().ffmpeg_path)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                source,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(file)
+            .output()
+            .await
+            .expect("the fixture render launches");
+        assert!(
+            output.status.success(),
+            "the fixture render failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn broken_runner() -> FFmpegRunner {
         FFmpegRunner::new(FFmpegInfo {
             ffmpeg_path: PathBuf::from("openreelio-no-such-ffmpeg"),
@@ -1833,10 +2082,160 @@ mod tests {
             "a default caption sits low in the frame, got {top}-{bottom}"
         );
 
-        let filter = band_filter((top, bottom), 320);
+        let (left, right) = super::super::rules::caption_span_percent(&clip, 1920, 1080);
+        let filter = band_filter((top, bottom), (left, right), 320);
         assert!(filter.contains("scale=w='min(320,iw)'"));
         assert!(filter.contains("crop="));
         assert!(filter.ends_with("format=rgb24"));
+    }
+
+    /// Feature: Band geometry
+    /// Scenario: should measure only the column the words are drawn in
+    ///
+    /// Cropping the full frame width let a bright strip at the far edge - a
+    /// window, a lit sign - decide that a centred caption sat over a mixed
+    /// background. The strip is outside the words entirely.
+    #[tokio::test]
+    #[ignore = "needs a real FFmpeg binary"]
+    async fn should_ignore_a_bright_strip_the_caption_never_reaches() {
+        let Some(runner) = ffmpeg_runner_for_tests() else {
+            return;
+        };
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let file = temp.path().join("strip.mp4");
+
+        // A dark 1920x1080 frame with a white strip down its rightmost eighth,
+        // which no centred caption's text block reaches.
+        render_fixture(
+            &runner,
+            &file,
+            "color=c=#202020:s=1920x1080:d=2,drawbox=x=1680:y=0:w=240:h=1080:color=white:t=fill",
+        )
+        .await;
+
+        let clip = caption_clip("Readable words", 0.0, 2.0, Some(bare_white_style()));
+        let sequence = sequence_with_captions(vec![clip]);
+        let sampling = sample_caption_bands(
+            &runner,
+            &file,
+            &sequence,
+            (0.0, 2.0),
+            &CaptionSampleOptions {
+                file_duration_sec: Some(2.0),
+                ..CaptionSampleOptions::default()
+            },
+        )
+        .await;
+
+        let sample = sampling
+            .samples
+            .first()
+            .unwrap_or_else(|| panic!("the cue must be measured: {:?}", sampling.notes));
+        assert!(
+            sample.band_luminance_stddev <= DEFAULT_MAX_BAND_STDDEV,
+            "a strip outside the text block must not read as a mixed background, got spread {}",
+            sample.band_luminance_stddev
+        );
+    }
+
+    /// Feature: Band geometry
+    /// Scenario: should follow a `verticalAlign` the renderer honours
+    ///
+    /// `resolve_caption_anchor` lets the style's `verticalAlign` move the block,
+    /// so a band read from `caption_position` alone sampled the bottom of the
+    /// frame for a caption drawn along the top - and graded it against the
+    /// wrong half of the picture.
+    #[tokio::test]
+    #[ignore = "needs a real FFmpeg binary"]
+    async fn should_measure_a_top_aligned_caption_against_the_top_of_the_frame() {
+        let Some(runner) = ffmpeg_runner_for_tests() else {
+            return;
+        };
+        let temp = tempfile::TempDir::new().expect("temp dir");
+
+        let top_aligned = serde_json::json!({
+            "color": "#FFFFFF",
+            "verticalAlign": "top",
+        });
+
+        // Black top half, white bottom half: white text sampled against the
+        // top reads clearly, and against the bottom disappears.
+        let black_top = temp.path().join("black-top.mp4");
+        render_fixture(
+            &runner,
+            &black_top,
+            "color=c=black:s=1920x1080:d=2,drawbox=x=0:y=540:w=1920:h=540:color=white:t=fill",
+        )
+        .await;
+
+        let sequence = sequence_with_captions(vec![caption_clip_with_style(
+            "Readable words",
+            0.0,
+            2.0,
+            Some(top_aligned.clone()),
+        )]);
+        let sampling = sample_caption_bands(
+            &runner,
+            &black_top,
+            &sequence,
+            (0.0, 2.0),
+            &CaptionSampleOptions {
+                file_duration_sec: Some(2.0),
+                ..CaptionSampleOptions::default()
+            },
+        )
+        .await;
+        let sample = sampling
+            .samples
+            .first()
+            .unwrap_or_else(|| panic!("the cue must be measured: {:?}", sampling.notes));
+        assert!(
+            sample.band_luminance < 0.2,
+            "a top-aligned caption must be measured against the top band, got {}",
+            sample.band_luminance
+        );
+
+        // The same style over the inverse frame is the failing case, which is
+        // what proves the band moved rather than merely widened.
+        let white_top = temp.path().join("white-top.mp4");
+        render_fixture(
+            &runner,
+            &white_top,
+            "color=c=white:s=1920x1080:d=2,drawbox=x=0:y=540:w=1920:h=540:color=black:t=fill",
+        )
+        .await;
+
+        let sequence = sequence_with_captions(vec![caption_clip_with_style(
+            "Readable words",
+            0.0,
+            2.0,
+            Some(top_aligned),
+        )]);
+        let sampling = sample_caption_bands(
+            &runner,
+            &white_top,
+            &sequence,
+            (0.0, 2.0),
+            &CaptionSampleOptions {
+                file_duration_sec: Some(2.0),
+                ..CaptionSampleOptions::default()
+            },
+        )
+        .await;
+        let sample = sampling
+            .samples
+            .first()
+            .unwrap_or_else(|| panic!("the cue must be measured: {:?}", sampling.notes));
+        assert!(
+            sample.band_luminance > 0.8,
+            "white text over a white top band is the failing case, got {}",
+            sample.band_luminance
+        );
+        assert!(
+            CaptionContrastRule::fault_for(sample, DEFAULT_MIN_CONTRAST, DEFAULT_MAX_BAND_STDDEV)
+                .is_some(),
+            "an unreadable top-aligned caption must be reported"
+        );
     }
 
     /// Feature: Band geometry

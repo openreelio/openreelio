@@ -136,9 +136,15 @@ structural check can answer. For each caption cue the file covers it decodes one
 frame at the cue's midpoint, measures the luminance of the band the words occupy
 and compares it with the text colour. A cue is "already protected" - and never
 decoded - only when the export would actually draw the protection: an
-`outlineColor` with a non-zero width, or a `backgroundColor` with a non-zero
-alpha. An `outlineWidth` with no colour renders bare, and so does a cue with no
-style at all, so those are graded like any other bare cue.
+`outlineColor` with a non-zero width, or a `backgroundColor` that is at least
+10% opaque. An `outlineWidth` with no colour renders bare, and so does a cue
+with no style at all, so those are graded like any other bare cue. A box faint
+enough to read through protects nothing, and a painted box replaces the outline
+in the burn-in, so an outline behind one is not protection either; a fully
+transparent `backgroundColor` is no box at all and leaves the outline standing.
+The measured rectangle follows the words on both axes - the band from
+`captionPosition` and the style's `verticalAlign`, the column from the text
+block - so a bright strip the line never reaches cannot decide the verdict.
 
 Two numbers decide it. A bare cue within `0.35` luminance of its background is
 reported (`fault: "lowContrast"`), and so is one whose band varies by more than
@@ -150,14 +156,16 @@ the `standard-outline` pack - not `boxed-contrast`, because an outline survives
 any background including a mixed one.
 
 The pass is bounded: at most 60 frames per run (spread evenly across the file),
-`--timeout-sec` as the budget for the whole pass, and no seek past the end of
+whatever is left of `--timeout-sec` after the probe pass - the flag is one budget
+for the whole measurement stage, not one per pass - and no seek past the end of
 the file that was measured. Anything it could not look at is reported as one
 `info` finding - "Caption contrast: N of M cue(s) not measured (…)" - so a run
 that decoded nothing never reads as `passed`, and `warnings` says the same in
 prose. The pass only runs when the check is selected, so `--skip
-caption.contrast` really does skip the decodes. Without `--file` the check emits
-a single `info` finding - "not measured" - instead of passing over a picture
-nobody looked at.
+caption.contrast` really does skip the decodes. Without `--file` the check is
+reported as `skipped`, like every other rendered check, rather than passing over
+a picture nobody looked at; the report's "N rendered check(s) were skipped"
+warning names the flag that would run it, except under `--structural-only`.
 
 `audio.clipping` reports the flat-topped samples `astats` measures, at warning
 — a master limited on purpose measures the same way, and `audio.peak` keeps the

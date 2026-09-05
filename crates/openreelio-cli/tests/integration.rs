@@ -7720,9 +7720,15 @@ fn test_verify_passes_a_white_caption_over_a_dark_picture() {
 }
 
 /// Feature: Caption legibility
-/// Scenario: should say it did not look, rather than passing, without a render
+/// Scenario: should report itself as skipped, not failed, without a render
+///
+/// The check used to answer a file-less run with `passed: false,
+/// skipped: false` and an `info` finding asking for a rendered file. Under
+/// `--structural-only` that asked the caller for the one thing it had just
+/// declined, and made a deliberate structural run read as having found
+/// something. Every other rendered check answers this by being skipped.
 #[test]
-fn test_verify_reports_caption_contrast_as_unmeasured_without_a_file() {
+fn test_verify_reports_caption_contrast_as_skipped_without_a_file() {
     let dir = create_temp_project("verify_caption_contrast_structural");
     let path = project_path(&dir, "verify_caption_contrast_structural");
 
@@ -7741,23 +7747,46 @@ fn test_verify_reports_caption_contrast_as_unmeasured_without_a_file() {
         BARE_WHITE_CAPTION_STYLE,
     ]);
 
-    let report = run_cli_ok(&[
-        "verify",
-        "--path",
-        &path,
-        "--structural-only",
-        "--checks",
-        "caption.contrast",
-    ]);
-    let check = find_check(&report, "caption.contrast");
+    for structural_only in [true, false] {
+        let mut args = vec!["verify", "--path", &path, "--checks", "caption.contrast"];
+        if structural_only {
+            args.push("--structural-only");
+        }
+        let report = run_cli_ok(&args);
+        let check = find_check(&report, "caption.contrast");
 
-    assert_eq!(check["severity"], "info", "{check}");
-    assert_eq!(check["violationCount"], 1);
-    assert_eq!(check["metrics"]["measured"], false);
-    assert!(
-        check["message"].as_str().unwrap().contains("not measured"),
-        "a check that never looked must say so: {check}"
-    );
+        assert_eq!(
+            check["status"], "skipped",
+            "structural_only={structural_only}: {check}"
+        );
+        assert_eq!(check["skipped"], true, "{check}");
+        assert_eq!(
+            check["violationCount"], 0,
+            "a skipped check must not also carry a finding: {check}"
+        );
+
+        let warnings = report["warnings"]
+            .as_array()
+            .map(|warnings| {
+                warnings
+                    .iter()
+                    .filter_map(|warning| warning.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .unwrap_or_default();
+        if structural_only {
+            assert!(
+                !warnings.contains("--file"),
+                "a structural run declined the render, so it is not nudged for one: {warnings}"
+            );
+        } else {
+            assert!(
+                warnings.contains("rendered check(s) were skipped") && warnings.contains("--file"),
+                "a run that could have measured is still told what it missed: {warnings}"
+            );
+        }
+    }
 }
 
 /// Feature: Verifying a partial render

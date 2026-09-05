@@ -15,8 +15,8 @@ use tokio::sync::mpsc::Sender;
 use crate::core::{
     assets::{Asset, AssetKind},
     captions::{
-        CAPTION_CUSTOM_DEFAULT_Y_PERCENT, CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
-        CAPTION_SIDE_MARGIN_PERCENT,
+        VerticalPosition, CAPTION_CUSTOM_DEFAULT_Y_PERCENT,
+        CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT, CAPTION_SIDE_MARGIN_PERCENT,
     },
     commands::TEXT_ASSET_PREFIX,
     effects::{
@@ -4755,6 +4755,54 @@ impl CaptionVertical {
             _ => Self::Bottom,
         }
     }
+
+    /// Reads the caption model's own vertical enum into the render-side one.
+    fn from_model(vertical: VerticalPosition) -> Self {
+        match vertical {
+            VerticalPosition::Top => Self::Top,
+            VerticalPosition::Center => Self::Center,
+            VerticalPosition::Bottom => Self::Bottom,
+        }
+    }
+}
+
+/// Margin a `verticalAlign` override holds its block off the named edge with,
+/// as a percentage of the canvas height.
+pub(crate) const CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT: f64 = 10.0;
+
+/// Fraction of the canvas height a `verticalAlign` override anchors at.
+///
+/// The same number [`resolve_caption_anchor`] writes into an overridden anchor,
+/// exposed so the QC caption band can place a custom-positioned cue's block
+/// where the renderer puts it rather than where the stored position says.
+pub(crate) fn caption_vertical_align_y(vertical: VerticalPosition) -> f64 {
+    vertical_position_to_y(
+        CaptionVertical::from_model(vertical),
+        CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT,
+    )
+}
+
+/// Reads the vertical axis a caption style's `verticalAlign` pins the block to.
+///
+/// Returns `None` when the style names nothing the renderer recognizes, in
+/// which case the stored `caption_position` decides the axis on its own.
+///
+/// Hoisted out of [`resolve_caption_anchor`] because the QC caption band has to
+/// answer the same question: a band derived from `caption_position` alone
+/// sampled the bottom of the frame for a caption the renderer draws along the
+/// top. One definition is the only way the two cannot drift.
+pub(crate) fn caption_style_vertical_align(style: Option<&Value>) -> Option<VerticalPosition> {
+    let raw = style
+        .and_then(Value::as_object)
+        .and_then(|object| get_json_field(object, &["verticalAlign", "vertical_align"]))
+        .and_then(Value::as_str)?;
+
+    match raw {
+        "top" => Some(VerticalPosition::Top),
+        "middle" | "center" => Some(VerticalPosition::Center),
+        "bottom" => Some(VerticalPosition::Bottom),
+        _ => None,
+    }
 }
 
 fn normalized_caption_margin_percent(margin_percent: f64) -> f64 {
@@ -4868,33 +4916,19 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
         }
     }
 
-    if let Some(style_object) = style.and_then(Value::as_object) {
-        if let Some(vertical_align) =
-            get_json_field(style_object, &["verticalAlign", "vertical_align"])
-                .and_then(Value::as_str)
-        {
-            let mapped = match vertical_align {
-                "top" => Some(CaptionVertical::Top),
-                "middle" | "center" => Some(CaptionVertical::Center),
-                "bottom" => Some(CaptionVertical::Bottom),
-                _ => None,
-            };
-
-            // The style's vertical alignment overrides only the vertical axis,
-            // so a custom anchor keeps the x its author chose.
-            if let Some(vertical) = mapped {
-                anchor = match anchor {
-                    CaptionAnchor::Custom { x, .. } => CaptionAnchor::Custom {
-                        x,
-                        y: vertical_position_to_y(vertical, 10.0),
-                    },
-                    CaptionAnchor::Preset { .. } => CaptionAnchor::Preset {
-                        vertical,
-                        margin_percent: 10.0,
-                    },
-                };
-            }
-        }
+    // The style's vertical alignment overrides only the vertical axis, so a
+    // custom anchor keeps the x its author chose.
+    if let Some(vertical) = caption_style_vertical_align(style).map(CaptionVertical::from_model) {
+        anchor = match anchor {
+            CaptionAnchor::Custom { x, .. } => CaptionAnchor::Custom {
+                x,
+                y: vertical_position_to_y(vertical, CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT),
+            },
+            CaptionAnchor::Preset { .. } => CaptionAnchor::Preset {
+                vertical,
+                margin_percent: CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT,
+            },
+        };
     }
 
     anchor
@@ -5520,6 +5554,15 @@ impl AssColor {
         }
     }
 
+    /// Whether this colour paints nothing at all.
+    ///
+    /// ASS stores alpha inverted - `0x00` is opaque and `0xFF` is fully
+    /// transparent - so a colour that reached full transparency here draws no
+    /// pixel whatever column it is written to.
+    fn is_invisible(self) -> bool {
+        self.alpha == 255
+    }
+
     fn ass_value(self) -> String {
         format!(
             "&H{:02X}{:02X}{:02X}{:02X}",
@@ -5870,12 +5913,18 @@ fn append_ass_text_style_and_event(
     } else {
         0.0
     };
+    // A box the viewer cannot see is not a box. `BorderStyle: 3` replaces the
+    // outline with the box, so treating a fully transparent `backgroundColor`
+    // as one drew nothing *and* took the outline away with it: the caption
+    // burned in invisible while the QC pass still counted the outline as
+    // protection. An unpaintable box therefore selects no box at all.
     let background_color = ass_color_param(
         effect,
         "background_color",
         "#000000",
         decoration_alpha("background_opacity", 1.0),
-    );
+    )
+    .filter(|color| !color.is_invisible());
     let background_padding = effect_int_param(effect, "background_padding", 10).clamp(0, 500);
     let border_style = if background_color.is_some() { 3 } else { 1 };
     let style_outline_width = if background_color.is_some() {
@@ -8868,6 +8917,38 @@ mod tests {
         assert!(
             script.contains(",1,4.00,0.00,"),
             "an outline must stay on BorderStyle 1. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn a_fully_transparent_box_keeps_the_outline_instead_of_erasing_it() {
+        // `BorderStyle: 3` replaces the outline with the box, and libass draws
+        // nothing at all for a box whose colour is fully transparent. Selecting
+        // it for a box the viewer cannot see therefore burned the caption in
+        // invisible - measured over a white background, the style row below
+        // produced zero non-white pixels while the outlined row produced
+        // thousands. An unpaintable box has to mean no box.
+        let script = caption_ass_script_for_style(serde_json::json!({
+            "color": "#FFFFFF",
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+            "backgroundColor": "#00000000",
+        }));
+
+        let columns = ass_style_columns(&script);
+        assert_eq!(
+            columns[ass_style_column::BORDER_STYLE],
+            "1",
+            "an invisible box must leave BorderStyle on the outline. Got: {script}"
+        );
+        let (border, _) = ass_border_and_back_colour(&script);
+        assert_eq!(
+            border, "&H00000000",
+            "the outline colour must keep the border column. Got: {script}"
+        );
+        assert!(
+            script.contains(",1,4.00,0.00,"),
+            "the outline must keep its own width. Got: {script}"
         );
     }
 
