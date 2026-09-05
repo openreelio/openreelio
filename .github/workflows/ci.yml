@@ -259,7 +259,8 @@ jobs:
       # they need a binary, so the `Run tests` step above never ran them and the
       # properties they measure - zoom frame counts and geometry, still and
       # animated image handling, the adjustment-layer refusal, filtergraph
-      # injection - went unexercised in CI.
+      # injection, and the audio loudness/peak measurement against a synthesized
+      # tone of known level - went unexercised in CI.
       #
       # They run against the BUNDLED FFmpeg, not apt's: the assertions were
       # measured against the exact build the app ships (9.x), and most of them
@@ -284,6 +285,7 @@ jobs:
           OPENREELIO_FFPROBE_PATH: ${{ github.workspace }}/src-tauri/binaries/ffprobe
         run: |
           cargo test --locked --features dev-full --lib -- --ignored \
+            core::analysis::audio::tests:: \
             core::effects::filter_builder::tests:: \
             core::render::export::tests:: 2>&1 | tee "${RUNNER_TEMP}/ffmpeg-tests.log"
           # A renamed or moved test would leave the filters matching nothing,

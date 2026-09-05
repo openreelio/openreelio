@@ -72,22 +72,63 @@ impl SilenceRegion {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProfile {
+    /// Version of the loudness/peak measurement that produced this profile.
+    ///
+    /// Profiles cached by an older measurement are dropped on load rather than
+    /// trusted; see [`AUDIO_MEASUREMENT_VERSION`]. Legacy bundles carry no
+    /// field and deserialize as version 0.
+    #[serde(default)]
+    pub measurement_version: u32,
     /// Estimated beats per minute (null if no clear rhythm detected)
     pub bpm: Option<f64>,
     /// Spectral center frequency in Hz (higher = brighter/more treble)
     pub spectral_centroid_hz: f64,
-    /// Per-second RMS loudness values in dB.
+    /// Per-second momentary loudness values in LUFS.
     ///
     /// Sampled at 1 Hz (one value per second), so `loudness_profile[i]`
-    /// represents the average loudness during the i-th second of audio.
+    /// represents the average momentary loudness during the i-th second of
+    /// audio. Windows the meter reports as digital silence are dropped rather
+    /// than averaged in, so the profile can be shorter than the audio.
     pub loudness_profile: Vec<f64>,
-    /// Maximum loudness in dB
+    /// Peak level in dB relative to full scale.
+    ///
+    /// True peak when the FFmpeg build measures it, otherwise the sample peak.
+    /// Falls back to [`SILENCE_FLOOR_DB`] only when nothing could be measured.
     pub peak_db: f64,
+    /// Integrated program loudness in LUFS (EBU R128), when it was measured.
+    #[serde(default)]
+    pub integrated_lufs: Option<f64>,
+    /// Loudness range in LU (EBU R128), when it was measured.
+    #[serde(default)]
+    pub loudness_range_lu: Option<f64>,
+    /// True peak in dBTP, when the FFmpeg build measured it.
+    #[serde(default)]
+    pub true_peak_dbtp: Option<f64>,
     /// Regions where audio is below -40 dB for > 0.5s
     pub silence_regions: Vec<SilenceRegion>,
     /// Regions where audio is above the silence threshold (derived speech / non-silence)
     #[serde(default)]
     pub speech_regions: Vec<SpeechRegion>,
+}
+
+/// Current version of the audio loudness/peak measurement.
+///
+/// Bumped whenever a fix changes the numbers a profile reports, so bundles
+/// cached by the older measurement are recomputed instead of served. Version 1
+/// fixed a pass that silently measured nothing: `ebur128=metadata=1` demotes
+/// its per-frame log to VERBOSE while the pass runs at `-loglevel info`, so
+/// every profile reported `peakDb: -90` with an empty loudness profile.
+pub const AUDIO_MEASUREMENT_VERSION: u32 = 1;
+
+impl Default for AudioProfile {
+    /// An empty profile stamped with the current measurement version.
+    ///
+    /// Useful as the base of a struct-update expression when only a few fields
+    /// matter; [`AudioProfile::silent`] is the one to use when the asset really
+    /// has no audible content over a known duration.
+    fn default() -> Self {
+        Self::silent(0.0)
+    }
 }
 
 impl AudioProfile {
@@ -99,10 +140,14 @@ impl AudioProfile {
             vec![]
         };
         Self {
+            measurement_version: AUDIO_MEASUREMENT_VERSION,
             bpm: None,
             spectral_centroid_hz: 0.0,
             loudness_profile: Vec::new(),
             peak_db: SILENCE_FLOOR_DB,
+            integrated_lufs: None,
+            loudness_range_lu: None,
+            true_peak_dbtp: None,
             silence_regions: silence,
             speech_regions: Vec::new(),
         }
@@ -569,6 +614,27 @@ impl AnalysisBundle {
         }
     }
 
+    /// Drops a cached audio profile produced by an older measurement.
+    ///
+    /// Returns `true` when a profile was discarded. The loudness/peak pass has
+    /// shipped wrong numbers before — a whole class of bundles carries
+    /// `peakDb: -90` with an empty loudness profile — and nothing else in the
+    /// bundle can tell a stale profile from a fresh one. Dropping it here makes
+    /// the next `analysis audio` / `analyze_asset` run recompute it, while every
+    /// other slot the bundle paid for survives.
+    pub fn drop_outdated_audio_profile(&mut self) -> bool {
+        let outdated = self
+            .audio_profile
+            .as_ref()
+            .is_some_and(|profile| profile.measurement_version < AUDIO_MEASUREMENT_VERSION);
+
+        if outdated {
+            self.audio_profile = None;
+        }
+
+        outdated
+    }
+
     /// Records an error for a specific analysis type
     pub fn add_error(&mut self, analysis_type: &str, error: String) {
         self.errors.insert(analysis_type.to_string(), error);
@@ -790,6 +856,7 @@ mod tests {
             peak_db: -0.5,
             silence_regions: vec![SilenceRegion::new(5.0, 6.5)],
             speech_regions: vec![SpeechRegion::new(0.0, 5.0), SpeechRegion::new(6.5, 10.0)],
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&profile).unwrap();
@@ -797,6 +864,44 @@ mod tests {
         assert!(json.contains("\"loudnessProfile\""));
         assert!(json.contains("\"peakDb\":-0.5"));
         assert!(json.contains("\"silenceRegions\""));
+    }
+
+    /// Feature: audio profile measurement versioning
+    /// Scenario: a bundle cached before the loudness fix is loaded
+    ///   Given a bundle whose audio profile predates the current measurement
+    ///   When the bundle is normalised on load
+    ///   Then the stale profile is dropped so the next run recomputes it,
+    ///   while every other slot the bundle paid for survives
+    #[test]
+    fn should_drop_an_audio_profile_measured_by_a_superseded_pass() {
+        let mut bundle = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0));
+        bundle.transcript = Some(Vec::new());
+        bundle.audio_profile = Some(AudioProfile {
+            measurement_version: AUDIO_MEASUREMENT_VERSION - 1,
+            peak_db: SILENCE_FLOOR_DB,
+            ..Default::default()
+        });
+
+        assert!(bundle.drop_outdated_audio_profile());
+        assert!(bundle.audio_profile.is_none());
+        assert!(
+            bundle.transcript.is_some(),
+            "only the audio profile is stale; the rest of the bundle must survive"
+        );
+    }
+
+    /// Feature: audio profile measurement versioning
+    /// Scenario: a bundle carries a profile from the current measurement
+    ///   Given an audio profile stamped with the current version
+    ///   When the bundle is normalised on load
+    ///   Then the profile is kept, so a good measurement is not thrown away
+    #[test]
+    fn should_keep_an_audio_profile_measured_by_the_current_pass() {
+        let mut bundle = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0));
+        bundle.audio_profile = Some(AudioProfile::silent(10.0));
+
+        assert!(!bundle.drop_outdated_audio_profile());
+        assert!(bundle.audio_profile.is_some());
     }
 
     // -------------------------------------------------------------------------
@@ -1196,6 +1301,7 @@ mod tests {
             peak_db: -0.3,
             silence_regions: vec![SilenceRegion::new(10.0, 11.5)],
             speech_regions: vec![SpeechRegion::new(0.0, 10.0), SpeechRegion::new(11.5, 12.0)],
+            ..Default::default()
         });
 
         bundle.segments = Some(vec![

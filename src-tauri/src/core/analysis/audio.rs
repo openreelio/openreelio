@@ -13,7 +13,13 @@ use uuid::Uuid;
 use webrtc_vad::{SampleRate as VadSampleRate, Vad, VadMode};
 
 use super::ducking::invert_silence_to_speech;
-use super::types::{AudioProfile, SilenceRegion, SpeechRegion, SILENCE_FLOOR_DB};
+use super::loudness::{
+    loudness_filter_chain, parse_astats_overall, parse_loudness_summary, parse_momentary_loudness,
+    per_second_loudness_profile, MOMENTARY_SAMPLES_PER_SECOND,
+};
+use super::types::{
+    AudioProfile, SilenceRegion, SpeechRegion, AUDIO_MEASUREMENT_VERSION, SILENCE_FLOOR_DB,
+};
 use crate::core::captions::audio::{extract_audio_for_transcription_async, load_audio_samples_i16};
 use crate::core::ffmpeg::{capture_filter_stderr, FFmpegError, FilterMode};
 use crate::core::{CoreError, CoreResult};
@@ -33,7 +39,7 @@ const SILENCE_MIN_DURATION: &str = "0.5";
 const PEAK_THRESHOLD_DB: f64 = 3.0;
 
 /// Approximate sampling rate of FFmpeg `ebur128` momentary loudness output.
-const LOUDNESS_SAMPLES_PER_SECOND: f64 = 10.0;
+const LOUDNESS_SAMPLES_PER_SECOND: f64 = MOMENTARY_SAMPLES_PER_SECOND;
 
 /// Minimum number of detected peaks required for BPM estimation.
 const MIN_PEAKS_FOR_BPM: usize = 4;
@@ -110,7 +116,7 @@ impl AudioProfiler {
         }
 
         let silence_regions = silence_result?;
-        let (loudness_profile, peak_db, momentary_samples) = loudness_result?;
+        let loudness = loudness_result?;
         let spectral_centroid_hz = spectral_result.unwrap_or_else(|err| {
             tracing::debug!(
                 "Spectral centroid extraction failed, defaulting to 0.0: {}",
@@ -119,8 +125,9 @@ impl AudioProfiler {
             0.0
         });
 
-        let bpm = Self::estimate_bpm_from_samples(&momentary_samples, LOUDNESS_SAMPLES_PER_SECOND)
-            .or_else(|| Self::estimate_bpm(&loudness_profile));
+        let bpm =
+            Self::estimate_bpm_from_samples(&loudness.momentary_lufs, LOUDNESS_SAMPLES_PER_SECOND)
+                .or_else(|| Self::estimate_bpm(&loudness.loudness_profile));
         let speech_regions = match self
             .detect_speech_regions_vad(video_path, duration_sec)
             .await
@@ -135,11 +142,17 @@ impl AudioProfiler {
             }
         };
 
+        let peak_db = loudness.peak_db();
+
         Ok(AudioProfile {
+            measurement_version: AUDIO_MEASUREMENT_VERSION,
             bpm,
             spectral_centroid_hz,
-            loudness_profile,
+            loudness_profile: loudness.loudness_profile,
             peak_db,
+            integrated_lufs: loudness.integrated_lufs,
+            loudness_range_lu: loudness.loudness_range_lu,
+            true_peak_dbtp: loudness.true_peak_dbtp,
             silence_regions,
             speech_regions,
         })
@@ -221,19 +234,20 @@ impl AudioProfiler {
     // Loudness & Peak Extraction
     // =========================================================================
 
-    /// Extracts per-second loudness profile and peak dB using EBU R128 metering.
+    /// Measures loudness and peak with the shared EBU R128 / true-peak pass.
     ///
-    /// Parses momentary loudness values from the `ebur128` filter output,
-    /// groups them into per-second averages, and finds the peak value.
+    /// The filter chain comes from [`super::loudness`], so this profile and the
+    /// rendered-file QC measurement agree by construction. Momentary readings
+    /// drive the per-second profile and BPM estimation; the summary block
+    /// supplies the program-level numbers.
     async fn extract_loudness_and_peak(
         &self,
         video_path: &Path,
-    ) -> CoreResult<(Vec<f64>, f64, Vec<f64>)> {
-        let filter = "ebur128=metadata=1";
-        let capture = self.run_ffmpeg_filter(video_path, filter).await?;
-        let (loudness_profile, peak_db) = parse_loudness_and_peak(&capture.stderr);
-        let momentary_values = parse_momentary_loudness_values(&capture.stderr);
-        Ok((loudness_profile, peak_db, momentary_values))
+    ) -> CoreResult<LoudnessMeasurement> {
+        let capture = self
+            .run_ffmpeg_filter(video_path, &loudness_filter_chain())
+            .await?;
+        Ok(measure_loudness(&capture.stderr))
     }
 
     // =========================================================================
@@ -570,66 +584,60 @@ fn extract_silence_end(line: &str) -> Option<f64> {
     num_str.parse::<f64>().ok()
 }
 
-/// Parses momentary loudness values and peak from EBU R128 `ebur128` filter
-/// stderr output.
+/// Everything the loudness pass measured for one asset.
 ///
-/// Groups momentary values into per-second averages. FFmpeg emits momentary
-/// readings roughly every 0.1 seconds, so ~10 values are averaged per second.
+/// Kept as a struct rather than a tuple because the pass now yields both
+/// per-window readings (profile, BPM) and program-level values (integrated
+/// loudness, true peak) that callers pick from independently.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LoudnessMeasurement {
+    /// Per-second average of the momentary readings, in LUFS.
+    pub loudness_profile: Vec<f64>,
+    /// Raw momentary readings at roughly 10 Hz, in LUFS.
+    pub momentary_lufs: Vec<f64>,
+    /// Integrated program loudness in LUFS, when the summary reported one.
+    pub integrated_lufs: Option<f64>,
+    /// Loudness range in LU, when the summary reported one.
+    pub loudness_range_lu: Option<f64>,
+    /// True peak in dBTP, when the FFmpeg build measured one.
+    pub true_peak_dbtp: Option<f64>,
+    /// Sample peak in dBFS reported by `astats`.
+    pub sample_peak_db: Option<f64>,
+}
+
+impl LoudnessMeasurement {
+    /// Returns the peak level to report, in dB relative to full scale.
+    ///
+    /// True peak is preferred because it accounts for inter-sample overs; the
+    /// `astats` sample peak stands in on builds without true-peak support. Only
+    /// when neither was measured does the value fall back to the silence floor,
+    /// which is what "nothing was measured" has always looked like to callers.
+    pub fn peak_db(&self) -> f64 {
+        self.true_peak_dbtp
+            .or(self.sample_peak_db)
+            .filter(|value| value.is_finite())
+            .unwrap_or(SILENCE_FLOOR_DB)
+            .max(SILENCE_FLOOR_DB)
+    }
+}
+
+/// Turns one `ebur128,astats` filter log into a [`LoudnessMeasurement`].
 ///
-/// Returns `(loudness_profile, peak_db)`.
-fn parse_loudness_and_peak(stderr: &str) -> (Vec<f64>, f64) {
-    let momentary_values = parse_momentary_loudness_values(stderr);
-    let peak_db = momentary_values
-        .iter()
-        .copied()
-        .fold(SILENCE_FLOOR_DB, f64::max);
+/// Pure over the captured stderr so it is testable without invoking FFmpeg.
+pub(crate) fn measure_loudness(stderr: &str) -> LoudnessMeasurement {
+    let momentary_lufs = parse_momentary_loudness(stderr);
     let loudness_profile =
-        build_per_second_profile(&momentary_values, LOUDNESS_SAMPLES_PER_SECOND as usize);
-    (loudness_profile, peak_db)
-}
+        per_second_loudness_profile(&momentary_lufs, LOUDNESS_SAMPLES_PER_SECOND as usize);
+    let summary = parse_loudness_summary(stderr);
+    let astats = parse_astats_overall(stderr);
 
-/// Parses all valid momentary loudness samples from `ebur128` stderr output.
-fn parse_momentary_loudness_values(stderr: &str) -> Vec<f64> {
-    stderr
-        .lines()
-        .filter_map(extract_momentary_loudness)
-        .collect()
-}
-
-/// Builds a per-second loudness profile from higher-resolution samples.
-fn build_per_second_profile(samples: &[f64], samples_per_second: usize) -> Vec<f64> {
-    if samples.is_empty() || samples_per_second == 0 {
-        return Vec::new();
-    }
-
-    samples
-        .chunks(samples_per_second)
-        .map(|chunk| chunk.iter().sum::<f64>() / chunk.len() as f64)
-        .collect()
-}
-
-/// Extracts a momentary loudness value (M:) from an ebur128 filter line.
-///
-/// Expected format: `[Parsed_ebur128_0 @ ...] M: -23.4 S: ...`
-/// or just lines containing `M:` followed by a dB value.
-fn extract_momentary_loudness(line: &str) -> Option<f64> {
-    // Look for "M:" followed by a numeric value
-    let marker = "M:";
-    let pos = line.find(marker)?;
-    let rest = line[pos + marker.len()..].trim();
-    let num_str: String = rest
-        .chars()
-        .take_while(|c| *c == '-' || *c == '.' || c.is_ascii_digit())
-        .collect();
-    if num_str.is_empty() {
-        return None;
-    }
-    let val = num_str.parse::<f64>().ok()?;
-    // Filter out obviously invalid values (ebur128 uses -70 as the floor)
-    if val.is_finite() && val > -120.0 {
-        Some(val)
-    } else {
-        None
+    LoudnessMeasurement {
+        loudness_profile,
+        momentary_lufs,
+        integrated_lufs: summary.integrated_lufs,
+        loudness_range_lu: summary.loudness_range_lu,
+        true_peak_dbtp: summary.true_peak_dbtp,
+        sample_peak_db: astats.sample_peak_db,
     }
 }
 
@@ -837,62 +845,115 @@ size=N/A time=00:00:20.00 bitrate=N/A speed=50.0x
     // Loudness Parsing Tests
     // -------------------------------------------------------------------------
 
-    #[test]
-    fn should_parse_loudness_from_ebur128_output() {
-        // Simulate ebur128 output with momentary values
-        let mut lines = Vec::new();
-        // Add 20 momentary values (simulating 2 seconds at 10/sec)
-        for i in 0..20 {
-            let db = -20.0 + (i as f64) * 0.5;
-            lines.push(format!(
-                "[Parsed_ebur128_0 @ 0x1234] M: {:.1} S: -22.0 I: -24.0 LUFS",
-                db
-            ));
-        }
-        let stderr = lines.join("\n");
+    /// One second of `ebur128` frame lines at a steady level, as the shared
+    /// chain prints them (`peak=true:framelog=info`).
+    fn ebur128_frames(level_lufs: f64, count: usize) -> String {
+        (0..count)
+            .map(|index| {
+                format!(
+                    "[Parsed_ebur128_0 @ 0x1] t: {:.6}   TARGET:-23 LUFS    M: {:.1} \
+                     S: {:.1}     I: {:.1} LUFS       LRA:   0.0 LU  \
+                     FTPK: -6.0 -6.0 dBFS  TPK: -6.0 -6.0 dBFS",
+                    index as f64 / 10.0,
+                    level_lufs,
+                    level_lufs,
+                    level_lufs,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
-        let (loudness_profile, peak_db) = parse_loudness_and_peak(&stderr);
+    /// The summary block ends every measurement pass.
+    fn ebur128_summary(integrated_lufs: f64, true_peak_dbtp: f64) -> String {
+        format!(
+            "[Parsed_ebur128_0 @ 0x1] Summary:\n\n  Integrated loudness:\n    \
+             I:  {integrated_lufs:.1} LUFS\n    Threshold: -30.0 LUFS\n\n  \
+             Loudness range:\n    LRA:  0.0 LU\n\n  True peak:\n    \
+             Peak:  {true_peak_dbtp:.1} dBFS"
+        )
+    }
+
+    #[test]
+    fn should_measure_loudness_and_peak_from_a_full_filter_log() {
+        let log = format!(
+            "{}\n{}\n[Parsed_astats_1 @ 0x1] Peak level dB: -6.020600",
+            ebur128_frames(-6.7, 20),
+            ebur128_summary(-6.7, -6.0),
+        );
+
+        let measurement = measure_loudness(&log);
 
         assert_eq!(
-            loudness_profile.len(),
+            measurement.loudness_profile.len(),
             2,
-            "20 samples at 10/sec = 2 seconds"
+            "20 readings at 10/sec is 2 seconds"
         );
-        // Peak should be the highest momentary value: -20.0 + 19 * 0.5 = -10.5
-        assert!(
-            (peak_db - (-10.5)).abs() < 0.01,
-            "Expected peak ~-10.5, got {}",
-            peak_db
-        );
-        // First second average: values -20.0 to -15.5 (10 values)
-        // Average = (-20.0 + -19.5 + -19.0 + ... + -15.5) / 10
-        let first_avg = (-20.0 + -15.5) / 2.0; // arithmetic mean of arithmetic sequence
-        assert!(
-            (loudness_profile[0] - first_avg).abs() < 0.1,
-            "Expected first second avg ~{}, got {}",
-            first_avg,
-            loudness_profile[0]
-        );
+        assert!((measurement.loudness_profile[0] - (-6.7)).abs() < 0.05);
+        assert_eq!(measurement.integrated_lufs, Some(-6.7));
+        assert_eq!(measurement.true_peak_dbtp, Some(-6.0));
+        assert_eq!(measurement.sample_peak_db, Some(-6.0206));
+        assert!((measurement.peak_db() - (-6.0)).abs() < 0.01);
+    }
+
+    /// Feature: audio profile peak reporting
+    /// Scenario: the FFmpeg build measures no true peak
+    ///   Given a filter log whose summary omits the true-peak section
+    ///   When the loudness pass is parsed
+    ///   Then the reported peak is the `astats` sample peak
+    #[test]
+    fn should_fall_back_to_the_sample_peak_when_true_peak_is_unavailable() {
+        let log = "\
+[Parsed_ebur128_0 @ 0x1] Summary:
+
+  Integrated loudness:
+    I:  -16.4 LUFS
+
+  Loudness range:
+    LRA:  5.0 LU
+[Parsed_astats_1 @ 0x1] Peak level dB: -1.900000";
+
+        let measurement = measure_loudness(log);
+
+        assert_eq!(measurement.true_peak_dbtp, None);
+        assert!((measurement.peak_db() - (-1.9)).abs() < 0.01);
     }
 
     #[test]
-    fn should_return_empty_loudness_for_no_data() {
-        let (loudness_profile, peak_db) = parse_loudness_and_peak("no relevant data here");
-        assert!(loudness_profile.is_empty());
-        assert_eq!(peak_db, SILENCE_FLOOR_DB);
+    fn should_report_the_silence_floor_when_nothing_could_be_measured() {
+        let measurement = measure_loudness("no relevant data here");
+
+        assert!(measurement.loudness_profile.is_empty());
+        assert!(measurement.momentary_lufs.is_empty());
+        assert_eq!(measurement.integrated_lufs, None);
+        assert_eq!(measurement.peak_db(), SILENCE_FLOOR_DB);
     }
 
+    /// Feature: audio profile loudness measurement
+    /// Scenario: a real talk is profiled
+    ///   Given a filter log carrying readings around -16 LUFS
+    ///   When the loudness pass is parsed
+    ///   Then the profile is populated instead of collapsing to the floor
+    ///
+    /// This is the regression: `ebur128=metadata=1` demoted its per-frame log
+    /// to VERBOSE, so a 14-minute talk reported `peakDb: -90` with zero
+    /// loudness samples while `verify --file` measured -16.6 LUFS / -1.9 dBTP.
     #[test]
-    fn should_ignore_invalid_momentary_values() {
-        let stderr = r#"
-[Parsed_ebur128_0 @ 0x1234] M: -inf S: -22.0 I: -24.0 LUFS
-[Parsed_ebur128_0 @ 0x1234] M: abc S: -22.0 I: -24.0 LUFS
-[Parsed_ebur128_0 @ 0x1234] M: -18.5 S: -22.0 I: -24.0 LUFS
-"#;
-        let (loudness_profile, peak_db) = parse_loudness_and_peak(stderr);
-        // Only one valid value
-        assert_eq!(loudness_profile.len(), 1);
-        assert!((peak_db - (-18.5)).abs() < 0.01);
+    fn should_not_collapse_to_the_silence_floor_for_audible_content() {
+        let log = format!(
+            "{}\n{}\n[Parsed_astats_1 @ 0x1] Peak level dB: -1.900000",
+            ebur128_frames(-16.4, 30),
+            ebur128_summary(-16.4, -1.9),
+        );
+
+        let measurement = measure_loudness(&log);
+
+        assert!(
+            !measurement.loudness_profile.is_empty(),
+            "loudnessSampleCount must not be zero for audible content"
+        );
+        assert!(measurement.peak_db() > SILENCE_FLOOR_DB + 1.0);
+        assert!((measurement.integrated_lufs.unwrap_or_default() - (-16.4)).abs() < 0.05);
     }
 
     // -------------------------------------------------------------------------
@@ -1031,17 +1092,225 @@ lavfi.aspectralstats.1.centroid=2800.0
         assert!((regions[0].end_sec - 4.0).abs() < 0.001);
     }
 
+    /// Feature: audio profile measurement versioning
+    /// Scenario: a profile is produced by the current measurement
+    ///   Given a freshly constructed profile
+    ///   When its measurement version is read
+    ///   Then it carries the current version, so the loader will not drop it
     #[test]
-    fn should_extract_momentary_loudness_value() {
-        let line = "[Parsed_ebur128_0 @ 0x1234] M: -18.5 S: -22.0 I: -24.0 LUFS";
-        let val = extract_momentary_loudness(line);
-        assert_eq!(val, Some(-18.5));
+    fn should_stamp_a_freshly_measured_profile_with_the_current_version() {
+        let profile = AudioProfile::silent(10.0);
+
+        assert_eq!(profile.measurement_version, AUDIO_MEASUREMENT_VERSION);
     }
 
-    #[test]
-    fn should_reject_invalid_momentary_loudness() {
-        assert_eq!(extract_momentary_loudness("no M: here"), None);
-        assert_eq!(extract_momentary_loudness("M:"), None);
-        assert_eq!(extract_momentary_loudness("M: abc"), None);
+    // -------------------------------------------------------------------------
+    // FFmpeg-backed measurement
+    //
+    // These drive a real FFmpeg over a signal whose level is known exactly, so
+    // what they assert is the number a user would see rather than the number a
+    // hand-written log says. They are `#[ignore]`d because the binary may be
+    // missing, and every one starts at `require_or_skip_ffmpeg`, which fails
+    // instead of skipping when `REQUIRE_FFMPEG_TESTS` says the run was supposed
+    // to have one.
+    // -------------------------------------------------------------------------
+
+    use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+    /// Peak level of the synthesized tone, in dBFS.
+    const FIXTURE_PEAK_DBFS: f64 = -6.0;
+
+    /// Expected integrated loudness of the stereo fixture, in LUFS.
+    ///
+    /// A sine of amplitude `A` has mean square `A^2 / 2`, so a -6 dBFS tone
+    /// carries `0.5012^2 / 2 = 0.1256` per channel. R128 sums the two
+    /// unity-weighted channels and applies its -0.691 LU offset:
+    /// `-0.691 + 10 * log10(2 * 0.1256) = -6.7 LUFS`. K-weighting sits within a
+    /// few tenths of a dB of unity at 440 Hz, which the tolerance absorbs.
+    const FIXTURE_STEREO_LUFS: f64 = -6.7;
+
+    /// Cost of folding a correlated stereo pair to one channel, in LU.
+    ///
+    /// R128 sums channel powers before taking the logarithm, so the downmix
+    /// measures exactly `10 * log10(2)` lower even though it sounds identical.
+    /// "The same LUFS" is the wrong expectation for a mono downmix.
+    const MONO_DOWNMIX_PENALTY_LU: f64 = 3.01;
+
+    /// Length of the synthesized fixtures, in seconds.
+    const FIXTURE_DURATION_SEC: f64 = 4.0;
+
+    /// Tolerance on a measured peak, in dB.
+    const PEAK_TOLERANCE_DB: f64 = 0.5;
+
+    /// Tolerance on a measured integrated loudness, in LU.
+    const LOUDNESS_TOLERANCE_LU: f64 = 1.0;
+
+    /// Tolerance on the stereo-to-mono loudness relationship, in LU.
+    ///
+    /// Tighter than [`LOUDNESS_TOLERANCE_LU`] because both sides come from the
+    /// same measurement of the same signal, so only the downmix itself can move
+    /// the difference.
+    const DOWNMIX_TOLERANCE_LU: f64 = 0.5;
+
+    /// Amplitude of the synthesized tone, as a linear sample value.
+    ///
+    /// `10^(-6/20)`, spelled out so the fixture expression carries the exact
+    /// number rather than depending on a filter's rounding.
+    const FIXTURE_AMPLITUDE: &str = "0.501187";
+
+    /// Writes a 440 Hz stereo sine at -6 dBFS, 48 kHz, to `path`.
+    ///
+    /// The tone is written by `aevalsrc` rather than the `sine` source because
+    /// `sine` has no amplitude option and emits at a fixed level well below
+    /// full scale (-21 dBFS on the bundled FFmpeg 9 build), which would make
+    /// the expected loudness a property of the FFmpeg build instead of the
+    /// signal. PCM in a WAV container for the same reason: a lossy encoder
+    /// would move both the peak and the loudness unpredictably.
+    ///
+    /// Both channels carry the identical expression, so the pair is fully
+    /// correlated and its expected loudness is computable.
+    fn write_stereo_sine_fixture(ffmpeg: &Path, path: &Path) -> bool {
+        let channel = format!("{FIXTURE_AMPLITUDE}*sin(2*PI*440*t)");
+        let source =
+            format!("aevalsrc=exprs={channel}|{channel}:s=48000:d={FIXTURE_DURATION_SEC}:c=stereo");
+
+        run_ffmpeg(
+            ffmpeg,
+            &["-f", "lavfi", "-i", source.as_str(), "-c:a", "pcm_s16le"],
+            path,
+        )
+    }
+
+    /// Folds `source` to a single channel, leaving the level untouched.
+    fn write_mono_downmix(ffmpeg: &Path, source: &Path, path: &Path) -> bool {
+        let Some(source) = source.to_str() else {
+            return false;
+        };
+
+        run_ffmpeg(
+            ffmpeg,
+            &["-i", source, "-ac", "1", "-c:a", "pcm_s16le"],
+            path,
+        )
+    }
+
+    /// Runs FFmpeg with the shared quiet flags and reports whether `path` was written.
+    fn run_ffmpeg(ffmpeg: &Path, args: &[&str], path: &Path) -> bool {
+        let mut command = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut command);
+        command
+            .args(["-y", "-hide_banner", "-loglevel", "error"])
+            .args(args)
+            .arg(path);
+
+        matches!(command.status(), Ok(status) if status.success()) && path.exists()
+    }
+
+    /// Feature: asset audio loudness measurement
+    /// Scenario: a tone of known level is profiled
+    ///   Given a 440 Hz sine at -6 dBFS, stereo, 48 kHz
+    ///   When the audio profiler measures it
+    ///   Then the peak, the integrated loudness and the sample count all match
+    ///   the synthesized signal
+    ///
+    /// This is the regression the shared measurement fixed: the old pass ran
+    /// `ebur128=metadata=1`, which demotes the per-frame log to VERBOSE while
+    /// the pass reads it at `-loglevel info`, so audible content came back as
+    /// `peak_db: -90` with an empty loudness profile.
+    #[tokio::test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    async fn should_measure_a_synthesized_tone_within_tolerance() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fixture = dir.path().join("sine_stereo.wav");
+        if !write_stereo_sine_fixture(&ffmpeg, &fixture) {
+            skip_without_ffmpeg("ffmpeg could not synthesize the stereo sine fixture");
+            return;
+        }
+
+        let profile = AudioProfiler::new(ffmpeg)
+            .analyze(&fixture, FIXTURE_DURATION_SEC)
+            .await
+            .expect("the profiler must measure a decodable tone");
+
+        assert!(
+            !profile.loudness_profile.is_empty(),
+            "loudnessSampleCount must be above zero for audible content"
+        );
+        assert_eq!(profile.measurement_version, AUDIO_MEASUREMENT_VERSION);
+        assert!(
+            (profile.peak_db - FIXTURE_PEAK_DBFS).abs() <= PEAK_TOLERANCE_DB,
+            "peak {} dB is further than {PEAK_TOLERANCE_DB} dB from the synthesized \
+             {FIXTURE_PEAK_DBFS} dBFS",
+            profile.peak_db
+        );
+
+        let integrated = profile
+            .integrated_lufs
+            .expect("the summary block must report integrated loudness");
+        assert!(
+            (integrated - FIXTURE_STEREO_LUFS).abs() <= LOUDNESS_TOLERANCE_LU,
+            "integrated loudness {integrated} LUFS is further than \
+             {LOUDNESS_TOLERANCE_LU} LU from the expected {FIXTURE_STEREO_LUFS} LUFS"
+        );
+    }
+
+    /// Feature: asset audio loudness measurement
+    /// Scenario: the same tone is measured as stereo and as its mono downmix
+    ///   Given a stereo fixture and a one-channel fold of it
+    ///   When both are profiled
+    ///   Then their peaks agree and their loudness differs only by the R128
+    ///   channel-summation term
+    ///
+    /// The relationship is asserted rather than equality because equality is
+    /// what a broken pass would satisfy: a measurement that reads nothing
+    /// reports the silence floor for both files.
+    #[tokio::test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    async fn should_track_the_signal_rather_than_the_channel_count() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let stereo_path = dir.path().join("sine_stereo.wav");
+        let mono_path = dir.path().join("sine_mono.wav");
+        if !write_stereo_sine_fixture(&ffmpeg, &stereo_path)
+            || !write_mono_downmix(&ffmpeg, &stereo_path, &mono_path)
+        {
+            skip_without_ffmpeg("ffmpeg could not synthesize the sine fixtures");
+            return;
+        }
+
+        let profiler = AudioProfiler::new(ffmpeg);
+        let stereo = profiler
+            .analyze(&stereo_path, FIXTURE_DURATION_SEC)
+            .await
+            .expect("the profiler must measure the stereo fixture");
+        let mono = profiler
+            .analyze(&mono_path, FIXTURE_DURATION_SEC)
+            .await
+            .expect("the profiler must measure the mono downmix");
+
+        assert!(
+            (stereo.peak_db - mono.peak_db).abs() <= PEAK_TOLERANCE_DB,
+            "peak is a per-sample quantity and must survive the downmix: stereo {} dB \
+             against mono {} dB",
+            stereo.peak_db,
+            mono.peak_db
+        );
+
+        let stereo_lufs = stereo
+            .integrated_lufs
+            .expect("the stereo summary must report integrated loudness");
+        let mono_lufs = mono
+            .integrated_lufs
+            .expect("the mono summary must report integrated loudness");
+        assert!(
+            ((stereo_lufs - mono_lufs) - MONO_DOWNMIX_PENALTY_LU).abs() <= DOWNMIX_TOLERANCE_LU,
+            "the downmix must sit {MONO_DOWNMIX_PENALTY_LU} LU below the stereo source: \
+             stereo {stereo_lufs} LUFS against mono {mono_lufs} LUFS"
+        );
     }
 }
