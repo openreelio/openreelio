@@ -847,7 +847,7 @@ openreelio-cli caption add    --path ./demo --text "Hello" --start 0.5 --end 3.0
 openreelio-cli caption update --path ./demo --id <CAPTION_ID> --text "Updated" [--style-pack <PACK_ID>]
 openreelio-cli caption list   --path ./demo
 openreelio-cli caption remove --path ./demo --id <CAPTION_ID>
-openreelio-cli caption import --path ./demo --file subs.srt [--format srt|vtt|transcript-json]
+openreelio-cli caption import --path ./demo --file subs.srt [--format srt|vtt|transcript-json] [--no-snap]
 openreelio-cli caption export --path ./demo --format srt --output subs.srt
 
 openreelio-cli text add       --path ./demo --text "Title" --start 0 [--duration 3] [--preset <PRESET_ID>]
@@ -989,9 +989,26 @@ caption track.
 ```bash
 openreelio-cli transcription status
 openreelio-cli transcription install --model large-v3-turbo-q5_0
-openreelio-cli transcription generate --path ./demo --asset <ASSET_ID> --import
-openreelio-cli transcription generate-sequence --path ./demo --import
+openreelio-cli transcription generate --path ./demo --asset <ASSET_ID> --import [--start 60 --end 150]
+openreelio-cli transcription generate-sequence --path ./demo --import [--start 60 --end 150]
 ```
+
+`generate-sequence` mixes down every clip that reaches the render with sound,
+including the embedded audio of an A/V file sitting on a **video** track — the
+shape a plain `timeline insert` produces. `render graph` reports the same audio
+layers the mixdown and the export will use, so an empty `audioLayers` means the
+render really is silent.
+
+`--start`/`--end` bound the work: asset seconds for `generate`, timeline seconds
+for `generate-sequence`. Only that window is decoded, so transcribing 90 seconds
+of a 14-minute talk costs 90 seconds. Reported segment times stay absolute, so a
+ranged run imports exactly like a full one.
+
+Imported cues are snapped to the sequence frame grid — nearest frame, always at
+least one frame long, ordering and non-overlap preserved. Without it a
+transcriber's millisecond times land between frames and every composite and
+render warns about each cue. The response reports `snappedCues`; pass `--no-snap`
+to keep the raw times.
 
 **Caption cue boundaries come from DTW-aligned word timings.** Instead of
 Whisper's cheap heuristic token timestamps, whisper.cpp aligns tokens by dynamic

@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
-    timeline::{Clip, ClipPlace, ClipRange},
-    ClipId, CoreError, CoreResult, SequenceId, TimeSec, TrackId,
+    timeline::{Clip, ClipPlace, ClipRange, TimelineClock},
+    ClipId, CoreError, CoreResult, Ratio, SequenceId, TimeSec, TrackId,
 };
 
 const CAPTION_ASSET_ID: &str = "caption";
@@ -24,6 +24,69 @@ const MIN_CAPTION_DURATION_SEC: TimeSec = 0.3;
 
 fn is_valid_time_sec(value: TimeSec) -> bool {
     value.is_finite() && value >= 0.0
+}
+
+/// Moves cue boundaries onto the sequence's frame grid, in place.
+///
+/// A transcriber reports times to the millisecond, and nothing in the caption
+/// path rounded them, so every imported cue landed between two frames. Each one
+/// then drew a `Clip '…' is not aligned to sequence frame boundaries` warning
+/// from every composite and render — forty-one of them on a single talk, enough
+/// to bury the warnings that mattered.
+///
+/// Each boundary goes to the nearest frame, and then three invariants are
+/// restored in one pass over the cues in time order:
+///
+/// * every cue lasts at least one frame, so rounding cannot collapse one;
+/// * no cue ends after the next one starts (touching is allowed — it is exactly
+///   what the overlap clamp in `enforce_readability` already produces);
+/// * ordering survives. Two cues less than a frame apart both want the frame
+///   the earlier one had to keep whole; the later one is pushed off it rather
+///   than dropped, which moves a cue's start by under a frame but never loses
+///   a line.
+///
+/// `cues` need not arrive sorted — a subtitle file can list them in any order,
+/// and only `ImportGeneratedCaptionsCommand` sorts beforehand. Each cue is
+/// written back to the slot it came in, so the caller's order is untouched.
+///
+/// Returns how many cues moved.
+pub fn snap_cue_times_to_frame_grid(cues: &mut [(TimeSec, TimeSec)], fps: &Ratio) -> usize {
+    let clock = TimelineClock::new(fps.clone());
+    let mut moved = 0usize;
+
+    let mut order = (0..cues.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        cues[*left]
+            .0
+            .total_cmp(&cues[*right].0)
+            .then_with(|| cues[*left].1.total_cmp(&cues[*right].1))
+    });
+
+    // The first frame the next cue may start on. Advancing it as cues are placed
+    // is what keeps the pass single and the result non-overlapping.
+    let mut earliest_start_frame = 0i64;
+
+    for index in order {
+        let (start_sec, end_sec) = cues[index];
+
+        let start_frame = clock
+            .seconds_to_nearest_frame(start_sec)
+            .max(earliest_start_frame);
+        let end_frame = clock.seconds_to_nearest_frame(end_sec).max(start_frame + 1);
+
+        let snapped = (
+            clock.frame_to_seconds(start_frame),
+            clock.frame_to_seconds(end_frame),
+        );
+        earliest_start_frame = end_frame;
+
+        if snapped.0 != start_sec || snapped.1 != end_sec {
+            moved += 1;
+        }
+        cues[index] = snapped;
+    }
+
+    moved
 }
 
 fn normalize_caption_text(text: String) -> Option<String> {
@@ -215,10 +278,21 @@ pub struct ImportGeneratedCaptionsCommand {
     pub position: Option<serde_json::Value>,
     #[serde(default)]
     pub replace_existing: bool,
+    /// Whether cue boundaries are moved onto the sequence's frame grid.
+    ///
+    /// On by default: a transcriber's millisecond times otherwise land between
+    /// frames and make every composite and render warn about each cue. Turn it
+    /// off to keep the raw times.
+    #[serde(default = "default_snap_to_frames")]
+    pub snap_to_frames: bool,
     #[serde(skip)]
     created_caption_ids: Vec<ClipId>,
     #[serde(skip)]
     removed_clips: Vec<(usize, Clip)>,
+}
+
+fn default_snap_to_frames() -> bool {
+    true
 }
 
 impl ImportGeneratedCaptionsCommand {
@@ -230,6 +304,7 @@ impl ImportGeneratedCaptionsCommand {
             style: None,
             position: None,
             replace_existing: false,
+            snap_to_frames: true,
             created_caption_ids: Vec::new(),
             removed_clips: Vec::new(),
         }
@@ -248,6 +323,38 @@ impl ImportGeneratedCaptionsCommand {
     pub fn replace_existing(mut self, replace_existing: bool) -> Self {
         self.replace_existing = replace_existing;
         self
+    }
+
+    /// Keeps the cues' raw times instead of snapping them to the frame grid.
+    pub fn snap_to_frames(mut self, snap_to_frames: bool) -> Self {
+        self.snap_to_frames = snap_to_frames;
+        self
+    }
+
+    /// Resolves the cues this import will place, without touching the project.
+    ///
+    /// Validation, ordering, the readability rules and — when `snap_to_frames`
+    /// — frame-grid snapping, in that order. `execute` runs exactly this, so a
+    /// caller can plan twice, with and without snapping, to report how many cues
+    /// the snap moved.
+    pub fn plan_segments(
+        &self,
+        fps: &Ratio,
+        snap_to_frames: bool,
+    ) -> CoreResult<Vec<GeneratedCaptionSegment>> {
+        let mut segments = self.normalized_segments()?;
+        if snap_to_frames {
+            let mut times = segments
+                .iter()
+                .map(|segment| (segment.start_sec, segment.end_sec))
+                .collect::<Vec<_>>();
+            snap_cue_times_to_frame_grid(&mut times, fps);
+            for (segment, (start_sec, end_sec)) in segments.iter_mut().zip(times) {
+                segment.start_sec = start_sec;
+                segment.end_sec = end_sec;
+            }
+        }
+        Ok(segments)
     }
 
     fn normalized_segments(&self) -> CoreResult<Vec<GeneratedCaptionSegment>> {
@@ -360,7 +467,16 @@ impl ImportGeneratedCaptionsCommand {
 
 impl Command for ImportGeneratedCaptionsCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
-        let segments = self.normalized_segments()?;
+        // The cue grid belongs to the sequence, so its rate is read before the
+        // mutable borrow the placement below needs.
+        let fps = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?
+            .format
+            .fps
+            .clone();
+        let segments = self.plan_segments(&fps, self.snap_to_frames)?;
         self.created_caption_ids.clear();
         self.removed_clips.clear();
 
@@ -757,8 +873,13 @@ mod tests {
     use crate::core::timeline::{Sequence, SequenceFormat, Track};
 
     fn state_with_caption_track() -> (ProjectState, String, String) {
+        state_with_caption_track_at(SequenceFormat::youtube_1080())
+    }
+
+    /// A project holding one empty caption track in a sequence of this format.
+    fn state_with_caption_track_at(format: SequenceFormat) -> (ProjectState, String, String) {
         let mut state = ProjectState::new_empty("Test");
-        let mut sequence = Sequence::new("Sequence 1", SequenceFormat::youtube_1080());
+        let mut sequence = Sequence::new("Sequence 1", format);
         let track = Track::new_caption("Captions");
         let seq_id = sequence.id.clone();
         let track_id = track.id.clone();
@@ -766,6 +887,159 @@ mod tests {
         state.active_sequence_id = Some(seq_id.clone());
         state.sequences.insert(seq_id.clone(), sequence);
         (state, seq_id, track_id)
+    }
+
+    /// 1920x1080 at exactly 24 fps, where one frame is 1/24 s.
+    fn format_24fps() -> SequenceFormat {
+        SequenceFormat::new(1920, 1080, 24, 1, 48_000)
+    }
+
+    /// Whether a time sits on the frame grid, to within a frame's rounding.
+    fn is_on_frame_grid(seconds: TimeSec, fps: &Ratio) -> bool {
+        let clock = TimelineClock::new(fps.clone());
+        let frame = clock.seconds_to_nearest_frame(seconds);
+        (clock.frame_to_seconds(frame) - seconds).abs() < 1e-9
+    }
+
+    #[test]
+    fn snap_cue_times_moves_every_boundary_onto_the_frame_grid() {
+        let fps = Ratio::new(24, 1);
+        let mut cues = vec![(0.123, 1.987), (2.004, 3.5), (4.0, 4.9)];
+
+        let moved = snap_cue_times_to_frame_grid(&mut cues, &fps);
+
+        assert_eq!(moved, 3);
+        for (start_sec, end_sec) in &cues {
+            assert!(is_on_frame_grid(*start_sec, &fps), "start {start_sec}");
+            assert!(is_on_frame_grid(*end_sec, &fps), "end {end_sec}");
+            assert!(end_sec > start_sec);
+        }
+    }
+
+    #[test]
+    fn snap_cue_times_reports_nothing_moved_when_cues_are_already_aligned() {
+        let fps = Ratio::new(24, 1);
+        let mut cues = vec![(0.0, 1.0), (1.0, 2.0)];
+
+        assert_eq!(snap_cue_times_to_frame_grid(&mut cues, &fps), 0);
+        assert_eq!(cues, vec![(0.0, 1.0), (1.0, 2.0)]);
+    }
+
+    #[test]
+    fn snap_cue_times_keeps_a_cue_at_least_one_frame_long() {
+        // Both boundaries round to frame 24; a cue that collapsed would take a
+        // caption clip's duration to zero.
+        let fps = Ratio::new(24, 1);
+        let mut cues = vec![(1.0, 1.001)];
+
+        snap_cue_times_to_frame_grid(&mut cues, &fps);
+
+        assert_eq!(cues[0].0, 1.0);
+        assert!((cues[0].1 - 25.0 / 24.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn snap_cue_times_keeps_neighbours_ordered_and_non_overlapping() {
+        // Two cues barely apart round onto the same pair of frames. The second
+        // is pushed off the frame the first had to keep, rather than dropped.
+        let fps = Ratio::new(24, 1);
+        let mut cues = vec![(1.0, 1.004), (1.008, 1.02)];
+
+        snap_cue_times_to_frame_grid(&mut cues, &fps);
+
+        assert!(cues[0].1 > cues[0].0);
+        assert!(cues[1].1 > cues[1].0);
+        assert!(cues[1].0 >= cues[0].1, "{cues:?}");
+        for (start_sec, end_sec) in &cues {
+            assert!(is_on_frame_grid(*start_sec, &fps));
+            assert!(is_on_frame_grid(*end_sec, &fps));
+        }
+    }
+
+    #[test]
+    fn snap_cue_times_handles_cues_that_arrive_out_of_order() {
+        // A subtitle file can list cues in any order, and `caption import`
+        // hands them over as parsed. Snapping must not read the file's order as
+        // time order and push a later-listed early cue past a whole cue.
+        let fps = Ratio::new(24, 1);
+        let mut cues = vec![(4.01, 5.01), (0.01, 1.01)];
+
+        snap_cue_times_to_frame_grid(&mut cues, &fps);
+
+        // Each cue stays in the slot it came in, snapped to its own frames.
+        assert!(is_on_frame_grid(cues[0].0, &fps));
+        assert!((cues[0].0 - 96.0 / 24.0).abs() < 1e-9, "{cues:?}");
+        assert!((cues[1].0 - 0.0).abs() < 1e-9, "{cues:?}");
+        assert!(cues[1].1 < cues[0].0, "{cues:?}");
+    }
+
+    #[test]
+    fn import_generated_captions_places_clips_on_the_frame_grid() {
+        let (mut state, seq_id, track_id) = state_with_caption_track_at(format_24fps());
+        let fps = Ratio::new(24, 1);
+        let segments = vec![
+            GeneratedCaptionSegment::new(0.137, 2.418, "First"),
+            GeneratedCaptionSegment::new(2.511, 5.049, "Second"),
+        ];
+
+        let mut cmd = ImportGeneratedCaptionsCommand::new(&seq_id, &track_id, segments);
+        cmd.execute(&mut state).expect("import");
+
+        let track = state
+            .get_sequence(&seq_id)
+            .unwrap()
+            .get_track(&track_id)
+            .unwrap();
+        assert_eq!(track.clips.len(), 2);
+        for clip in &track.clips {
+            assert!(is_on_frame_grid(clip.place.timeline_in_sec, &fps));
+            assert!(is_on_frame_grid(clip.place.timeline_out_sec(), &fps));
+            assert!(clip.place.duration_sec >= 1.0 / 24.0 - 1e-9);
+        }
+        assert!(track.clips[1].place.timeline_in_sec >= track.clips[0].place.timeline_out_sec());
+    }
+
+    #[test]
+    fn import_generated_captions_keeps_raw_times_when_snapping_is_off() {
+        let (mut state, seq_id, track_id) = state_with_caption_track_at(format_24fps());
+        let segments = vec![GeneratedCaptionSegment::new(0.137, 2.418, "First")];
+
+        let mut cmd =
+            ImportGeneratedCaptionsCommand::new(&seq_id, &track_id, segments).snap_to_frames(false);
+        cmd.execute(&mut state).expect("import");
+
+        let track = state
+            .get_sequence(&seq_id)
+            .unwrap()
+            .get_track(&track_id)
+            .unwrap();
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.137);
+        assert!((track.clips[0].place.timeline_out_sec() - 2.418).abs() < 1e-9);
+    }
+
+    #[test]
+    fn plan_segments_reports_the_same_cues_the_import_places() {
+        let (mut state, seq_id, track_id) = state_with_caption_track_at(format_24fps());
+        let fps = Ratio::new(24, 1);
+        let segments = vec![
+            GeneratedCaptionSegment::new(0.137, 2.418, "First"),
+            GeneratedCaptionSegment::new(2.511, 5.049, "Second"),
+        ];
+
+        let mut cmd = ImportGeneratedCaptionsCommand::new(&seq_id, &track_id, segments);
+        let planned = cmd.plan_segments(&fps, true).expect("plan");
+        cmd.execute(&mut state).expect("import");
+
+        let track = state
+            .get_sequence(&seq_id)
+            .unwrap()
+            .get_track(&track_id)
+            .unwrap();
+        assert_eq!(planned.len(), track.clips.len());
+        for (segment, clip) in planned.iter().zip(&track.clips) {
+            assert_eq!(segment.start_sec, clip.place.timeline_in_sec);
+            assert!((segment.end_sec - clip.place.timeline_out_sec()).abs() < 1e-9);
+        }
     }
 
     #[test]

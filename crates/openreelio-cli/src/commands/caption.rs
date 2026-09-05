@@ -10,6 +10,7 @@ use openreelio_core::commands::*;
 use openreelio_core::style::{resolve_caption_layers, resolve_caption_pack, resolve_caption_style};
 use openreelio_core::timeline::{Clip, Sequence, TrackKind};
 use openreelio_core::ActiveProject;
+use openreelio_core::Ratio;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
@@ -196,6 +197,15 @@ pub enum CaptionAction {
         /// Ignored for SRT/VTT input, which is always timeline-relative.
         #[arg(long)]
         source_clip: Option<String>,
+
+        /// Keep the file's raw cue times instead of snapping them to the
+        /// sequence frame grid.
+        ///
+        /// Snapping is on by default: subtitle files carry millisecond times,
+        /// which land between frames and make every composite and render warn
+        /// about each cue.
+        #[arg(long)]
+        no_snap: bool,
     },
 
     /// Export captions to SRT or VTT format
@@ -814,6 +824,37 @@ pub(crate) fn map_segments_for_source_clip(
     Ok(info)
 }
 
+/// Counts how many cues an import will move onto the frame grid.
+///
+/// The command is planned twice — once with snapping, once without — and the
+/// results compared cue for cue. Planning is pure, so this costs nothing but
+/// arithmetic, and it reports the number the import will actually produce
+/// rather than a guess made before the readability rules run.
+pub(crate) fn count_snapped_cues(
+    command: &ImportGeneratedCaptionsCommand,
+    fps: &Ratio,
+    snap_to_frames: bool,
+) -> anyhow::Result<usize> {
+    if !snap_to_frames {
+        return Ok(0);
+    }
+
+    let raw = command
+        .plan_segments(fps, false)
+        .map_err(|error| anyhow::anyhow!("Caption import failed: {}", error))?;
+    let snapped = command
+        .plan_segments(fps, true)
+        .map_err(|error| anyhow::anyhow!("Caption import failed: {}", error))?;
+
+    Ok(raw
+        .iter()
+        .zip(snapped.iter())
+        .filter(|(raw, snapped)| {
+            raw.start_sec != snapped.start_sec || raw.end_sec != snapped.end_sec
+        })
+        .count())
+}
+
 pub(crate) fn ensure_caption_track(
     project: &mut ActiveProject,
     sequence_id: &str,
@@ -1286,7 +1327,9 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             position_json,
             sequence,
             source_clip,
+            no_snap,
         } => {
+            let snap_to_frames = !no_snap;
             let subtitle_path = std::fs::canonicalize(&file).map_err(|e| {
                 anyhow::anyhow!("Subtitle file '{}' not found: {}", file.display(), e)
             })?;
@@ -1315,7 +1358,9 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             // records nothing — there is nowhere to look.
             let mut edit = super::EditRecorder::begin(&project, &seq_id);
 
+            let sequence_fps = get_sequence(&project, &seq_id)?.format.fps.clone();
             let mut created_ids = Vec::new();
+            let mut snapped_cues = 0usize;
             if matches!(format, CaptionFileFormat::TranscriptJson) {
                 let mut segments: Vec<GeneratedCaptionSegment> = captions
                     .iter()
@@ -1349,7 +1394,18 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
 
                 let cmd = ImportGeneratedCaptionsCommand::new(&seq_id, &track_id, segments)
                     .with_style(style.clone())
-                    .with_position(position.clone());
+                    .with_position(position.clone())
+                    .snap_to_frames(snap_to_frames);
+                match count_snapped_cues(&cmd, &sequence_fps, snap_to_frames) {
+                    Ok(count) => snapped_cues = count,
+                    Err(error) => {
+                        if created_track {
+                            let cmd = RemoveTrackCommand::new(&seq_id, &track_id);
+                            let _ = project.executor.execute(Box::new(cmd), &mut project.state);
+                        }
+                        return Err(error);
+                    }
+                }
 
                 match edit.execute(&mut project, Box::new(cmd)) {
                     Ok(result) => {
@@ -1364,6 +1420,23 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                     }
                 }
             } else {
+                // SRT and VTT carry millisecond times, so the same grid applies
+                // here — but these cues are placed one command at a time, and
+                // `CreateCaption` deliberately honours the times it is given.
+                // Snapping therefore happens on the way in.
+                let mut captions = captions;
+                if snap_to_frames {
+                    let mut times = captions
+                        .iter()
+                        .map(|caption| (caption.start_sec, caption.end_sec))
+                        .collect::<Vec<_>>();
+                    snapped_cues = snap_cue_times_to_frame_grid(&mut times, &sequence_fps);
+                    for (caption, (start_sec, end_sec)) in captions.iter_mut().zip(times) {
+                        caption.start_sec = start_sec;
+                        caption.end_sec = end_sec;
+                    }
+                }
+
                 for caption in captions {
                     let cmd = CreateCaptionCommand::new(
                         &seq_id,
@@ -1426,6 +1499,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 "language": language,
                 "source": subtitle_path.display().to_string(),
                 "sequenceId": seq_id,
+                "snappedCues": snapped_cues,
                 "affectedRanges": affected_ranges,
             }))
         }

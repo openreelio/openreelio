@@ -25,12 +25,18 @@ Import and export:
 
 ```bash
 openreelio-cli caption import --path ./demo --file subs.srt \
-                              [--format srt|vtt|transcript-json] [--language en]
+                              [--format srt|vtt|transcript-json] [--language en] [--no-snap]
 openreelio-cli caption export --path ./demo --format srt --output subs.srt
 ```
 
 `--format` is auto-detected from the file extension on import when omitted.
 Export supports `srt` and `vtt`.
+
+Imported cue boundaries are snapped to the sequence frame grid: each start and
+end goes to the nearest frame, every cue keeps at least one frame, and ordering
+and non-overlap survive. Subtitle files carry millisecond times, which otherwise
+land between frames and make every composite and render warn about each cue. The
+response reports `snappedCues`; pass `--no-snap` to keep the file's raw times.
 
 ## Caption style packs
 
@@ -235,15 +241,29 @@ openreelio-cli transcription status
 openreelio-cli transcription install --model large-v3-turbo [--force]
 openreelio-cli transcription generate --path ./demo --asset <ASSET_ID> \
                                       [--language auto] [--model auto] [--import] \
-                                      [--track <TRACK_ID>] [--replace-existing] [--translate]
-openreelio-cli transcription generate-sequence --path ./demo [--sequence <SEQ_ID>] --import
+                                      [--track <TRACK_ID>] [--replace-existing] [--translate] \
+                                      [--start <SEC>] [--end <SEC>] [--no-snap]
+openreelio-cli transcription generate-sequence --path ./demo [--sequence <SEQ_ID>] --import \
+                                      [--start <SEC>] [--end <SEC>] [--no-snap]
 ```
 
 `transcription status` returns `{featureAvailable, ready, modelsDir,
 defaultModel, installedCount, models[…]}`. `--import` writes the result straight
 into a caption track; without it, use `--output <FILE>` and import later.
 `generate-sequence` transcribes the audible mix of a sequence instead of a single
-asset.
+asset — every clip that reaches the render with sound, including the embedded
+audio of an A/V file sitting on a *video* track, which is what a plain
+`timeline insert` produces. `render graph` lists the same audio layers, so an
+empty `audioLayers` there means the sequence really is silent.
+
+`--start`/`--end` bound the decode: asset seconds for `generate`, timeline
+seconds for `generate-sequence`. Nothing outside the window is opened, so
+transcribing 90 seconds of a 14-minute talk costs 90 seconds. Segment times come
+back absolute, so a ranged run imports exactly like a full one.
+
+Cues imported by `--import` are snapped to the sequence frame grid, the same way
+`caption import` does, and the response reports `snappedCues`. `--no-snap` keeps
+Whisper's raw millisecond times.
 
 **Caption cue boundaries come from DTW-aligned word timings.** Cue starts and
 ends — including on a cue short enough to need no splitting — are derived from
@@ -274,6 +294,12 @@ otherwise span a pause is released after at most 350 ms per syllable-ish unit,
 except the segment's last word, whose end anchors the tail cue; and starts are
 snapped to the nearest short-time-energy onset within 80 ms when that neither
 reorders nor starves a neighbour.
+
+Grid snapping runs after all of that, on import rather than on transcription: it
+moves each boundary by up to half a frame so the cue clips sit on the sequence's
+frame grid, which is what silences the per-cue alignment warnings. It does not
+make the timings more accurate — a boundary is only ever as good as the word
+timing under it.
 
 Accuracy is indicative, not contractual: on English and Korean test clips whose
 speech is preceded by silence, the leading cue edge landed on the hand-measured

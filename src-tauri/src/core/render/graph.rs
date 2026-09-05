@@ -4,10 +4,16 @@
 //! project state into deterministic audio and visual layer lists that a future
 //! GPU compositor, software reference renderer, or export renderer can share.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use specta::Type;
 
+use crate::core::render::{
+    audio_presence::clip_carries_audio,
+    export::{collect_audio_companion_keys, AssetAudioInfo},
+};
 use crate::core::{
     captions::{CAPTION_CUSTOM_DEFAULT_Y_PERCENT, CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT},
     commands::{get_text_data, is_text_clip},
@@ -406,7 +412,25 @@ impl TextRenderSpec {
 }
 
 /// Builds a renderer-agnostic graph for the sequence.
+///
+/// Audio presence is read from the assets' *stored* metadata. When the caller
+/// can afford one FFprobe per asset — the transcription mixdown, `render graph`
+/// — [`build_render_graph_with_audio_info`] measures it instead, which is the
+/// only way to see the audio of a file imported without a probe.
 pub fn build_render_graph(state: &ProjectState, sequence_id: &str) -> CoreResult<RenderGraph> {
+    build_render_graph_with_audio_info(state, sequence_id, &HashMap::new())
+}
+
+/// Builds the graph with measured audio-stream presence for the sequence's assets.
+///
+/// `audio_info` comes from [`crate::core::render::probe_sequence_audio_info`];
+/// assets missing from it fall back to their stored metadata, exactly as the
+/// export's argument builders do.
+pub fn build_render_graph_with_audio_info(
+    state: &ProjectState,
+    sequence_id: &str,
+    audio_info: &HashMap<String, AssetAudioInfo>,
+) -> CoreResult<RenderGraph> {
     let sequence = state
         .sequences
         .get(sequence_id)
@@ -415,9 +439,17 @@ pub fn build_render_graph(state: &ProjectState, sequence_id: &str) -> CoreResult
     let mut visual_layers = Vec::new();
     let mut audio_layers = Vec::new();
     let clock = TimelineClock::new(sequence.format.fps.clone());
+    let audio_companion_keys = collect_audio_companion_keys(sequence, &state.assets, audio_info);
 
     for (track_index, track) in sequence.tracks.iter().enumerate().rev() {
-        if track.muted || !track.visible {
+        // Picture and sound leave a track on different conditions: hiding a
+        // video track removes its picture but keeps its sound, which is what
+        // `Track::contributes_to_output` — the export's own filter — says.
+        // Deciding both here with one `!track.visible` would have the graph
+        // report silence for a render that still carries the audio.
+        let contributes_audio = track.contributes_to_output();
+        let contributes_picture = !track.muted && track.visible;
+        if !contributes_audio && !contributes_picture {
             continue;
         }
 
@@ -426,32 +458,57 @@ pub fn build_render_graph(state: &ProjectState, sequence_id: &str) -> CoreResult
                 continue;
             }
 
-            match track.kind {
-                TrackKind::Audio => {
-                    let timeline_in_frame =
-                        clock.seconds_to_nearest_frame(clip.place.timeline_in_sec);
-                    let timeline_out_frame =
-                        clock.seconds_to_nearest_frame(clip.place.timeline_out_sec());
-                    audio_layers.push(AudioRenderLayer {
-                        track_id: track.id.clone(),
-                        track_index,
-                        clip_id: clip.id.clone(),
-                        asset_id: clip.asset_id.clone(),
-                        timeline_in_sec: clip.place.timeline_in_sec,
-                        timeline_out_sec: clip.place.timeline_out_sec(),
-                        timeline_in_frame,
-                        timeline_out_frame,
-                        duration_frames: (timeline_out_frame - timeline_in_frame).max(0),
-                        source_in_sec: clip.range.source_in_sec,
-                        source_out_sec: clip.range.source_out_sec,
-                        source_in_frame: clock.seconds_to_nearest_frame(clip.range.source_in_sec),
-                        source_out_frame: clock.seconds_to_nearest_frame(clip.range.source_out_sec),
-                        speed: clip.speed,
-                        reverse: clip.reverse,
-                        audio: clip.audio.clone(),
-                        effects: clip.effects.clone(),
-                    });
+            // Every clip that reaches the output with sound gets an audio
+            // layer, whichever track it sits on. A single A/V file dropped on
+            // the video track — the shape every headless import produces — is
+            // the common case, and it used to produce no audio layer at all.
+            //
+            // A freeze frame holds one picture and plays nothing, and the
+            // audio-only argument builder skips it for that reason.
+            if contributes_audio && !clip.freeze_frame {
+                if let Some(asset) = state.assets.get(&clip.asset_id) {
+                    if clip_carries_audio(
+                        clip,
+                        track,
+                        asset,
+                        audio_info.get(&clip.asset_id),
+                        &audio_companion_keys,
+                    ) {
+                        let timeline_in_frame =
+                            clock.seconds_to_nearest_frame(clip.place.timeline_in_sec);
+                        let timeline_out_frame =
+                            clock.seconds_to_nearest_frame(clip.place.timeline_out_sec());
+                        audio_layers.push(AudioRenderLayer {
+                            track_id: track.id.clone(),
+                            track_index,
+                            clip_id: clip.id.clone(),
+                            asset_id: clip.asset_id.clone(),
+                            timeline_in_sec: clip.place.timeline_in_sec,
+                            timeline_out_sec: clip.place.timeline_out_sec(),
+                            timeline_in_frame,
+                            timeline_out_frame,
+                            duration_frames: (timeline_out_frame - timeline_in_frame).max(0),
+                            source_in_sec: clip.range.source_in_sec,
+                            source_out_sec: clip.range.source_out_sec,
+                            source_in_frame: clock
+                                .seconds_to_nearest_frame(clip.range.source_in_sec),
+                            source_out_frame: clock
+                                .seconds_to_nearest_frame(clip.range.source_out_sec),
+                            speed: clip.speed,
+                            reverse: clip.reverse,
+                            audio: clip.audio.clone(),
+                            effects: clip.effects.clone(),
+                        });
+                    }
                 }
+            }
+
+            if !contributes_picture {
+                continue;
+            }
+
+            match track.kind {
+                TrackKind::Audio => {}
                 TrackKind::Video | TrackKind::Overlay | TrackKind::Caption => {
                     let source = if let Some(compound_sequence_id) = &clip.compound_sequence_id {
                         VisualRenderSource::Compound {
@@ -793,6 +850,7 @@ fn normalize_caption_axis(value: f64, fallback: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::core::{
+        assets::{Asset, AudioInfo, VideoInfo},
         commands::TEXT_ASSET_PREFIX,
         effects::{Effect, EffectType, ParamValue},
         project::ProjectState,
@@ -810,6 +868,27 @@ mod tests {
     fn add_sequence(state: &mut ProjectState, sequence: Sequence) {
         state.active_sequence_id = Some(sequence.id.clone());
         state.sequences.insert(sequence.id.clone(), sequence);
+    }
+
+    /// Registers an audio-only asset under a known id.
+    ///
+    /// Audio presence is a property of the asset now, so a clip whose asset the
+    /// project never heard of contributes nothing — which is also what the
+    /// export's argument builders do with it (they fail on it outright).
+    fn add_audio_asset(state: &mut ProjectState, asset_id: &str) {
+        let mut asset = Asset::new_audio(asset_id, "audio.wav", AudioInfo::default());
+        asset.id = asset_id.to_string();
+        state.assets.insert(asset_id.to_string(), asset);
+    }
+
+    /// Registers a video asset under a known id, with or without an audio stream.
+    fn add_video_asset(state: &mut ProjectState, asset_id: &str, has_audio: bool) {
+        let mut asset = Asset::new_video(asset_id, "video.mp4", VideoInfo::default());
+        asset.id = asset_id.to_string();
+        if has_audio {
+            asset.audio = Some(AudioInfo::default());
+        }
+        state.assets.insert(asset_id.to_string(), asset);
     }
 
     #[test]
@@ -1004,6 +1083,7 @@ mod tests {
         sequence.tracks.push(video_track);
         sequence.tracks.push(audio_track);
         add_sequence(&mut state, sequence);
+        add_audio_asset(&mut state, "asset-audio");
 
         let graph = build_render_graph(&state, "seq-1").expect("render graph");
 
@@ -1014,6 +1094,146 @@ mod tests {
         assert_eq!(graph.audio_layers[0].timeline_in_frame, 60);
         assert_eq!(graph.audio_layers[0].timeline_out_frame, 180);
         assert_eq!(graph.audio_layers[0].duration_frames, 120);
+    }
+
+    #[test]
+    fn build_render_graph_emits_an_audio_layer_for_an_av_clip_on_a_video_track() {
+        // The shape every headless `timeline insert` of an A/V file produces.
+        // The export mixes its embedded audio, so the graph has to report it.
+        let mut state = ProjectState::new("Render Graph Test");
+        state.sequences.clear();
+
+        let mut sequence = Sequence::new("Sequence", SequenceFormat::youtube_1080());
+        sequence.id = "seq-1".to_string();
+
+        let mut video_track = Track::new("Video 1", TrackKind::Video);
+        video_track.id = "video-track".to_string();
+        video_track
+            .clips
+            .push(clip_with_timing("av-clip", "asset-av", 0.0, 2.0));
+        sequence.tracks.push(video_track);
+        add_sequence(&mut state, sequence);
+        add_video_asset(&mut state, "asset-av", true);
+
+        let graph = build_render_graph(&state, "seq-1").expect("render graph");
+
+        assert_eq!(graph.visual_layers.len(), 1);
+        assert_eq!(graph.audio_layers.len(), 1);
+        assert_eq!(graph.audio_layers[0].clip_id, "av-clip");
+        assert_eq!(graph.audio_layers[0].track_id, "video-track");
+    }
+
+    #[test]
+    fn build_render_graph_omits_an_audio_layer_for_a_silent_video_clip() {
+        let mut state = ProjectState::new("Render Graph Test");
+        state.sequences.clear();
+
+        let mut sequence = Sequence::new("Sequence", SequenceFormat::youtube_1080());
+        sequence.id = "seq-1".to_string();
+
+        let mut video_track = Track::new("Video 1", TrackKind::Video);
+        video_track.id = "video-track".to_string();
+        video_track
+            .clips
+            .push(clip_with_timing("silent-clip", "asset-silent", 0.0, 2.0));
+        sequence.tracks.push(video_track);
+        add_sequence(&mut state, sequence);
+        add_video_asset(&mut state, "asset-silent", false);
+
+        let graph = build_render_graph(&state, "seq-1").expect("render graph");
+
+        assert_eq!(graph.visual_layers.len(), 1);
+        assert!(graph.audio_layers.is_empty());
+    }
+
+    #[test]
+    fn build_render_graph_reads_measured_audio_presence_over_stored_metadata() {
+        // `asset import` records an mp4 from its extension without opening it,
+        // so the stored metadata says "no audio" for a file that has some. A
+        // caller that probes gets the truth; one that does not sees the guess.
+        let mut state = ProjectState::new("Render Graph Test");
+        state.sequences.clear();
+
+        let mut sequence = Sequence::new("Sequence", SequenceFormat::youtube_1080());
+        sequence.id = "seq-1".to_string();
+
+        let mut video_track = Track::new("Video 1", TrackKind::Video);
+        video_track.id = "video-track".to_string();
+        video_track
+            .clips
+            .push(clip_with_timing("av-clip", "asset-unprobed", 0.0, 2.0));
+        sequence.tracks.push(video_track);
+        add_sequence(&mut state, sequence);
+        add_video_asset(&mut state, "asset-unprobed", false);
+
+        assert!(build_render_graph(&state, "seq-1")
+            .expect("render graph")
+            .audio_layers
+            .is_empty());
+
+        let mut audio_info = HashMap::new();
+        audio_info.insert(
+            "asset-unprobed".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::from_asset(&state.assets["asset-unprobed"])
+            },
+        );
+        let graph =
+            build_render_graph_with_audio_info(&state, "seq-1", &audio_info).expect("render graph");
+
+        assert_eq!(graph.audio_layers.len(), 1);
+        assert_eq!(graph.audio_layers[0].clip_id, "av-clip");
+    }
+
+    #[test]
+    fn build_render_graph_keeps_a_hidden_video_track_audible() {
+        // `contributes_to_output` says a hidden video track still carries its
+        // sound. Deciding picture and sound together would have the graph
+        // report silence for a render that has audio.
+        let mut state = ProjectState::new("Render Graph Test");
+        state.sequences.clear();
+
+        let mut sequence = Sequence::new("Sequence", SequenceFormat::youtube_1080());
+        sequence.id = "seq-1".to_string();
+
+        let mut video_track = Track::new("Video 1", TrackKind::Video);
+        video_track.id = "video-track".to_string();
+        video_track.visible = false;
+        video_track
+            .clips
+            .push(clip_with_timing("av-clip", "asset-av", 0.0, 2.0));
+        sequence.tracks.push(video_track);
+        add_sequence(&mut state, sequence);
+        add_video_asset(&mut state, "asset-av", true);
+
+        let graph = build_render_graph(&state, "seq-1").expect("render graph");
+
+        assert!(graph.visual_layers.is_empty());
+        assert_eq!(graph.audio_layers.len(), 1);
+    }
+
+    #[test]
+    fn build_render_graph_drops_the_audio_of_a_muted_track() {
+        let mut state = ProjectState::new("Render Graph Test");
+        state.sequences.clear();
+
+        let mut sequence = Sequence::new("Sequence", SequenceFormat::youtube_1080());
+        sequence.id = "seq-1".to_string();
+
+        let mut video_track = Track::new("Video 1", TrackKind::Video);
+        video_track.id = "video-track".to_string();
+        video_track.muted = true;
+        video_track
+            .clips
+            .push(clip_with_timing("av-clip", "asset-av", 0.0, 2.0));
+        sequence.tracks.push(video_track);
+        add_sequence(&mut state, sequence);
+        add_video_asset(&mut state, "asset-av", true);
+
+        let graph = build_render_graph(&state, "seq-1").expect("render graph");
+
+        assert!(graph.audio_layers.is_empty());
     }
 
     #[test]

@@ -736,6 +736,16 @@ pub struct ImportGeneratedCaptionsPayload {
     pub style_pack: Option<String>,
     #[serde(default)]
     pub replace_existing: bool,
+    /// Whether cue boundaries are moved onto the sequence's frame grid.
+    ///
+    /// Defaults to `true`: a transcriber's millisecond times otherwise land
+    /// between frames and make every composite and render warn about each cue.
+    #[serde(default = "default_snap_to_frames")]
+    pub snap_to_frames: bool,
+}
+
+fn default_snap_to_frames() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
@@ -2193,7 +2203,8 @@ impl CommandPayload {
                     ImportGeneratedCaptionsCommand::new(&p.sequence_id, &p.track_id, segments)
                         .with_style(p.style)
                         .with_position(p.position)
-                        .replace_existing(p.replace_existing),
+                        .replace_existing(p.replace_existing)
+                        .snap_to_frames(p.snap_to_frames),
                 )
             }
             CommandPayload::DeleteCaption(p) => Box::new(DeleteCaptionCommand::new(

@@ -6131,7 +6131,14 @@ export type ImportGeneratedCaptionsPayload = { sequenceId: string; trackId: stri
 /**
  * Curated caption pack id, resolved into `style` + `position`.
  */
-stylePack?: string | null; replaceExisting?: boolean }
+stylePack?: string | null; replaceExisting?: boolean; 
+/**
+ * Whether cue boundaries are moved onto the sequence's frame grid.
+ * 
+ * Defaults to `true`: a transcriber's millisecond times otherwise land
+ * between frames and make every composite and render warn about each cue.
+ */
+snapToFrames?: boolean }
 export type InsertClipPayload = { sequenceId: string; trackId: string; assetId: string; 
 /**
  * Timeline position to insert at.

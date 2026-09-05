@@ -1,13 +1,14 @@
 //! Render and export commands.
 
-use crate::ffmpeg_env::ensure_ffmpeg;
+use crate::ffmpeg_env::{ensure_ffmpeg, ensure_ffmpeg_optional};
 use crate::output;
 use crate::validate;
 use clap::Subcommand;
 use openreelio_core::ffmpeg::FFmpegRunner;
 use openreelio_core::render::{
-    build_render_graph, build_render_plan, validate_export_settings, AudioCodec, ExportEngine,
-    ExportPreset, ExportProgress, ExportSettings, HdrMode, VideoCodec,
+    build_render_graph, build_render_graph_with_audio_info, build_render_plan,
+    probe_sequence_audio_info, validate_export_settings, AudioCodec, ExportEngine, ExportPreset,
+    ExportProgress, ExportSettings, HdrMode, VideoCodec,
 };
 use openreelio_core::timeline::Canvas;
 use std::path::PathBuf;
@@ -107,9 +108,19 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
         }
 
         RenderAction::Graph { path, sequence } => {
+            // The graph tells an agent what a render of this sequence will
+            // contain, so its audio layers have to be the ones the render will
+            // actually mix. Whether a video asset carries sound is a property of
+            // the file, not of the metadata an extension-based import guessed,
+            // so it is measured here — one FFprobe per unique asset. Without
+            // FFmpeg the stored metadata is all there is, and the graph still
+            // builds rather than failing an introspection command.
+            ensure_ffmpeg_optional();
+
             let project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
-            let graph = build_render_graph(&project.state, &seq_id)
+            let audio_info = probe_sequence_audio_info(&project.state, &seq_id);
+            let graph = build_render_graph_with_audio_info(&project.state, &seq_id, &audio_info)
                 .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
 
             output::print_json_pretty(&graph)
