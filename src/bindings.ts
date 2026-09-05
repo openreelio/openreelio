@@ -6131,7 +6131,23 @@ export type ImportGeneratedCaptionsPayload = { sequenceId: string; trackId: stri
 /**
  * Curated caption pack id, resolved into `style` + `position`.
  */
-stylePack?: string | null; replaceExisting?: boolean }
+stylePack?: string | null; replaceExisting?: boolean; 
+/**
+ * Whether cue boundaries are moved onto the sequence's frame grid.
+ * 
+ * Defaults to `true`: a transcriber's millisecond times otherwise land
+ * between frames and make every composite and render warn about each cue.
+ * Each boundary moves by at most half a frame, and because these cues were
+ * already de-overlapped by the readability pass, any two that rounding put
+ * on the same frame are pushed apart again.
+ * 
+ * Snapping rewrites times the caller supplied, so it is reported rather
+ * than silent: the command answers with a
+ * `captionsSnappedToFrameGrid` state change carrying the number of cues
+ * that moved, which is the GUI's cue to say so. No change is emitted when
+ * nothing moved, or when this is `false`.
+ */
+snapToFrames?: boolean }
 export type InsertClipPayload = { sequenceId: string; trackId: string; assetId: string; 
 /**
  * Timeline position to insert at.
@@ -8600,6 +8616,15 @@ export type StateChange =
  * An existing sequence was modified
  */
 { type: "sequenceModified"; sequence_id: string } | 
+/**
+ * Imported caption cues were moved onto the sequence's frame grid.
+ * 
+ * Reported so a GUI can say "41 cues were nudged onto the frame grid"
+ * rather than leaving a silent rewrite of the times the user handed over.
+ * `count` is how many cues moved; the change is only emitted when at least
+ * one did.
+ */
+{ type: "captionsSnappedToFrameGrid"; count: number } | 
 /**
  * A new marker was created
  */

@@ -6,7 +6,8 @@ use clap::Subcommand;
 use openreelio_core::assets::AssetKind;
 use openreelio_core::captions::{
     audio::{
-        extract_audio_for_transcription, load_audio_samples, mix_sequence_audio_for_transcription,
+        extract_audio_range_for_transcription, load_audio_samples,
+        mix_sequence_audio_for_transcription, AudioWindow,
     },
     whisper::{
         default_models_dir, download_whisper_model_blocking, is_whisper_available,
@@ -17,6 +18,7 @@ use openreelio_core::commands::{
     GeneratedCaptionSegment, ImportGeneratedCaptionsCommand, RemoveTrackCommand,
 };
 use openreelio_core::ActiveProject;
+use openreelio_core::Ratio;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -59,6 +61,14 @@ pub enum TranscriptionAction {
         #[arg(long)]
         translate: bool,
 
+        /// First ASSET second to transcribe; the rest of the file is never decoded
+        #[arg(long)]
+        start: Option<f64>,
+
+        /// Last ASSET second to transcribe; segment times stay absolute
+        #[arg(long)]
+        end: Option<f64>,
+
         /// Write transcript JSON to this file in addition to stdout
         #[arg(long)]
         output: Option<PathBuf>,
@@ -78,6 +88,10 @@ pub enum TranscriptionAction {
         /// Replace existing captions on the target caption track during import
         #[arg(long)]
         replace_existing: bool,
+
+        /// Keep raw cue times on import instead of snapping them to the frame grid
+        #[arg(long)]
+        no_snap: bool,
 
         /// Clip ID to map SOURCE-relative transcript times onto the timeline
         /// during import.
@@ -115,6 +129,14 @@ pub enum TranscriptionAction {
         #[arg(long)]
         translate: bool,
 
+        /// First TIMELINE second to transcribe; clips outside are never decoded
+        #[arg(long)]
+        start: Option<f64>,
+
+        /// Last TIMELINE second to transcribe; segment times stay absolute
+        #[arg(long)]
+        end: Option<f64>,
+
         /// Write transcript JSON to this file in addition to stdout
         #[arg(long)]
         output: Option<PathBuf>,
@@ -130,6 +152,10 @@ pub enum TranscriptionAction {
         /// Replace existing captions on the target caption track during import
         #[arg(long)]
         replace_existing: bool,
+
+        /// Keep raw cue times on import instead of snapping them to the frame grid
+        #[arg(long)]
+        no_snap: bool,
     },
 }
 
@@ -215,16 +241,21 @@ pub fn execute(action: TranscriptionAction) -> anyhow::Result<()> {
             language,
             model,
             translate,
+            start,
+            end,
             output,
             import_to_timeline,
             track,
             sequence,
             replace_existing,
+            no_snap,
             source_clip,
         } => {
             let mut project = super::load_project(&path)?;
-            let transcription =
-                generate_asset_transcription(&project, &asset, &language, &model, translate)?;
+            let window = parse_window(start, end)?;
+            let transcription = generate_asset_transcription(
+                &project, &asset, &language, &model, translate, window,
+            )?;
             let mut response = serde_json::to_value(&transcription)?;
 
             if let Some(output_path) = output {
@@ -239,6 +270,7 @@ pub fn execute(action: TranscriptionAction) -> anyhow::Result<()> {
                     sequence,
                     track,
                     replace_existing,
+                    !no_snap,
                     &transcription,
                     source_clip,
                     Some(&asset),
@@ -255,19 +287,24 @@ pub fn execute(action: TranscriptionAction) -> anyhow::Result<()> {
             language,
             model,
             translate,
+            start,
+            end,
             output,
             import_to_timeline,
             track,
             replace_existing,
+            no_snap,
         } => {
             let mut project = super::load_project(&path)?;
             let sequence_id = super::resolve_sequence_id(&project, sequence)?;
+            let window = parse_window(start, end)?;
             let transcription = generate_sequence_transcription(
                 &project,
                 &sequence_id,
                 &language,
                 &model,
                 translate,
+                window,
             )?;
             let mut response = serde_json::to_value(&transcription)?;
 
@@ -285,6 +322,7 @@ pub fn execute(action: TranscriptionAction) -> anyhow::Result<()> {
                     Some(sequence_id),
                     track,
                     replace_existing,
+                    !no_snap,
                     &TranscriptionCliOutput {
                         status: transcription.status.clone(),
                         asset_id: "sequence-audio".to_string(),
@@ -428,6 +466,7 @@ pub(crate) fn generate_asset_transcription(
     language: &str,
     model: &str,
     translate: bool,
+    window: AudioWindow,
 ) -> anyhow::Result<TranscriptionCliOutput> {
     if !is_whisper_available() {
         return Err(anyhow::anyhow!(
@@ -475,7 +514,7 @@ pub(crate) fn generate_asset_transcription(
     ));
     let _guard = TempFileGuard(temp_path.clone());
 
-    extract_audio_for_transcription(&asset_path, &temp_path, None)
+    extract_audio_range_for_transcription(&asset_path, &temp_path, window, None)
         .map_err(|error| anyhow::anyhow!("Audio extraction failed: {}", error))?;
     let samples = load_audio_samples(&temp_path)
         .map_err(|error| anyhow::anyhow!("Failed to load extracted audio: {}", error))?;
@@ -492,6 +531,10 @@ pub(crate) fn generate_asset_transcription(
         .map_err(|error| anyhow::anyhow!("Transcription failed: {}", error))?;
     let full_text = result.full_text();
     let subtitle_segments = subtitle_ready_segments(&result.segments);
+    // Whisper saw only the window, so its clock starts at zero. Times are put
+    // back on the asset's own clock here, which is what makes a ranged run
+    // interchangeable with a full one.
+    let offset_sec = window.start();
     let segments = subtitle_segments
         .into_iter()
         .filter_map(|segment| {
@@ -501,8 +544,8 @@ pub(crate) fn generate_asset_transcription(
             }
 
             Some(TranscriptionSegmentJson {
-                start_time: segment.start_time,
-                end_time: segment.end_time,
+                start_time: segment.start_time + offset_sec,
+                end_time: segment.end_time + offset_sec,
                 text,
             })
         })
@@ -527,6 +570,7 @@ pub(crate) fn generate_sequence_transcription(
     language: &str,
     model: &str,
     translate: bool,
+    window: AudioWindow,
 ) -> anyhow::Result<SequenceTranscriptionCliOutput> {
     if !is_whisper_available() {
         return Err(anyhow::anyhow!(
@@ -563,8 +607,9 @@ pub(crate) fn generate_sequence_transcription(
     ));
     let _guard = TempFileGuard(temp_path.clone());
 
-    mix_sequence_audio_for_transcription(&project.state, sequence_id, &temp_path, None)
-        .map_err(|error| anyhow::anyhow!("Sequence audio mixdown failed: {}", error))?;
+    let mixdown =
+        mix_sequence_audio_for_transcription(&project.state, sequence_id, &temp_path, window, None)
+            .map_err(|error| anyhow::anyhow!("Sequence audio mixdown failed: {}", error))?;
     let samples = load_audio_samples(&temp_path)
         .map_err(|error| anyhow::anyhow!("Failed to load mixed sequence audio: {}", error))?;
     let engine = WhisperEngine::new(&model_path)
@@ -580,11 +625,14 @@ pub(crate) fn generate_sequence_transcription(
         .map_err(|error| anyhow::anyhow!("Transcription failed: {}", error))?;
     let full_text = result.full_text();
     let subtitle_segments = subtitle_ready_segments(&result.segments);
+    // The mixdown starts at the window, so Whisper's clock does too. Rebasing
+    // here keeps the segments on the sequence's clock, ready to import as-is.
+    let offset_sec = mixdown.start_sec;
     let segments = subtitle_segments
         .into_iter()
         .map(|segment| TranscriptionSegmentJson {
-            start_time: segment.start_time,
-            end_time: segment.end_time,
+            start_time: segment.start_time + offset_sec,
+            end_time: segment.end_time + offset_sec,
             text: segment.text,
         })
         .collect::<Vec<_>>();
@@ -607,6 +655,7 @@ fn import_generated_captions(
     sequence: Option<String>,
     track: Option<String>,
     replace_existing: bool,
+    snap_to_frames: bool,
     transcription: &TranscriptionCliOutput,
     source_clip: Option<String>,
     source_asset_id: Option<&str>,
@@ -639,8 +688,25 @@ fn import_generated_captions(
 
     let (track_id, created_track) =
         super::caption::ensure_caption_track(project, &sequence_id, track.as_deref())?;
+    let fps = sequence_fps(project, &sequence_id)?;
     let command = ImportGeneratedCaptionsCommand::new(&sequence_id, &track_id, segments)
-        .replace_existing(replace_existing);
+        .replace_existing(replace_existing)
+        .snap_to_frames(snap_to_frames);
+    // Planning can still refuse the segments, and by now the caption track may
+    // be one this call created. It goes back the same way an import failure
+    // takes it, or the project keeps an empty track nobody asked for.
+    let snapped_cues = match super::caption::count_snapped_cues(&command, &fps, snap_to_frames) {
+        Ok(count) => count,
+        Err(error) => {
+            if created_track {
+                let rollback = RemoveTrackCommand::new(&sequence_id, &track_id);
+                let _ = project
+                    .executor
+                    .execute(Box::new(rollback), &mut project.state);
+            }
+            return Err(error);
+        }
+    };
 
     match project
         .executor
@@ -653,7 +719,8 @@ fn import_generated_captions(
                 "opId": result.op_id,
                 "createdIds": result.created_ids,
                 "deletedIds": result.deleted_ids,
-                "replaceExisting": replace_existing
+                "replaceExisting": replace_existing,
+                "snappedCues": snapped_cues
             });
             if let serde_json::Value::Object(map) = &mut payload {
                 map.extend(mapping_info);
@@ -670,6 +737,21 @@ fn import_generated_captions(
             Err(anyhow::anyhow!("Caption import failed: {}", error))
         }
     }
+}
+
+/// Builds the decode window from the CLI's `--start`/`--end` pair.
+fn parse_window(start: Option<f64>, end: Option<f64>) -> anyhow::Result<AudioWindow> {
+    AudioWindow::new(start, end).map_err(|error| anyhow::anyhow!("{}", error))
+}
+
+/// The frame rate the caption grid is defined against.
+fn sequence_fps(project: &ActiveProject, sequence_id: &str) -> anyhow::Result<Ratio> {
+    project
+        .state
+        .sequences
+        .get(sequence_id)
+        .map(|sequence| sequence.format.fps.clone())
+        .ok_or_else(|| anyhow::anyhow!("Sequence '{}' not found", sequence_id))
 }
 
 fn write_json_file<T: Serialize>(path: &Path, output: &T) -> anyhow::Result<()> {
@@ -702,5 +784,85 @@ impl Drop for TempFileGuard {
         if self.0.exists() {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openreelio_core::timeline::TrackKind;
+
+    /// A transcription whose every cue is blank once trimmed.
+    ///
+    /// Whisper emits these — a segment of pure silence comes back as a space —
+    /// and the caption command refuses them, which is the failure this import
+    /// has to unwind cleanly.
+    fn blank_transcription() -> TranscriptionCliOutput {
+        TranscriptionCliOutput {
+            status: "ok".to_string(),
+            asset_id: "asset".to_string(),
+            asset_name: "asset.mp4".to_string(),
+            language: "en".to_string(),
+            model: "tiny".to_string(),
+            duration_sec: 2.0,
+            segment_count: 2,
+            full_text: String::new(),
+            segments: vec![
+                TranscriptionSegmentJson {
+                    start_time: 0.0,
+                    end_time: 1.0,
+                    text: " ".to_string(),
+                },
+                TranscriptionSegmentJson {
+                    start_time: 1.0,
+                    end_time: 2.0,
+                    text: "\n".to_string(),
+                },
+            ],
+        }
+    }
+
+    /// How many caption tracks the project's active sequence carries.
+    fn caption_track_count(project: &ActiveProject) -> usize {
+        let sequence_id = project
+            .state
+            .active_sequence_id
+            .clone()
+            .expect("a new project has an active sequence");
+        project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Caption)
+            .count()
+    }
+
+    #[test]
+    fn a_refused_import_leaves_no_caption_track_behind() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut project = ActiveProject::create("Blank Import", dir.path().join("project"))
+            .expect("create project");
+        assert_eq!(caption_track_count(&project), 0);
+
+        let error = import_generated_captions(
+            &mut project,
+            None,
+            None,
+            false,
+            true,
+            &blank_transcription(),
+            None,
+            None,
+        )
+        .expect_err("blank cues cannot become captions");
+
+        assert!(
+            error.to_string().contains("text cannot be empty"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            caption_track_count(&project),
+            0,
+            "the track this import created has to go back with it"
+        );
     }
 }

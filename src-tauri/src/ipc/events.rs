@@ -514,6 +514,15 @@ impl EventEmitter {
                     )
                     .map_err(|e| format!("Failed to emit marker deleted event: {}", e))?;
                 }
+                StateChange::CaptionsSnappedToFrameGrid { count } => {
+                    app.emit(
+                        "caption:snapped-to-frame-grid",
+                        &serde_json::json!({ "count": count }),
+                    )
+                    .map_err(|e| {
+                        format!("Failed to emit caption snapped-to-frame-grid event: {}", e)
+                    })?;
+                }
             }
         }
         Ok(())

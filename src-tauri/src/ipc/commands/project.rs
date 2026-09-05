@@ -985,8 +985,17 @@ pub async fn get_sequence_render_graph(
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    crate::core::render::build_render_graph(&project.state, &sequence_id)
-        .map_err(|error| error.to_ipc_error())
+    // Measured audio presence, the same way `render graph` and the export do:
+    // an A/V file the GUI imported without a probe carries no audio metadata, and
+    // reading the guess here would show the user a silent graph for a render that
+    // has sound. Measurements are memoized per file, so a repeated poll is free.
+    let audio_info = crate::core::render::probe_sequence_audio_info(&project.state, &sequence_id);
+    crate::core::render::build_render_graph_with_audio_info(
+        &project.state,
+        &sequence_id,
+        &audio_info,
+    )
+    .map_err(|error| error.to_ipc_error())
 }
 
 /// Returns the backend effect capability contract used by export validation.

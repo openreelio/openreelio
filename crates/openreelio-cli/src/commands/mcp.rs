@@ -51,6 +51,7 @@ use crate::{
 #[cfg(test)]
 use base64::Engine as _;
 use clap::Args;
+use openreelio_core::captions::audio::AudioWindow;
 #[cfg(test)]
 use openreelio_core::commands::SplitClipCommand;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
@@ -693,7 +694,17 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
                         "enum": ["auto", "tiny", "base", "small", "medium", "large", "large-v3", "large-v3-turbo", "large-v3-turbo-q5_0", "large-v3-turbo-q8_0", "large-v3-q5_0"],
                         "description": "Whisper model to use. Defaults to auto, which selects the best installed model. Every model except large produces DTW-aligned word timings; large (ggml-large.bin) keeps the cheaper heuristic ones because its filename does not pin a version."
                     },
-                    "translate": { "type": "boolean" }
+                    "translate": { "type": "boolean" },
+                    "start": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "First second to transcribe. Asset seconds in asset mode, timeline seconds in sequenceAudio mode. Everything outside the range is never decoded, so captioning a 90-second excerpt of a long talk costs the excerpt. Segment times stay absolute."
+                    },
+                    "end": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "Last second to transcribe, in the same clock as start. Must be greater than start."
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -1312,6 +1323,11 @@ fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Va
         optional_string_argument(&arguments, "model")?.unwrap_or_else(|| "auto".to_string());
     let translate = optional_bool_argument(&arguments, "translate")?.unwrap_or(false);
     let sequence_audio = optional_bool_argument(&arguments, "sequenceAudio")?.unwrap_or(false);
+    let window = AudioWindow::new(
+        optional_non_negative_number(&arguments, "start")?,
+        optional_non_negative_number(&arguments, "end")?,
+    )
+    .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
     let project = super::load_project(project_path).map_err(|error| {
         ToolError::Execution(format!(
             "Failed to open project '{}': {error}",
@@ -1332,6 +1348,7 @@ fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Va
                 &language,
                 &model,
                 translate,
+                window,
             )
             .map_err(|error| ToolError::Execution(error.to_string()))?,
         )
@@ -1341,7 +1358,7 @@ fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Va
         confine_asset_media(&project, &asset_id)?;
         serde_json::to_value(
             transcription::generate_asset_transcription(
-                &project, &asset_id, &language, &model, translate,
+                &project, &asset_id, &language, &model, translate, window,
             )
             .map_err(|error| ToolError::Execution(error.to_string()))?,
         )
@@ -4972,6 +4989,50 @@ mod tests {
             "the surface's own spelling of the sequence argument"
         );
         assert_eq!(names.asset, "assetId");
+    }
+
+    /// Feature: ranged transcription
+    /// Scenario: the MCP surface advertises the same window the CLI takes
+    ///
+    /// The unknown-argument guard builds its table from the advertised schemas,
+    /// so a range the schema does not declare is refused before it reaches the
+    /// tool no matter how the tool is written.
+    #[test]
+    fn transcription_generate_should_advertise_a_time_range() {
+        let state = McpServerState {
+            project: Some(PathBuf::from("unused")),
+            ..Default::default()
+        };
+        let tools = build_tools(&state);
+        let properties = tools
+            .iter()
+            .find(|tool| tool["name"] == "openreelio.transcription.generate")
+            .and_then(|tool| tool["inputSchema"]["properties"].as_object())
+            .expect("transcription.generate advertises an object schema");
+
+        assert!(properties.contains_key("start"));
+        assert!(properties.contains_key("end"));
+    }
+
+    /// Feature: ranged transcription
+    /// Scenario: an impossible window is refused before any work is done
+    #[test]
+    fn transcription_generate_should_refuse_an_end_before_its_start() {
+        let state = McpServerState {
+            project: Some(PathBuf::from("unused")),
+            ..Default::default()
+        };
+
+        let error = generate_transcription(
+            &state,
+            serde_json::json!({ "assetId": "asset_1", "start": 5.0, "end": 3.0 }),
+        )
+        .expect_err("an end before its start is not a range");
+
+        assert!(
+            matches!(error, ToolError::InvalidArguments(ref message) if message.contains("must be greater than")),
+            "{error:?}"
+        );
     }
 
     #[test]

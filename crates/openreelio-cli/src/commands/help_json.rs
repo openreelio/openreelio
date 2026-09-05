@@ -480,7 +480,8 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom. A vertical anchor only; the margin comes from --style-pack when one is named, else 5%" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object applied to all cues" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" },
-                    "source-clip": { "type": "string", "required": false, "desc": "Clip ID to map SOURCE-relative transcript times onto the timeline (transcript-json only). A transcript produced from a source asset counts from the start of the file, so a trimmed, moved or sped-up clip drifts; naming the hosting clip remaps every cue to its timeline position. Omitted, cues are imported as-is - correct only when the times are already timeline-relative. Ignored for SRT/VTT, which always are" }
+                    "source-clip": { "type": "string", "required": false, "desc": "Clip ID to map SOURCE-relative transcript times onto the timeline (transcript-json only). A transcript produced from a source asset counts from the start of the file, so a trimmed, moved or sped-up clip drifts; naming the hosting clip remaps every cue to its timeline position. Omitted, cues are imported as-is - correct only when the times are already timeline-relative. Ignored for SRT/VTT, which always are" },
+                    "no-snap": { "type": "boolean", "required": false, "desc": "Keep the file's raw cue times instead of snapping each boundary to the sequence frame grid. Snapping is on by default: subtitle files carry millisecond times, which land between frames and make every composite and render warn about each cue. The response reports how many cues moved as snappedCues" }
                 },
                 "example": "openreelio-cli caption import --path ./project --file transcript.json --format transcript-json --source-clip clip_001"
             },
@@ -505,11 +506,14 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "language": { "type": "string", "required": false, "desc": "Language code, or auto for detection" },
                     "model": { "type": "string", "required": false, "desc": "Whisper model, or auto to use the best installed model. Prefer any model except large: large keeps Whisper's heuristic word timings instead of DTW-aligned ones" },
                     "translate": { "type": "boolean", "required": false, "desc": "Translate recognized speech to English when supported" },
+                    "start": { "type": "number", "required": false, "desc": "First ASSET second to transcribe. Everything outside the range is never decoded, so captioning a 90-second excerpt of a long talk costs the excerpt. Segment times stay absolute" },
+                    "end": { "type": "number", "required": false, "desc": "Last ASSET second to transcribe; must be greater than --start" },
                     "output": { "type": "string", "required": false, "desc": "Write transcript JSON to this file in addition to stdout" },
                     "import": { "type": "boolean", "required": false, "desc": "Import generated captions into the active or selected sequence" },
                     "track": { "type": "string", "required": false, "desc": "Caption track ID for import" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID for import" },
                     "replace-existing": { "type": "boolean", "required": false, "desc": "Replace existing captions on the target caption track during import" },
+                    "no-snap": { "type": "boolean", "required": false, "desc": "Keep raw cue times on import instead of snapping each boundary to the sequence frame grid. Snapping is on by default; the response reports how many cues moved as snappedCues" },
                     "source-clip": { "type": "string", "required": false, "desc": "Clip ID to map SOURCE-relative transcript times onto the timeline during import. Transcribing an asset counts from the start of the file, so a trimmed, moved or sped-up clip drifts; naming the hosting clip remaps every segment to its timeline position. When the asset sits on the target sequence as exactly one clip, that clip is resolved automatically and the mapping is applied" }
                 },
                 "example": "openreelio-cli transcription generate --path ./project --asset asset_001 --language auto --model auto --import --source-clip clip_001"
@@ -522,10 +526,13 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "language": { "type": "string", "required": false, "desc": "Language code, or auto for detection" },
                     "model": { "type": "string", "required": false, "desc": "Whisper model, or auto to use the best installed model. Prefer any model except large: large keeps Whisper's heuristic word timings instead of DTW-aligned ones" },
                     "translate": { "type": "boolean", "required": false, "desc": "Translate recognized speech to English when supported" },
+                    "start": { "type": "number", "required": false, "desc": "First TIMELINE second to transcribe. Clips outside the range are never opened, so transcribing a stretch of a long sequence costs that stretch. Segment times stay absolute" },
+                    "end": { "type": "number", "required": false, "desc": "Last TIMELINE second to transcribe; must be greater than --start" },
                     "output": { "type": "string", "required": false, "desc": "Write transcript JSON to this file in addition to stdout" },
                     "import": { "type": "boolean", "required": false, "desc": "Import generated captions into the selected sequence" },
                     "track": { "type": "string", "required": false, "desc": "Caption track ID for import" },
-                    "replace-existing": { "type": "boolean", "required": false, "desc": "Replace existing captions on the target caption track during import" }
+                    "replace-existing": { "type": "boolean", "required": false, "desc": "Replace existing captions on the target caption track during import" },
+                    "no-snap": { "type": "boolean", "required": false, "desc": "Keep raw cue times on import instead of snapping each boundary to the sequence frame grid. Snapping is on by default; the response reports how many cues moved as snappedCues" }
                 },
                 "example": "openreelio-cli transcription generate-sequence --path ./project --sequence seq_001 --language auto --model auto --import"
             },

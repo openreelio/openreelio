@@ -1237,8 +1237,8 @@ impl JobProcessor {
     async fn process_preview_render(&self, job: &Job) -> Result<serde_json::Value, String> {
         #[cfg(not(test))]
         use crate::core::render::{
-            build_render_graph, build_render_plan, validate_export_settings, ExportEngine,
-            ExportSettings,
+            build_render_graph_with_audio_info, build_render_plan, probe_sequence_audio_info,
+            validate_export_settings, ExportEngine, ExportSettings,
         };
 
         // Validate required payload fields
@@ -1308,8 +1308,12 @@ impl JobProcessor {
 
                 // Clone required data to release the lock
                 let sequence = sequence.clone();
-                let render_graph = build_render_graph(&project.state, sequence_id)
-                    .map_err(|error| format!("Failed to build render graph: {}", error))?;
+                let render_graph = build_render_graph_with_audio_info(
+                    &project.state,
+                    sequence_id,
+                    &probe_sequence_audio_info(&project.state, sequence_id),
+                )
+                .map_err(|error| format!("Failed to build render graph: {}", error))?;
                 let assets = project.state.assets.clone();
                 let effects = project.state.effects.clone();
                 (sequence, assets, effects, render_graph)
@@ -1508,8 +1512,8 @@ impl JobProcessor {
         use crate::core::{
             fs::{export_allowed_roots, validate_scoped_output_path},
             render::{
-                build_render_graph, build_render_plan, validate_export_settings, ExportEngine,
-                ExportPreset, ExportSettings,
+                build_render_graph_with_audio_info, build_render_plan, probe_sequence_audio_info,
+                validate_export_settings, ExportEngine, ExportPreset, ExportSettings,
             },
         };
 
@@ -1560,8 +1564,12 @@ impl JobProcessor {
                     .get(sequence_id)
                     .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
                     .clone();
-                let render_graph = build_render_graph(&project.state, sequence_id)
-                    .map_err(|error| format!("Failed to build render graph: {}", error))?;
+                let render_graph = build_render_graph_with_audio_info(
+                    &project.state,
+                    sequence_id,
+                    &probe_sequence_audio_info(&project.state, sequence_id),
+                )
+                .map_err(|error| format!("Failed to build render graph: {}", error))?;
 
                 // Clone needed data to release lock quickly
                 (
