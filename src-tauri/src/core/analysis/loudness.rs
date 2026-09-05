@@ -180,25 +180,27 @@ pub fn parse_astats_overall(stderr: &str) -> AstatsOverall {
 /// Only lines carrying the `ebur128` frame markers are considered, so an
 /// unrelated log line that happens to contain `M:` cannot inject a reading.
 ///
-/// **Every frame line yields exactly one reading.** The series is positional:
+/// **Every frame line yields exactly one reading**, with no exceptions:
+/// "is a frame line" ([`is_ebur128_frame_line`]) and "yields a slot"
+/// ([`momentary_reading`]) are the same predicate. The series is positional —
 /// [`per_second_loudness_profile`] chunks it back into seconds and consumers
-/// index the resulting profile by the integer second. A window the meter
-/// reports as digital silence (`-120.7`, a sentinel rather than a level) is
-/// therefore clamped to [`SILENCE_FLOOR_DB`] instead of being dropped —
-/// dropping it would pull every later reading into an earlier second and
-/// silently misalign the whole profile with the audio. Where the silence is
-/// genuinely uninteresting, filter afterwards with
-/// [`audible_momentary_readings`].
+/// index the resulting profile by the integer second — so a dropped line pulls
+/// every later reading into an earlier second and silently misaligns the whole
+/// profile with the audio.
 ///
-/// A frame line whose `M:` value cannot be parsed at all is the one case that
-/// yields no reading: it is not silence, and there is no honest number to put
-/// in its place. FFmpeg does not emit such a line, so the shift it would cause
-/// is theoretical.
+/// What the meter prints for a window with no signal is not one spelling.
+/// FFmpeg 9 reports `-120.7` for the first 300 ms while the momentary window
+/// fills, and for a window of digital silence prints either a number far below
+/// the floor (`-157.4`, `-163.5`, `-166.2` — the figure depends on the decoder)
+/// or the literal `nan`, which is what an mp3 decode of the same silence
+/// produces. They all mean the same thing and all become [`SILENCE_FLOOR_DB`]:
+/// a silent slot that holds its position. Where the silence is genuinely
+/// uninteresting, filter afterwards with [`audible_momentary_readings`].
 pub fn parse_momentary_loudness(stderr: &str) -> Vec<f64> {
     stderr
         .lines()
         .filter(|line| is_ebur128_frame_line(line))
-        .filter_map(extract_momentary_loudness)
+        .map(momentary_reading)
         .collect()
 }
 
@@ -213,8 +215,19 @@ pub fn audible_momentary_readings(samples: &[f64]) -> Vec<f64> {
     samples
         .iter()
         .copied()
-        .filter(|value| *value > SILENCE_FLOOR_DB)
+        .filter(|value| is_audible(*value))
         .collect()
+}
+
+/// Returns whether a reading measured audible content rather than silence.
+///
+/// A reading at or below [`SILENCE_FLOOR_DB`] is the floor sentinel, and a
+/// non-finite one is a value no averaging step can use. Both mean "no signal
+/// in this window", and every statistic taken over a loudness series has to
+/// agree on that: a sentinel that survives into a mean, a median or a standard
+/// deviation is read back as a level the audio actually reached.
+pub fn is_audible(value: f64) -> bool {
+    value.is_finite() && value > SILENCE_FLOOR_DB
 }
 
 /// Averages higher-resolution momentary readings into one value per second.
@@ -222,9 +235,18 @@ pub fn audible_momentary_readings(samples: &[f64]) -> Vec<f64> {
 /// `samples_per_second` is the nominal reading rate; a value of zero or a
 /// non-positive count yields an empty profile rather than a division by zero.
 ///
-/// The result is positional: entry `i` averages the readings taken during
-/// second `i`, which is the contract [`super::segmentation`] and [`super::esd`]
-/// rely on when they address the profile by time.
+/// The result is positional: entry `i` covers the readings taken during second
+/// `i`, which is the contract [`super::segmentation`] and [`super::esd`] rely
+/// on when they address the profile by time.
+///
+/// Only the audible readings of a chunk are averaged. The floor sentinel is
+/// not a level — it sits far below anything the meter would call quiet — so
+/// averaging it in drags a second down in proportion to how much of it the
+/// meter had not yet measured. Two windows make that concrete: the meter's
+/// first 300 ms read the floor while the momentary window fills, and the
+/// 400 ms after a silence read it again as the window refills over the join. A
+/// chunk with no audible reading at all is a silent second and reads
+/// [`SILENCE_FLOOR_DB`].
 pub fn per_second_loudness_profile(samples: &[f64], samples_per_second: usize) -> Vec<f64> {
     if samples.is_empty() || samples_per_second == 0 {
         return Vec::new();
@@ -232,7 +254,20 @@ pub fn per_second_loudness_profile(samples: &[f64], samples_per_second: usize) -
 
     samples
         .chunks(samples_per_second)
-        .map(|chunk| chunk.iter().sum::<f64>() / chunk.len() as f64)
+        .map(|chunk| {
+            let mut audible_count = 0usize;
+            let mut audible_sum = 0.0;
+            for value in chunk.iter().copied().filter(|value| is_audible(*value)) {
+                audible_count += 1;
+                audible_sum += value;
+            }
+
+            if audible_count == 0 {
+                SILENCE_FLOOR_DB
+            } else {
+                audible_sum / audible_count as f64
+            }
+        })
         .collect()
 }
 
@@ -246,18 +281,38 @@ fn is_ebur128_frame_line(line: &str) -> bool {
     line.contains("[Parsed_ebur128") && line.contains(" M:") && !line.contains("Summary")
 }
 
-/// Extracts the momentary loudness value from one `ebur128` frame line.
+/// Reads the momentary loudness of one `ebur128` frame line.
 ///
-/// A reading at the filter's digital-silence sentinel is reported as
-/// [`SILENCE_FLOOR_DB`], so the caller still gets one value per frame line.
-fn extract_momentary_loudness(line: &str) -> Option<f64> {
+/// Total by construction: every frame line has a reading, and everything the
+/// meter prints for "no signal" collapses to [`SILENCE_FLOOR_DB`]. That covers
+/// the warm-up sentinel (`-120.7`), a digital-silence window (a number far
+/// below the floor, or the literal `nan` or `-inf` depending on the decoder)
+/// and a token this parser cannot read at all. Returning nothing for any of
+/// them would shorten the series and shift every later second.
+///
+/// [`parse_leading_f64`] keeps rejecting non-finite tokens on purpose: in the
+/// summary block a `nan` integrated loudness means "not measured", and only
+/// here does it mean "silence".
+fn momentary_reading(line: &str) -> f64 {
     let marker = " M:";
-    let position = line.find(marker)?;
-    let value = parse_leading_f64(&line[position + marker.len()..])?;
-    Some(value.max(SILENCE_FLOOR_DB))
+    // Unreachable for a line `is_ebur128_frame_line` accepted; the function is
+    // written to be total rather than to trust that the caller checked.
+    let Some(position) = line.find(marker) else {
+        return SILENCE_FLOOR_DB;
+    };
+
+    match parse_leading_f64(&line[position + marker.len()..]) {
+        Some(value) if is_audible(value) => value,
+        _ => SILENCE_FLOOR_DB,
+    }
 }
 
 /// Parses the first numeric token of `text`, ignoring trailing units.
+///
+/// Returns `None` for a non-finite token (`nan`, `-inf`) as well as for one
+/// that is not a number at all: in the summary block both mean the value was
+/// not measured. The per-frame path wants "silence" rather than "unmeasured",
+/// so [`momentary_reading`] maps `None` onto the floor itself.
 pub(crate) fn parse_leading_f64(text: &str) -> Option<f64> {
     let trimmed = text.trim_start();
     let token: String = trimmed
@@ -311,6 +366,47 @@ mod tests {
 [Parsed_ebur128_0 @ 000001f3f7a0] t: 0.499979   TARGET:-23 LUFS    M:  -6.5 S:  -6.6     I:  -6.6 LUFS       LRA:   0.0 LU  FTPK:  -6.0  -6.0 dBFS  TPK:  -6.0  -6.0 dBFS
 [Parsed_ebur128_0 @ 000001f3f7a0] t: 0.599979   TARGET:-23 LUFS    M:-120.7 S:-120.7     I:  -6.6 LUFS       LRA:   0.0 LU  FTPK:-120.7 -120.7 dBFS  TPK:  -6.0  -6.0 dBFS";
 
+    /// Verbatim `ebur128` log of a 3 s mp3 whose middle second is digital
+    /// silence, captured from the bundled FFmpeg 9.0.1 with the filter spelling
+    /// this module pins.
+    ///
+    /// It carries every spelling of "no signal" the meter uses in one file:
+    /// the `-120.7` warm-up while the momentary window fills (t < 0.4), the
+    /// literal `nan` of a fully silent window (t 1.5–1.9), and the deep
+    /// negative of a window that is only partly silent (`-102.4` at t 2.0).
+    const EBUR128_REAL_MP3_LOG: &str = "\
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.0999792  TARGET:-23 LUFS    M:-120.7 S:-120.7     I: -70.0 LUFS       LRA:   0.0 LU  FTPK: -18.4 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.199979   TARGET:-23 LUFS    M:-120.7 S:-120.7     I: -70.0 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.299979   TARGET:-23 LUFS    M:-120.7 S:-120.7     I: -70.0 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.399979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -22.2 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.499979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -22.2 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.599979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -22.2 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.699979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -22.2 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.799979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -22.2 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.899979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -22.2 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 0.999979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -22.2 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.099979   TARGET:-23 LUFS    M: -23.5 S:-120.7     I: -22.3 LUFS       LRA:   0.0 LU  FTPK: -20.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.199979   TARGET:-23 LUFS    M: -25.2 S:-120.7     I: -22.6 LUFS       LRA:   0.0 LU  FTPK:  -inf dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.299979   TARGET:-23 LUFS    M: -28.2 S:-120.7     I: -22.9 LUFS       LRA:   0.0 LU  FTPK:  -inf dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.399979   TARGET:-23 LUFS    M: -59.4 S:-120.7     I: -22.9 LUFS       LRA:   0.0 LU  FTPK:  -inf dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.499979   TARGET:-23 LUFS    M:   nan S:-120.7     I: -22.9 LUFS       LRA:   0.0 LU  FTPK:  -inf dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.599979   TARGET:-23 LUFS    M:   nan S:-120.7     I: -22.9 LUFS       LRA:   0.0 LU  FTPK:  -inf dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.699979   TARGET:-23 LUFS    M:   nan S:-120.7     I: -22.9 LUFS       LRA:   0.0 LU  FTPK:  -inf dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.799979   TARGET:-23 LUFS    M:   nan S:-120.7     I: -22.9 LUFS       LRA:   0.0 LU  FTPK:  -inf dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.899979   TARGET:-23 LUFS    M:   nan S:-120.7     I: -22.9 LUFS       LRA:   0.0 LU  FTPK:  -inf dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 1.999979   TARGET:-23 LUFS    M:-102.4 S:-120.7     I: -22.9 LUFS       LRA:   0.0 LU  FTPK: -80.3 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.099979   TARGET:-23 LUFS    M: -28.2 S:-120.7     I: -23.2 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.199979   TARGET:-23 LUFS    M: -25.2 S:-120.7     I: -23.3 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.299979   TARGET:-23 LUFS    M: -23.5 S:-120.7     I: -23.3 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.399979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -23.3 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.499979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -23.2 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.599979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -23.1 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.699979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -23.1 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.799979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -23.0 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.899979   TARGET:-23 LUFS    M: -22.2 S:-120.7     I: -23.0 LUFS       LRA:   0.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] t: 2.999979   TARGET:-23 LUFS    M: -22.2 S: -24.0     I: -22.9 LUFS       LRA:  20.0 LU  FTPK: -18.5 dBFS  TPK: -18.4 dBFS
+[Parsed_ebur128_0 @ 00000152e352cec0] Summary:";
+
     /// Real `astats` overall section with per-channel measurement disabled.
     const ASTATS_OVERALL: &str = "\
 [Parsed_astats_1 @ 000001f3f800] Overall
@@ -359,8 +455,8 @@ mod tests {
     }
 
     /// Feature: momentary loudness parsing
-    /// Scenario: a frame line reports digital silence
-    ///   Given three frame lines, the last one at the meter's silence sentinel
+    /// Scenario: a frame line reports the meter warm-up sentinel
+    ///   Given three frame lines, the last one at `-120.7`
     ///   When the momentary readings are parsed
     ///   Then all three are returned, the silent one clamped to the floor
     ///
@@ -387,18 +483,74 @@ mod tests {
     }
 
     /// Feature: momentary loudness parsing
-    /// Scenario: a frame line carries a value that is not a number
-    ///   Given frame lines whose `M:` values read `-inf` and `abc`
+    /// Scenario: a frame line carries a value that is not a finite number
+    ///   Given frame lines whose `M:` values read `nan`, `-inf` and `abc`
     ///   When the momentary readings are parsed
-    ///   Then only the numeric reading survives
+    ///   Then each still yields one slot, at the silence floor
+    ///
+    /// `nan` is not hypothetical: it is what FFmpeg 9 prints for a window of
+    /// digital silence decoded from mp3. Dropping those lines shortened the
+    /// series and shifted every second after the silence.
     #[test]
-    fn should_skip_frame_lines_whose_momentary_value_is_malformed() {
-        let malformed = "\
-[Parsed_ebur128_0 @ 0x1] t: 0.1 M: -inf S: -22.0 I: -24.0 LUFS
-[Parsed_ebur128_0 @ 0x1] t: 0.2 M: abc S: -22.0 I: -24.0 LUFS
-[Parsed_ebur128_0 @ 0x1] t: 0.3 M: -18.5 S: -22.0 I: -24.0 LUFS";
+    fn should_report_silence_when_a_frame_line_carries_a_non_finite_value() {
+        let non_finite = "\
+[Parsed_ebur128_0 @ 0x1] t: 0.1 M:   nan S: -22.0 I: -24.0 LUFS
+[Parsed_ebur128_0 @ 0x1] t: 0.2 M: -inf S: -22.0 I: -24.0 LUFS
+[Parsed_ebur128_0 @ 0x1] t: 0.3 M: abc S: -22.0 I: -24.0 LUFS
+[Parsed_ebur128_0 @ 0x1] t: 0.4 M: -18.5 S: -22.0 I: -24.0 LUFS";
 
-        assert_eq!(parse_momentary_loudness(malformed), vec![-18.5]);
+        assert_eq!(
+            parse_momentary_loudness(non_finite),
+            vec![SILENCE_FLOOR_DB, SILENCE_FLOOR_DB, SILENCE_FLOOR_DB, -18.5]
+        );
+    }
+
+    /// Feature: momentary loudness parsing
+    /// Scenario: a real FFmpeg 9 log of loud / digital silence / loud
+    ///   Given the captured log of a 3 s mp3 whose middle second is silent
+    ///   When the readings are parsed and folded into a per-second profile
+    ///   Then there are 30 readings and 3 seconds, silent in the middle
+    ///
+    /// The regression this pins is the whole point of the module: the log
+    /// carries six `nan` lines and three `-120.7` warm-up lines, and the parser
+    /// that dropped them produced a 24-reading series that folded into two
+    /// seconds — so second 2 of the audio was reported at index 1.
+    #[test]
+    fn should_stay_second_indexed_on_a_real_log_with_nan_and_warmup_lines() {
+        let readings = parse_momentary_loudness(EBUR128_REAL_MP3_LOG);
+
+        assert_eq!(readings.len(), 30, "a 3 s file must yield 30 frame slots");
+        assert_eq!(readings[0], SILENCE_FLOOR_DB, "warm-up reads the floor");
+        assert_eq!(readings[15], SILENCE_FLOOR_DB, "`nan` reads the floor");
+
+        let profile = per_second_loudness_profile(&readings, 10);
+
+        assert_eq!(profile.len(), 3, "a 3 s file must yield 3 profile entries");
+        // Second 0 is loud despite its three warm-up readings: the floor
+        // sentinel is excluded from the average rather than dragging it down.
+        assert!(
+            (profile[0] - (-22.2)).abs() < 0.3,
+            "second 0 must read the tone, got {}",
+            profile[0]
+        );
+        // Second 1 is the transition into the silence. Its `nan` readings drop
+        // out of the average and what is left is the meter's 400 ms decay, so
+        // it reads far below the tone without reaching the floor; a second
+        // wholly inside the silence does reach it (see the real-FFmpeg test in
+        // `super::super::audio`).
+        assert!(
+            profile[1] < profile[0] - 8.0,
+            "second 1 must fall away from the tone, got {} against {}",
+            profile[1],
+            profile[0]
+        );
+        // Second 2 opens with the meter climbing back out of the silence, so
+        // it sits a little under the tone rather than exactly on it.
+        assert!(
+            (profile[2] - (-22.2)).abs() < 1.5,
+            "second 2 must read the tone again, got {}",
+            profile[2]
+        );
     }
 
     #[test]
@@ -436,7 +588,7 @@ Stream mapping: M: not a reading
 
     /// Feature: per-second loudness profile
     /// Scenario: the middle second of a three-second signal is digital silence
-    ///   Given thirty frame lines whose middle ten sit at the silence sentinel
+    ///   Given thirty frame lines whose middle ten print `nan`
     ///   When the profile is built
     ///   Then it has one entry per second and the middle entry is the floor
     ///
@@ -447,16 +599,15 @@ Stream mapping: M: not a reading
     fn should_keep_one_profile_entry_per_second_when_a_second_is_silent() {
         let mut log = String::new();
         for index in 0..30 {
-            let level = if (10..20).contains(&index) {
-                -120.7
+            let momentary = if (10..20).contains(&index) {
+                "  nan".to_string()
             } else {
-                -16.4
+                format!("{:.1}", -16.4)
             };
             log.push_str(&format!(
-                "[Parsed_ebur128_0 @ 0x1] t: {:.1}   TARGET:-23 LUFS    M: {:.1} S: {:.1}\n",
+                "[Parsed_ebur128_0 @ 0x1] t: {:.1}   TARGET:-23 LUFS    M: {} S:-120.7\n",
                 index as f64 / 10.0,
-                level,
-                level,
+                momentary,
             ));
         }
 
@@ -466,6 +617,25 @@ Stream mapping: M: not a reading
         assert!((profile[0] - (-16.4)).abs() < 0.05);
         assert_eq!(profile[1], SILENCE_FLOOR_DB);
         assert!((profile[2] - (-16.4)).abs() < 0.05);
+    }
+
+    /// Feature: per-second loudness profile
+    /// Scenario: a second is only partly measured
+    ///   Given a second whose first three readings are the meter warm-up
+    ///   When the profile is built
+    ///   Then the second reads the level of its audible readings alone
+    ///
+    /// The warm-up is not a quiet part of the audio, it is the 300 ms before
+    /// the momentary window has filled. Averaging it in put the opening second
+    /// of every measured file tens of LU below the rest of the file.
+    #[test]
+    fn should_average_only_the_audible_readings_of_a_partly_silent_second() {
+        let mut second = vec![SILENCE_FLOOR_DB; 3];
+        second.extend(vec![-16.0; 7]);
+
+        let profile = per_second_loudness_profile(&second, 10);
+
+        assert_eq!(profile, vec![-16.0]);
     }
 
     #[test]

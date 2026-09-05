@@ -176,6 +176,7 @@ export function buildSourceAnalysisMarkdown(
     `- Shots: ${report.coverage.shots ? 'available' : 'missing'}`,
     `- Transcript: ${report.coverage.transcript ? 'available' : 'missing'}`,
     `- Audio profile: ${report.coverage.audio ? 'available' : 'missing'}`,
+    `- Loudness measurement: ${report.coverage.loudness ? 'available' : 'missing (run `analysis audio`)'}`,
     `- Segments: ${report.coverage.segments ? 'available' : 'missing'}`,
     `- Visual analysis: ${report.coverage.visual ? 'available' : 'missing'}`,
     `- Annotations: ${report.coverage.annotation ? 'available' : 'missing'}`,

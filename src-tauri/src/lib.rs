@@ -1243,6 +1243,19 @@ pub struct AppState {
     ///   in the native dialog, never from a path argument supplied by the renderer.
     /// - It is intentionally runtime-only (never persisted to disk) and reset per session.
     pub approved_export_dirs: Mutex<std::collections::HashSet<PathBuf>>,
+
+    /// Assets whose loudness re-measurement this session has already attempted.
+    ///
+    /// Reading a cached analysis bundle whose loudness numbers are missing
+    /// queues an audio-only pass to fill them in. Nothing in the bundle records
+    /// that the pass ran and produced nothing usable, so without this set every
+    /// subsequent read of the same asset queues the same pass again — an FFmpeg
+    /// decode of the whole file per read. Membership is claimed before the job
+    /// is submitted, so two concurrent reads of one asset queue one pass.
+    ///
+    /// Runtime-only and never persisted: a session that starts after the media
+    /// was fixed should try once more.
+    pub loudness_remeasure_attempts: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Runtime source monitor state for dual-viewer workflow.
@@ -1384,6 +1397,7 @@ impl AppState {
                 crate::core::external_agent::ExternalAgentApprovalTokenStore::default(),
             ),
             approved_export_dirs: Mutex::new(std::collections::HashSet::new()),
+            loudness_remeasure_attempts: Mutex::new(std::collections::HashSet::new()),
         }
     }
 

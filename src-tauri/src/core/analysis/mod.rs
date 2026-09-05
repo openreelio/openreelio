@@ -57,7 +57,7 @@ use crate::core::captions::{
 use crate::core::indexing::shots::{ShotDetector, ShotDetectorConfig};
 use crate::core::{CoreError, CoreResult};
 
-use audio::AudioProfiler;
+use audio::{AudioAnalysis, AudioProfiler};
 use segmentation::ContentSegmenter;
 use speaker_turns::infer_speaker_turns;
 use visual::VisualAnalyzer;
@@ -399,15 +399,33 @@ impl AnalysisJobRunner {
             }
         }
 
-        // Collect audio results
+        // Collect audio results.
+        //
+        // A pass that produced a profile but could not measure loudness lands
+        // here as `Ok` with a reason: the profile is stored, the reason is
+        // recorded against the `audio` job, and segmentation still runs. Only a
+        // pass that produced nothing at all is a failure.
         let audio_profile = match audio_result {
-            Ok(Some(profile)) => {
+            Ok(Some(analysis)) => {
+                let AudioAnalysis {
+                    profile,
+                    loudness_error,
+                } = analysis;
                 bundle.audio_profile = Some(profile.clone());
-                emit_progress(
-                    "audio",
-                    "completed",
-                    Some("Audio profile extracted".to_string()),
-                );
+                match loudness_error {
+                    Some(error) => {
+                        let detail = format!("Loudness measurement failed: {}", error);
+                        bundle.add_error("audio", detail.clone());
+                        emit_progress("audio", "completed", Some(detail));
+                    }
+                    None => {
+                        emit_progress(
+                            "audio",
+                            "completed",
+                            Some("Audio profile extracted".to_string()),
+                        );
+                    }
+                }
                 Some(profile)
             }
             Ok(None) => None,
@@ -527,7 +545,7 @@ impl AnalysisJobRunner {
         // Save bundle to disk. The write merges with whatever is cached, so a
         // run with only some sub-jobs enabled keeps the results it did not
         // reproduce instead of erasing them.
-        let bundle = self.save_bundle(&bundle)?;
+        let bundle = self.save_bundle(&bundle, options)?;
         emit_progress(
             "bundle",
             "saved",
@@ -653,15 +671,31 @@ impl AnalysisJobRunner {
     /// network I/O — must publish its delta through
     /// [`Self::publish_enrichment`] or [`Self::merge_bundle_update`] instead, so
     /// the read its merge is based on happens under the bundle lock.
-    fn save_bundle(&self, bundle: &AnalysisBundle) -> CoreResult<AnalysisBundle> {
+    fn save_bundle(
+        &self,
+        bundle: &AnalysisBundle,
+        options: &AnalysisOptions,
+    ) -> CoreResult<AnalysisBundle> {
         let fresh = bundle.clone();
         let metadata = bundle.metadata.clone();
+        // An audio-only run has no second job whose success could justify
+        // dropping the cached profile, so a failure there leaves the cached one
+        // in place rather than trading it for an empty slot.
+        let audio_only = options.audio
+            && !options.shots
+            && !options.transcript
+            && !options.segments
+            && !options.visual;
         let updated = self.locked_bundle_update(
             &bundle.asset_id,
             MissingBundle::Create(&metadata),
             move |stored| {
                 let previous = std::mem::replace(stored, fresh);
-                stored.backfill_missing_from(&previous);
+                if audio_only {
+                    stored.backfill_missing_from_keeping_audio(&previous);
+                } else {
+                    stored.backfill_missing_from(&previous);
+                }
                 true
             },
         )?;
@@ -773,16 +807,28 @@ impl AnalysisJobRunner {
         })
     }
 
-    /// Merges an audio profile into the asset's cached bundle.
-    pub fn merge_bundle_audio_profile(
+    /// Merges one audio pass into the asset's cached bundle.
+    ///
+    /// Takes the whole [`AudioAnalysis`] rather than just the profile so a pass
+    /// that stored regions but could not measure loudness records that against
+    /// the `audio` job instead of clearing the previous run's error and
+    /// presenting the profile as complete.
+    pub fn merge_bundle_audio_analysis(
         &self,
         asset_id: &str,
         fallback_metadata: &VideoMetadata,
-        audio_profile: AudioProfile,
+        analysis: AudioAnalysis,
     ) -> CoreResult<AnalysisBundle> {
         self.merge_bundle_update(asset_id, fallback_metadata, |bundle| {
-            bundle.audio_profile = Some(audio_profile);
-            bundle.errors.remove("audio");
+            bundle.audio_profile = Some(analysis.profile);
+            match analysis.loudness_error {
+                Some(error) => {
+                    bundle.add_error("audio", format!("Loudness measurement failed: {}", error))
+                }
+                None => {
+                    bundle.errors.remove("audio");
+                }
+            }
         })
     }
 
@@ -963,18 +1009,19 @@ impl AnalysisJobRunner {
         duration_sec: f64,
         has_audio: bool,
         options: &AnalysisOptions,
-    ) -> CoreResult<Option<AudioProfile>> {
+    ) -> CoreResult<Option<AudioAnalysis>> {
         if !options.audio {
             return Ok(None);
         }
 
         if !has_audio {
-            return Ok(Some(AudioProfile::silent(duration_sec)));
+            return Ok(Some(AudioAnalysis::measured(AudioProfile::silent(
+                duration_sec,
+            ))));
         }
 
         let profiler = AudioProfiler::new(self.ffmpeg_path.clone());
-        let profile = profiler.analyze(video_path, duration_sec).await?;
-        Ok(Some(profile))
+        Ok(Some(profiler.analyze(video_path, duration_sec).await?))
     }
 
     /// Runs content segmentation if enabled in options
@@ -1138,7 +1185,9 @@ mod tests {
             rows: 1,
         });
 
-        runner.save_bundle(&bundle).unwrap();
+        runner
+            .save_bundle(&bundle, &AnalysisOptions::default())
+            .unwrap();
 
         let loaded = runner.load_bundle("asset_001").unwrap();
         assert_eq!(loaded.asset_id, "asset_001");
@@ -1199,7 +1248,11 @@ mod tests {
             let runner = AnalysisJobRunner::new(&project_dir);
             for _ in 0..20 {
                 runner
-                    .merge_bundle_audio_profile("asset_200", &metadata, AudioProfile::silent(30.0))
+                    .merge_bundle_audio_analysis(
+                        "asset_200",
+                        &metadata,
+                        AudioAnalysis::measured(AudioProfile::silent(30.0)),
+                    )
                     .unwrap();
             }
         });
@@ -1234,7 +1287,9 @@ mod tests {
             for _ in 0..20 {
                 let mut bundle = AnalysisBundle::new("asset_201", pipeline_metadata.clone());
                 bundle.shots = Some(vec![ShotResult::new(0.0, 30.0, 0.9)]);
-                runner.save_bundle(&bundle).unwrap();
+                runner
+                    .save_bundle(&bundle, &AnalysisOptions::default())
+                    .unwrap();
             }
         });
 
@@ -1243,7 +1298,11 @@ mod tests {
             let runner = AnalysisJobRunner::new(&project_dir);
             for _ in 0..20 {
                 runner
-                    .merge_bundle_audio_profile("asset_201", &metadata, AudioProfile::silent(30.0))
+                    .merge_bundle_audio_analysis(
+                        "asset_201",
+                        &metadata,
+                        AudioAnalysis::measured(AudioProfile::silent(30.0)),
+                    )
                     .unwrap();
             }
         });
@@ -1268,11 +1327,15 @@ mod tests {
         let mut cached = AnalysisBundle::new("asset_202", VideoMetadata::new(30.0));
         cached.audio_profile = Some(AudioProfile::silent(30.0));
         cached.segments = Some(Vec::new());
-        runner.save_bundle(&cached).unwrap();
+        runner
+            .save_bundle(&cached, &AnalysisOptions::default())
+            .unwrap();
 
         let mut fresh = AnalysisBundle::new("asset_202", VideoMetadata::new(30.0));
         fresh.shots = Some(vec![ShotResult::new(0.0, 30.0, 0.9)]);
-        let persisted = runner.save_bundle(&fresh).unwrap();
+        let persisted = runner
+            .save_bundle(&fresh, &AnalysisOptions::default())
+            .unwrap();
 
         assert!(persisted.shots.is_some());
         assert!(persisted.audio_profile.is_some());
@@ -1299,7 +1362,9 @@ mod tests {
             columns: 1,
             rows: 1,
         });
-        runner.save_bundle(&cached).unwrap();
+        runner
+            .save_bundle(&cached, &AnalysisOptions::default())
+            .unwrap();
 
         let merged = runner
             .merge_bundle_shots(
@@ -1340,7 +1405,9 @@ mod tests {
             columns: 1,
             rows: 1,
         });
-        runner.save_bundle(&cached).unwrap();
+        runner
+            .save_bundle(&cached, &AnalysisOptions::default())
+            .unwrap();
 
         // `analysis shots` re-detects the same cuts without extracting keyframes.
         let merged = runner
@@ -1365,7 +1432,9 @@ mod tests {
 
         let mut cached = AnalysisBundle::new("asset_205", VideoMetadata::new(30.0));
         cached.analyzed_at = "2020-01-01T00:00:00+00:00".to_string();
-        runner.save_bundle(&cached).unwrap();
+        runner
+            .save_bundle(&cached, &AnalysisOptions::default())
+            .unwrap();
         let stamp_before = runner.load_bundle("asset_205").unwrap().analyzed_at;
 
         let declined = runner
@@ -1405,7 +1474,9 @@ mod tests {
         let mut existing = AnalysisBundle::new("asset_101", VideoMetadata::new(30.0));
         existing.audio_profile = Some(AudioProfile::silent(30.0));
         existing.segments = Some(Vec::new());
-        runner.save_bundle(&existing).unwrap();
+        runner
+            .save_bundle(&existing, &AnalysisOptions::default())
+            .unwrap();
 
         runner
             .merge_bundle_shots(
@@ -1423,6 +1494,52 @@ mod tests {
         assert_eq!(loaded.metadata.duration_sec, 30.0);
     }
 
+    /// Feature: automatic loudness re-measurement
+    /// Scenario: the re-measure pass fails on a bundle that is already cached
+    ///   Given a bundle on disk holding silence and speech regions
+    ///   When an audio-only run fails and is published
+    ///   Then the regions are still on disk and the failure is recorded
+    ///
+    /// This is the read path: opening a project re-measures a bundle whose
+    /// loudness is missing, and a failure there used to delete the profile the
+    /// user already had, leaving the asset with no regions at all.
+    #[test]
+    fn should_not_erase_a_cached_audio_profile_when_an_audio_only_run_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+        let metadata = VideoMetadata::new(30.0).with_audio(true);
+
+        let mut cached = AnalysisBundle::new("asset_500", metadata.clone());
+        cached.shots = Some(vec![ShotResult::new(0.0, 30.0, 0.9)]);
+        cached.audio_profile = Some(AudioProfile {
+            silence_regions: vec![SilenceRegion::new(1.0, 2.0)],
+            speech_regions: vec![SpeechRegion::new(2.0, 6.0)],
+            ..Default::default()
+        });
+        runner
+            .save_bundle(&cached, &AnalysisOptions::default())
+            .unwrap();
+
+        let mut failed_run = AnalysisBundle::new("asset_500", metadata);
+        failed_run.add_error("audio", "FFmpeg is not installed".to_string());
+        runner
+            .save_bundle(&failed_run, &AnalysisOptions::audio_only())
+            .unwrap();
+
+        let loaded = runner.load_bundle("asset_500").unwrap();
+        let profile = loaded
+            .audio_profile
+            .as_ref()
+            .expect("the cached profile must still be on disk");
+        assert_eq!(profile.silence_regions.len(), 1);
+        assert_eq!(profile.speech_regions.len(), 1);
+        assert!(
+            loaded.shots.is_some(),
+            "the rest of the bundle survives too"
+        );
+        assert!(loaded.errors.contains_key("audio"));
+    }
+
     #[test]
     fn should_clear_the_matching_error_when_merging_a_successful_result() {
         let temp_dir = TempDir::new().unwrap();
@@ -1431,13 +1548,15 @@ mod tests {
         let mut existing = AnalysisBundle::new("asset_102", VideoMetadata::new(30.0));
         existing.add_error("audio", "FFmpeg missing".to_string());
         existing.add_error("shots", "FFmpeg missing".to_string());
-        runner.save_bundle(&existing).unwrap();
+        runner
+            .save_bundle(&existing, &AnalysisOptions::default())
+            .unwrap();
 
         runner
-            .merge_bundle_audio_profile(
+            .merge_bundle_audio_analysis(
                 "asset_102",
                 &VideoMetadata::new(30.0),
-                AudioProfile::silent(30.0),
+                AudioAnalysis::measured(AudioProfile::silent(30.0)),
             )
             .unwrap();
 
@@ -1456,13 +1575,19 @@ mod tests {
         let mut published = AnalysisBundle::new("asset_300", metadata.clone());
         published.shots = Some(vec![ShotResult::new(0.0, 30.0, 0.9)]);
         published.audio_profile = Some(AudioProfile::silent(30.0));
-        runner.save_bundle(&published).unwrap();
+        runner
+            .save_bundle(&published, &AnalysisOptions::default())
+            .unwrap();
 
         // A second writer re-profiles the audio while the provider is working.
         let mut reprofiled = AudioProfile::silent(30.0);
         reprofiled.bpm = Some(128.0);
         runner
-            .merge_bundle_audio_profile("asset_300", &metadata, reprofiled)
+            .merge_bundle_audio_analysis(
+                "asset_300",
+                &metadata,
+                AudioAnalysis::measured(reprofiled),
+            )
             .unwrap();
 
         let enrichment = BundleEnrichment {
@@ -1504,7 +1629,9 @@ mod tests {
         ];
         let mut published = AnalysisBundle::new("asset_301", metadata.clone());
         published.shots = Some(analyzed_shots.clone());
-        runner.save_bundle(&published).unwrap();
+        runner
+            .save_bundle(&published, &AnalysisOptions::default())
+            .unwrap();
 
         // A re-detection lands while the provider is still reading the old cuts.
         runner
@@ -1563,7 +1690,9 @@ mod tests {
         bundle.add_error("transcript", "Whisper not available".to_string());
         bundle.add_error("visual", "Vision API timeout".to_string());
 
-        runner.save_bundle(&bundle).unwrap();
+        runner
+            .save_bundle(&bundle, &AnalysisOptions::default())
+            .unwrap();
 
         let loaded = runner.load_bundle("asset_002").unwrap();
         assert!(loaded.shots.is_some());
@@ -1580,12 +1709,16 @@ mod tests {
         // Save first version
         let mut bundle1 = AnalysisBundle::new("asset_003", VideoMetadata::new(10.0));
         bundle1.shots = Some(vec![ShotResult::new(0.0, 10.0, 0.5)]);
-        runner.save_bundle(&bundle1).unwrap();
+        runner
+            .save_bundle(&bundle1, &AnalysisOptions::default())
+            .unwrap();
 
         // Save updated version
         let mut bundle2 = AnalysisBundle::new("asset_003", VideoMetadata::new(10.0));
         bundle2.shots = Some(vec![ShotResult::new(0.0, 10.0, 1.0)]);
-        runner.save_bundle(&bundle2).unwrap();
+        runner
+            .save_bundle(&bundle2, &AnalysisOptions::default())
+            .unwrap();
 
         let loaded = runner.load_bundle("asset_003").unwrap();
         assert_eq!(loaded.shots.as_ref().unwrap()[0].confidence, 1.0);

@@ -85,11 +85,22 @@ pub struct AudioProfile {
     pub spectral_centroid_hz: f64,
     /// Per-second momentary loudness values in LUFS.
     ///
-    /// Sampled at 1 Hz (one value per second), so `loudness_profile[i]` is the
-    /// average momentary loudness during the i-th second of audio and the
-    /// profile has one entry per second of measured audio. Consumers address it
-    /// by time, so a second the meter reports as digital silence keeps its slot
-    /// and reads [`SILENCE_FLOOR_DB`] rather than being omitted.
+    /// Sampled at 1 Hz (one value per second), so `loudness_profile[i]` covers
+    /// the i-th second of audio and the profile has one entry per second of
+    /// measured audio. Consumers address it by time, so a second the meter
+    /// reports as digital silence keeps its slot and reads [`SILENCE_FLOOR_DB`]
+    /// rather than being omitted.
+    ///
+    /// Each entry averages only the *audible* readings of its second. The
+    /// meter reports no level for the first 300 ms of a file and for the
+    /// windows around a silence, and those readings are 70 dB below anything it
+    /// would call quiet; folding them into the mean would report a second as
+    /// far quieter than it sounds. A second with no audible reading at all is
+    /// the floor.
+    ///
+    /// An empty profile is not by itself "unmeasured" — an asset shorter than
+    /// one meter window legitimately produces one. [`Self::loudness_measured`]
+    /// is the field that says whether a pass ran.
     pub loudness_profile: Vec<f64>,
     /// Peak level in dB relative to full scale.
     ///
@@ -115,6 +126,20 @@ pub struct AudioProfile {
     /// Regions where audio is above the silence threshold (derived speech / non-silence)
     #[serde(default)]
     pub speech_regions: Vec<SpeechRegion>,
+    /// Whether a loudness pass actually produced the fields above.
+    ///
+    /// The loudness pass can fail on its own while silence detection, the VAD
+    /// and the spectral pass all succeed, and it is the only part of the
+    /// profile whose "nothing here" value ([`SILENCE_FLOOR_DB`], an empty
+    /// curve) is indistinguishable from a real reading of a silent file. This
+    /// flag is what separates the two, so readers can say "not measured"
+    /// instead of publishing `-90 dB` as a level and callers know whether a
+    /// re-measurement is worth running.
+    ///
+    /// Legacy bundles carry no field and deserialize as `false`, which costs
+    /// them one re-measurement.
+    #[serde(default)]
+    pub loudness_measured: bool,
 }
 
 /// Current version of the audio loudness/peak measurement.
@@ -156,28 +181,40 @@ impl AudioProfile {
             true_peak_dbtp: None,
             silence_regions: silence,
             speech_regions: Vec::new(),
+            // Nothing to measure and nothing that a later pass could add: this
+            // is the profile of an asset with no audio stream. Leaving the flag
+            // clear would make every read of the bundle queue another pass that
+            // arrives at this same profile.
+            loudness_measured: true,
         }
     }
 
     /// Returns `true` when the loudness numbers come from the current pass.
     ///
-    /// A profile whose per-second curve is empty counts as unmeasured even at
-    /// the current version: that is exactly the shape the superseded pass
-    /// produced, and no caller can tell the two apart from the numbers alone.
+    /// Both halves matter: [`Self::measurement_version`] says which pass
+    /// produced the numbers, and [`Self::loudness_measured`] says a pass
+    /// produced them at all. The curve's emptiness is deliberately *not* part
+    /// of the test — [`Self::silent`] and any asset shorter than one meter
+    /// window produce an empty curve from a pass that ran perfectly well, and
+    /// treating those as unmeasured made every read of such a bundle queue
+    /// another pass that could only reach the same answer.
     pub fn has_current_loudness(&self) -> bool {
-        self.measurement_version >= AUDIO_MEASUREMENT_VERSION && !self.loudness_profile.is_empty()
+        self.measurement_version >= AUDIO_MEASUREMENT_VERSION && self.loudness_measured
     }
 
     /// Clears every field the loudness pass produces, leaving the regions.
     ///
     /// The peak returns to [`SILENCE_FLOOR_DB`], which is what "nothing was
-    /// measured" means everywhere else in the profile.
+    /// measured" means everywhere else in the profile, and
+    /// [`Self::loudness_measured`] goes back to `false` so a reader reports the
+    /// gap rather than the sentinel.
     pub fn clear_loudness_measurement(&mut self) {
         self.loudness_profile.clear();
         self.peak_db = SILENCE_FLOOR_DB;
         self.integrated_lufs = None;
         self.loudness_range_lu = None;
         self.true_peak_dbtp = None;
+        self.loudness_measured = false;
     }
 }
 
@@ -747,7 +784,33 @@ impl AnalysisBundle {
     /// "missing", it is superseded — republishing it under a fresh
     /// `analyzed_at` would present stale data as current, which is exactly
     /// wrong when the failure came from media that changed underneath.
+    ///
+    /// See [`Self::backfill_missing_from_keeping_audio`] for the one run shape
+    /// where that rule does more harm than good.
     pub fn backfill_missing_from(&mut self, previous: &AnalysisBundle) {
+        self.backfill(previous, AudioSlotOnFailure::Supersede);
+    }
+
+    /// Merges as [`Self::backfill_missing_from`] does, but keeps the cached
+    /// audio profile when this run's audio job failed.
+    ///
+    /// For an audio-only run — the automatic loudness re-measurement, or
+    /// `analysis run --audio` — the "superseded" reading is wrong. The run
+    /// enabled exactly one job, so a failure means it produced *nothing*, and
+    /// applying the general rule would delete the cached silence and speech
+    /// regions in exchange for an empty slot. Those regions come from
+    /// `silencedetect` and the VAD and had nothing to do with the loudness
+    /// numbers the run went looking for.
+    ///
+    /// The failure is still recorded in [`Self::errors`], so nothing presents
+    /// the retained profile as freshly measured, and
+    /// [`AudioProfile::has_current_loudness`] still reports its loudness as
+    /// missing.
+    pub fn backfill_missing_from_keeping_audio(&mut self, previous: &AnalysisBundle) {
+        self.backfill(previous, AudioSlotOnFailure::Keep);
+    }
+
+    fn backfill(&mut self, previous: &AnalysisBundle, audio_on_failure: AudioSlotOnFailure) {
         if self.shots.is_none() && !self.job_failed("shots") {
             self.shots = previous.shots.clone();
         }
@@ -757,7 +820,11 @@ impl AnalysisBundle {
         if self.transcript_detail.is_none() && !self.job_failed("transcript") {
             self.transcript_detail = previous.transcript_detail.clone();
         }
-        if self.audio_profile.is_none() && !self.job_failed("audio") {
+        let audio_restorable = match audio_on_failure {
+            AudioSlotOnFailure::Keep => true,
+            AudioSlotOnFailure::Supersede => !self.job_failed("audio"),
+        };
+        if self.audio_profile.is_none() && audio_restorable {
             self.audio_profile = previous.audio_profile.clone();
         }
         if self.segments.is_none() && !self.job_failed("segments") {
@@ -847,6 +914,15 @@ impl AnalysisBundle {
     fn job_failed(&self, analysis_type: &str) -> bool {
         self.errors.contains_key(analysis_type)
     }
+}
+
+/// What a merge does with the cached audio profile when the audio job failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioSlotOnFailure {
+    /// Drop the cached profile: this run replaced it and could not.
+    Supersede,
+    /// Keep the cached profile: this run had nothing else to offer.
+    Keep,
 }
 
 /// Tolerance used when deciding whether two shot lists describe the same cuts.
@@ -1055,6 +1131,79 @@ mod tests {
         });
 
         assert!(!bundle.needs_loudness_measurement());
+    }
+
+    /// Feature: stale loudness detection
+    /// Scenario: an asset with an audio stream measured as digital silence
+    ///   Given a bundle whose audio pass ran and found nothing audible
+    ///   When the bundle is asked whether loudness has to be measured
+    ///   Then it says no
+    ///
+    /// A silent measurement leaves an empty curve and a floor peak — the same
+    /// shape a pass that never ran leaves. Reading the curve to tell them apart
+    /// made every read of a silent asset, and of any asset shorter than one
+    /// meter window, queue a full re-decode that could only find the same
+    /// nothing.
+    #[test]
+    fn should_not_ask_for_loudness_when_a_pass_measured_silence() {
+        let mut bundle = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0).with_audio(true));
+        bundle.audio_profile = Some(AudioProfile::silent(10.0));
+
+        assert!(!bundle.needs_loudness_measurement());
+    }
+
+    /// Feature: audio-only re-measurement
+    /// Scenario: the re-measure pass fails
+    ///   Given a cached bundle holding silence and speech regions
+    ///   And an audio-only run that failed and produced no profile
+    ///   When the run is merged over the cache
+    ///   Then the cached profile survives and the failure is still recorded
+    ///
+    /// The general rule is that a failed job supersedes its cached result. For
+    /// an audio-only run there is nothing to supersede it with: applying the
+    /// rule traded the user's silence and speech regions for an empty slot.
+    #[test]
+    fn should_keep_the_cached_audio_profile_when_an_audio_only_run_failed() {
+        let mut previous = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0));
+        previous.shots = Some(Vec::new());
+        previous.audio_profile = Some(AudioProfile {
+            silence_regions: vec![SilenceRegion::new(1.0, 2.0)],
+            speech_regions: vec![SpeechRegion::new(2.0, 6.0)],
+            ..Default::default()
+        });
+
+        let mut fresh = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0));
+        fresh.add_error("audio", "FFmpeg is not installed".to_string());
+        fresh.backfill_missing_from_keeping_audio(&previous);
+
+        let profile = fresh
+            .audio_profile
+            .as_ref()
+            .expect("the cached profile must survive a failed audio-only run");
+        assert_eq!(profile.silence_regions.len(), 1);
+        assert_eq!(profile.speech_regions.len(), 1);
+        assert!(
+            fresh.errors.contains_key("audio"),
+            "the failure stays recorded so nothing calls the profile fresh"
+        );
+    }
+
+    /// Feature: audio-only re-measurement
+    /// Scenario: a full run fails its audio job
+    ///   Given the same cached bundle
+    ///   When a run that also produced shots merges over it
+    ///   Then the cached profile is superseded as before
+    #[test]
+    fn should_still_supersede_a_cached_audio_profile_when_a_full_run_failed_audio() {
+        let mut previous = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0));
+        previous.audio_profile = Some(AudioProfile::silent(10.0));
+
+        let mut fresh = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0));
+        fresh.shots = Some(Vec::new());
+        fresh.add_error("audio", "FFmpeg is not installed".to_string());
+        fresh.backfill_missing_from(&previous);
+
+        assert!(fresh.audio_profile.is_none());
     }
 
     // -------------------------------------------------------------------------

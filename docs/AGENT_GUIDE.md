@@ -602,10 +602,15 @@ openreelio-cli analysis report  --path ./demo --id <ASSET_ID>
   `astats` sample peak (dBFS) otherwise. It used to be the maximum momentary
   loudness in LUFS, so a `peakDb` read from a report written before this change
   is a different quantity. `loudnessProfile` has one entry per second of audio,
-  including seconds of digital silence, which read `-90`. A pass that measures
-  nothing now fails instead of reporting `-90 dB`, and `analysis report` says
-  `coverage.loudness: false` when the cached numbers predate the current
-  measurement — rerun `analysis audio` when you see that.
+  including seconds of digital silence, which read `-90`; each entry averages
+  only the audible readings of its second, so the meter's 300 ms warm-up and the
+  windows around a silence do not drag a second down. A pass that measures
+  nothing reports `loudnessMeasured: false` with the loudness fields nulled
+  rather than publishing `-90 dB` as a level, and `status: partial` — the
+  silence and speech regions it did produce are still stored, and
+  `analysis run` still exits `0`. `analysis report` says
+  `coverage.loudness: false` whenever the numbers are absent or predate the
+  current measurement — rerun `analysis audio` when you see that.
 - **`analysis run`** drives the job runner with local-only providers.
   Transcript is off unless `--transcript` is passed, and fails fast with an
   `openreelio-cli transcription install` hint when no Whisper model is present.

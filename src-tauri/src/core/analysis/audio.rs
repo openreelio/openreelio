@@ -95,7 +95,20 @@ impl AudioProfiler {
     /// Runs silence detection, loudness metering, and spectral analysis in
     /// parallel via `tokio::join!`. If the video has no audio stream, returns
     /// [`AudioProfile::silent`] instead.
-    pub async fn analyze(&self, video_path: &Path, duration_sec: f64) -> CoreResult<AudioProfile> {
+    ///
+    /// A loudness pass that fails or measures nothing does not fail the whole
+    /// analysis: the silence regions, speech regions and spectral centroid are
+    /// three independent FFmpeg passes and they are what most of the pipeline
+    /// actually reads. The profile comes back with its loudness fields
+    /// unmeasured and the reason in [`AudioAnalysis::loudness_error`], so the
+    /// caller can record the gap without discarding the rest.
+    ///
+    /// # Errors
+    ///
+    /// Only silence detection is load-bearing enough to fail the pass: without
+    /// it there are no regions and nothing downstream has anything to work
+    /// with.
+    pub async fn analyze(&self, video_path: &Path, duration_sec: f64) -> CoreResult<AudioAnalysis> {
         // Run all three analysis passes in parallel
         let (silence_result, loudness_result, spectral_result) = tokio::join!(
             self.detect_silence(video_path),
@@ -113,11 +126,23 @@ impl AudioProfiler {
                 "No audio stream detected in {}, returning silent profile",
                 video_path.display()
             );
-            return Ok(AudioProfile::silent(duration_sec));
+            return Ok(AudioAnalysis::measured(AudioProfile::silent(duration_sec)));
         }
 
         let silence_regions = silence_result?;
-        let loudness = loudness_result?;
+        // A failed loudness pass costs the loudness fields, not the profile.
+        let (loudness, loudness_error) = match loudness_result {
+            Ok(measurement) => (measurement, None),
+            Err(error) => {
+                tracing::warn!(
+                    input = %video_path.display(),
+                    %error,
+                    "Loudness measurement failed; the audio profile keeps its regions \
+                     and reports its loudness as unmeasured"
+                );
+                (LoudnessMeasurement::default(), Some(error.to_string()))
+            }
+        };
         let spectral_centroid_hz = spectral_result.unwrap_or_else(|err| {
             tracing::debug!(
                 "Spectral centroid extraction failed, defaulting to 0.0: {}",
@@ -131,8 +156,14 @@ impl AudioProfiler {
         // by the second, but a stretch of floor readings is a pair of artificial
         // jumps rather than a beat.
         let onset_samples = audible_momentary_readings(&loudness.momentary_lufs);
+        // The per-second fallback is filtered for the same reason: a run of
+        // floor entries between two spoken phrases reads as one huge peak
+        // followed by one huge trough, which is exactly the shape the onset
+        // detector is looking for.
         let bpm = Self::estimate_bpm_from_samples(&onset_samples, LOUDNESS_SAMPLES_PER_SECOND)
-            .or_else(|| Self::estimate_bpm(&loudness.loudness_profile));
+            .or_else(|| {
+                Self::estimate_bpm(&audible_momentary_readings(&loudness.loudness_profile))
+            });
         let speech_regions = match self
             .detect_speech_regions_vad(video_path, duration_sec)
             .await
@@ -149,17 +180,21 @@ impl AudioProfiler {
 
         let peak_db = loudness.peak_db();
 
-        Ok(AudioProfile {
-            measurement_version: AUDIO_MEASUREMENT_VERSION,
-            bpm,
-            spectral_centroid_hz,
-            loudness_profile: loudness.loudness_profile,
-            peak_db,
-            integrated_lufs: loudness.integrated_lufs,
-            loudness_range_lu: loudness.loudness_range_lu,
-            true_peak_dbtp: loudness.true_peak_dbtp,
-            silence_regions,
-            speech_regions,
+        Ok(AudioAnalysis {
+            profile: AudioProfile {
+                measurement_version: AUDIO_MEASUREMENT_VERSION,
+                bpm,
+                spectral_centroid_hz,
+                loudness_profile: loudness.loudness_profile,
+                peak_db,
+                integrated_lufs: loudness.integrated_lufs,
+                loudness_range_lu: loudness.loudness_range_lu,
+                true_peak_dbtp: loudness.true_peak_dbtp,
+                silence_regions,
+                speech_regions,
+                loudness_measured: loudness_error.is_none(),
+            },
+            loudness_error,
         })
     }
 
@@ -589,6 +624,30 @@ fn extract_silence_end(line: &str) -> Option<f64> {
     num_str.parse::<f64>().ok()
 }
 
+/// One audio analysis pass: the profile it produced and what it could not measure.
+///
+/// Separate from [`AudioProfile`] because the profile is the cached artifact
+/// and this is the run report. The loudness fields can come back unmeasured
+/// while the regions are perfectly good, and the caller needs the reason to
+/// record against the bundle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioAnalysis {
+    /// The profile to cache. Always present, even when loudness failed.
+    pub profile: AudioProfile,
+    /// Why the loudness fields are unmeasured, when they are.
+    pub loudness_error: Option<String>,
+}
+
+impl AudioAnalysis {
+    /// Wraps a profile whose loudness pass succeeded.
+    pub fn measured(profile: AudioProfile) -> Self {
+        Self {
+            profile,
+            loudness_error: None,
+        }
+    }
+}
+
 /// Everything the loudness pass measured for one asset.
 ///
 /// Kept as a struct rather than a tuple because the pass now yields both
@@ -619,7 +678,9 @@ impl LoudnessMeasurement {
     /// below the silence floor, and clamping it would invent a level the file
     /// does not have. The floor is reached only when both fields are empty,
     /// which for a completed pass means the input was digital silence:
-    /// [`measure_loudness`] rejects a pass that measured nothing at all.
+    /// [`measure_loudness`] rejects a pass that measured nothing at all, and a
+    /// pass that never completed is published with
+    /// `AudioProfile::loudness_measured` clear rather than as a level.
     pub fn peak_db(&self) -> f64 {
         self.true_peak_dbtp
             .or(self.sample_peak_db)
@@ -1328,7 +1389,8 @@ lavfi.aspectralstats.1.centroid=2800.0
         let profile = AudioProfiler::new(ffmpeg)
             .analyze(&fixture, FIXTURE_DURATION_SEC)
             .await
-            .expect("the profiler must measure a decodable tone");
+            .expect("the profiler must measure a decodable tone")
+            .profile;
 
         assert!(
             !profile.loudness_profile.is_empty(),
@@ -1350,6 +1412,168 @@ lavfi.aspectralstats.1.centroid=2800.0
             "integrated loudness {integrated} LUFS is further than \
              {LOUDNESS_TOLERANCE_LU} LU from the expected {FIXTURE_STEREO_LUFS} LUFS"
         );
+    }
+
+    /// Writes a tone / digital-silence / tone fixture with the given encoder.
+    ///
+    /// `anullsrc` supplies exact zeroes and the tone is the same `aevalsrc`
+    /// expression the other fixtures use, so the audible seconds land at a
+    /// known level. The encoder is a parameter because the two that matter
+    /// print different things for the silent windows: PCM gives FFmpeg 9 a
+    /// number far below the floor, and mp3 gives it the literal `M:   nan`,
+    /// which is the spelling the parser used to drop.
+    ///
+    /// `silence_sec` is 2 rather than 1 because the meter's momentary window is
+    /// 400 ms wide: a one-second gap never yields a whole second whose readings
+    /// are all silent, only a second of decay.
+    fn write_gapped_tone_fixture(
+        ffmpeg: &Path,
+        path: &Path,
+        encoder: &str,
+        silence_sec: u32,
+    ) -> bool {
+        let channel = format!("{FIXTURE_AMPLITUDE}*sin(2*PI*440*t)");
+        let tone = format!("aevalsrc=exprs={channel}|{channel}:s=48000:d=1:c=stereo");
+        let silence = format!("anullsrc=r=48000:cl=stereo:d={silence_sec}");
+
+        run_ffmpeg(
+            ffmpeg,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                tone.as_str(),
+                "-f",
+                "lavfi",
+                "-i",
+                silence.as_str(),
+                "-f",
+                "lavfi",
+                "-i",
+                tone.as_str(),
+                "-filter_complex",
+                "[0:a][1:a][2:a]concat=n=3:v=0:a=1[out]",
+                "-map",
+                "[out]",
+                "-c:a",
+                encoder,
+            ],
+            path,
+        )
+    }
+
+    /// Length of the gapped fixture, in seconds: one tone, two silent, one tone.
+    const GAPPED_FIXTURE_SEC: f64 = 4.0;
+
+    /// Seconds of digital silence in the middle of the gapped fixture.
+    const GAPPED_FIXTURE_SILENCE_SEC: u32 = 2;
+
+    /// How far below the tone a silent second has to read to count as silent.
+    ///
+    /// Loose because it has to hold for a lossy encoder too: mp3 reconstructs
+    /// digital silence as its own noise floor, around -87 LUFS against a -22
+    /// LUFS tone, which is inaudible without being the sentinel.
+    const SILENT_SECOND_MARGIN_LU: f64 = 40.0;
+
+    /// Feature: asset audio loudness measurement
+    /// Scenario: a file whose middle is digital silence is profiled
+    ///   Given tone / 2 s of digital silence / tone, as PCM and as mp3
+    ///   When the audio profiler measures each
+    ///   Then the per-second profile has one entry per second, the second
+    ///   wholly inside the silence reads as silent and the outer seconds read
+    ///   the tone
+    ///
+    /// The real-FFmpeg half of the parser regression, run over both encodings
+    /// because they exercise different spellings of "no signal": PCM prints a
+    /// number far below the floor, mp3 prints `M:   nan`. Dropping either
+    /// shortened the series, so the closing tone was reported at the index of
+    /// the silence and every consumer that addresses the profile by time read
+    /// the wrong second.
+    #[tokio::test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    async fn should_keep_the_profile_aligned_when_the_middle_of_a_file_is_silent() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let profiler = AudioProfiler::new(ffmpeg.clone());
+
+        for (name, encoder) in [
+            ("gapped_tone.wav", "pcm_s16le"),
+            ("gapped_tone.mp3", "libmp3lame"),
+        ] {
+            let fixture = dir.path().join(name);
+            if !write_gapped_tone_fixture(&ffmpeg, &fixture, encoder, GAPPED_FIXTURE_SILENCE_SEC) {
+                skip_without_ffmpeg("ffmpeg could not synthesize the gapped tone fixture");
+                return;
+            }
+
+            let profile = profiler
+                .analyze(&fixture, GAPPED_FIXTURE_SEC)
+                .await
+                .expect("the profiler must measure a decodable file")
+                .profile;
+            let curve = &profile.loudness_profile;
+
+            assert_eq!(
+                curve.len(),
+                GAPPED_FIXTURE_SEC as usize,
+                "{encoder}: a {GAPPED_FIXTURE_SEC} s file must yield one entry per \
+                 second, got {curve:?}"
+            );
+            assert!(
+                curve[0] > SILENCE_FLOOR_DB,
+                "{encoder}: second 0 is the opening tone, got {}",
+                curve[0]
+            );
+            assert!(
+                curve[2] < curve[0] - SILENT_SECOND_MARGIN_LU,
+                "{encoder}: second 2 is wholly inside the silence, got {} against a \
+                 tone at {}",
+                curve[2],
+                curve[0]
+            );
+            assert!(
+                curve[3] > SILENCE_FLOOR_DB,
+                "{encoder}: second 3 is the closing tone, got {}",
+                curve[3]
+            );
+            assert!(
+                profile.loudness_measured,
+                "{encoder}: a completed pass must mark the profile measured"
+            );
+        }
+    }
+
+    /// Feature: asset audio loudness measurement
+    /// Scenario: a second of exact digital silence is profiled
+    ///   Given the PCM gapped fixture, whose silence is exact zeroes
+    ///   When the audio profiler measures it
+    ///   Then the second inside the silence is the floor sentinel exactly
+    ///
+    /// Split from the encoder-agnostic test because only a lossless encoding
+    /// can promise it: mp3 rebuilds digital silence as its own noise floor,
+    /// which is a real, if inaudible, reading.
+    #[tokio::test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    async fn should_report_the_silence_floor_for_a_second_of_exact_digital_silence() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fixture = dir.path().join("gapped_tone.wav");
+        if !write_gapped_tone_fixture(&ffmpeg, &fixture, "pcm_s16le", GAPPED_FIXTURE_SILENCE_SEC) {
+            skip_without_ffmpeg("ffmpeg could not synthesize the gapped tone fixture");
+            return;
+        }
+
+        let profile = AudioProfiler::new(ffmpeg)
+            .analyze(&fixture, GAPPED_FIXTURE_SEC)
+            .await
+            .expect("the profiler must measure a decodable file")
+            .profile;
+
+        assert_eq!(profile.loudness_profile[2], SILENCE_FLOOR_DB);
     }
 
     /// Feature: asset audio loudness measurement
@@ -1382,11 +1606,13 @@ lavfi.aspectralstats.1.centroid=2800.0
         let stereo = profiler
             .analyze(&stereo_path, FIXTURE_DURATION_SEC)
             .await
-            .expect("the profiler must measure the stereo fixture");
+            .expect("the profiler must measure the stereo fixture")
+            .profile;
         let mono = profiler
             .analyze(&mono_path, FIXTURE_DURATION_SEC)
             .await
-            .expect("the profiler must measure the mono downmix");
+            .expect("the profiler must measure the mono downmix")
+            .profile;
 
         assert!(
             (stereo.peak_db - mono.peak_db).abs() <= PEAK_TOLERANCE_DB,

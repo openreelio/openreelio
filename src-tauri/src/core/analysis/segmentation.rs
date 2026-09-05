@@ -6,6 +6,7 @@
 
 use serde_json::json;
 
+use super::loudness::is_audible;
 use super::types::{AudioProfile, ContentSegment, SegmentType, SilenceRegion};
 use crate::core::annotations::models::{ShotResult, TranscriptSegment};
 use crate::core::{CoreError, CoreResult};
@@ -359,35 +360,47 @@ impl ContentSegmenter {
         (all_short, longest)
     }
 
-    /// Computes median and standard deviation for finite loudness samples.
+    /// Computes median and standard deviation over the audible loudness samples.
+    ///
+    /// Silent seconds are excluded rather than averaged in. Their value is the
+    /// floor sentinel, tens of dB below anything the meter would call quiet, so
+    /// a file with any silence in it gets a median dragged down and a standard
+    /// deviation inflated by an amount that tracks how much silence it has.
+    /// [`Self::classify_window`] compares a window's average loudness against
+    /// `median + 0.5 * std_dev`, so both errors move the "loud enough to be a
+    /// performance" line for reasons that have nothing to do with the music.
+    ///
+    /// A profile with no audible second at all is a silent file: there is no
+    /// meaningful centre, and the zeroes it returns keep the threshold above
+    /// every real reading, so nothing is classified as loud.
     fn compute_loudness_stats(loudness_profile: &[f64]) -> LoudnessStats {
-        let mut finite_values: Vec<f64> = loudness_profile
+        let mut audible_values: Vec<f64> = loudness_profile
             .iter()
             .copied()
-            .filter(|value| value.is_finite())
+            .filter(|value| is_audible(*value))
             .collect();
 
-        if finite_values.is_empty() {
+        if audible_values.is_empty() {
             return LoudnessStats {
                 median_db: 0.0,
                 std_dev_db: 0.0,
             };
         }
 
-        finite_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median_db = if finite_values.len().is_multiple_of(2) {
-            let upper = finite_values.len() / 2;
-            (finite_values[upper - 1] + finite_values[upper]) / 2.0
+        audible_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median_db = if audible_values.len().is_multiple_of(2) {
+            let upper = audible_values.len() / 2;
+            (audible_values[upper - 1] + audible_values[upper]) / 2.0
         } else {
-            finite_values[finite_values.len() / 2]
+            audible_values[audible_values.len() / 2]
         };
 
-        let mean = finite_values.iter().sum::<f64>() / finite_values.len() as f64;
-        let variance = finite_values
+        let mean = audible_values.iter().sum::<f64>() / audible_values.len() as f64;
+        let variance = audible_values
             .iter()
             .map(|value| (value - mean).powi(2))
             .sum::<f64>()
-            / finite_values.len() as f64;
+            / audible_values.len() as f64;
 
         LoudnessStats {
             median_db,
@@ -566,7 +579,62 @@ mod tests {
     }
 
     use super::*;
-    use crate::core::analysis::types::SpeechRegion;
+    use crate::core::analysis::types::{SpeechRegion, SILENCE_FLOOR_DB};
+
+    /// Feature: content segmentation
+    /// Scenario: the same audible seconds are measured with and without pauses
+    ///   Given a loudness profile of audible seconds
+    ///   And the same profile with silent seconds interleaved
+    ///   When the loudness statistics are computed for each
+    ///   Then they agree
+    ///
+    /// The statistics set the "loud enough to be a performance" threshold at
+    /// `median + 0.5 * std_dev`. Counting the floor sentinel as a level pulled
+    /// the median down and pushed the deviation up in proportion to how much
+    /// silence a file happened to contain, so the same music was classified
+    /// differently depending on the pauses around it.
+    #[test]
+    fn should_ignore_silent_seconds_when_computing_loudness_statistics() {
+        let audible = vec![-24.0, -20.0, -16.0, -12.0];
+        let with_pauses = vec![
+            -24.0,
+            SILENCE_FLOOR_DB,
+            -20.0,
+            SILENCE_FLOOR_DB,
+            SILENCE_FLOOR_DB,
+            -16.0,
+            -12.0,
+        ];
+
+        let clean = ContentSegmenter::compute_loudness_stats(&audible);
+        let padded = ContentSegmenter::compute_loudness_stats(&with_pauses);
+
+        assert!(
+            (clean.median_db - padded.median_db).abs() < 1e-9,
+            "median moved from {} to {}",
+            clean.median_db,
+            padded.median_db
+        );
+        assert!(
+            (clean.std_dev_db - padded.std_dev_db).abs() < 1e-9,
+            "deviation moved from {} to {}",
+            clean.std_dev_db,
+            padded.std_dev_db
+        );
+    }
+
+    /// Feature: content segmentation
+    /// Scenario: nothing in the profile is audible
+    ///   Given a profile of nothing but silent seconds
+    ///   When the loudness statistics are computed
+    ///   Then they are the neutral pair, so no window reads as loud
+    #[test]
+    fn should_return_neutral_loudness_statistics_for_a_wholly_silent_profile() {
+        let stats = ContentSegmenter::compute_loudness_stats(&[SILENCE_FLOOR_DB; 4]);
+
+        assert_eq!(stats.median_db, 0.0);
+        assert_eq!(stats.std_dev_db, 0.0);
+    }
 
     /// Helper: create a simple audio profile with uniform loudness
     fn make_audio_profile(

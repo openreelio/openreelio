@@ -512,18 +512,33 @@ interface AnalysisOptions {
 ```typescript
 interface AudioProfile {
   measurementVersion: number; // Loudness/peak pass that produced the numbers
+  loudnessMeasured: boolean;  // Whether a pass filled the loudness fields in
   bpm: number | null;
   spectralCentroidHz: number;
   loudnessProfile: number[]; // Per-second momentary loudness in LUFS, one entry
-                             // per second; a silent second reads -90
+                             // per second of audio, including silent seconds,
+                             // which read -90. Each entry averages only the
+                             // audible readings of its second.
   peakDb: number; // True peak in dBTP when measured, else the sample peak in
-                  // dBFS; -90 means nothing was measured
+                  // dBFS
   integratedLufs: number | null; // EBU R128 program loudness
   loudnessRangeLu: number | null; // EBU R128 loudness range
   truePeakDbtp: number | null; // True peak, when the FFmpeg build measures one
   silenceRegions: SilenceRegion[];
   speechRegions: SpeechRegion[];
 }
+```
+
+`loudnessMeasured` is what separates "measured as silent" from "not measured".
+An empty `loudnessProfile` and a `peakDb` of -90 are the honest result for a
+silent asset, and also the shape a pass that never ran leaves behind, so nothing
+reads the numbers to decide. When it is `false` — or `measurementVersion` is
+below the current one — every surface reports the loudness fields as absent
+rather than publishing the floor as a level, while the silence and speech
+regions in the same profile stay usable: they come from `silencedetect` and the
+VAD, which the loudness pass does not touch.
+
+```typescript
 
 interface SilenceRegion {
   startSec: number;

@@ -284,23 +284,30 @@ struct CachedAudioProfile {
     silence_regions: Vec<CachedSilenceRegion>,
     #[serde(default)]
     speech_regions: Vec<CachedSpeechRegion>,
+    /// Whether a loudness pass produced the fields above; legacy bundles carry
+    /// no field and deserialize as `false`.
+    #[serde(default)]
+    loudness_measured: bool,
 }
 
 impl CachedAudioProfile {
     /// Whether the loudness numbers in this profile can be reported.
     ///
     /// The report reads `bundle.json` with its own types, so it repeats the
-    /// staleness check the core loader performs rather than trusting whatever
-    /// numbers the file happens to hold. An empty per-second curve counts as
-    /// unmeasured at any version: that is the exact shape the superseded pass
-    /// produced, and nothing in the file distinguishes the two.
+    /// check the core loader performs rather than trusting whatever numbers the
+    /// file happens to hold. It has to give the same answer as
+    /// `AudioProfile::has_current_loudness`, and for the same reasons: the
+    /// version says which pass produced the numbers and `loudnessMeasured` says
+    /// a pass produced them at all. The curve's length is not part of it — a
+    /// silent asset, and any asset shorter than one meter window, has an empty
+    /// curve from a pass that ran perfectly well.
     ///
     /// Only the loudness fields hang off this. The silence and speech regions
     /// in the same profile came from `silencedetect` and the VAD, which the
     /// loudness fix never touched, so they are reported regardless.
     fn has_current_loudness(&self) -> bool {
         self.measurement_version >= openreelio_core::analysis::AUDIO_MEASUREMENT_VERSION
-            && !self.loudness_profile.is_empty()
+            && self.loudness_measured
     }
 }
 
@@ -5418,13 +5425,17 @@ mod tests {
     }
 
     /// Feature: cached bundle staleness
-    /// Scenario: a profile carries regions but no loudness curve
-    ///   Given a profile at the current version with an empty curve
+    /// Scenario: a profile that a loudness pass never filled in
+    ///   Given a profile at the current version whose pass did not run
     ///   When its loudness is checked
-    ///   Then it counts as unmeasured, because that is the shape the
-    ///   superseded pass produced
+    ///   Then it counts as unmeasured
+    ///
+    /// And the mirror case: a pass that ran and found nothing to measure —
+    /// a silent asset, or one shorter than a meter window — leaves an empty
+    /// curve and still counts as measured, so reading the report does not
+    /// queue an analysis that could only reach the same answer.
     #[test]
-    fn cached_audio_profile_should_treat_an_empty_curve_as_unmeasured() {
+    fn cached_audio_profile_should_follow_the_measured_flag_not_the_curve() {
         let mut profile = CachedAudioProfile {
             measurement_version: openreelio_core::analysis::AUDIO_MEASUREMENT_VERSION,
             bpm: None,
@@ -5436,15 +5447,49 @@ mod tests {
             true_peak_dbtp: None,
             silence_regions: Vec::new(),
             speech_regions: Vec::new(),
+            loudness_measured: false,
         };
 
         assert!(!profile.has_current_loudness());
+
+        profile.loudness_measured = true;
+        assert!(
+            profile.has_current_loudness(),
+            "an empty curve from a completed pass is measured"
+        );
 
         profile.loudness_profile = vec![-18.0];
         assert!(profile.has_current_loudness());
 
         profile.measurement_version = 0;
         assert!(!profile.has_current_loudness());
+    }
+
+    /// Feature: cached bundle staleness
+    /// Scenario: a bundle written by the current pipeline is read back
+    ///   Given the JSON a freshly measured `AudioProfile` serializes to
+    ///   When the report deserializes it with its own types
+    ///   Then it reports the loudness as current
+    ///
+    /// The report and the core carry separate structs over the same file, so
+    /// the two are only in agreement while a test says so. They disagreed once
+    /// already, and the symptom was `coverage.loudness: false` on a bundle that
+    /// had just been measured.
+    #[test]
+    fn cached_audio_profile_should_read_a_freshly_measured_profile_as_current() {
+        let measured = openreelio_core::analysis::AudioProfile {
+            measurement_version: openreelio_core::analysis::AUDIO_MEASUREMENT_VERSION,
+            loudness_profile: vec![-18.0, -17.5],
+            peak_db: -3.0,
+            loudness_measured: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&measured).expect("profile must serialize");
+
+        let cached: CachedAudioProfile =
+            serde_json::from_str(&json).expect("the report must read what the core writes");
+
+        assert!(cached.has_current_loudness());
     }
 
     #[test]

@@ -21,7 +21,7 @@
 //! - `search_clip_evidence`: Search cached clip-local semantic observations
 //! - `plan_semantic_clip_edit`: Plan temporal edit ranges from semantic evidence
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -594,6 +594,12 @@ pub async fn analyze_video_full(
 /// is left alone. If the pass cannot be set up or fails, the cached bundle is
 /// returned as it is: a stale-loudness bundle is still better than no bundle,
 /// and `analysis report` marks the gap.
+///
+/// The pass is attempted **at most once per asset per session**, and not at all
+/// once the bundle records an `audio` failure. Re-measuring is a full FFmpeg
+/// decode of the asset; retrying it on every read of a bundle it cannot fix
+/// turns opening a project into a decode storm. See
+/// [`should_attempt_loudness_remeasure`].
 #[tauri::command]
 #[specta::specta]
 #[tracing::instrument(skip(state, ffmpeg_state))]
@@ -619,13 +625,39 @@ pub async fn get_analysis_bundle(
         return Ok(None);
     };
 
-    if !bundle.needs_loudness_measurement() {
+    if !should_attempt_loudness_remeasure(&bundle, &state.loudness_remeasure_attempts).await {
         return Ok(Some(bundle));
     }
 
     Ok(Some(
         remeasure_audio_profile(&asset_id, bundle, &state, &ffmpeg_state).await,
     ))
+}
+
+/// Decides whether reading `bundle` should queue a loudness re-measurement.
+///
+/// Three things have to hold, and claiming the session slot is the last of
+/// them so the check doubles as the concurrency gate: two reads of the same
+/// asset that arrive together produce one job, not two.
+///
+/// * The bundle is missing loudness numbers it should have
+///   ([`AnalysisBundle::needs_loudness_measurement`]).
+/// * The bundle records no `audio` failure. A recorded failure is the pipeline
+///   saying it already tried and could not; running it again on every read
+///   would decode the whole asset each time to reach the same conclusion.
+/// * No pass has been attempted for this asset in this session.
+async fn should_attempt_loudness_remeasure(
+    bundle: &AnalysisBundle,
+    attempted: &tokio::sync::Mutex<HashSet<String>>,
+) -> bool {
+    if !bundle.needs_loudness_measurement() {
+        return false;
+    }
+    if bundle.errors.contains_key("audio") {
+        return false;
+    }
+
+    attempted.lock().await.insert(bundle.asset_id.clone())
 }
 
 /// Re-runs the audio pass for a bundle whose loudness measurement is missing.
@@ -1499,9 +1531,70 @@ fn build_curves_params(correction: &ColorCorrection) -> HashMap<String, ParamVal
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::analysis::{AudioProfile, SilenceRegion};
     use crate::core::assets::{Asset, AudioInfo, VideoInfo};
     use crate::core::ffmpeg::{AudioStreamInfo, VideoStreamInfo};
     use crate::core::Ratio;
+
+    /// A cached bundle for an asset with audio whose loudness never got measured.
+    fn bundle_awaiting_loudness(asset_id: &str) -> AnalysisBundle {
+        let mut bundle = AnalysisBundle::new(asset_id, VideoMetadata::new(30.0).with_audio(true));
+        let mut profile = AudioProfile::silent(30.0);
+        profile.measurement_version = 0;
+        profile.silence_regions = vec![SilenceRegion::new(0.0, 1.0)];
+        profile.clear_loudness_measurement();
+        bundle.audio_profile = Some(profile);
+        bundle
+    }
+
+    /// Feature: automatic loudness re-measurement
+    /// Scenario: the same bundle is read twice in one session
+    ///   Given a cached bundle whose loudness numbers are missing
+    ///   When it is read again after a pass was already attempted
+    ///   Then no second pass is queued
+    ///
+    /// Re-measuring decodes the whole asset. Before the session set, every read
+    /// of a bundle the pass could not fix queued another full decode.
+    #[tokio::test]
+    async fn should_attempt_a_loudness_remeasure_at_most_once_per_asset_per_session() {
+        let bundle = bundle_awaiting_loudness("asset_1");
+        let attempted = tokio::sync::Mutex::new(HashSet::new());
+
+        assert!(should_attempt_loudness_remeasure(&bundle, &attempted).await);
+        assert!(!should_attempt_loudness_remeasure(&bundle, &attempted).await);
+    }
+
+    /// Feature: automatic loudness re-measurement
+    /// Scenario: the bundle already records an audio failure
+    ///   Given a cached bundle whose audio job failed
+    ///   When it is read
+    ///   Then no pass is queued
+    #[tokio::test]
+    async fn should_not_remeasure_loudness_when_the_bundle_records_an_audio_failure() {
+        let mut bundle = bundle_awaiting_loudness("asset_2");
+        bundle.add_error("audio", "FFmpeg is not installed".to_string());
+        let attempted = tokio::sync::Mutex::new(HashSet::new());
+
+        assert!(!should_attempt_loudness_remeasure(&bundle, &attempted).await);
+    }
+
+    /// Feature: automatic loudness re-measurement
+    /// Scenario: an asset with no audible content is read
+    ///   Given a bundle whose audio pass completed and found silence
+    ///   When it is read
+    ///   Then no pass is queued
+    ///
+    /// A silent asset has an empty loudness curve, which is also the shape a
+    /// pass that never ran leaves behind. Telling them apart by the curve made
+    /// every read of a silent asset re-analyse it.
+    #[tokio::test]
+    async fn should_not_remeasure_loudness_for_an_asset_that_measured_as_silent() {
+        let mut bundle = AnalysisBundle::new("asset_3", VideoMetadata::new(30.0).with_audio(true));
+        bundle.audio_profile = Some(AudioProfile::silent(30.0));
+        let attempted = tokio::sync::Mutex::new(HashSet::new());
+
+        assert!(!should_attempt_loudness_remeasure(&bundle, &attempted).await);
+    }
 
     #[test]
     fn build_asset_video_metadata_uses_asset_duration_and_streams() {

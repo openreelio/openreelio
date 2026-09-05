@@ -2048,6 +2048,8 @@ describe('reference style transfer analysis tools', () => {
           },
         },
         audioProfile: {
+          measurementVersion: 1,
+          loudnessMeasured: true,
           bpm: 120,
           spectralCentroidHz: 1400,
           loudnessProfile: [-18.2, -16.8, -17.4],
@@ -2356,6 +2358,7 @@ describe('reference style transfer analysis tools', () => {
       expect(String(data.markdown)).toContain('- Integrated loudness: -16.4 LUFS');
       expect(String(data.markdown)).toContain('- True peak: -1.9 dBTP');
       expect(String(data.markdown)).toContain('- Loudness range: 5.2 LU');
+      expect(String(data.markdown)).toContain('- Loudness measurement: available');
       expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
         assetId: 'source-1',
       });

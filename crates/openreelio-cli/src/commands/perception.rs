@@ -387,12 +387,14 @@ pub fn audio(args: AudioArgs) -> anyhow::Result<()> {
     }
 
     let profiler = AudioProfiler::new(ffmpeg_info.ffmpeg_path.clone());
-    let profile = runtime
+    let analysis = runtime
         .block_on(profiler.analyze(&media_path, metadata.duration_sec))
         .map_err(|error| anyhow::anyhow!("Audio profiling failed: {}", error))?;
+    let profile = analysis.profile.clone();
+    let loudness_error = analysis.loudness_error.clone();
 
     AnalysisJobRunner::new(&project.path)
-        .merge_bundle_audio_profile(&args.id, &metadata, profile.clone())
+        .merge_bundle_audio_analysis(&args.id, &metadata, analysis)
         .map_err(|error| anyhow::anyhow!("Failed to update the analysis bundle: {}", error))?;
 
     let total_silence_sec: f64 = profile
@@ -406,15 +408,22 @@ pub fn audio(args: AudioArgs) -> anyhow::Result<()> {
         .map(|region| region.duration())
         .sum();
 
+    // The regions are the product of their own FFmpeg passes and are reported
+    // whatever the meter did. The loudness numbers are nulled when no pass
+    // measured them, so a reader never sees the silence floor presented as a
+    // level; `loudnessError` says why.
+    let measured = profile.loudness_measured;
     output::print_json_pretty(&json!({
-        "status": "ok",
+        "status": if measured { "ok" } else { "partial" },
         "assetId": args.id,
         "durationSec": metadata.duration_sec,
         "bpm": profile.bpm,
-        "peakDb": profile.peak_db,
-        "truePeakDbtp": profile.true_peak_dbtp,
-        "integratedLufs": profile.integrated_lufs,
-        "loudnessRangeLu": profile.loudness_range_lu,
+        "loudnessMeasured": measured,
+        "loudnessError": loudness_error,
+        "peakDb": measured.then_some(profile.peak_db),
+        "truePeakDbtp": measured.then_some(profile.true_peak_dbtp).flatten(),
+        "integratedLufs": measured.then_some(profile.integrated_lufs).flatten(),
+        "loudnessRangeLu": measured.then_some(profile.loudness_range_lu).flatten(),
         "spectralCentroidHz": profile.spectral_centroid_hz,
         "loudnessSampleCount": profile.loudness_profile.len(),
         "silenceRegionCount": profile.silence_regions.len(),
@@ -464,19 +473,8 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("Analysis run failed: {}", error))?;
 
     let enabled = enabled_job_names(&options);
-    let failed = enabled
-        .iter()
-        .filter(|job| bundle.errors.contains_key(**job))
-        .copied()
-        .collect::<Vec<_>>();
-    let all_failed = !enabled.is_empty() && failed.len() == enabled.len();
-    let status = if failed.is_empty() {
-        "ok"
-    } else if all_failed {
-        "failed"
-    } else {
-        "partial"
-    };
+    let (failed, barren) = classify_run(&bundle, &enabled);
+    let status = run_status(&failed, barren);
 
     output::print_json_pretty(&json!({
         "status": status,
@@ -501,14 +499,64 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
         "errors": bundle.errors,
     }))?;
 
-    if all_failed {
+    if barren {
         return Err(anyhow::anyhow!(
-            "Every enabled analysis sub-job failed: {}",
+            "Every enabled analysis sub-job failed without producing a result: {}",
             failed.join(", ")
         ));
     }
 
     Ok(())
+}
+
+/// Splits a finished run into the jobs that failed and whether it is barren.
+///
+/// "Barren" means every enabled job both failed and left nothing behind, which
+/// is the only outcome that deserves a non-zero exit. A job can record an error
+/// and still produce a usable result — the audio pass stores its silence and
+/// speech regions when only the loudness meter failed — and that is a partial
+/// run, not a failed one, even when it was the only job enabled.
+fn classify_run<'a>(bundle: &AnalysisBundle, enabled: &[&'a str]) -> (Vec<&'a str>, bool) {
+    let failed = enabled
+        .iter()
+        .filter(|job| bundle.errors.contains_key(**job))
+        .copied()
+        .collect::<Vec<_>>();
+    let barren = !enabled.is_empty()
+        && enabled
+            .iter()
+            .all(|job| failed.contains(job) && !job_produced_a_result(bundle, job));
+
+    (failed, barren)
+}
+
+/// Names the outcome a classified run reports as its `status` field.
+fn run_status(failed: &[&str], barren: bool) -> &'static str {
+    if failed.is_empty() {
+        "ok"
+    } else if barren {
+        "failed"
+    } else {
+        "partial"
+    }
+}
+
+/// Returns whether `job` left something in the bundle despite its error.
+///
+/// The bundle's error map records what went wrong, not whether anything
+/// survived. Only `audio` can currently do both — a loudness meter that fails
+/// while `silencedetect` and the VAD succeed — but reading the slot rather than
+/// special-casing the job keeps the rule true if another pass grows the same
+/// shape.
+fn job_produced_a_result(bundle: &AnalysisBundle, job: &str) -> bool {
+    match job {
+        "shots" => bundle.shots.is_some(),
+        "audio" => bundle.audio_profile.is_some(),
+        "transcript" => bundle.transcript.is_some(),
+        "segments" => bundle.segments.is_some(),
+        "visual" => bundle.frame_analysis.is_some(),
+        _ => false,
+    }
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────
@@ -881,6 +929,58 @@ mod tests {
         ] {
             assert!(build_analysis_options(&args).local_only);
         }
+    }
+
+    /// Feature: `analysis run` exit code
+    /// Scenario: the only enabled job stored a result but recorded an error
+    ///   Given an audio-only run whose loudness meter failed
+    ///   When the run is classified
+    ///   Then it is partial rather than barren, so the command exits 0
+    ///
+    /// The audio pass keeps its silence and speech regions when only the meter
+    /// fails. Treating that as a total failure made `analysis run --audio`
+    /// exit 1 on a run that had just produced usable regions.
+    #[test]
+    fn classify_run_should_call_an_audio_only_loudness_failure_partial() {
+        let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(10.0));
+        bundle.audio_profile = Some(openreelio_core::analysis::AudioProfile::silent(10.0));
+        bundle.add_error(
+            "audio",
+            "Loudness measurement failed: no readings".to_string(),
+        );
+
+        let (failed, barren) = classify_run(&bundle, &["audio"]);
+
+        assert_eq!(failed, vec!["audio"]);
+        assert!(!barren);
+        assert_eq!(run_status(&failed, barren), "partial");
+    }
+
+    /// Feature: `analysis run` exit code
+    /// Scenario: the only enabled job produced nothing at all
+    ///   Given an audio-only run whose whole pass failed
+    ///   When the run is classified
+    ///   Then it is barren, so the command exits 1
+    #[test]
+    fn classify_run_should_call_a_job_that_produced_nothing_barren() {
+        let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(10.0));
+        bundle.add_error("audio", "No audio stream found in input".to_string());
+
+        let (failed, barren) = classify_run(&bundle, &["audio"]);
+
+        assert!(barren);
+        assert_eq!(run_status(&failed, barren), "failed");
+    }
+
+    #[test]
+    fn classify_run_should_call_a_clean_run_ok() {
+        let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(10.0));
+        bundle.audio_profile = Some(openreelio_core::analysis::AudioProfile::silent(10.0));
+
+        let (failed, barren) = classify_run(&bundle, &["audio"]);
+
+        assert!(failed.is_empty());
+        assert_eq!(run_status(&failed, barren), "ok");
     }
 
     #[test]

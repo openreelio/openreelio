@@ -2124,6 +2124,12 @@ async analyzeVideoFull(assetId: string, options: AnalysisOptions) : Promise<Resu
  * is left alone. If the pass cannot be set up or fails, the cached bundle is
  * returned as it is: a stale-loudness bundle is still better than no bundle,
  * and `analysis report` marks the gap.
+ * 
+ * The pass is attempted **at most once per asset per session**, and not at all
+ * once the bundle records an `audio` failure. Re-measuring is a full FFmpeg
+ * decode of the asset; retrying it on every read of a bundle it cannot fix
+ * turns opening a project into a decode storm. See
+ * [`should_attempt_loudness_remeasure`].
  */
 async getAnalysisBundle(assetId: string) : Promise<Result<AnalysisBundle | null, string>> {
     try {
@@ -4145,11 +4151,22 @@ spectralCentroidHz: number;
 /**
  * Per-second momentary loudness values in LUFS.
  * 
- * Sampled at 1 Hz (one value per second), so `loudness_profile[i]` is the
- * average momentary loudness during the i-th second of audio and the
- * profile has one entry per second of measured audio. Consumers address it
- * by time, so a second the meter reports as digital silence keeps its slot
- * and reads [`SILENCE_FLOOR_DB`] rather than being omitted.
+ * Sampled at 1 Hz (one value per second), so `loudness_profile[i]` covers
+ * the i-th second of audio and the profile has one entry per second of
+ * measured audio. Consumers address it by time, so a second the meter
+ * reports as digital silence keeps its slot and reads [`SILENCE_FLOOR_DB`]
+ * rather than being omitted.
+ * 
+ * Each entry averages only the *audible* readings of its second. The
+ * meter reports no level for the first 300 ms of a file and for the
+ * windows around a silence, and those readings are 70 dB below anything it
+ * would call quiet; folding them into the mean would report a second as
+ * far quieter than it sounds. A second with no audible reading at all is
+ * the floor.
+ * 
+ * An empty profile is not by itself "unmeasured" — an asset shorter than
+ * one meter window legitimately produces one. [`Self::loudness_measured`]
+ * is the field that says whether a pass ran.
  */
 loudnessProfile: number[]; 
 /**
@@ -4183,7 +4200,22 @@ silenceRegions: SilenceRegion[];
 /**
  * Regions where audio is above the silence threshold (derived speech / non-silence)
  */
-speechRegions?: SpeechRegion[] }
+speechRegions?: SpeechRegion[]; 
+/**
+ * Whether a loudness pass actually produced the fields above.
+ * 
+ * The loudness pass can fail on its own while silence detection, the VAD
+ * and the spectral pass all succeed, and it is the only part of the
+ * profile whose "nothing here" value ([`SILENCE_FLOOR_DB`], an empty
+ * curve) is indistinguishable from a real reading of a silent file. This
+ * flag is what separates the two, so readers can say "not measured"
+ * instead of publishing `-90 dB` as a level and callers know whether a
+ * re-measurement is worth running.
+ * 
+ * Legacy bundles carry no field and deserialize as `false`, which costs
+ * them one re-measurement.
+ */
+loudnessMeasured?: boolean }
 /**
  * An audio clip layer in timeline order.
  */
