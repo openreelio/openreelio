@@ -714,8 +714,20 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.command.schema",
             "OpenReelio command schema",
-            "Read the command schema, text/caption workflows, and payload conventions available to external agents.",
-            serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            "Read the command schema, text/caption workflows, and payload conventions available to external agents. Without arguments this lists the command names and the workflow hints. Pass commandType (one name or a list) to get the JSON Schema of those payloads — field names, types, which are required, enums, and the alternative spellings each field accepts — and read it before composing a payload rather than guessing one and reading the parse error.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "commandType": {
+                        "description": "One backend command type, or a list of them, to describe. Omit for the name listing.",
+                        "anyOf": [
+                            { "type": "string" },
+                            { "type": "array", "items": { "type": "string" } }
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            }),
         ),
         tool(
             "openreelio.command.validate",
@@ -1064,7 +1076,7 @@ fn plan_schema() -> Value {
                         },
                         "commandType": {
                             "type": "string",
-                            "description": "Backend command type, e.g. SplitClip. Call openreelio.command.schema for the supported list."
+                            "description": "Backend command type, e.g. SplitClip. Call openreelio.command.schema for the supported list, and again with commandType for that payload's JSON Schema."
                         },
                         "payload": {
                             "type": "object",
@@ -1179,7 +1191,7 @@ fn call_tool(
         .map_err(|error| ToolError::Execution(error.to_string()))?),
         "openreelio.transcription.generate" => generate_transcription(state, arguments),
         "openreelio.annotation.read" => build_annotation_read(state, arguments),
-        "openreelio.command.schema" => Ok(build_command_schema()),
+        "openreelio.command.schema" => read_command_schema(arguments),
         "openreelio.command.validate" => validate_command(arguments),
         "openreelio.plan.validate" => validate_plan(arguments),
         "openreelio.verify" => run_verify_tool(state, arguments),
@@ -1867,6 +1879,39 @@ fn text_preset_catalog_line() -> Vec<String> {
         .collect()
 }
 
+/// Answers `openreelio.command.schema`, with or without a `commandType`.
+///
+/// Without one this stays the surface listing it has always been, so an agent
+/// discovering the tools is not handed eighty payload schemas it did not ask
+/// for. With one — or a list — it returns the derived JSON Schema of those
+/// payloads in the same `{ commandType, schema }` entries the CLI prints, so
+/// the two surfaces answer the same question the same way.
+fn read_command_schema(arguments: Value) -> Result<Value, ToolError> {
+    let requested = match arguments.get("commandType") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::String(one)) => vec![one.clone()],
+        Some(Value::Array(many)) => many
+            .iter()
+            .map(|entry| {
+                entry.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                    ToolError::InvalidArguments("commandType entries must be strings".to_string())
+                })
+            })
+            .collect::<Result<Vec<String>, ToolError>>()?,
+        Some(_) => {
+            return Err(ToolError::InvalidArguments(
+                "commandType must be a string or an array of strings".to_string(),
+            ))
+        }
+    };
+
+    if requested.is_empty() {
+        return Ok(build_command_schema());
+    }
+
+    openreelio_core::ipc::command_payload_schemas(&requested).map_err(ToolError::InvalidArguments)
+}
+
 fn build_command_schema() -> Value {
     // Read the curated ids from the core registries rather than restating them:
     // a pack added to core shows up in the hints, and a hint can never name an
@@ -1989,7 +2034,8 @@ fn build_command_schema() -> Value {
         },
         "payloadFormat": {
             "commandType": "PascalCase backend command type",
-            "payload": "camelCase JSON object matching the command payload"
+            "payload": "camelCase JSON object matching the command payload",
+            "schemaLookup": "Call this tool again with commandType (one name or a list) for the derived JSON Schema of those payloads: field names, types, which are required, enums, and the alternative spellings each field accepts. The payloadHints above cover the commands with workflow rules; the schema covers all of them."
         }
     })
 }
@@ -3574,6 +3620,85 @@ mod tests {
         assert!(names.contains(&"openreelio.command.schema"));
         assert!(!names.contains(&"openreelio.transcription.install_model"));
         assert!(!names.contains(&"openreelio.plan.apply"));
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: an agent asks for one command's payload shape
+    #[test]
+    fn should_return_a_payload_schema_when_command_schema_is_given_a_type() {
+        let result = read_command_schema(serde_json::json!({ "commandType": "UpdateCaption" }))
+            .expect("UpdateCaption has a schema");
+
+        assert_eq!(result["count"].as_u64(), Some(1));
+        assert_eq!(result["schemas"][0]["commandType"], "UpdateCaption");
+
+        let schema = &result["schemas"][0]["schema"];
+        assert_eq!(schema["title"], "UpdateCaption");
+        assert_eq!(schema["additionalProperties"], false);
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("a schema names what it requires")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(required, vec!["captionId", "sequenceId", "trackId"]);
+    }
+
+    #[test]
+    fn should_return_the_surface_listing_when_command_schema_is_given_no_type() {
+        let result =
+            read_command_schema(serde_json::json!({})).expect("the bare listing always works");
+
+        assert!(
+            result["commands"].is_array(),
+            "the name listing is unchanged"
+        );
+        assert!(result["payloadHints"].is_object());
+        assert!(
+            result["payloadFormat"]["schemaLookup"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("commandType")),
+            "the listing must point at the payload-shape lookup"
+        );
+    }
+
+    #[test]
+    fn should_accept_a_list_of_command_types_and_refuse_an_unknown_one() {
+        let result =
+            read_command_schema(serde_json::json!({ "commandType": ["SplitClip", "AddMask"] }))
+                .expect("both are supported");
+        assert_eq!(result["count"].as_u64(), Some(2));
+        assert_eq!(result["schemas"][1]["commandType"], "AddMask");
+
+        let error = read_command_schema(serde_json::json!({ "commandType": "UpdateCaptions" }))
+            .expect_err("an unsupported type has no schema");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("UpdateCaption'"),
+            "the refusal must name the command the caller meant: {message}"
+        );
+
+        let error = read_command_schema(serde_json::json!({ "commandType": 7 }))
+            .expect_err("a number is not a command type");
+        assert!(format!("{error:?}").contains("commandType"));
+    }
+
+    /// The unknown-argument guard reads the advertised schema, so `commandType`
+    /// has to be declared there or a call carrying it is rejected before it
+    /// reaches the handler.
+    #[test]
+    fn should_advertise_the_command_type_argument_on_the_schema_tool() {
+        let state = McpServerState::default();
+        let tool = build_tools(&state)
+            .into_iter()
+            .find(|tool| tool["name"] == "openreelio.command.schema")
+            .expect("the schema tool is advertised");
+
+        assert!(
+            tool["inputSchema"]["properties"]["commandType"].is_object(),
+            "commandType must be advertised: {tool}"
+        );
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]

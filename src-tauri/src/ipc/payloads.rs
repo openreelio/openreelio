@@ -1,3 +1,4 @@
+use super::command_schema::declare_command_payloads;
 use crate::core::assets::{AudioInfo, LicenseInfo, ProxyStatus, VideoInfo};
 use crate::core::effects::{EffectType, Keyframe, ParamValue};
 use crate::core::masks::{MaskBlendMode, MaskKeyframe, MaskShape};
@@ -15,7 +16,13 @@ use std::collections::HashMap;
 // Payload Structs (Strict / Injection-Resistant)
 // =============================================================================
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `InsertClip` (primitive placement at an exact timeline position).
+///
+/// Overwrites nothing and ripples nothing: the clip is placed where
+/// `timelineStart` says. This primitive does not create the linked audio a
+/// video asset carries — use `InsertMedia` for normal media placement so the
+/// video stays visible and its audio stays in sync.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InsertClipPayload {
     pub sequence_id: SequenceId,
@@ -37,13 +44,15 @@ pub struct InsertClipPayload {
 /// Inserts a primary clip and, for video assets that carry audio, also creates
 /// or reuses an audio track, inserts a linked audio clip, links the two clips,
 /// and mutes the video clip. The whole composite is a single undoable unit.
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InsertMediaPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub asset_id: AssetId,
     /// Timeline position to insert at.
+    ///
+    /// Accepts both `timelineStart` and legacy `timelineIn`.
     #[serde(alias = "timelineIn")]
     pub timeline_start: TimeSec,
     /// Optional source start time for partial-range inserts.
@@ -64,7 +73,7 @@ fn default_true() -> bool {
 }
 
 /// Payload for Insert Edit (ripple insert — pushes downstream clips).
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InsertEditPayload {
     pub sequence_id: SequenceId,
@@ -79,7 +88,7 @@ pub struct InsertEditPayload {
 }
 
 /// Payload for Overwrite Edit (replaces content in time range — trims/removes overlapping clips).
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OverwriteEditPayload {
     pub sequence_id: SequenceId,
@@ -94,12 +103,20 @@ pub struct OverwriteEditPayload {
 }
 
 /// Payload for Ripple Delete (remove clips + close gaps).
-#[derive(Debug, Serialize, Clone, specta::Type)]
+///
+/// A single clip may also be named as `clipId` instead of `clipIds`, and a
+/// legacy `affectAllTracks` flag is accepted and ignored. Neither is listed as
+/// a property below, which is why this payload does not declare
+/// `additionalProperties: false`.
+#[derive(Debug, Serialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RippleDeletePayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     /// One or more clip IDs to remove.
+    ///
+    /// Accepts `clipIds`, or `clipId` for a single clip; one of the two is
+    /// required.
     pub clip_ids: Vec<ClipId>,
 }
 
@@ -140,7 +157,7 @@ impl<'de> Deserialize<'de> for RippleDeletePayload {
 }
 
 /// Payload for Lift (remove clips, leave gaps).
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LiftPayload {
     pub sequence_id: SequenceId,
@@ -150,7 +167,7 @@ pub struct LiftPayload {
 }
 
 /// Payload for Extract Edit (remove In/Out range + close gap).
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtractEditPayload {
     pub sequence_id: SequenceId,
@@ -162,7 +179,7 @@ pub struct ExtractEditPayload {
 }
 
 /// Payload for Find Gaps (query — returns gap info without mutating state).
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FindGapsPayload {
     pub sequence_id: SequenceId,
@@ -170,7 +187,7 @@ pub struct FindGapsPayload {
 }
 
 /// Payload for Close Gap (close a specific gap by shifting downstream clips).
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloseGapPayload {
     pub sequence_id: SequenceId,
@@ -182,14 +199,17 @@ pub struct CloseGapPayload {
 }
 
 /// Payload for Close All Gaps (remove all gaps on a track).
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloseAllGapsPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `RemoveClip` (remove one clip, leaving a gap).
+///
+/// Use `RippleDelete` to remove clips and close the gap behind them.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveClipPayload {
     pub sequence_id: SequenceId,
@@ -197,7 +217,8 @@ pub struct RemoveClipPayload {
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `MoveClip` (move one clip in time, and optionally across tracks).
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoveClipPayload {
     pub sequence_id: SequenceId,
@@ -209,11 +230,12 @@ pub struct MoveClipPayload {
     /// Accepts both `newTimelineIn` and legacy `newStart`.
     #[serde(alias = "newStart")]
     pub new_timeline_in: TimeSec,
+    /// Track to move the clip onto; it stays on `trackId` when omitted.
     #[serde(alias = "newTrackId")]
     pub new_track_id: Option<TrackId>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetTrackBlendModePayload {
     pub sequence_id: SequenceId,
@@ -221,7 +243,7 @@ pub struct SetTrackBlendModePayload {
     pub blend_mode: BlendMode,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipBlendModePayload {
     pub sequence_id: SequenceId,
@@ -230,22 +252,37 @@ pub struct SetClipBlendModePayload {
     pub blend_mode: BlendMode,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `TrimClip` (change a clip's source range and timeline position).
+///
+/// Every field but the ids is optional; an omitted one keeps its current value.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TrimClipPayload {
     pub sequence_id: SequenceId,
     /// Track containing the clip.
     pub track_id: TrackId,
     pub clip_id: ClipId,
+    /// New source in-point, in source seconds.
+    ///
+    /// Accepts both `newSourceIn` and legacy `newStart`.
     #[serde(alias = "newStart")]
     pub new_source_in: Option<TimeSec>,
+    /// New source out-point, in source seconds.
+    ///
+    /// Accepts both `newSourceOut` and legacy `newEnd`.
     #[serde(alias = "newEnd")]
     pub new_source_out: Option<TimeSec>,
+    /// New timeline position for the trimmed clip.
     #[serde(alias = "newTimelineIn")]
     pub new_timeline_in: Option<TimeSec>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `SetClipTransform` (position, scale, rotation and anchor).
+///
+/// This renders in the final export for every visual clip, not just in the
+/// preview. Motion keyframes (`SetClipMotionKeyframes`) still render static at
+/// the clip's base transform, and the render reports a warning saying so.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipTransformPayload {
     pub sequence_id: SequenceId,
@@ -254,7 +291,7 @@ pub struct SetClipTransformPayload {
     pub transform: Transform,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipMotionKeyframesPayload {
     pub sequence_id: SequenceId,
@@ -263,27 +300,42 @@ pub struct SetClipMotionKeyframesPayload {
     pub keyframes: Vec<TransformKeyframe>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `SetClipOpacity` (one clip's constant opacity).
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipOpacityPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub clip_id: ClipId,
+    /// Opacity as a fraction: `0.0` fully transparent, `1.0` fully opaque.
+    ///
+    /// Values outside that range are clamped into it, so `100` means opaque,
+    /// not "100 percent".
     pub opacity: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `SetClipSpeed` (constant clip speed and direction).
+///
+/// Use `SetTimeRemap` for speed that varies across the clip.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipSpeedPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub clip_id: ClipId,
+    /// Playback rate multiplier: `1.0` real time, `0.5` half speed, `2.0`
+    /// double speed. Must be finite and greater than zero.
+    ///
+    /// The clip's timeline duration changes with it; use
+    /// `SetClipSlowMotionInterpolation` to choose how sub-real-time frames are
+    /// generated.
     pub speed: f32,
+    /// Whether the clip plays backwards. Defaults to `false`.
     #[serde(default)]
     pub reverse: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipSlowMotionInterpolationPayload {
     pub sequence_id: SequenceId,
@@ -292,7 +344,7 @@ pub struct SetClipSlowMotionInterpolationPayload {
     pub interpolation: crate::core::timeline::SlowMotionInterpolation,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReverseClipPayload {
     pub sequence_id: SequenceId,
@@ -300,7 +352,7 @@ pub struct ReverseClipPayload {
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipEnabledPayload {
     pub sequence_id: SequenceId,
@@ -310,42 +362,42 @@ pub struct SetClipEnabledPayload {
 }
 
 /// Clip reference: a (trackId, clipId) pair used in multi-clip commands.
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClipRef {
     pub track_id: TrackId,
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LinkClipsPayload {
     pub sequence_id: SequenceId,
     pub clip_refs: Vec<ClipRef>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnlinkClipsPayload {
     pub sequence_id: SequenceId,
     pub clip_refs: Vec<ClipRef>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupClipsPayload {
     pub sequence_id: SequenceId,
     pub clip_refs: Vec<ClipRef>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UngroupClipsPayload {
     pub sequence_id: SequenceId,
     pub clip_refs: Vec<ClipRef>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DetachAudioPayload {
     pub sequence_id: SequenceId,
@@ -355,13 +407,18 @@ pub struct DetachAudioPayload {
     pub target_audio_track_id: Option<TrackId>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `CreateFreezeFrame` (hold one frame of a clip).
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateFreezeFramePayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub clip_id: ClipId,
+    /// Timeline position, in seconds, of the frame to hold. It must fall
+    /// inside the clip.
     pub playhead_sec: f64,
+    /// How long the held frame lasts, in seconds. Defaults to the standard
+    /// freeze-frame duration when omitted.
     #[serde(default = "default_freeze_duration")]
     pub duration_sec: f64,
 }
@@ -370,7 +427,7 @@ fn default_freeze_duration() -> f64 {
     crate::core::commands::DEFAULT_FREEZE_FRAME_DURATION
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetTimeRemapPayload {
     pub sequence_id: SequenceId,
@@ -379,7 +436,7 @@ pub struct SetTimeRemapPayload {
     pub time_remap: crate::core::timeline::TimeRemapCurve,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClearTimeRemapPayload {
     pub sequence_id: SequenceId,
@@ -387,7 +444,7 @@ pub struct ClearTimeRemapPayload {
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipMutePayload {
     pub sequence_id: SequenceId,
@@ -396,22 +453,36 @@ pub struct SetClipMutePayload {
     pub muted: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `SetClipAudio` (clip gain, pan, mute, fades and roles).
+///
+/// Every field but the ids is optional and an omitted one is left alone, but
+/// at least one of them must be present.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipAudioPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub clip_id: ClipId,
+    /// Clip gain in decibels, clamped to -60..=+6. `0` is unity gain.
     pub volume_db: Option<f32>,
+    /// Stereo pan, clamped to -1.0 (left) ..= 1.0 (right); `0` is centred.
     pub pan: Option<f32>,
+    /// Whether the clip's audio is silenced.
     pub muted: Option<bool>,
+    /// Fade-in length in seconds, clamped to the clip's duration.
     pub fade_in_sec: Option<TimeSec>,
+    /// Fade-out length in seconds, clamped to the clip's duration.
+    ///
+    /// A fade pair longer than the clip is shortened rather than rejected.
     pub fade_out_sec: Option<TimeSec>,
+    /// Editorial role: `dialogue`, `music`, `sfx`, `ambience` or `voiceover`.
+    /// `none` or an empty string clears it; anything else is rejected.
     pub audio_role: Option<String>,
+    /// Free-form editorial tags, lowercased and de-duplicated on write.
     pub audio_tags: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddAudioKeyframePayload {
     pub sequence_id: SequenceId,
@@ -423,7 +494,7 @@ pub struct AddAudioKeyframePayload {
     pub interpolation: crate::core::timeline::KeyframeInterpolation,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveAudioKeyframePayload {
     pub sequence_id: SequenceId,
@@ -432,7 +503,7 @@ pub struct RemoveAudioKeyframePayload {
     pub keyframe_index: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoveAudioKeyframePayload {
     pub sequence_id: SequenceId,
@@ -442,7 +513,7 @@ pub struct MoveAudioKeyframePayload {
     pub new_time_offset: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetAudioKeyframeValuePayload {
     pub sequence_id: SequenceId,
@@ -453,7 +524,7 @@ pub struct SetAudioKeyframeValuePayload {
     pub interpolation: Option<crate::core::timeline::KeyframeInterpolation>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetAudioFadeInPayload {
     pub sequence_id: SequenceId,
@@ -464,7 +535,7 @@ pub struct SetAudioFadeInPayload {
     pub fade_type: crate::core::timeline::FadeType,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetAudioFadeOutPayload {
     pub sequence_id: SequenceId,
@@ -475,30 +546,34 @@ pub struct SetAudioFadeOutPayload {
     pub fade_type: crate::core::timeline::FadeType,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `SplitClip` (razor cut at a timeline position).
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SplitClipPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub clip_id: ClipId,
+    /// Timeline position to cut at, in timeline seconds.
+    ///
+    /// Accepts both `splitTime` and `atTimelineSec`.
     #[serde(alias = "splitTime", alias = "atTimelineSec")]
     pub split_time: TimeSec,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportAssetPayload {
     pub name: String,
     pub uri: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveAssetPayload {
     pub asset_id: AssetId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateAssetPayload {
     pub asset_id: AssetId,
@@ -518,21 +593,21 @@ pub struct UpdateAssetPayload {
     pub missing: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSequencePayload {
     pub name: String,
     pub format: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetMasterVolumePayload {
     pub sequence_id: SequenceId,
     pub volume_db: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateSequenceHdrSettingsPayload {
     pub sequence_id: SequenceId,
@@ -545,7 +620,7 @@ pub struct UpdateSequenceHdrSettingsPayload {
 /// keep their current value. `sequenceId` defaults to the active sequence.
 /// `fps` takes either an exact ratio (`{"num": 30000, "den": 1001}`) or a
 /// decimal (`29.97`), which is snapped to the exact rational it names.
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetSequenceFormatPayload {
     /// Sequence to change; the active sequence when omitted.
@@ -568,7 +643,11 @@ pub struct SetSequenceFormatPayload {
     pub audio_channels: Option<u8>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `CreateTrack`.
+///
+/// Editable text clips need a `video` or `overlay` track; `AddTextClip`
+/// requires one and does not create it.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateTrackPayload {
     pub sequence_id: SequenceId,
@@ -577,23 +656,30 @@ pub struct CreateTrackPayload {
     pub position: Option<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveTrackPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameTrackPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
+    /// New track name.
+    ///
+    /// Accepts both `newName` and `name`.
     #[serde(alias = "name")]
     pub new_name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `SetCaptionTrackLanguage`.
+///
+/// Caption tracks only. The language is a BCP-47-ish code such as `en`, `ko`,
+/// `ja`, `zh`, `es` or `en-us`.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetCaptionTrackLanguagePayload {
     pub sequence_id: SequenceId,
@@ -601,14 +687,14 @@ pub struct SetCaptionTrackLanguagePayload {
     pub language: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReorderTracksPayload {
     pub sequence_id: SequenceId,
     pub new_order: Vec<TrackId>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetTrackVolumePayload {
     pub sequence_id: SequenceId,
@@ -617,7 +703,7 @@ pub struct SetTrackVolumePayload {
     pub volume: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToggleTrackMutePayload {
     pub sequence_id: SequenceId,
@@ -625,7 +711,7 @@ pub struct ToggleTrackMutePayload {
     pub muted: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToggleTrackLockPayload {
     pub sequence_id: SequenceId,
@@ -633,7 +719,7 @@ pub struct ToggleTrackLockPayload {
     pub locked: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToggleTrackVisibilityPayload {
     pub sequence_id: SequenceId,
@@ -645,12 +731,16 @@ pub struct ToggleTrackVisibilityPayload {
 // Marker Payloads
 // =============================================================================
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddMarkerPayload {
     pub sequence_id: SequenceId,
+    /// Timeline position of the marker, in seconds.
+    ///
+    /// Accepts both `timeSec` and `time`.
     #[serde(alias = "time")]
     pub time_sec: TimeSec,
+    /// Marker label.
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<Color>,
@@ -658,28 +748,56 @@ pub struct AddMarkerPayload {
     pub marker_type: Option<MarkerType>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveMarkerPayload {
     pub sequence_id: SequenceId,
     pub marker_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `UpdateCaption` (restyle or retime one caption line).
+///
+/// Every field but the ids is optional; an omitted one keeps its current value.
+/// `stylePack` contributes style only here: the command replaces the stored
+/// anchor whenever the payload carries one, so an update restyles without
+/// moving the caption unless it also passes `position`.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateCaptionPayload {
+    /// Sequence holding the caption track.
     pub sequence_id: SequenceId,
+    /// Caption track holding the caption.
     pub track_id: TrackId,
+    /// Caption to update.
+    ///
+    /// Accepts both `captionId` and `clipId`.
     #[serde(alias = "clipId")]
     pub caption_id: ClipId,
+    /// New caption text; the existing text is kept when omitted.
     pub text: Option<String>,
+    /// New start time in timeline seconds; the existing one is kept when omitted.
+    ///
+    /// Accepts both `startSec` and `startTime`.
     #[serde(alias = "startSec", alias = "startTime")]
     pub start_sec: Option<TimeSec>,
+    /// New end time in timeline seconds; the existing one is kept when omitted.
+    ///
+    /// Accepts both `endSec` and `endTime`.
     #[serde(alias = "endSec", alias = "endTime")]
     pub end_sec: Option<TimeSec>,
     // Forward-compatible fields currently used by UI/QC but not applied by core yet.
     // Keep them to avoid rejecting payloads during strict parsing.
+    /// Caption style overrides, applied on top of `stylePack` key by key.
+    ///
+    /// Accepts fontFamily, fontSize, fontWeight, bold, italic, underline,
+    /// color, opacity, backgroundColor, backgroundPadding, outlineColor,
+    /// outlineWidth, shadowColor, shadowOffsetX, shadowOffsetY, shadowBlur,
+    /// alignment, lineHeight and letterSpacing.
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub style: Option<serde_json::Value>,
+    /// Caption anchor: a `preset` of top/center/bottom, or custom
+    /// `xPercent`/`yPercent`. The stored anchor is kept when omitted.
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub position: Option<serde_json::Value>,
     /// Curated caption pack id, resolved into `style` only.
     ///
@@ -690,59 +808,122 @@ pub struct UpdateCaptionPayload {
     pub style_pack: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `CreateCaption` (one caption line).
+///
+/// Use `ImportGeneratedCaptions` for transcript segments, which imports them
+/// atomically as a single undoable command.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateCaptionPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
+    /// Caption text.
     pub text: String,
+    /// Start time in timeline seconds.
+    ///
+    /// Accepts both `startSec` and `startTime`.
     #[serde(alias = "startTime")]
     pub start_sec: TimeSec,
+    /// End time in timeline seconds.
+    ///
+    /// Accepts both `endSec` and `endTime`.
     #[serde(alias = "endTime")]
     pub end_sec: TimeSec,
     // Forward-compatible fields currently used by UI/agent prompts but not
     // applied by core command logic yet.
+    /// Caption style overrides, applied on top of `stylePack` key by key.
+    ///
+    /// Accepts fontFamily, fontSize, fontWeight, bold, italic, underline,
+    /// color, opacity, backgroundColor, backgroundPadding, outlineColor,
+    /// outlineWidth, shadowColor, shadowOffsetX, shadowOffsetY, shadowBlur,
+    /// alignment, lineHeight and letterSpacing.
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub style: Option<serde_json::Value>,
+    /// Caption anchor: a `preset` of top/center/bottom, or custom
+    /// `xPercent`/`yPercent`.
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub position: Option<serde_json::Value>,
     /// Curated caption pack id, resolved into `style` + `position`.
     #[serde(default)]
     pub style_pack: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// One transcript segment in an `ImportGeneratedCaptions` payload.
+///
+/// The times are TIMELINE-relative. A transcription of a single source asset
+/// returns SOURCE-relative times, which must be mapped onto the placed clip
+/// before they are used here.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GeneratedCaptionSegmentPayload {
+    /// Segment start in timeline seconds.
+    ///
+    /// Accepts `startSec`, `startTime` or `start`.
     #[serde(alias = "startTime", alias = "start")]
     pub start_sec: TimeSec,
+    /// Segment end in timeline seconds.
+    ///
+    /// Accepts `endSec`, `endTime` or `end`.
     #[serde(alias = "endTime", alias = "end")]
     pub end_sec: TimeSec,
+    /// Transcribed text for the segment.
     pub text: String,
+    /// Recognition confidence, when the transcriber reported one.
     pub confidence: Option<f64>,
+    /// Speaker label from diarization.
+    ///
+    /// Accepts both `speaker` and `speakerId`.
     #[serde(alias = "speakerId")]
     pub speaker: Option<String>,
+    /// BCP-47-ish language code for the segment, e.g. `en` or `ko`.
     pub language: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `ImportGeneratedCaptions` (a whole transcript, atomically).
+///
+/// Every segment is imported as one undoable command. Prefer `stylePack` over
+/// hand-assembled style values: the curated packs are the checked quality
+/// floor and stay inside the title-safe area on landscape and vertical
+/// canvases alike.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportGeneratedCaptionsPayload {
+    /// Sequence holding the caption track.
     pub sequence_id: SequenceId,
+    /// Caption track to import into.
     pub track_id: TrackId,
+    /// Transcript segments, in timeline seconds.
     pub segments: Vec<GeneratedCaptionSegmentPayload>,
+    /// Caption style overrides applied to every imported segment, on top of
+    /// `stylePack` key by key.
+    ///
+    /// Accepts fontFamily, fontSize, fontWeight, bold, italic, underline,
+    /// color, opacity, backgroundColor, backgroundPadding, outlineColor,
+    /// outlineWidth, shadowColor, shadowOffsetX, shadowOffsetY, shadowBlur,
+    /// alignment, lineHeight and letterSpacing.
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub style: Option<serde_json::Value>,
+    /// Caption anchor for every imported segment: a `preset` of
+    /// top/center/bottom, or custom `xPercent`/`yPercent`.
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub position: Option<serde_json::Value>,
     /// Curated caption pack id, resolved into `style` + `position`.
     #[serde(default)]
     pub style_pack: Option<String>,
+    /// Whether to clear the track's existing captions before importing.
     #[serde(default)]
     pub replace_existing: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+/// Payload for `DeleteCaption` (remove one caption line).
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteCaptionPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
+    /// Caption to delete.
+    ///
+    /// Accepts both `captionId` and `clipId`.
     #[serde(alias = "clipId")]
     pub caption_id: ClipId,
 }
@@ -758,7 +939,7 @@ pub struct DeleteCaptionPayload {
 /// baseline parameters; anything in `params` overrides the recipe key by key.
 /// `CommandPayload::parse` performs that resolution, so a payload that reaches
 /// command construction always carries an explicit effect type.
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddEffectPayload {
     pub sequence_id: SequenceId,
@@ -769,8 +950,12 @@ pub struct AddEffectPayload {
     /// Curated transition recipe id, resolved into `effectType` + `params`.
     #[serde(default)]
     pub recipe: Option<String>,
+    /// Effect parameters, overriding a `recipe`'s baseline key by key.
+    ///
+    /// Accepts both `params` and `parameters`.
     #[serde(default, alias = "parameters")]
     pub params: HashMap<String, ParamValue>,
+    /// Keyframed parameter tracks, keyed by parameter name.
     #[serde(default)]
     pub keyframes: HashMap<String, Vec<Keyframe>>,
     /// Optional position in the effect list (None = append at end)
@@ -778,7 +963,7 @@ pub struct AddEffectPayload {
 }
 
 /// Payload for removing an effect from a clip.
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveEffectPayload {
     pub sequence_id: SequenceId,
@@ -788,7 +973,7 @@ pub struct RemoveEffectPayload {
 }
 
 /// Payload for updating effect parameters.
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateEffectPayload {
     pub effect_id: EffectId,
@@ -803,7 +988,7 @@ pub struct UpdateEffectPayload {
 // =============================================================================
 
 /// Payload for pasting all copied effects onto target clips.
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PasteEffectsPayload {
     pub sequence_id: SequenceId,
@@ -814,7 +999,7 @@ pub struct PasteEffectsPayload {
 }
 
 /// Payload for selective paste of effects and attributes.
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PasteAttributesPayload {
     pub sequence_id: SequenceId,
@@ -828,7 +1013,7 @@ pub struct PasteAttributesPayload {
 }
 
 /// Payload for removing effects and/or resetting attributes on a clip.
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveAttributesPayload {
     pub sequence_id: SequenceId,
@@ -880,7 +1065,7 @@ pub struct RemoveAttributesPayload {
 ///     "inverted": false
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddMaskPayload {
     pub sequence_id: SequenceId,
@@ -921,7 +1106,7 @@ pub struct AddMaskPayload {
 ///     "opacity": 0.8
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateMaskPayload {
     pub effect_id: EffectId,
@@ -971,7 +1156,7 @@ pub struct UpdateMaskPayload {
 ///     "maskId": "mask_001"
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveMaskPayload {
     pub effect_id: EffectId,
@@ -1026,12 +1211,20 @@ pub struct RemoveMaskPayload {
 ///
 /// Unknown fields are rejected by the wire shape this deserializes from, and
 /// `timelineStart` is accepted there as an alias for `timelineIn`.
-#[derive(Debug, Serialize, Clone, specta::Type)]
+// The wire shape this deserializes from is stricter and looser than the struct
+// in different places, and the derived schema has to describe the *wire*: it
+// rejects unknown fields, and `textData` may be absent or partial when
+// `preset` names one. Only `schemars` sees these; serde still reads the hand
+// written `Deserialize` below.
+#[derive(Debug, Serialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[schemars(deny_unknown_fields)]
 pub struct AddTextClipPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     /// Timeline position to insert the text clip at (seconds)
+    ///
+    /// Accepts both `timelineIn` and `timelineStart`.
     pub timeline_in: TimeSec,
     /// Duration of the text clip (seconds)
     pub duration: TimeSec,
@@ -1046,6 +1239,7 @@ pub struct AddTextClipPayload {
     ///
     /// Required unless `preset` names a preset, in which case it carries only
     /// the fields that override the preset.
+    #[schemars(with = "Option<TextClipData>")]
     pub text_data: TextClipData,
 }
 
@@ -1108,7 +1302,7 @@ impl<'de> Deserialize<'de> for AddTextClipPayload {
 ///     }
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateTextClipPayload {
     pub sequence_id: SequenceId,
@@ -1133,7 +1327,7 @@ pub struct UpdateTextClipPayload {
 ///     "clipId": "clip_001"
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveTextClipPayload {
     pub sequence_id: SequenceId,
@@ -1145,33 +1339,33 @@ pub struct RemoveTextClipPayload {
 // Filesystem Payloads
 // =============================================================================
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateFolderPayload {
     pub relative_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameFilePayload {
     pub old_relative_path: String,
     pub new_name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoveFilePayload {
     pub source_path: String,
     pub dest_folder_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteFilePayload {
     pub relative_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApplyAudioDuckingPayload {
     pub sequence_id: SequenceId,
@@ -1180,7 +1374,7 @@ pub struct ApplyAudioDuckingPayload {
     pub keyframes: Vec<crate::core::timeline::AudioKeyframe>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateCompoundClipPayload {
     pub sequence_id: SequenceId,
@@ -1189,7 +1383,7 @@ pub struct CreateCompoundClipPayload {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnnestCompoundClipPayload {
     pub sequence_id: SequenceId,
@@ -1197,7 +1391,7 @@ pub struct UnnestCompoundClipPayload {
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateAdjustmentLayerPayload {
     pub sequence_id: SequenceId,
@@ -1211,7 +1405,7 @@ pub struct CreateAdjustmentLayerPayload {
 // Tagged Union
 // =============================================================================
 
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(tag = "commandType", content = "payload", rename_all = "camelCase")]
 pub enum CommandPayload {
     #[serde(alias = "insertClip", alias = "InsertClip")]
@@ -1520,90 +1714,95 @@ pub enum CommandPayload {
     RemoveAttributes(RemoveAttributesPayload),
 }
 
-impl CommandPayload {
-    pub const SUPPORTED_COMMAND_TYPES: &'static [&'static str] = &[
-        "InsertClip",
-        "InsertMedia",
-        "InsertEdit",
-        "OverwriteEdit",
-        "RippleDelete",
-        "Lift",
-        "ExtractEdit",
-        "CloseGap",
-        "CloseAllGaps",
-        "RemoveClip",
-        "MoveClip",
-        "TrimClip",
-        "SplitClip",
-        "SetClipTransform",
-        "SetClipMotionKeyframes",
-        "SetClipOpacity",
-        "SetClipSpeed",
-        "SetClipSlowMotionInterpolation",
-        "ReverseClip",
-        "SetClipEnabled",
-        "LinkClips",
-        "UnlinkClips",
-        "GroupClips",
-        "UngroupClips",
-        "DetachAudio",
-        "CreateFreezeFrame",
-        "SetTimeRemap",
-        "ClearTimeRemap",
-        "SetClipMute",
-        "SetClipAudio",
-        "AddAudioKeyframe",
-        "RemoveAudioKeyframe",
-        "MoveAudioKeyframe",
-        "SetAudioKeyframeValue",
-        "SetAudioFadeIn",
-        "SetAudioFadeOut",
-        "SetTrackBlendMode",
-        "SetClipBlendMode",
-        "ImportAsset",
-        "RemoveAsset",
-        "UpdateAsset",
-        "CreateSequence",
-        "SetMasterVolume",
-        "UpdateSequenceHdrSettings",
-        "SetSequenceFormat",
-        "CreateTrack",
-        "RemoveTrack",
-        "RenameTrack",
-        "SetCaptionTrackLanguage",
-        "ReorderTracks",
-        "SetTrackVolume",
-        "ToggleTrackMute",
-        "ToggleTrackLock",
-        "ToggleTrackVisibility",
-        "AddMarker",
-        "RemoveMarker",
-        "CreateCaption",
-        "ImportGeneratedCaptions",
-        "DeleteCaption",
-        "UpdateCaption",
-        "AddEffect",
-        "RemoveEffect",
-        "UpdateEffect",
-        "AddMask",
-        "UpdateMask",
-        "RemoveMask",
-        "AddTextClip",
-        "UpdateTextClip",
-        "RemoveTextClip",
-        "CreateFolder",
-        "RenameFile",
-        "MoveFile",
-        "DeleteFile",
-        "ApplyAudioDucking",
-        "CreateCompoundClip",
-        "UnnestCompoundClip",
-        "CreateAdjustmentLayer",
-        "PasteEffects",
-        "PasteAttributes",
-        "RemoveAttributes",
-    ];
+// The one place the backend command surface is declared: each canonical
+// PascalCase command type paired with the payload it parses into. The macro
+// generates `CommandPayload::SUPPORTED_COMMAND_TYPES` and the
+// `command_payload_schema` lookup from this single list, so a command cannot be
+// advertised without a schema or carry a schema nobody can reach.
+declare_command_payloads! {
+    "InsertClip" => InsertClipPayload,
+    "InsertMedia" => InsertMediaPayload,
+    "InsertEdit" => InsertEditPayload,
+    "OverwriteEdit" => OverwriteEditPayload,
+    "RippleDelete" => RippleDeletePayload,
+    "Lift" => LiftPayload,
+    "ExtractEdit" => ExtractEditPayload,
+    "CloseGap" => CloseGapPayload,
+    "CloseAllGaps" => CloseAllGapsPayload,
+    "RemoveClip" => RemoveClipPayload,
+    "MoveClip" => MoveClipPayload,
+    "TrimClip" => TrimClipPayload,
+    "SplitClip" => SplitClipPayload,
+    "SetClipTransform" => SetClipTransformPayload,
+    "SetClipMotionKeyframes" => SetClipMotionKeyframesPayload,
+    "SetClipOpacity" => SetClipOpacityPayload,
+    "SetClipSpeed" => SetClipSpeedPayload,
+    "SetClipSlowMotionInterpolation" => SetClipSlowMotionInterpolationPayload,
+    "ReverseClip" => ReverseClipPayload,
+    "SetClipEnabled" => SetClipEnabledPayload,
+    "LinkClips" => LinkClipsPayload,
+    "UnlinkClips" => UnlinkClipsPayload,
+    "GroupClips" => GroupClipsPayload,
+    "UngroupClips" => UngroupClipsPayload,
+    "DetachAudio" => DetachAudioPayload,
+    "CreateFreezeFrame" => CreateFreezeFramePayload,
+    "SetTimeRemap" => SetTimeRemapPayload,
+    "ClearTimeRemap" => ClearTimeRemapPayload,
+    "SetClipMute" => SetClipMutePayload,
+    "SetClipAudio" => SetClipAudioPayload,
+    "AddAudioKeyframe" => AddAudioKeyframePayload,
+    "RemoveAudioKeyframe" => RemoveAudioKeyframePayload,
+    "MoveAudioKeyframe" => MoveAudioKeyframePayload,
+    "SetAudioKeyframeValue" => SetAudioKeyframeValuePayload,
+    "SetAudioFadeIn" => SetAudioFadeInPayload,
+    "SetAudioFadeOut" => SetAudioFadeOutPayload,
+    "SetTrackBlendMode" => SetTrackBlendModePayload,
+    "SetClipBlendMode" => SetClipBlendModePayload,
+    "ImportAsset" => ImportAssetPayload,
+    "RemoveAsset" => RemoveAssetPayload,
+    "UpdateAsset" => UpdateAssetPayload,
+    "CreateSequence" => CreateSequencePayload,
+    "SetMasterVolume" => SetMasterVolumePayload,
+    "UpdateSequenceHdrSettings" => UpdateSequenceHdrSettingsPayload,
+    "SetSequenceFormat" => SetSequenceFormatPayload,
+    "CreateTrack" => CreateTrackPayload,
+    "RemoveTrack" => RemoveTrackPayload,
+    "RenameTrack" => RenameTrackPayload,
+    "SetCaptionTrackLanguage" => SetCaptionTrackLanguagePayload,
+    "ReorderTracks" => ReorderTracksPayload,
+    "SetTrackVolume" => SetTrackVolumePayload,
+    "ToggleTrackMute" => ToggleTrackMutePayload,
+    "ToggleTrackLock" => ToggleTrackLockPayload,
+    "ToggleTrackVisibility" => ToggleTrackVisibilityPayload,
+    "AddMarker" => AddMarkerPayload,
+    "RemoveMarker" => RemoveMarkerPayload,
+    "CreateCaption" => CreateCaptionPayload,
+    "ImportGeneratedCaptions" => ImportGeneratedCaptionsPayload,
+    "DeleteCaption" => DeleteCaptionPayload,
+    "UpdateCaption" => UpdateCaptionPayload,
+    "AddEffect" => AddEffectPayload,
+    "RemoveEffect" => RemoveEffectPayload,
+    "UpdateEffect" => UpdateEffectPayload,
+    "AddMask" => AddMaskPayload,
+    "UpdateMask" => UpdateMaskPayload,
+    "RemoveMask" => RemoveMaskPayload,
+    "AddTextClip" => AddTextClipPayload,
+    "UpdateTextClip" => UpdateTextClipPayload,
+    "RemoveTextClip" => RemoveTextClipPayload,
+    "CreateFolder" => CreateFolderPayload,
+    "RenameFile" => RenameFilePayload,
+    "MoveFile" => MoveFilePayload,
+    "DeleteFile" => DeleteFilePayload,
+    "ApplyAudioDucking" => ApplyAudioDuckingPayload,
+    "CreateCompoundClip" => CreateCompoundClipPayload,
+    "UnnestCompoundClip" => UnnestCompoundClipPayload,
+    "CreateAdjustmentLayer" => CreateAdjustmentLayerPayload,
+    "PasteEffects" => PasteEffectsPayload,
+    "PasteAttributes" => PasteAttributesPayload,
+    "RemoveAttributes" => RemoveAttributesPayload,
+}
 
+impl CommandPayload {
     /// Hard limit to prevent DoS via massive IPC payloads.
     ///
     /// This is intentionally conservative: edit commands should remain small and
@@ -3778,5 +3977,460 @@ mod tests {
             err.contains("unknown field"),
             "expected unknown-field rejection, got: {err}"
         );
+    }
+
+    // =========================================================================
+    // Derived payload schemas
+    // =========================================================================
+
+    use crate::ipc::command_schema::{
+        all_command_payload_schemas, check_against_schema, property, required,
+    };
+
+    /// Feature: derived command payload schemas
+    /// Scenario: every advertised command can be looked up
+    ///
+    /// The gap this closes: `command schema` listed eighty names and nothing
+    /// about their shapes, so an agent learned a payload by guessing one and
+    /// reading the parse error. A name an agent can discover and not resolve
+    /// would put that guessing back.
+    #[test]
+    fn should_derive_a_schema_for_every_supported_command_type() {
+        for command_type in CommandPayload::SUPPORTED_COMMAND_TYPES {
+            let schema = command_payload_schema(command_type)
+                .unwrap_or_else(|| panic!("{command_type} is advertised but has no schema"));
+
+            assert_eq!(
+                schema["title"], **command_type,
+                "{command_type}'s schema must be titled by the command type an agent writes"
+            );
+            assert_eq!(
+                schema["type"], "object",
+                "{command_type}'s payload is a JSON object"
+            );
+            assert!(
+                schema["properties"].is_object(),
+                "{command_type}'s schema must name its properties"
+            );
+        }
+    }
+
+    #[test]
+    fn should_not_answer_an_unknown_command_type_with_a_schema() {
+        assert!(command_payload_schema("Bogus").is_none());
+        assert!(command_payload_schema("").is_none());
+    }
+
+    /// The macro table pairs a command name with a payload struct by hand, and
+    /// a mispairing would hand agents a plausible schema for the wrong command.
+    /// The enum's own derived schema is the independent witness: it says which
+    /// payload each variant actually deserializes into.
+    #[test]
+    fn should_pair_every_command_type_with_the_payload_its_variant_parses() {
+        let enum_schema = serde_json::to_value(schemars::schema_for!(CommandPayload))
+            .expect("the command union has a schema");
+        let variants = enum_schema["oneOf"]
+            .as_array()
+            .expect("an adjacently tagged enum is a oneOf");
+
+        for (command_type, struct_name) in COMMAND_PAYLOAD_STRUCT_NAMES {
+            // serde renames the variants to camelCase; the PascalCase spelling
+            // the table uses is one of the aliases, which schemars never emits.
+            let variant = variants
+                .iter()
+                .find(|variant| {
+                    variant["properties"]["commandType"]["enum"][0]
+                        .as_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(command_type))
+                })
+                .unwrap_or_else(|| panic!("{command_type} names no variant of CommandPayload"));
+
+            assert_eq!(
+                variant["properties"]["payload"]["$ref"],
+                format!("#/definitions/{struct_name}"),
+                "{command_type} is paired with {struct_name}, which is not what its variant parses"
+            );
+        }
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: an agent reads what UpdateCaption needs before composing one
+    #[test]
+    fn update_caption_schema_should_separate_the_ids_it_needs_from_what_it_may_change() {
+        let schema = command_payload_schema("UpdateCaption").expect("UpdateCaption has a schema");
+
+        assert_eq!(
+            required(&schema),
+            vec!["captionId", "sequenceId", "trackId"],
+            "UpdateCaption needs exactly the three ids"
+        );
+
+        for optional in ["text", "startSec", "endSec", "style", "position"] {
+            let field = property(&schema, optional)
+                .unwrap_or_else(|| panic!("UpdateCaption must document {optional}"));
+            assert!(
+                !required(&schema).contains(&optional.to_string()),
+                "{optional} is optional on UpdateCaption"
+            );
+            let description = field
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            assert!(
+                !description.is_empty(),
+                "{optional} must say what it does, not just its type"
+            );
+        }
+    }
+
+    /// The aliases are what an agent that learned an older spelling sends, and
+    /// `schemars` never reads `#[serde(alias)]` — so they live in the doc
+    /// comment, which the guard below keeps honest.
+    #[test]
+    fn update_caption_schema_should_name_the_spellings_its_parser_also_accepts() {
+        let schema = command_payload_schema("UpdateCaption").expect("UpdateCaption has a schema");
+
+        let caption_id = property(&schema, "captionId").expect("captionId is documented");
+        assert!(
+            caption_id["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("clipId")),
+            "captionId also answers to clipId: {caption_id:?}"
+        );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a frame rate may be written either way
+    #[test]
+    fn set_sequence_format_schema_should_offer_both_frame_rate_spellings() {
+        let schema =
+            command_payload_schema("SetSequenceFormat").expect("SetSequenceFormat has a schema");
+
+        assert!(
+            required(&schema).is_empty(),
+            "every SetSequenceFormat field is optional"
+        );
+
+        let fps = property(&schema, "fps").expect("fps is documented");
+        let referenced = fps["anyOf"]
+            .as_array()
+            .expect("an optional union is an anyOf")
+            .iter()
+            .filter_map(|entry| entry["$ref"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            referenced.contains(&"#/definitions/FpsSpec"),
+            "fps must point at the number-or-ratio union: {fps:?}"
+        );
+
+        let fps_spec = &schema["definitions"]["FpsSpec"]["anyOf"];
+        let spellings = fps_spec.as_array().expect("FpsSpec is a union");
+        assert!(
+            spellings
+                .iter()
+                .any(|entry| entry["type"] == "number" || entry["format"] == "double"),
+            "a decimal rate must be accepted: {fps_spec}"
+        );
+        assert!(
+            spellings.iter().any(|entry| {
+                entry["$ref"] == "#/definitions/Ratio"
+                    || entry["allOf"][0]["$ref"] == "#/definitions/Ratio"
+            }),
+            "an exact ratio must be accepted: {fps_spec}"
+        );
+        assert!(
+            schema["definitions"]["Ratio"]["properties"]["num"].is_object(),
+            "the ratio's own shape must travel with the schema"
+        );
+    }
+
+    /// `deny_unknown_fields` is what makes a typo a parse error rather than a
+    /// silently dropped field, so the schema has to say so.
+    #[test]
+    fn should_close_a_schema_exactly_where_the_parser_rejects_unknown_fields() {
+        for closed in [
+            "UpdateCaption",
+            "SetSequenceFormat",
+            "InsertClip",
+            "AddTextClip",
+        ] {
+            let schema = command_payload_schema(closed).expect("the command has a schema");
+            assert_eq!(
+                schema["additionalProperties"], false,
+                "{closed} rejects unknown fields and its schema must say so"
+            );
+        }
+
+        // The two payloads with a hand written `Deserialize` accept spellings
+        // no property lists, so declaring them closed would be a lie in the
+        // other direction. Their struct docs name what else they take.
+        let ripple = command_payload_schema("RippleDelete").expect("RippleDelete has a schema");
+        assert!(
+            ripple["additionalProperties"].is_null(),
+            "RippleDelete also accepts clipId, so its schema must stay open"
+        );
+        assert!(
+            ripple["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("clipId")),
+            "RippleDelete must say which other spelling it takes: {ripple:?}"
+        );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: what the parser accepts, the schema accepts
+    ///
+    /// The schema is only worth reading if it agrees with the parser every
+    /// surface runs payloads through. Each sample below is parsed strictly and
+    /// then checked against its own schema, so a schema that drifted from the
+    /// struct it was derived from fails here rather than in an agent's session.
+    #[test]
+    fn a_payload_the_parser_accepts_should_validate_against_its_own_schema() {
+        let samples = [
+            (
+                "UpdateCaption",
+                serde_json::json!({
+                    "sequenceId": "seq_1",
+                    "trackId": "track_c1",
+                    "clipId": "caption_1",
+                    "text": "Hello",
+                    "startTime": 1.0,
+                    "endTime": 2.5
+                }),
+            ),
+            (
+                "InsertClip",
+                serde_json::json!({
+                    "sequenceId": "seq_1",
+                    "trackId": "track_v1",
+                    "assetId": "asset_1",
+                    "timelineIn": 0.0
+                }),
+            ),
+            (
+                "SplitClip",
+                serde_json::json!({
+                    "sequenceId": "seq_1",
+                    "trackId": "track_v1",
+                    "clipId": "clip_1",
+                    "atTimelineSec": 5.0
+                }),
+            ),
+            (
+                "SetSequenceFormat",
+                serde_json::json!({ "fps": { "num": 24000, "den": 1001 } }),
+            ),
+            (
+                "RippleDelete",
+                serde_json::json!({
+                    "sequenceId": "seq_1",
+                    "trackId": "track_v1",
+                    "clipId": "clip_1"
+                }),
+            ),
+        ];
+
+        for (command_type, wire) in samples {
+            let parsed = CommandPayload::parse(command_type.to_string(), wire)
+                .unwrap_or_else(|error| panic!("{command_type} sample must parse: {error}"));
+
+            // The parsed payload is re-serialized, which is the canonical
+            // spelling of exactly the fields the schema was derived from.
+            let canonical = serde_json::to_value(&parsed).expect("a parsed payload serializes")
+                ["payload"]
+                .clone();
+
+            let schema = command_payload_schema(command_type).expect("the command has a schema");
+            check_against_schema(&schema, &canonical).unwrap_or_else(|error| {
+                panic!("{command_type} parses payloads its own schema rejects: {error}")
+            });
+        }
+    }
+
+    #[test]
+    fn should_list_every_command_when_asked_for_all_of_them() {
+        let all = all_command_payload_schemas();
+
+        assert_eq!(
+            all["count"].as_u64(),
+            Some(CommandPayload::SUPPORTED_COMMAND_TYPES.len() as u64)
+        );
+
+        let entries = all["schemas"].as_array().expect("schemas is a list");
+        let listed: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry["commandType"].as_str())
+            .collect();
+        assert_eq!(listed, CommandPayload::SUPPORTED_COMMAND_TYPES.to_vec());
+        assert!(entries
+            .iter()
+            .all(|entry| entry["schema"]["type"] == "object"));
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a field an agent cannot type is at least a field it can read
+    ///
+    /// A handful of payload fields are `serde_json::Value`, which `schemars`
+    /// renders as "anything" — a property with no `type`, no `$ref` and no
+    /// union. That is honest but useless on its own: an agent reading it
+    /// learns nothing at all. Such a field has to say in prose what it takes,
+    /// so this fails when a free-form field is added without a doc comment.
+    #[test]
+    fn a_field_with_no_declared_shape_must_at_least_be_described() {
+        /// Whether a property schema tells a caller what values it accepts.
+        fn declares_a_shape(property: &serde_json::Value) -> bool {
+            ["type", "$ref", "anyOf", "allOf", "oneOf", "enum", "const"]
+                .iter()
+                .any(|keyword| property.get(*keyword).is_some())
+        }
+
+        fn described(property: &serde_json::Value) -> bool {
+            property
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        }
+
+        let mut opaque: Vec<String> = Vec::new();
+
+        for command_type in CommandPayload::SUPPORTED_COMMAND_TYPES {
+            let schema = command_payload_schema(command_type)
+                .unwrap_or_else(|| panic!("{command_type} is advertised but has no schema"));
+
+            // The payload's own fields, then the fields of every type it
+            // references: a free-form leaf is just as opaque one level down.
+            let mut objects: Vec<(String, &serde_json::Value)> =
+                vec![(command_type.to_string(), &schema)];
+            if let Some(definitions) = schema["definitions"].as_object() {
+                objects.extend(
+                    definitions
+                        .iter()
+                        .map(|(name, definition)| (name.clone(), definition)),
+                );
+            }
+
+            for (owner, object) in objects {
+                let Some(properties) = object["properties"].as_object() else {
+                    continue;
+                };
+                for (name, property) in properties {
+                    if !declares_a_shape(property) && !described(property) {
+                        opaque.push(format!("{owner}.{name}"));
+                    }
+                }
+            }
+        }
+
+        opaque.sort();
+        opaque.dedup();
+        assert!(
+            opaque.is_empty(),
+            "these fields accept anything and say nothing — give the field a doc comment, or a \
+             `#[schemars(with = \"…\")]` naming the shape the parser reads: {opaque:#?}"
+        );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: an alias cannot be added without telling agents about it
+    ///
+    /// `schemars` reads `rename_all` but not `alias`, so a field's accepted
+    /// spellings only reach an agent through its doc comment. Nothing in the
+    /// compiler ties the two together — this does. It reads the payload source
+    /// itself so an alias added tomorrow fails here rather than going
+    /// unnoticed until an agent sends the old spelling and is told the field
+    /// is unknown.
+    #[test]
+    fn every_field_alias_should_be_named_in_the_doc_comment_agents_read() {
+        let source = include_str!("payloads.rs");
+        let mut undocumented: Vec<String> = Vec::new();
+        let mut current_struct: Option<&str> = None;
+        let mut doc: Vec<String> = Vec::new();
+        let mut aliases: Vec<String> = Vec::new();
+
+        for line in source.lines() {
+            if let Some(name) = line
+                .strip_prefix("pub struct ")
+                .and_then(|rest| rest.strip_suffix(" {"))
+            {
+                current_struct = Some(name);
+                doc.clear();
+                aliases.clear();
+                continue;
+            }
+            if line == "}" {
+                current_struct = None;
+                continue;
+            }
+            let Some(owner) = current_struct else {
+                continue;
+            };
+
+            // Only the struct's own fields, which sit at one level of
+            // indentation; a `Wire` shape nested inside an `impl` is deeper and
+            // is not what the schema is derived from.
+            let Some(body) = line.strip_prefix("    ") else {
+                continue;
+            };
+            if body.starts_with(' ') {
+                continue;
+            }
+
+            if let Some(text) = body.strip_prefix("/// ").or(body.strip_prefix("///")) {
+                doc.push(text.to_string());
+                continue;
+            }
+            if body.starts_with("#[serde(") || body.starts_with("#[schemars(") {
+                for alias in body.split("alias = \"").skip(1) {
+                    if let Some(alias) = alias.split('"').next() {
+                        aliases.push(alias.to_string());
+                    }
+                }
+                continue;
+            }
+            if let Some(field) = body
+                .strip_prefix("pub ")
+                .and_then(|rest| rest.split(':').next())
+            {
+                let canonical = to_camel_case(field);
+                let described = doc.join(" ");
+                for alias in &aliases {
+                    // An alias equal to the camelCase name serde already
+                    // derives is a no-op; there is nothing to tell anyone.
+                    if *alias == canonical {
+                        continue;
+                    }
+                    if !described.contains(alias.as_str()) {
+                        undocumented.push(format!("{owner}.{canonical} accepts '{alias}'"));
+                    }
+                }
+            }
+            doc.clear();
+            aliases.clear();
+        }
+
+        assert!(
+            undocumented.is_empty(),
+            "these fields accept a spelling no agent can discover — name it in the field's doc \
+             comment, which becomes the schema description: {undocumented:#?}"
+        );
+    }
+
+    /// Converts a `snake_case` field name to the camelCase serde emits.
+    fn to_camel_case(field: &str) -> String {
+        let mut camel = String::with_capacity(field.len());
+        let mut capitalize = false;
+        for character in field.chars() {
+            if character == '_' {
+                capitalize = true;
+                continue;
+            }
+            if capitalize {
+                camel.extend(character.to_uppercase());
+                capitalize = false;
+            } else {
+                camel.push(character);
+            }
+        }
+        camel
     }
 }

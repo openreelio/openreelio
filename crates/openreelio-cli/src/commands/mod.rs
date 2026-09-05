@@ -1,11 +1,16 @@
 //! CLI command definitions and dispatch.
 //!
-//! All subcommands follow the pattern:
+//! Every subcommand that acts on a project follows the pattern:
 //! 1. Parse arguments (clap)
 //! 2. Load ActiveProject from `--path`
 //! 3. Build + execute Command via CommandExecutor
 //! 4. Save project state
 //! 5. Output JSON result to stdout
+//!
+//! The verbs that describe the tool rather than a project take no `--path`:
+//! `command schema`, `command validate`, `ffmpeg info`, `help-json`, `mcp`,
+//! `packs list`, `plan template`, `render presets`, `transcription install` and
+//! `transcription status`.
 
 mod analysis;
 mod asset;

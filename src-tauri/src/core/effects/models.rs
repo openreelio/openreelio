@@ -192,7 +192,9 @@ pub enum EffectCategory {
 }
 
 /// Predefined effect types
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectType {
     // Color effects
@@ -376,7 +378,7 @@ impl EffectType {
 // =============================================================================
 
 /// Effect parameter value types
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ParamValue {
     Float(f64),
@@ -511,7 +513,9 @@ impl ParamDef {
 // =============================================================================
 
 /// Easing function for keyframe interpolation
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, specta::Type)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, specta::Type, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Easing {
     #[default]
@@ -525,7 +529,7 @@ pub enum Easing {
 }
 
 /// A keyframe for parameter animation
-#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Keyframe {
     /// Time offset from effect start (seconds)

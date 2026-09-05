@@ -5744,6 +5744,166 @@ fn test_command_schema_exposes_backend_payload_surface() {
     assert!(commands.iter().any(|value| value == "RenameTrack"));
 }
 
+/// Feature: derived command payload schemas
+/// Scenario: an agent reads a payload's shape before composing one
+///
+/// The gap this closes: `command schema` answered only "which commands exist",
+/// and `--type` was rejected outright, so the field names, types and
+/// required-ness of a payload were only in the Rust source.
+#[test]
+fn test_command_schema_type_returns_the_payload_shape() {
+    let result = run_cli_ok(&["command", "schema", "--type", "UpdateCaption"]);
+
+    assert_eq!(result["count"].as_u64(), Some(1));
+    let entry = &result["schemas"][0];
+    assert_eq!(entry["commandType"], "UpdateCaption");
+
+    let schema = &entry["schema"];
+    assert_eq!(schema["title"], "UpdateCaption");
+    assert_eq!(schema["type"], "object");
+    assert_eq!(
+        schema["additionalProperties"], false,
+        "UpdateCaption rejects unknown fields and the schema must say so"
+    );
+
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("a schema names what it requires")
+        .iter()
+        .map(|value| value.as_str().expect("required names are strings"))
+        .collect();
+    assert_eq!(required, vec!["captionId", "sequenceId", "trackId"]);
+
+    for optional in ["text", "startSec", "endSec", "style", "position"] {
+        assert!(
+            schema["properties"][optional].is_object(),
+            "UpdateCaption must document its optional {optional}"
+        );
+        assert!(
+            !required.contains(&optional),
+            "{optional} is optional on UpdateCaption"
+        );
+    }
+
+    // The alternative spellings the parser accepts are what an agent holding an
+    // older payload sends; they live in the description because JSON Schema has
+    // nowhere else to put them.
+    let caption_id = schema["properties"]["captionId"]["description"]
+        .as_str()
+        .expect("captionId is described");
+    assert!(
+        caption_id.contains("clipId"),
+        "captionId also answers to clipId: {caption_id}"
+    );
+
+    // The bare listing is unchanged, and points at the new lookup.
+    let listing = run_cli_ok(&["command", "schema"]);
+    assert!(listing["commands"].is_array());
+    assert!(listing["schemas"].is_null());
+    assert!(listing["payloadFormat"]["schemaLookup"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("--type")));
+}
+
+#[test]
+fn test_command_schema_type_is_repeatable_and_all_covers_every_command() {
+    use openreelio_core::ipc::CommandPayload;
+
+    let pair = run_cli_ok(&[
+        "command",
+        "schema",
+        "--type",
+        "SplitClip",
+        "--type",
+        "SetSequenceFormat",
+    ]);
+    assert_eq!(pair["count"].as_u64(), Some(2));
+    assert_eq!(pair["schemas"][0]["commandType"], "SplitClip");
+    assert_eq!(pair["schemas"][1]["commandType"], "SetSequenceFormat");
+
+    // A frame rate may be written as a decimal or an exact ratio, and the
+    // schema has to show both or an agent will send only one.
+    let fps = &pair["schemas"][1]["schema"]["properties"]["fps"];
+    assert!(
+        fps["anyOf"]
+            .as_array()
+            .expect("an optional union is an anyOf")
+            .iter()
+            .any(|entry| entry["$ref"] == "#/definitions/FpsSpec"),
+        "fps must point at the number-or-ratio union: {fps}"
+    );
+
+    let all = run_cli_ok(&["command", "schema", "--all"]);
+    assert_eq!(
+        all["count"].as_u64(),
+        Some(CommandPayload::SUPPORTED_COMMAND_TYPES.len() as u64)
+    );
+    let listed: Vec<&str> = all["schemas"]
+        .as_array()
+        .expect("--all returns a list")
+        .iter()
+        .map(|entry| entry["commandType"].as_str().expect("named entries"))
+        .collect();
+    assert_eq!(listed, CommandPayload::SUPPORTED_COMMAND_TYPES.to_vec());
+}
+
+/// A misspelled command type is the common failure, and "not supported" alone
+/// leaves the agent to diff its spelling against eighty names.
+#[test]
+fn test_command_schema_names_the_closest_match_for_an_unknown_type() {
+    let (_stdout, stderr) = run_cli_err(&["command", "schema", "--type", "UpdateCaptions"]);
+    assert!(
+        stderr.contains("UpdateCaption'"),
+        "the error must name the command the caller meant: {stderr}"
+    );
+
+    let (_stdout, stderr) = run_cli_err(&["command", "schema", "--type", "Bogus"]);
+    assert!(
+        stderr.contains("not a supported command type"),
+        "an unrecognisable name is still refused clearly: {stderr}"
+    );
+}
+
+/// The schema is only worth reading if the parser agrees with it: a payload
+/// composed from the schema's required list must validate.
+#[test]
+fn test_a_payload_built_from_the_schema_passes_command_validate() {
+    let schema = run_cli_ok(&["command", "schema", "--type", "SplitClip"]);
+    let required: Vec<String> = schema["schemas"][0]["schema"]["required"]
+        .as_array()
+        .expect("SplitClip names what it requires")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("required names are strings")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        required,
+        vec!["clipId", "sequenceId", "splitTime", "trackId"]
+    );
+
+    let payload = serde_json::json!({
+        "sequenceId": "seq_1",
+        "trackId": "track_v1",
+        "clipId": "clip_1",
+        "splitTime": 5.0
+    })
+    .to_string();
+
+    let result = run_cli_ok(&[
+        "command",
+        "validate",
+        "--type",
+        "SplitClip",
+        "--payload",
+        &payload,
+    ]);
+    assert_eq!(result["status"], "ok");
+}
+
 /// Drift guard: the `command schema` output is the only agent-facing surface for
 /// the canonical backend command list, and it must be derived from
 /// `CommandPayload::SUPPORTED_COMMAND_TYPES` rather than a hand-written copy.

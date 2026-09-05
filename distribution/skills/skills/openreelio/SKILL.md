@@ -33,7 +33,10 @@ Treat the binary as the source of truth, not this skill.
 `openreelio-cli help-json` prints the entire command schema as JSON, and
 `openreelio-cli <verb> --help` is authoritative for any single verb. `help-json`
 is roughly 68 KB — fetch per-verb help instead of loading all of it. Use
-`openreelio-cli command schema` for the 80 backend command types, and
+`openreelio-cli command schema` for the 80 backend command types
+(`--type <CommandType>` for one payload's JSON Schema — fields, types, what is
+required, and the spellings each field accepts; read it before composing a
+payload), and
 `openreelio-cli packs list` for the curated caption styles, transition
 recipes, text presets, and pacing profiles
 (`--kind caption|transition|text|pacing`).

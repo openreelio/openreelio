@@ -34,7 +34,9 @@ pub mod fonts;
 // =============================================================================
 
 /// Text alignment options for horizontal text positioning.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TextAlignment {
     /// Align text to the left
@@ -54,7 +56,7 @@ pub enum TextAlignment {
 ///
 /// Controls the visual appearance of text including font, size, color,
 /// and formatting options.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TextStyle {
     /// Font family name (system font)
@@ -200,7 +202,7 @@ impl TextStyle {
 ///
 /// Creates a drop shadow behind the text for improved readability
 /// or visual effect.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TextShadow {
     /// Shadow color in hex format (#RRGGBB or #RRGGBBAA)
@@ -276,7 +278,7 @@ impl TextShadow {
 ///
 /// Creates an outline around the text for improved readability,
 /// especially on busy backgrounds.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TextOutline {
     /// Outline color in hex format (#RRGGBB or #RRGGBBAA)
@@ -337,7 +339,7 @@ impl TextOutline {
 /// - (0.0, 0.0) = top-left corner
 /// - (0.5, 0.5) = center
 /// - (1.0, 1.0) = bottom-right corner
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 pub struct TextPosition {
     /// X position (0.0 = left, 0.5 = center, 1.0 = right)
     pub x: f64,
@@ -404,7 +406,7 @@ impl TextPosition {
 ///
 /// Contains all properties needed to render a text overlay including
 /// content, styling, positioning, and effects.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TextClipData {
     /// The text content (can be multi-line with \n)

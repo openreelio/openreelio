@@ -65,9 +65,11 @@ error text on stderr. `verify` is the exception: `0` ran without breaching the
 arguments, unreadable file, FFmpeg error).
 
 **`--path <PROJECT_DIR>` on every project verb.** There is no ambient "current
-project". Only `help-json`, `command schema`, `plan template`, `render presets`,
-`ffmpeg info`, `transcription status` and `transcription install` omit it.
-`--sequence` is always optional and defaults to the active sequence.
+project". The verbs that describe the tool rather than a project take no
+`--path`: `command schema`, `command validate`, `ffmpeg info`, `help-json`,
+`mcp`, `packs list`, `plan template`, `render presets`, `transcription install`
+and `transcription status`. `--sequence` is always optional and defaults to the
+active sequence.
 
 **IDs are ULIDs, not `asset_001`.** The examples in `help-json` use readable
 placeholders. Real IDs look like `01KZW64VJ4JPBS5B9YZEA335J8`. Read them from
@@ -88,6 +90,15 @@ it into a context window. Fetch help per verb instead
 `openreelio-cli command schema` for the 80 backend command types, and
 `openreelio-cli packs list` for the curated caption styles, transition recipes,
 text presets, and pacing profiles (`--kind caption|transition|text|pacing`).
+
+`command schema --type <CommandType>` (repeatable, or `--all`) prints the JSON
+Schema of that command's payload — property names in the camelCase the parser
+reads, types, which properties are required, enums, the alternative spellings a
+field also accepts, and `"additionalProperties": false` wherever a typo is a
+parse error rather than a silently dropped field. It is derived from the payload
+types themselves, so it is the authoritative answer to "what goes in this
+payload" — read it before composing one instead of guessing and reading the
+parse error.
 
 ### Self-diagnosis
 
@@ -203,14 +214,18 @@ adjustment layers, audio ducking, blend modes — is reachable directly:
 
 ```bash
 openreelio-cli command schema                       # list all 80 types
+openreelio-cli command schema --type UpdateCaption  # that payload's JSON Schema
 openreelio-cli command validate --type RenameTrack --payload '{…}'
 openreelio-cli command execute  --path ./demo --type SplitClip \
   --payload '{"sequenceId":"…","trackId":"…","clipId":"…","splitTime":5}'
 ```
 
-Payloads are camelCase JSON objects. Use `--payload-file <FILE>` instead of
-`--payload` when the JSON is large or shell quoting is awkward. `command
-validate` runs the same strict parser without touching the project.
+Payloads are camelCase JSON objects. Read `command schema --type <CommandType>`
+before composing one: it names the fields, their types, which are required, and
+the alternative spellings each accepts. An unknown type is refused with the
+closest supported name. Use `--payload-file <FILE>` instead of `--payload` when
+the JSON is large or shell quoting is awkward. `command validate` runs the same
+strict parser without touching the project.
 
 Every mutating verb answers *where the edit landed*. `command execute`,
 `plan execute` and the `timeline`, `text` and `caption` edit verbs all report

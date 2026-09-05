@@ -717,9 +717,12 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli command validate --type AddEffect --payload '{\"sequenceId\":\"seq_1\",\"trackId\":\"track_v1\",\"clipId\":\"clip_1\",\"recipe\":\"dissolve-soft\"}'"
             },
             "command.schema": {
-                "description": "Print the backend command surface available to headless agents",
-                "params": {},
-                "example": "openreelio-cli command schema"
+                "description": "Print the backend command surface available to headless agents. Bare, it lists every command name. With --type (repeatable) or --all it prints the JSON Schema derived from the payload structs themselves: property names in the camelCase the parser reads, types, which properties are required, enums, the alternative spellings a field also accepts, and 'additionalProperties': false wherever a typo is a parse error rather than a dropped field. Read the schema before composing a payload instead of guessing one and reading the parse error. Takes no --path: it describes the command surface, not a project",
+                "params": {
+                    "type": { "type": "string", "required": false, "desc": "Backend command type to describe, e.g. UpdateCaption (repeatable)" },
+                    "all": { "type": "boolean", "required": false, "desc": "Describe every supported command instead of one" }
+                },
+                "example": "openreelio-cli command schema --type UpdateCaption"
             },
             "state.dump": {
                 "description": "Dump full project state as JSON",
@@ -905,6 +908,62 @@ mod tests {
             .collect();
         leaves.sort_by(|left, right| left.0.cmp(&right.0));
         leaves
+    }
+
+    /// The agent-facing guide, read here so its `--path` claim cannot rot.
+    const AGENT_GUIDE: &str = include_str!("../../../../docs/AGENT_GUIDE.md");
+
+    /// The verbs clap parses without a `--path`, in the spelling a caller types.
+    fn leaves_without_path() -> Vec<String> {
+        clap_leaf_commands()
+            .into_iter()
+            .filter(|(_, command)| {
+                !command
+                    .get_arguments()
+                    .any(|argument| argument.get_long() == Some("path"))
+            })
+            .map(|(path, _)| path.replace('.', " "))
+            .collect()
+    }
+
+    /// Feature: agent-facing documentation
+    /// Scenario: the `--path` rule names exactly the verbs that skip it
+    ///
+    /// The bug this replaces: the guide named seven exceptions while clap had
+    /// ten, so an agent reading it believed `command validate`, `packs list`
+    /// and `mcp` needed a project directory they had no reason to have. The
+    /// list is read off the parser here, so a verb added tomorrow either takes
+    /// a `--path` or is named in the sentence agents read.
+    #[test]
+    fn the_guide_should_name_exactly_the_verbs_that_take_no_path() {
+        let marker = "**`--path <PROJECT_DIR>` on every project verb.**";
+        let paragraph_start = AGENT_GUIDE
+            .find(marker)
+            .expect("the guide must state the --path rule");
+        let paragraph = AGENT_GUIDE[paragraph_start..]
+            .split("\n\n")
+            .next()
+            .expect("a paragraph ends at a blank line");
+
+        // Every backticked token in the paragraph that names a real leaf verb.
+        let all_leaves: Vec<String> = clap_leaf_commands()
+            .into_iter()
+            .map(|(path, _)| path.replace('.', " "))
+            .collect();
+        let mut named: Vec<String> = all_leaves
+            .iter()
+            .filter(|verb| paragraph.contains(&format!("`{verb}`")))
+            .cloned()
+            .collect();
+        named.sort();
+
+        let mut expected = leaves_without_path();
+        expected.sort();
+
+        assert_eq!(
+            named, expected,
+            "the guide's --path exception list has drifted from the parser"
+        );
     }
 
     #[test]
