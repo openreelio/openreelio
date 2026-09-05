@@ -21,7 +21,7 @@ mod fix_roundtrip_tests;
 // Re-export main types
 pub use caption_contrast::{
     sample_caption_bands, CaptionBandSample, CaptionBandSampling, CaptionContrastRule,
-    CaptionSampleOptions, CAPTION_CONTRAST_CHECK_ID,
+    CaptionSampleCoverage, CaptionSampleOptions, CAPTION_CONTRAST_CHECK_ID,
 };
 pub use context::{
     MeasuredStreams, MeasuredVideoStream, MeasuredWindow, QCContext, RenderMeasurements,

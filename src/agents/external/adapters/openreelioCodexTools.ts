@@ -994,7 +994,7 @@ const VERIFY_SCHEMA: CodexJsonObject = {
       minItems: 2,
       maxItems: 2,
       description:
-        'Timeline seconds file holds, as [start, end] — the same pair frame_extract takes. The rendered checks then grade the file against that window instead of the whole sequence, and every finding is reported in timeline seconds. Without it a partial render reads as a truncated deliverable and render.duration_mismatch fails the run. Only means something with file.',
+        'Timeline seconds file holds, as [start, end] — the same pair frame_extract takes. The rendered checks then grade the file against that window instead of the whole sequence, and every finding is reported in timeline seconds. Without it a partial render reads as a truncated deliverable and render.duration_mismatch fails the run. Only means something with file, and a window lying entirely past the end of the sequence is refused rather than graded against nothing.',
     },
     structuralOnly: {
       type: 'boolean',
@@ -1277,8 +1277,8 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- frame_extract shows the composited edit by default. Only pass mode: "fast" when you deliberately want the raw footage without captions, text or effects.',
     `- Use openreelio.render_proxy only for motion or pacing questions a still cannot answer, and keep the range under ${RENDER_PROXY_MAX_RANGE_SEC}s (the same cap the backend enforces). Then inspect its outputPath with openreelio.frame_extract { file: outputPath, between: [0, durationSec], grid: '4x3', labelCells: true }, which sweeps the whole draft and always has something to show. When the rendered range contains cuts, captions or transitions, judge those instead: add fileRange: [start, start + durationSec] — the start you asked for and the duration the render reported — with a sampler such as atCuts, atCaptions, atTransitions or perShot and grid: 'auto'. fileRange is what lets the samplers read a rendered file, and every cell then carries both fileSec and timelineSec; a sampler over a range holding no such event errors rather than returning an empty sheet.`,
     '- Never claim a cut, caption, overlay, or transition looks right without having extracted a frame that shows it.',
-'- Before you report a task done, run openreelio.verify with no arguments for the structural checks, and after an openreelio.render_proxy run openreelio.verify { file: outputPath, fileRange: [start, start + durationSec] } so the black, freeze, silence, loudness, true-peak and caption-contrast measurements run over the range that was drafted.',
-    "- Read the verify exitCode: 0 passed, 1 means a check failed and there is something to fix before reporting done, 2 means verify itself could not run — report that as a tool problem, never as a clean edit. Look at a violation's timeRange with openreelio.frame_extract { ranges: <the violation timeRanges>, grid: 'auto', labelCells: true }, and apply a suggestedFix through openreelio.plan_apply only after reviewing it.",
+    '- Before you report a task done, run openreelio.verify with no arguments for the structural checks, and after an openreelio.render_proxy run openreelio.verify { file: outputPath, fileRange: [start, start + durationSec] } so the black, freeze, silence, loudness, true-peak and caption-contrast measurements run over the range that was drafted.',
+    "- Read the verify exitCode: 0 passed, 1 means a check failed and there is something to fix before reporting done, 2 means verify itself could not run — report that as a tool problem, never as a clean edit. Look at what a violation flagged with openreelio.frame_extract { ranges: <the violation's metrics.timeRanges when it carries them, otherwise its own timeRange>, grid: 'auto', labelCells: true }, and apply a suggestedFix through openreelio.plan_apply only after reviewing it.",
     '',
     'Available OpenReelio dynamic tools:',
     OPENREELIO_CODEX_DYNAMIC_TOOLS.map((tool) => `- openreelio.${tool.name}`).join('\n'),
@@ -2584,20 +2584,14 @@ function collectVerifyFindings(payload: unknown): VerifyFindings {
       hasSuggestedFix = true;
     }
 
-    const timeRange = asObject(violation.timeRange);
-    const startSec = timeRange ? asFiniteNumber(timeRange.startSec) : null;
-    const endSec = timeRange ? asFiniteNumber(timeRange.endSec) : null;
-    if (startSec === null || endSec === null) {
-      continue;
+    for (const range of readViolationRanges(violation)) {
+      const key = `${range.startSec}:${range.endSec}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      ranges.push(range);
     }
-
-    const range = { startSec: roundSeconds(startSec), endSec: roundSeconds(endSec) };
-    const key = `${range.startSec}:${range.endSec}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    ranges.push(range);
   }
 
   return {
@@ -2605,6 +2599,42 @@ function collectVerifyFindings(payload: unknown): VerifyFindings {
     totalRanges: ranges.length,
     hasSuggestedFix,
   };
+}
+
+/**
+ * The windows one violation is worth looking at, most specific first.
+ *
+ * A grouped caption finding covers every offending cue on a track, so its own
+ * `timeRange` spans the first cue to the last — a minute of programme an agent
+ * cannot usefully extract a frame from. Those checks publish the individual cue
+ * windows as a `timeRanges` metric, and those are what an inspection loop
+ * needs; the coarse span is the fallback for every check that reports one
+ * finding about one place.
+ */
+function readViolationRanges(violation: CodexJsonObject): VerifyViolationRange[] {
+  const perCue = asObject(violation.metrics)?.timeRanges;
+  if (Array.isArray(perCue)) {
+    const ranges = perCue
+      .map(readTimeRange)
+      .filter((range): range is VerifyViolationRange => range !== null);
+    if (ranges.length > 0) {
+      return ranges;
+    }
+  }
+
+  const range = readTimeRange(violation.timeRange);
+  return range ? [range] : [];
+}
+
+/** Read a `{ startSec, endSec }` window, or null for anything else. */
+function readTimeRange(value: unknown): VerifyViolationRange | null {
+  const range = asObject(value);
+  const startSec = range ? asFiniteNumber(range.startSec) : null;
+  const endSec = range ? asFiniteNumber(range.endSec) : null;
+  if (startSec === null || endSec === null) {
+    return null;
+  }
+  return { startSec: roundSeconds(startSec), endSec: roundSeconds(endSec) };
 }
 
 /** Read a report field that should hold violation objects, tolerating anything else. */

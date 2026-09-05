@@ -45,6 +45,15 @@ and `render.duration_mismatch` grades a windowed run at warning: the window is
 your own claim about a file you rendered on purpose, not a missing
 deliverable.
 
+A window that lies entirely *past* the end of the edit is refused outright. It
+clips to nothing, so every rendered check would grade an empty span, report
+`passed`, and exit `0` on a file nobody looked at - a verdict no `--fail-on`
+setting could catch, because there is no violation to grade. It is an impossible
+claim about the file, so it is refused like any other bad argument: exit `2`,
+before a frame is measured, naming `--file-range` and saying the window "lies
+outside the sequence". A window that merely *overhangs* the end still holds real
+timeline and stays a `warnings` line.
+
 ## Exit codes
 
 | Code | Meaning                                                              |
@@ -83,7 +92,10 @@ to the caller, because the material to do it with is a judgement call.
 The caption checks report **one violation per caption track**, not one per cue.
 `caption.safe_area`, `caption.out_of_bounds` and `caption.reading_rate` list
 every offending cue under `metrics.cues` (`clipId`, `startSec`, `endSec` and
-that cue's own numbers) and in `entities`, and their `suggestedFix` is a single
+that cue's own numbers) and in `entities`, publish those cue windows again as
+`metrics.timeRanges` (the violation's own `timeRange` spans the first cue to the
+last, which is usually the whole track - hand `metrics.timeRanges` to
+`frame extract --ranges` instead), and their `suggestedFix` is a single
 plan that repairs all of them - a machine transcript anchored two percent too
 low is one mistake, not forty-one, and the fix loop runs once instead of once
 per caption. A plan is capped at 200 steps; past that the finding splits into
@@ -91,7 +103,8 @@ violations carrying `part`/`partCount`. `autoFixable` is true only when the
 steps finish the job: `caption.reading_rate` extends a cue into the following
 gap when the gap is long enough (`repair: "extend"`), and otherwise proposes a
 split at the nearest word boundary (`repair: "split"`, an `UpdateCaption` +
-`CreateCaption` pair) that a human still has to accept - so that group reports
+`CreateCaption` pair whose new half carries the original cue's `style` and
+`position`) that a human still has to accept - so that group reports
 `autoFixable: false` while still carrying the plan to read.
 
 `render.duration_mismatch` compares the measured file against the length a
@@ -121,15 +134,30 @@ each one under half the running time.
 `caption.contrast` (warning) asks whether the words can be read, which no
 structural check can answer. For each caption cue the file covers it decodes one
 frame at the cue's midpoint, measures the luminance of the band the words occupy
-and compares it with the text colour. A cue that already carries a background
-box or an outline is never decoded - the mitigation settles it - so the cost
-scales with the bare captions only. A bare cue within `0.35` luminance of its
-background is reported with `{bandLuminance, bandLuminanceStddev, textLuminance,
-contrast, hasBox, hasOutline}` and an `UpdateCaption` fix applying the
-`standard-outline` pack. At most 60 frames are decoded per run, spread evenly
-across the file, and `warnings` says so when the cap bites. Without `--file` the
-check emits a single `info` finding - "not measured" - instead of passing over a
-picture nobody looked at.
+and compares it with the text colour. A cue is "already protected" - and never
+decoded - only when the export would actually draw the protection: an
+`outlineColor` with a non-zero width, or a `backgroundColor` with a non-zero
+alpha. An `outlineWidth` with no colour renders bare, and so does a cue with no
+style at all, so those are graded like any other bare cue.
+
+Two numbers decide it. A bare cue within `0.35` luminance of its background is
+reported (`fault: "lowContrast"`), and so is one whose band varies by more than
+`0.2` (`fault: "mixedBackground"`) - a band that is half sky and half shadow has
+a comfortable mean and is still half unreadable. Either way the finding carries
+`{bandLuminance, bandLuminanceStddev, textLuminance, contrast, minContrast,
+maxBandStddev, fault, hasBox, hasOutline}` and an `UpdateCaption` fix applying
+the `standard-outline` pack - not `boxed-contrast`, because an outline survives
+any background including a mixed one.
+
+The pass is bounded: at most 60 frames per run (spread evenly across the file),
+`--timeout-sec` as the budget for the whole pass, and no seek past the end of
+the file that was measured. Anything it could not look at is reported as one
+`info` finding - "Caption contrast: N of M cue(s) not measured (…)" - so a run
+that decoded nothing never reads as `passed`, and `warnings` says the same in
+prose. The pass only runs when the check is selected, so `--skip
+caption.contrast` really does skip the decodes. Without `--file` the check emits
+a single `info` finding - "not measured" - instead of passing over a picture
+nobody looked at.
 
 `audio.clipping` reports the flat-topped samples `astats` measures, at warning
 — a master limited on purpose measures the same way, and `audio.peak` keeps the

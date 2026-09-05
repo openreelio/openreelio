@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::caption_contrast::CaptionBandSample;
+use super::caption_contrast::{CaptionBandSample, CaptionSampleCoverage};
 use crate::core::timeline::Sequence;
 
 /// Frame rate used when a sequence carries an unusable frame rate.
@@ -104,6 +104,14 @@ pub struct RenderMeasurements {
     /// pixel is read. See [`crate::core::qc::caption_contrast`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub caption_band_samples: Vec<CaptionBandSample>,
+    /// How much of the caption work the sampling pass actually got done.
+    ///
+    /// `None` means no sampling pass ran, which is not the same as "there was
+    /// nothing to sample": a run with a rendered file records the counts even
+    /// when every decode failed, so the rule can report unmeasured cues rather
+    /// than let an empty sample list read as a clean result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_band_coverage: Option<CaptionSampleCoverage>,
 }
 
 impl RenderMeasurements {

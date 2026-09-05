@@ -47,6 +47,7 @@ use super::{
     crossref_black_ranges_with_gaps, measure_rendered_file_detailed, sample_caption_bands,
     CaptionSampleOptions, MeasureOptions, MeasuredWindow, MeasurementReport, QCContext, QCEngine,
     QCEngineConfig, QCReport, QCSeverityFilter, RuleStatus, Severity, ViolationFix,
+    CAPTION_CONTRAST_CHECK_ID,
 };
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::project::ProjectState;
@@ -388,12 +389,40 @@ impl VerifyPlan {
         &self.selected_ids
     }
 
+    /// How this run would bound the caption-band pass, or `None` to skip it.
+    ///
+    /// Decoding one frame per bare cue is the most expensive thing the
+    /// measurement stage does and it answers exactly one check, so a run that
+    /// did not select `caption.contrast` — or skipped it — must not pay for it.
+    /// The caller's timeout bounds the whole pass rather than each decode
+    /// inside it, and the length the probe measured bounds which cues can
+    /// honestly be aimed at: seeking past the end of a file yields its last
+    /// frame rather than nothing.
+    fn caption_sample_options(&self, file_duration_sec: f64) -> Option<CaptionSampleOptions> {
+        if !self
+            .selected_ids
+            .iter()
+            .any(|id| id == CAPTION_CONTRAST_CHECK_ID)
+        {
+            return None;
+        }
+
+        Some(CaptionSampleOptions {
+            run_timeout: Duration::from_secs(self.request.timeout_sec),
+            file_duration_sec: Some(file_duration_sec),
+            ..CaptionSampleOptions::default()
+        })
+    }
+
     /// Runs the checks and assembles the report.
     ///
     /// `runner` is required exactly when [`requires_ffmpeg`](Self::requires_ffmpeg)
     /// says so. A measurement that fails does not abandon the run: the
     /// structural half of the report is still worth emitting, and the failure
     /// is recorded in `errors` and in the exit code.
+    ///
+    /// A declared window the sequence does not contain is the one thing that
+    /// stops the run before it starts — see [`check_window_overlaps`].
     pub async fn run(
         &self,
         state: &ProjectState,
@@ -404,6 +433,7 @@ impl VerifyPlan {
             .sequences
             .get(&sequence_id)
             .ok_or_else(|| VerifyError::new(format!("Sequence '{}' not found", sequence_id)))?;
+        check_window_overlaps(self.window, sequence, self.request.names)?;
 
         self.engine.set_config(self.config.clone()).await;
 
@@ -434,20 +464,18 @@ impl VerifyPlan {
                         shift_measured_spans(&mut report, window.start_sec);
                     }
 
-                    let sampling_window = self
-                        .window
-                        .map(|window| (window.start_sec, window.end_sec))
-                        .unwrap_or((0.0, sequence.duration()));
-                    let sampling = sample_caption_bands(
-                        runner,
-                        file,
-                        sequence,
-                        sampling_window,
-                        &CaptionSampleOptions::default(),
-                    )
-                    .await;
-                    warnings.extend(sampling.notes.iter().cloned());
-                    report.measurements.caption_band_samples = sampling.samples;
+                    if let Some(options) = self.caption_sample_options(report.duration_sec) {
+                        let sampling_window = self
+                            .window
+                            .map(|window| (window.start_sec, window.end_sec))
+                            .unwrap_or((0.0, sequence.duration()));
+                        let sampling =
+                            sample_caption_bands(runner, file, sequence, sampling_window, &options)
+                                .await;
+                        warnings.extend(sampling.notes.iter().cloned());
+                        report.measurements.caption_band_samples = sampling.samples;
+                        report.measurements.caption_band_coverage = Some(sampling.coverage);
+                    }
 
                     measurement = Some(report);
                 }
@@ -668,6 +696,46 @@ fn resolve_file_range(request: &VerifyRequest) -> VerifyResult<Option<MeasuredWi
                 names.file_range, values[0], values[1]
             ))
         })
+}
+
+/// Refuses a declared window that names timeline the sequence does not have.
+///
+/// `resolve_file_range` can only see the numbers; whether they exist is a
+/// question about the project, so it is asked here, once the sequence is known
+/// and before a frame is measured.
+///
+/// Clipping `--file-range 100 130` to a 90-second edit leaves nothing. Every
+/// rendered rule would then grade an empty span, find nothing, and report
+/// `passed` — a clean verdict on a file nobody looked at, and one that survives
+/// any `--fail-on` setting because there is no violation to grade. The window
+/// is the caller's own claim about the file, so a claim about seconds the
+/// timeline does not contain is a bad argument, refused in the same words and
+/// with the same exit code as `--file-range 5 2`.
+fn check_window_overlaps(
+    window: Option<MeasuredWindow>,
+    sequence: &Sequence,
+    names: VerifyArgumentNames,
+) -> VerifyResult<()> {
+    let Some(window) = window else {
+        return Ok(());
+    };
+
+    let output_duration = sequence.output_duration();
+    if !output_duration.is_finite() || output_duration <= 0.0 {
+        // An empty sequence is `sequence.empty`'s finding to report, and it is
+        // a structural one the caller should still get to read.
+        return Ok(());
+    }
+    if window.clipped_to(output_duration).duration_sec() > 0.0 {
+        return Ok(());
+    }
+
+    Err(VerifyError::new(format!(
+        "Invalid value for {}: the window {:.2}s-{:.2}s lies outside the sequence, which ends at \
+         {:.2}s. Nothing in the file can be graded against timeline the sequence does not \
+         contain, so declare the window in seconds it has.",
+        names.file_range, window.start_sec, window.end_sec, output_duration
+    )))
 }
 
 /// Moves every detection span from the file's own clock onto the timeline.
@@ -2059,6 +2127,132 @@ mod tests {
         assert!(
             error.to_string().contains("--file"),
             "the refusal must name the missing argument, got: {error}"
+        );
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should refuse a window that names timeline the sequence lacks
+    ///
+    /// Regression: `--file-range 100 130` on a six-second edit clipped to
+    /// nothing, every rendered rule graded that empty span and reported
+    /// `passed`, and the run exited `0` on a file nobody looked at — a verdict
+    /// no `--fail-on` setting could have caught, because there was no violation
+    /// to grade. The window is an argument, so an impossible one is refused
+    /// like any other bad argument.
+    #[test]
+    fn test_a_window_outside_the_sequence_should_be_refused() {
+        let sequence = sequence_with_gap();
+        let names = VerifyArgumentNames::cli();
+
+        let error = check_window_overlaps(MeasuredWindow::new(100.0, 130.0), &sequence, names)
+            .expect_err("a window the edit does not contain is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("--file-range") && message.contains("lies outside the sequence"),
+            "the refusal must name the argument and what is wrong with it, got: {message}"
+        );
+
+        assert!(
+            check_window_overlaps(MeasuredWindow::new(4.0, 30.0), &sequence, names).is_ok(),
+            "a window that overhangs the end still holds real timeline, which is a warning"
+        );
+        assert!(
+            check_window_overlaps(None, &sequence, names).is_ok(),
+            "a whole-sequence run declares no window at all"
+        );
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should leave an empty edit to the structural checks
+    ///
+    /// Every window clips to nothing against an empty sequence. Refusing the
+    /// run would hide `sequence.empty`, which is the finding the caller needs.
+    #[test]
+    fn test_an_empty_sequence_should_not_turn_a_window_into_a_refusal() {
+        let sequence = Sequence::new("Empty", SequenceFormat::youtube_1080());
+
+        assert!(check_window_overlaps(
+            MeasuredWindow::new(10.0, 40.0),
+            &sequence,
+            VerifyArgumentNames::cli(),
+        )
+        .is_ok());
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should decode caption bands only for a run that grades them
+    ///
+    /// The pass spawns one FFmpeg seek per bare cue, which on a talk is
+    /// hundreds. A caller running `--checks timeline.gap`, or skipping
+    /// `caption.contrast`, was paying for all of them and reading none.
+    #[test]
+    fn test_caption_bands_should_be_sampled_only_when_the_check_is_selected() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let file = temp.path().join("render.mp4");
+        std::fs::write(&file, b"render").expect("write render");
+
+        let plan_for = |request: VerifyRequest| {
+            VerifyPlan::resolve(VerifyRequest {
+                file: Some(file.clone()),
+                ..request
+            })
+            .expect("the request is valid")
+        };
+
+        assert!(
+            plan_for(VerifyRequest::default())
+                .caption_sample_options(12.0)
+                .is_some(),
+            "a default run grades caption contrast, so it has to measure it"
+        );
+        assert!(
+            plan_for(VerifyRequest {
+                skip: Some(vec![CAPTION_CONTRAST_CHECK_ID.to_string()]),
+                ..Default::default()
+            })
+            .caption_sample_options(12.0)
+            .is_none(),
+            "a skipped check must not be paid for"
+        );
+        assert!(
+            plan_for(VerifyRequest {
+                checks: Some(vec!["timeline.gap".to_string()]),
+                ..Default::default()
+            })
+            .caption_sample_options(12.0)
+            .is_none(),
+            "a selection that leaves the check out must not be paid for either"
+        );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should bound the caption pass by the caller's own timeout
+    ///
+    /// `--timeout-sec` is a budget for the run. Left at the module default the
+    /// caption pass could spend twenty seconds per cue on top of a measurement
+    /// the caller had already capped.
+    #[test]
+    fn test_caption_sampling_should_take_its_budget_from_the_request() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let file = temp.path().join("render.mp4");
+        std::fs::write(&file, b"render").expect("write render");
+
+        let plan = VerifyPlan::resolve(VerifyRequest {
+            file: Some(file),
+            timeout_sec: 7,
+            ..Default::default()
+        })
+        .expect("the request is valid");
+
+        let options = plan
+            .caption_sample_options(12.5)
+            .expect("the default run grades caption contrast");
+
+        assert_eq!(options.run_timeout, Duration::from_secs(7));
+        assert_eq!(
+            options.file_duration_sec,
+            Some(12.5),
+            "the pass must know how much file there is to seek into"
         );
     }
 

@@ -1135,6 +1135,8 @@ impl QCRule for CaptionReadingRateRule {
                         clip_end_sec: clip_end,
                         required_duration_sec: char_count / warn_cps,
                         frame_sec,
+                        style: clip.caption_style.as_ref(),
+                        position: clip.caption_position.as_ref(),
                     },
                     &starts,
                     sequence_end_sec,
@@ -1194,6 +1196,10 @@ struct RepairInputs<'a> {
     /// How long the cue would have to be up to reach the comfortable rate
     required_duration_sec: f64,
     frame_sec: f64,
+    /// The cue's stored style, so a split half keeps the look of the whole
+    style: Option<&'a serde_json::Value>,
+    /// The cue's stored position, so a split half stays where the cue was
+    position: Option<&'a serde_json::Value>,
 }
 
 /// The repair proposed for one over-fast cue.
@@ -1270,6 +1276,28 @@ impl CaptionReadingRateRule {
         }
         let split_sec = (split_sec.clamp(earliest, latest) * 1000.0).round() / 1000.0;
 
+        // The second half is a new caption, and a new caption carries the
+        // caption defaults unless it is told otherwise. Splitting a styled,
+        // repositioned cue without copying both would leave half the line in a
+        // different font, in a different place — a repair that trades one
+        // defect for a worse one. `CreateCaption` takes both verbatim.
+        let mut create = serde_json::json!({
+            "type": "CreateCaption",
+            "sequenceId": inputs.sequence_id,
+            "trackId": inputs.track_id,
+            "text": second,
+            "startSec": split_sec,
+            "endSec": (extended_end * 1000.0).round() / 1000.0,
+        });
+        if let Some(payload) = create.as_object_mut() {
+            if let Some(style) = inputs.style {
+                payload.insert("style".to_string(), style.clone());
+            }
+            if let Some(position) = inputs.position {
+                payload.insert("position".to_string(), position.clone());
+            }
+        }
+
         CaptionRepair {
             label: "split",
             commands: vec![
@@ -1283,14 +1311,7 @@ impl CaptionReadingRateRule {
                     "text": first,
                     "endSec": split_sec,
                 }),
-                serde_json::json!({
-                    "type": "CreateCaption",
-                    "sequenceId": inputs.sequence_id,
-                    "trackId": inputs.track_id,
-                    "text": second,
-                    "startSec": split_sec,
-                    "endSec": (extended_end * 1000.0).round() / 1000.0,
-                }),
+                create,
             ],
             resolved: false,
         }
@@ -2874,6 +2895,71 @@ mod tests {
             3,
             "one step per cue, applied as a single plan"
         );
+    }
+
+    /// Feature: Repairing an over-fast caption
+    /// Scenario: should keep the cue's look and place when it splits the line
+    ///
+    /// `CreateCaption` falls back to the caption defaults, so a split that did
+    /// not copy the style and the position moved half the line into a different
+    /// font, in a different part of the frame — the split cost more than the
+    /// reading rate it was fixing.
+    #[tokio::test]
+    async fn test_reading_rate_rule_should_carry_style_and_position_into_a_split() {
+        let style = serde_json::json!({
+            "fontFamily": "Inter",
+            "fontSize": 64,
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+        });
+        let position = serde_json::json!({
+            "type": "preset",
+            "vertical": "top",
+            "marginPercent": 12.0,
+        });
+
+        let mut sequence = sequence_with_ten_seconds_of_picture();
+        let mut track = Track::new_caption("C1");
+        let mut fast = caption_clip("abcdefghij abcdefghij abcdefg", 0.0, 1.0);
+        fast.caption_style = Some(style.clone());
+        fast.caption_position = Some(position.clone());
+        track.add_clip(fast);
+        // Leaves no room to extend, so the repair has to be a split.
+        track.add_clip(caption_clip("Next", 1.2, 0.8));
+        sequence.add_track(track);
+
+        let violations = reading_rate_violations(&sequence).await;
+
+        assert_eq!(violations.len(), 1);
+        let fix = violations[0].suggested_fix.as_ref().expect("a proposal");
+        assert_eq!(fix.commands[1]["type"], "CreateCaption");
+        assert_eq!(
+            fix.commands[1]["style"], style,
+            "the new half must be drawn the way the cue was: {}",
+            fix.commands[1]
+        );
+        assert_eq!(
+            fix.commands[1]["position"], position,
+            "the new half must sit where the cue sat: {}",
+            fix.commands[1]
+        );
+    }
+
+    /// Feature: Repairing an over-fast caption
+    /// Scenario: should leave the payload alone for an unstyled cue
+    #[tokio::test]
+    async fn test_reading_rate_rule_should_omit_style_when_the_cue_carries_none() {
+        let mut sequence = sequence_with_ten_seconds_of_picture();
+        let mut track = Track::new_caption("C1");
+        track.add_clip(caption_clip("abcdefghij abcdefghij abcdefg", 0.0, 1.0));
+        track.add_clip(caption_clip("Next", 1.2, 0.8));
+        sequence.add_track(track);
+
+        let violations = reading_rate_violations(&sequence).await;
+        let fix = violations[0].suggested_fix.as_ref().expect("a proposal");
+
+        assert!(fix.commands[1].get("style").is_none());
+        assert!(fix.commands[1].get("position").is_none());
     }
 
     // ========================================================================
