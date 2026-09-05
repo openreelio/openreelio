@@ -8972,14 +8972,27 @@ fn vertical_caption_ass_script_with_style(text: &str, style: serde_json::Value) 
 }
 
 /// Renders `script` over black and returns the frame as 8-bit grayscale.
-///
-/// The script is written into the directory FFmpeg runs in so the filtergraph
-/// can name it without escaping a Windows drive letter.
 fn render_ass_over_black(
     ffmpeg_path: &std::path::Path,
     script: &str,
     width: u32,
     height: u32,
+) -> Option<Vec<u8>> {
+    render_ass_over_color(ffmpeg_path, script, width, height, "black")
+}
+
+/// Renders `script` over a flat `color` and returns the frame as 8-bit grayscale.
+///
+/// The script is written into the directory FFmpeg runs in so the filtergraph
+/// can name it without escaping a Windows drive letter. A backing other than
+/// black is what makes a *dark* decoration measurable: a black box over black
+/// is indistinguishable from no box at all.
+fn render_ass_over_color(
+    ffmpeg_path: &std::path::Path,
+    script: &str,
+    width: u32,
+    height: u32,
+    color: &str,
 ) -> Option<Vec<u8>> {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("overlay.ass"), script).expect("write script");
@@ -8992,7 +9005,7 @@ fn render_ass_over_black(
             "-f",
             "lavfi",
             "-i",
-            &format!("color=c=black:s={width}x{height}:d=2"),
+            &format!("color=c={color}:s={width}x{height}:d=2"),
             "-vf",
             "subtitles=overlay.ass",
             "-ss",
@@ -9025,6 +9038,76 @@ fn render_ass_over_black(
 
 /// Threshold above which a grayscale sample counts as text rather than backing.
 const CAPTION_INK_THRESHOLD: u8 = 96;
+
+/// Below this a grayscale sample counts as backing rather than bright canvas.
+///
+/// A 70%-opaque black box over white lands near 76; the canvas itself is 255.
+const CAPTION_BACKING_THRESHOLD: u8 = 128;
+
+/// Share of a row that must read dark before the row counts as backed.
+///
+/// A caption is far narrower than the canvas, so the row *mean* stays bright
+/// even where the box is solid. Coverage measures the box instead of averaging
+/// it away.
+const CAPTION_BACKING_ROW_COVERAGE: f64 = 0.2;
+
+/// Mean sample value of a rectangle, inclusive of both ends of both ranges.
+fn region_mean_luminance(frame: &[u8], width: u32, rows: (u32, u32), columns: (u32, u32)) -> f64 {
+    let mut total = 0.0;
+    let mut count = 0.0;
+
+    for row in rows.0..=rows.1 {
+        for column in columns.0..=columns.1 {
+            total += f64::from(frame[(row * width + column) as usize]);
+            count += 1.0;
+        }
+    }
+
+    total / count
+}
+
+/// Row ranges where enough of the row reads dark, grouped into bands.
+///
+/// The inverse of [`text_row_bands`]: over a bright backing it finds the *dark*
+/// decorations - a caption's background box - rather than the light glyphs.
+fn backed_row_bands(frame: &[u8], width: u32, height: u32) -> Vec<(u32, u32)> {
+    let mut bands: Vec<(u32, u32)> = Vec::new();
+
+    for row in 0..height {
+        let start = (row * width) as usize;
+        let dark = frame[start..start + width as usize]
+            .iter()
+            .filter(|value| **value < CAPTION_BACKING_THRESHOLD)
+            .count();
+        let is_backed = dark as f64 / f64::from(width) >= CAPTION_BACKING_ROW_COVERAGE;
+
+        match (is_backed, bands.last_mut()) {
+            (true, Some(band)) if band.1 + 1 == row => band.1 = row,
+            (true, _) => bands.push((row, row)),
+            (false, _) => {}
+        }
+    }
+
+    bands
+}
+
+/// Horizontal extent of the dark samples inside `rows`, as (leftmost, rightmost).
+fn backing_column_extent(frame: &[u8], width: u32, rows: (u32, u32)) -> Option<(u32, u32)> {
+    let mut extent: Option<(u32, u32)> = None;
+
+    for row in rows.0..=rows.1 {
+        for column in 0..width {
+            if frame[(row * width + column) as usize] < CAPTION_BACKING_THRESHOLD {
+                extent = Some(match extent {
+                    Some((left, right)) => (left.min(column), right.max(column)),
+                    None => (column, column),
+                });
+            }
+        }
+    }
+
+    extent
+}
 
 /// Row ranges carrying text, grouped into the bands they form.
 ///
@@ -9065,6 +9148,84 @@ fn text_column_extent(frame: &[u8], width: u32, height: u32) -> Option<(u32, u32
     }
 
     extent
+}
+
+/// Feature: Caption burn-in
+/// Scenario: a caption styled with a translucent black box burns that box in
+///
+/// Given a caption whose style carries `backgroundColor` rgba(0,0,0,180)
+/// When the export's ASS script is burned in by libass over a white backing
+/// Then the band behind the text is dark, and the same band of the same
+///      caption without a box stays white
+///
+/// The unit tests can only assert what the script *says*. libass draws a
+/// `BorderStyle: 3` box in the OutlineColour column and reserves BackColour for
+/// the drop shadow, so a script that named the box in BackColour parsed fine,
+/// asserted fine, and burned in as bare white text over the footage. Only
+/// measuring pixels behind the caption catches that.
+#[test]
+fn test_a_boxed_caption_burns_a_dark_band_behind_its_text() {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return;
+    };
+
+    let (width, height) = (1080u32, 1920u32);
+    let boxed = vertical_caption_ass_script_with_style(
+        "Boxed caption",
+        serde_json::json!({
+            "fontFamily": "Arial",
+            "fontSize": 64,
+            "color": { "r": 255, "g": 255, "b": 255, "a": 255 },
+            "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 180 },
+        }),
+    );
+    let bare = vertical_caption_ass_script_with_style(
+        "Boxed caption",
+        serde_json::json!({
+            "fontFamily": "Arial",
+            "fontSize": 64,
+            "color": { "r": 255, "g": 255, "b": 255, "a": 255 },
+        }),
+    );
+
+    let Some(with_box) = render_ass_over_color(&ffmpeg_path, &boxed, width, height, "white") else {
+        skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
+        return;
+    };
+    let without_box = render_ass_over_color(&ffmpeg_path, &bare, width, height, "white")
+        .expect("the control render must succeed once the first one did");
+
+    let bands = backed_row_bands(&with_box, width, height);
+    let band = bands
+        .iter()
+        .max_by_key(|(top, bottom)| bottom - top)
+        .copied()
+        .unwrap_or_else(|| panic!("a boxed caption must darken rows, got bands {bands:?}"));
+
+    assert!(
+        band.1 - band.0 >= 64,
+        "the box must cover at least the type it backs, got rows {band:?}"
+    );
+    assert!(
+        band.0 > height / 2 && band.1 < height - 80,
+        "a bottom-preset box must sit low in frame and clear the edge, got rows {band:?}"
+    );
+
+    let columns = backing_column_extent(&with_box, width, band).expect("the box has an extent");
+    let boxed_mean = region_mean_luminance(&with_box, width, band, columns);
+    let bare_mean = region_mean_luminance(&without_box, width, band, columns);
+    assert!(
+        boxed_mean < 160.0,
+        "the caption band must read dark behind the text, got mean {boxed_mean:.1}"
+    );
+    assert!(
+        bare_mean > 240.0,
+        "the same band without a box must stay white, got mean {bare_mean:.1}"
+    );
+    assert!(
+        bare_mean - boxed_mean > 80.0,
+        "the box must change the picture, got {bare_mean:.1} without and {boxed_mean:.1} with"
+    );
 }
 
 /// Feature: Caption burn-in
