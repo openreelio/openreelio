@@ -252,6 +252,7 @@ export function buildSourceAnalysisMarkdown(
     lines.push('', '## Audio Summary', '');
     lines.push(`- BPM: ${report.audio.bpm ?? 'unknown'}`);
     lines.push(`- Peak dB: ${report.audio.peakDb ?? 'unknown'}`);
+    lines.push(`- Integrated loudness: ${report.audio.integratedLufs ?? 'unknown'} LUFS`);
     lines.push(`- Spectral centroid: ${report.audio.spectralCentroidHz ?? 'unknown'} Hz`);
     lines.push(`- Silence regions: ${report.audio.silenceRegionCount}`);
     lines.push(`- Silence duration: ${report.audio.silenceDurationSec}s`);
