@@ -12,7 +12,8 @@ use crate::core::{
     assets::{AssetKind, AudioInfo, VideoInfo},
     commands::{ImportAssetCommand, UpdateAssetCommand},
     ffmpeg::{AudioStreamInfo, MediaInfo, VideoStreamInfo},
-    Ratio,
+    project::ProjectState,
+    CoreError, CoreResult, Ratio,
 };
 
 /// Tolerance for recognising an NTSC frame rate in a probed float.
@@ -23,6 +24,9 @@ const INTEGER_FPS_TOLERANCE: f64 = 0.001;
 
 /// Denominator used for frame rates that are neither NTSC nor integral.
 const FRACTIONAL_FPS_DENOMINATOR: i32 = 1000;
+
+/// Slack below which a source bound is rounding rather than a real overrun.
+const SOURCE_BOUND_EPSILON_SEC: f64 = 1e-6;
 
 /// Converts a floating-point FPS value to a Ratio (numerator, denominator).
 ///
@@ -53,6 +57,98 @@ pub fn fps_to_ratio(fps: f64) -> (i32, i32) {
     // For other fractional frame rates, use a reasonable approximation
     let num = (fps * FRACTIONAL_FPS_DENOMINATOR as f64).round() as i32;
     (num, FRACTIONAL_FPS_DENOMINATOR)
+}
+
+/// The duration a probe is allowed to hand to an asset, or `None`.
+///
+/// FFprobe reports `0` or a non-finite duration for containers it cannot
+/// measure — and for a PNG, which has no `format.duration` at all — and
+/// recording that as the asset's length would make every later insert fail with
+/// an empty source range instead of falling back to the default. Only a
+/// positive, finite reading is a duration.
+pub fn usable_duration_sec(media_info: &MediaInfo) -> Option<f64> {
+    Some(media_info.duration_sec).filter(|value| value.is_finite() && *value > 0.0)
+}
+
+/// The duration to record for an asset of the given kind, or `None`.
+///
+/// Two readings of the same file are not interchangeable:
+///
+/// * A still has no length. FFprobe answers `0` for a PNG and one frame's worth
+///   (`0.04`) for a JPEG, and recording either turns the next insert into a
+///   refusal ("sourceOut must be greater than sourceIn") or a 40ms clip. An
+///   image holds whatever slot the timeline gives it, so it records nothing.
+/// * A video is bounded by its *video stream*, not by its container. The
+///   renderer bounds every picture clip by
+///   [`resolve_asset_source_duration`](crate::core::render::resolve_asset_source_duration),
+///   which reads the video stream's own length; an mp4 whose AAC outlasts its
+///   pictures by 0.2s would otherwise be recorded 0.2s too long and every clip
+///   cut from it would carry a black tail and an overrun warning.
+pub fn recorded_duration_sec(media_info: &MediaInfo, asset_kind: &AssetKind) -> Option<f64> {
+    match asset_kind {
+        AssetKind::Image => None,
+        AssetKind::Video => media_info
+            .video_duration_sec
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .or_else(|| usable_duration_sec(media_info)),
+        _ => usable_duration_sec(media_info),
+    }
+}
+
+/// Refuses a source-out point that reaches past the end of a clip's media.
+///
+/// Nothing downstream can recover the frames such an edit asks for: the render
+/// pads the missing seconds with black and the preview shows the same. Naming
+/// the asset's recorded length here is what lets the caller retry with a number
+/// that exists. Shared by every surface that trims — `timeline trim`, `command
+/// execute --type TrimClip`, `plan execute` and the MCP plan tools — so the
+/// refusal cannot be true of one of them and not the others.
+///
+/// Silent (`Ok`) whenever the bound is unknowable rather than satisfied: a
+/// missing sequence, clip or asset is the executing command's error to report,
+/// an unmeasured asset has no length to check against, and a still holds its
+/// slot however long the timeline makes it.
+pub fn ensure_source_out_within_media(
+    state: &ProjectState,
+    sequence_id: &str,
+    clip_id: &str,
+    source_out: Option<f64>,
+) -> CoreResult<()> {
+    let Some(source_out) = source_out else {
+        return Ok(());
+    };
+    let Some(sequence) = state.sequences.get(sequence_id) else {
+        return Ok(());
+    };
+    let Some(clip) = sequence
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.id == clip_id)
+    else {
+        return Ok(());
+    };
+    let Some(asset) = state.assets.get(&clip.asset_id) else {
+        return Ok(());
+    };
+    if asset.kind == AssetKind::Image {
+        return Ok(());
+    }
+    let Some(duration_sec) = asset
+        .duration_sec
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+    else {
+        return Ok(());
+    };
+
+    if source_out > duration_sec + SOURCE_BOUND_EPSILON_SEC {
+        return Err(CoreError::ValidationError(format!(
+            "sourceOut {source_out} is past the end of asset '{}', which holds only {duration_sec:.3}s of media. Use {duration_sec:.3} or less.",
+            asset.id
+        )));
+    }
+
+    Ok(())
 }
 
 /// Builds the stored video metadata for a probed video stream.
@@ -86,7 +182,9 @@ pub fn audio_info_from_probe(audio_stream: &AudioStreamInfo) -> AudioInfo {
 /// inference and no duration. With one, the asset kind is corrected against
 /// what the file actually contains — an `.ogg` holding pictures is a video, an
 /// `.mp4` holding only sound is audio — and duration, size, dimensions, frame
-/// rate and audio format are recorded.
+/// rate and audio format are recorded — except a duration the file does not
+/// have, which is left unknown rather than recorded as zero; see
+/// [`recorded_duration_sec`].
 pub fn import_command_from_probe(
     name: &str,
     resolved_uri: &str,
@@ -144,9 +242,13 @@ pub fn import_command_from_probe(
         _ => ImportAssetCommand::new(name, resolved_uri),
     };
 
-    command = command
-        .with_duration(info.duration_sec)
-        .with_file_size(info.size_bytes);
+    // Only a length the file actually has: a still records none, and a video
+    // records its picture's length rather than its container's. See
+    // [`recorded_duration_sec`].
+    if let Some(duration_sec) = recorded_duration_sec(info, &command.asset.kind) {
+        command = command.with_duration(duration_sec);
+    }
+    command = command.with_file_size(info.size_bytes);
 
     if matches!(command.asset.kind, AssetKind::Video) {
         if let Some(video_stream) = info.video.as_ref() {
@@ -170,10 +272,25 @@ pub fn import_command_from_probe(
 /// later verb needs the duration. Going through a command rather than mutating
 /// the asset keeps the correction in the ops log, so replaying the project
 /// reproduces it.
-pub fn update_command_from_probe(asset_id: &str, media_info: &MediaInfo) -> UpdateAssetCommand {
-    let mut command = UpdateAssetCommand::new(asset_id)
-        .with_duration_sec(Some(media_info.duration_sec))
-        .with_file_size(media_info.size_bytes);
+///
+/// `asset_kind` decides which reading is recorded — see
+/// [`recorded_duration_sec`] — and a probe carrying no usable duration for that
+/// kind leaves the asset's duration untouched rather than clearing it.
+pub fn update_command_from_probe(
+    asset_id: &str,
+    asset_kind: &AssetKind,
+    media_info: &MediaInfo,
+) -> UpdateAssetCommand {
+    let mut command = UpdateAssetCommand::new(asset_id);
+
+    if let Some(duration_sec) = recorded_duration_sec(media_info, asset_kind) {
+        command = command.with_duration_sec(Some(duration_sec));
+    }
+    // A probe that could not size the file must not erase a size the import
+    // already recorded: `0` here means "unread", not "empty".
+    if media_info.size_bytes > 0 {
+        command = command.with_file_size(media_info.size_bytes);
+    }
 
     if let Some(video_stream) = media_info.video.as_ref() {
         command = command.with_video(Some(video_info_from_probe(video_stream)));
@@ -256,7 +373,7 @@ mod tests {
 
     #[test]
     fn should_back_fill_duration_and_streams_through_an_update_command() {
-        let command = update_command_from_probe("asset-1", &media_info(5.76));
+        let command = update_command_from_probe("asset-1", &AssetKind::Video, &media_info(5.76));
 
         assert_eq!(command.duration_sec, Some(Some(5.76)));
         assert!(command.video.is_some());
@@ -271,6 +388,88 @@ mod tests {
         let command = import_command_from_probe("cover.jpg", "/tmp/cover.jpg", Some(&info));
 
         assert_eq!(command.asset.kind, AssetKind::Image);
+    }
+
+    #[test]
+    fn should_leave_a_still_without_a_duration_whatever_ffprobe_reported() {
+        // FFprobe answers a PNG with no `format.duration` at all, which reads
+        // back as `0`, and a JPEG with a single frame's `0.04`.
+        let mut png = media_info(0.0);
+        png.video_duration_sec = None;
+        png.audio = None;
+        let mut jpeg = media_info(0.04);
+        jpeg.audio = None;
+
+        let png_command = import_command_from_probe("still.png", "/tmp/still.png", Some(&png));
+        let jpeg_command = import_command_from_probe("cover.jpg", "/tmp/cover.jpg", Some(&jpeg));
+
+        assert_eq!(png_command.asset.duration_sec, None);
+        assert_eq!(jpeg_command.asset.duration_sec, None);
+        assert_eq!(
+            update_command_from_probe("asset-1", &AssetKind::Image, &jpeg).duration_sec,
+            None
+        );
+    }
+
+    #[test]
+    fn should_leave_the_duration_unknown_when_the_probe_reported_nothing_measurable() {
+        let mut unmeasurable = media_info(0.0);
+        unmeasurable.video_duration_sec = None;
+        let mut infinite = media_info(f64::INFINITY);
+        infinite.video_duration_sec = None;
+
+        assert_eq!(
+            import_command_from_probe("clip.mp4", "/tmp/clip.mp4", Some(&unmeasurable))
+                .asset
+                .duration_sec,
+            None
+        );
+        assert_eq!(
+            import_command_from_probe("clip.mp4", "/tmp/clip.mp4", Some(&infinite))
+                .asset
+                .duration_sec,
+            None
+        );
+    }
+
+    #[test]
+    fn should_record_the_video_streams_length_rather_than_the_containers() {
+        // An mp4 whose AAC outlasts its pictures: the renderer bounds the clip
+        // by the 4.0s of video, so recording the container's 4.2s would give
+        // every clip a black tail and an overrun warning.
+        let mut info = media_info(4.2);
+        info.video_duration_sec = Some(4.0);
+
+        let command = import_command_from_probe("clip.mp4", "/tmp/clip.mp4", Some(&info));
+
+        assert_eq!(command.asset.duration_sec, Some(4.0));
+        assert_eq!(
+            update_command_from_probe("asset-1", &AssetKind::Video, &info).duration_sec,
+            Some(Some(4.0))
+        );
+    }
+
+    #[test]
+    fn should_keep_the_container_length_for_sound_carried_beside_cover_art() {
+        // A podcast .m4a carries a one-frame cover-art "video stream"; the
+        // sound is what the asset is.
+        let mut info = media_info(120.0);
+        info.video_duration_sec = Some(0.04);
+
+        let command = import_command_from_probe("podcast.m4a", "/tmp/podcast.m4a", Some(&info));
+
+        assert_eq!(command.asset.kind, AssetKind::Audio);
+        assert_eq!(command.asset.duration_sec, Some(120.0));
+    }
+
+    #[test]
+    fn should_keep_a_recorded_file_size_when_the_probe_could_not_measure_one() {
+        let mut info = media_info(4.0);
+        info.size_bytes = 0;
+
+        let command = update_command_from_probe("asset-1", &AssetKind::Video, &info);
+
+        assert_eq!(command.file_size, None);
     }
 
     #[test]

@@ -3111,6 +3111,14 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
         state.consume_approval_token()?;
     }
 
+    // The same lazy measurement `timeline insert` makes: an asset imported with
+    // `--no-probe`, or before probing existed, records no duration, and an
+    // insert with no duration takes a default length whatever the media is.
+    // `help-json` promises this of the command surface, so it has to be true of
+    // the MCP tool as well as of the CLI verb.
+    let measurement_warnings = crate::media_probe::ensure_asset_measured(&mut project, &asset_id)
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+
     let command = InsertMediaCommand::new(&sequence_id, &track_id, &asset_id, timeline_start)
         .with_source_range(source_in, source_out)
         .with_audio_only(audio_only)
@@ -3147,30 +3155,10 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
     ));
     let duration_sec = primary_clip.place.duration_sec;
 
-    let linked_audio = match primary_clip.link_group_id.clone() {
-        Some(link_group_id) => sequence
-            .tracks
-            .iter()
-            .find_map(|t| {
-                t.clips
-                    .iter()
-                    .find(|c| {
-                        c.id != primary_clip_id
-                            && c.link_group_id.as_deref() == Some(link_group_id.as_str())
-                    })
-                    .map(|c| (t.id.clone(), c.id.clone()))
-            })
-            .map(|(audio_track_id, audio_clip_id)| {
-                let created_track = command_result.created_ids.contains(&audio_track_id);
-                serde_json::json!({
-                    "trackId": audio_track_id,
-                    "clipId": audio_clip_id,
-                    "createdTrack": created_track,
-                })
-            })
-            .unwrap_or(Value::Null),
-        None => Value::Null,
-    };
+    // Shaped by the same helper `timeline insert` reports through, so the two
+    // surfaces cannot drift about what an insert with sound came back as.
+    let linked_audio =
+        super::linked_audio_json(&project.state, &sequence_id, &command_result.created_ids);
 
     Ok(serde_json::json!({
         "status": "ok",
@@ -3185,7 +3173,8 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
         "sourceIn": source_range.map(|range| range.0),
         "sourceOut": source_range.map(|range| range.1),
         "durationSec": duration_sec,
-        "linkedAudio": linked_audio
+        "linkedAudio": linked_audio,
+        "warnings": measurement_warnings,
     }))
 }
 

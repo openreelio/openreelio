@@ -299,6 +299,64 @@ impl EditRecorder {
     }
 }
 
+/// Reports the audio clip an insert extracted alongside a picture clip.
+///
+/// A video asset that carries sound is placed the way a drag-and-drop in the
+/// app places it: the picture clip is muted and the sound goes onto its own
+/// audio track as a linked clip, creating that track when the sequence has
+/// none. Two clips come back where the caller asked for one, and the audio one
+/// has an id of its own — every later `trim`, `split`, `move` and `remove`
+/// names a single clip, so a caller that never saw this id would leave the
+/// sound behind. `null` when the insert placed only one clip.
+///
+/// The primary clip is the first created id, which is what
+/// [`InsertMediaCommand`](openreelio_core::commands::InsertMediaCommand)
+/// reports; the partner is the other clip sharing its link group.
+pub(crate) fn linked_audio_json(
+    state: &openreelio_core::project::ProjectState,
+    sequence_id: &str,
+    created_ids: &[String],
+) -> serde_json::Value {
+    let Some(primary_clip_id) = created_ids.first() else {
+        return serde_json::Value::Null;
+    };
+    let Some(sequence) = state.sequences.get(sequence_id) else {
+        return serde_json::Value::Null;
+    };
+    let Some(link_group_id) = sequence
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| &clip.id == primary_clip_id)
+        .and_then(|clip| clip.link_group_id.clone())
+    else {
+        return serde_json::Value::Null;
+    };
+
+    sequence
+        .tracks
+        .iter()
+        .find_map(|track| {
+            track
+                .clips
+                .iter()
+                .find(|clip| {
+                    &clip.id != primary_clip_id
+                        && clip.link_group_id.as_deref() == Some(link_group_id.as_str())
+                })
+                .map(|clip| (track.id.clone(), clip.id.clone()))
+        })
+        .map(|(audio_track_id, audio_clip_id)| {
+            let created_track = created_ids.contains(&audio_track_id);
+            serde_json::json!({
+                "trackId": audio_track_id,
+                "clipId": audio_clip_id,
+                "createdTrack": created_track,
+            })
+        })
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// Resolve the sequence ID: use explicit arg or fall back to active sequence.
 pub(crate) fn resolve_sequence_id(
     project: &ActiveProject,

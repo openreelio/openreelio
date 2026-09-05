@@ -71,11 +71,12 @@ was made. A decimal `--fps` snaps to the exact broadcast rational (`29.97` →
 > **`asset import` probes the file.** The asset records `durationSec` and
 > `video {width,height,fps}` — read either back with `asset info` or `asset
 > list` — so the clip `timeline insert` places is as long as the media and a
-> second insert at its end does not overlap. `--no-probe` skips the reading when
-> you are importing in bulk; the asset then carries no duration until
-> `timeline insert` probes it lazily and records the result through
-> `UpdateAsset`. A file nothing could probe reports why in `warnings[]` and
-> still falls back to a 10-second clip.
+> second insert at its reported end does not overlap. `--no-probe` skips the
+> reading when you are importing in bulk; the asset then carries no duration
+> until the first insert of it probes it lazily and records the result through
+> `UpdateAsset`, on whichever surface that insert came from. A file nothing
+> could probe reports why in `warnings[]` and still falls back to a 10-second
+> clip.
 
 ## Conventions that apply everywhere
 

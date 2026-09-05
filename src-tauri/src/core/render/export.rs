@@ -2503,26 +2503,15 @@ pub(super) fn bounded_source_window(
     }
 }
 
-/// How badly a clip's source range outruns the media behind it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SourceOverrunSeverity {
-    /// The clip starts at or past the end: nothing decodes, so the render would
-    /// write a segment with no frames in it.
-    NoPictureAtAll,
-    /// Part of the clip decodes and the remainder is padded with black.
-    RendersAsBlack,
-}
-
-/// One clip's source-overrun finding, ready to be filed against the clip.
-#[derive(Debug, Clone)]
-pub(super) struct SourceOverrunFinding {
-    /// Whether the render can still show something for this clip.
-    pub(super) severity: SourceOverrunSeverity,
-    /// The message shown to whoever asked for the render.
-    pub(super) message: String,
-}
-
 /// Reports a clip whose source range reaches past the end of its media.
+///
+/// Always a *warning*, never an error, and that is deliberate: the render
+/// bounds the decodable window and pads the rest with black, so even a clip
+/// whose whole range sits past the end of its media still produces a file.
+/// Filing the no-picture case as an error made one over-trimmed clip invalidate
+/// the sequence, and the frame probe refuses to composite an invalid sequence —
+/// so a single bad clip returned nothing at *every* timecode and an agent could
+/// not so much as look at the rest of its own edit.
 ///
 /// `None` for every clip the render does not bound this way: audio, stills
 /// (which hold their slot whatever their window says), freeze frames (which
@@ -2534,7 +2523,7 @@ pub(super) fn source_overrun_finding(
     asset: &Asset,
     track: &crate::core::timeline::Track,
     source_durations: &mut SourceDurationCache,
-) -> Option<SourceOverrunFinding> {
+) -> Option<String> {
     if track.kind != TrackKind::Video
         || asset.kind == AssetKind::Image
         || clip.freeze_frame
@@ -2550,29 +2539,23 @@ pub(super) fn source_overrun_finding(
     }
 
     if clip.range.source_in_sec >= available {
-        return Some(SourceOverrunFinding {
-            severity: SourceOverrunSeverity::NoPictureAtAll,
-            message: format!(
-                "Clip '{}' on track '{}' starts {:.3}s into asset '{}', which holds only {:.3}s of \
-                 media, so it decodes no picture at all. Trim the clip back inside its source, or \
-                 remove it.",
-                clip.id, track.name, clip.range.source_in_sec, asset.id, available
-            ),
-        });
+        return Some(format!(
+            "Clip '{}' on track '{}' starts {:.3}s into asset '{}', which holds only {:.3}s of \
+             media, so it decodes no picture at all and renders as black for its whole length. \
+             Trim the clip back inside its source, or remove it.",
+            clip.id, track.name, clip.range.source_in_sec, asset.id, available
+        ));
     }
 
-    Some(SourceOverrunFinding {
-        severity: SourceOverrunSeverity::RendersAsBlack,
-        message: format!(
-            "Clip '{}' on track '{}' runs {:.3}s past the end of asset '{}', which holds only \
-             {:.3}s of media; the overrun renders as black. Trim the clip to the media length.",
-            clip.id,
-            track.name,
-            clip.range.source_out_sec - available,
-            asset.id,
-            available
-        ),
-    })
+    Some(format!(
+        "Clip '{}' on track '{}' runs {:.3}s past the end of asset '{}', which holds only \
+         {:.3}s of media; the overrun renders as black. Trim the clip to the media length.",
+        clip.id,
+        track.name,
+        clip.range.source_out_sec - available,
+        asset.id,
+        available
+    ))
 }
 
 /// What kind of picture the input of a video trim decodes to.
@@ -8334,14 +8317,7 @@ pub fn validate_export_settings_with_dimensions(
             // stderr from being the only signal.
             if let Some(finding) = source_overrun_finding(clip, asset, track, &mut source_durations)
             {
-                match finding.severity {
-                    SourceOverrunSeverity::NoPictureAtAll => {
-                        validation.add_clip_error(&sequence.id, &clip.id, finding.message)
-                    }
-                    SourceOverrunSeverity::RendersAsBlack => {
-                        validation.add_clip_warning(&sequence.id, &clip.id, finding.message)
-                    }
-                }
+                validation.add_clip_warning(&sequence.id, &clip.id, finding);
             }
 
             // Placing a transformed clip needs the source's real pixel size. An

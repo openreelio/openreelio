@@ -88,9 +88,14 @@ One thing about a fresh project will otherwise cost you a render:
 `project create` makes a **30fps 1920x1080** sequence whatever the media is —
 pass `--fps/--width/--height`, or run `timeline set-format`. Asset length is
 handled for you: `asset import` probes the file, so `timeline insert` places a
-clip as long as the media and a second insert at its end does not overlap. Pass
-`--no-probe` to skip the reading in bulk; `timeline insert` then probes the
-asset lazily before placing the clip.
+clip as long as the media and a second insert at its reported end does not
+overlap. Pass `--no-probe` to skip the reading in bulk; the first insert of that
+asset probes it lazily before placing the clip.
+
+One thing to carry into every later edit: inserting a video that carries sound
+places **two** clips — a muted picture clip and a linked audio clip on its own
+audio track (`linkedAudio` in the response). `trim`, `split`, `move` and
+`remove` act on the single clip you name, so edit the audio clip id too.
 
 ## Perception
 

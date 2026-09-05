@@ -750,6 +750,7 @@ pub(crate) fn apply_edit_plan(
     let mut applied_op_ids: Vec<String> = Vec::new();
     let target_sequence_id = resolve_plan_sequence_id(&project.state, plan);
     let mut step_ranges: Vec<Vec<openreelio_core::TimeRange>> = Vec::new();
+    let plan_warnings = measure_assets_the_plan_inserts(project, plan)?;
 
     // Rollback unwinds the executor's in-memory undo stack, and that stack is
     // capped for interactive use — far below the plan step cap. Without this,
@@ -870,7 +871,45 @@ pub(crate) fn apply_edit_plan(
         "sequenceId": (!target_sequence_id.is_empty()).then_some(target_sequence_id.as_str()),
         "affectedRanges": affected_ranges,
         "stepResults": results,
+        "warnings": plan_warnings,
     }))
+}
+
+/// Measures every asset the plan inserts that nothing has measured yet.
+///
+/// The same lazy probe `timeline insert` makes, applied once before the plan
+/// runs rather than inside a step. A step that emitted two operations would
+/// desynchronise the rollback, which undoes exactly one per succeeded step —
+/// and a measurement is not part of the edit anyway: it records how long a file
+/// on disk is, which stays true whether or not the plan is rolled back.
+///
+/// Steps whose `assetId` is a `$fromStep` reference are skipped: the id is not
+/// settled until the referenced step runs, and the asset it will name was
+/// created by this same plan.
+fn measure_assets_the_plan_inserts(
+    project: &mut openreelio_core::ActiveProject,
+    plan: &EditPlan,
+) -> anyhow::Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    let mut measured: Vec<String> = Vec::new();
+
+    for step in &plan.steps {
+        if !matches!(step.command_type.as_str(), "InsertMedia" | "InsertClip") {
+            continue;
+        }
+        let Some(asset_id) = step.payload.get("assetId").and_then(|id| id.as_str()) else {
+            continue;
+        };
+        if measured.iter().any(|id| id == asset_id) {
+            continue;
+        }
+        measured.push(asset_id.to_string());
+        warnings.extend(crate::media_probe::ensure_asset_measured(
+            project, asset_id,
+        )?);
+    }
+
+    Ok(warnings)
 }
 
 /// Report for a plan that failed at a step and was rolled back.
@@ -965,6 +1004,18 @@ fn execute_step(
             .map_err(|error| {
                 anyhow::anyhow!("Invalid command '{}': {}", step.command_type, error)
             })?;
+    // The past-the-media refusal, on this surface too. A step that asks for
+    // frames the file does not hold fails the plan and rolls it back, rather
+    // than quietly producing a clip that renders black.
+    if let openreelio_core::ipc::CommandPayload::TrimClip(trim) = &typed_payload {
+        openreelio_core::commands::ensure_source_out_within_media(
+            &project.state,
+            &trim.sequence_id,
+            &trim.clip_id,
+            trim.new_source_out,
+        )
+        .map_err(|error| anyhow::anyhow!("Command '{}' failed: {}", step.command_type, error))?;
+    }
     let cmd = typed_payload.build_command(&project.path);
 
     project
