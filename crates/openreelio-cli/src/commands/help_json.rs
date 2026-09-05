@@ -717,7 +717,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli command validate --type AddEffect --payload '{\"sequenceId\":\"seq_1\",\"trackId\":\"track_v1\",\"clipId\":\"clip_1\",\"recipe\":\"dissolve-soft\"}'"
             },
             "command.schema": {
-                "description": "Print the backend command surface available to headless agents. Bare, it lists every command name. With --type (repeatable) or --all it prints the JSON Schema derived from the payload structs themselves: property names in the camelCase the parser reads, types, which properties are required, enums, the alternative spellings a field also accepts, and 'additionalProperties': false wherever a typo is a parse error rather than a dropped field. Read the schema before composing a payload instead of guessing one and reading the parse error. Takes no --path: it describes the command surface, not a project",
+                "description": "Print the backend command surface available to headless agents. Bare, it lists every command name. With --type (repeatable) or --all it prints the JSON Schema derived from the payload structs themselves: property names in the camelCase the parser reads, types, which properties are required, enums, the alternative spellings a field also accepts, and 'additionalProperties': false wherever a typo is a parse error rather than a dropped field. A required field with more than one accepted spelling is not listed in 'required'; it becomes an 'allOf' of 'anyOf' groups, one group per field, each naming the spellings that satisfy it. A schema carrying 'x-openreelio-executable': false parses and validates but 'command execute' refuses it. Read the schema before composing a payload instead of guessing one and reading the parse error. Ask for the commands you are about to compose: each schema runs to a few thousand tokens, so --all belongs in a file you grep rather than in a context window. Takes no --path: it describes the command surface, not a project",
                 "params": {
                     "type": { "type": "string", "required": false, "desc": "Backend command type to describe, e.g. UpdateCaption (repeatable)" },
                     "all": { "type": "boolean", "required": false, "desc": "Describe every supported command instead of one" }
@@ -936,14 +936,20 @@ mod tests {
     /// a `--path` or is named in the sentence agents read.
     #[test]
     fn the_guide_should_name_exactly_the_verbs_that_take_no_path() {
+        // A checkout with `core.autocrlf` on hands `include_str!` CRLF line
+        // endings, and a paragraph split on "\n\n" would then never split —
+        // the "paragraph" would be the rest of the guide and the test would
+        // pass on verbs named anywhere in it.
+        let guide = AGENT_GUIDE.replace("\r\n", "\n");
         let marker = "**`--path <PROJECT_DIR>` on every project verb.**";
-        let paragraph_start = AGENT_GUIDE
+        let paragraph_start = guide
             .find(marker)
             .expect("the guide must state the --path rule");
-        let paragraph = AGENT_GUIDE[paragraph_start..]
+        let paragraph = guide[paragraph_start..]
             .split("\n\n")
             .next()
-            .expect("a paragraph ends at a blank line");
+            .expect("a paragraph ends at a blank line")
+            .to_string();
 
         // Every backticked token in the paragraph that names a real leaf verb.
         let all_leaves: Vec<String> = clap_leaf_commands()

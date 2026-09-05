@@ -36,8 +36,13 @@ fn generate_mask_id() -> MaskId {
 // =============================================================================
 
 /// A 2D point with normalized coordinates (0.0-1.0)
+// `crate::core::types::Point2D` is a different shape under the same short name,
+// and `schemars` keys `definitions` by that short name — two of them in one
+// schema would silently describe one point with the other's fields. The wire
+// name is unchanged; only the schema definition key is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[schemars(rename = "MaskPoint2D")]
 pub struct Point2D {
     /// X coordinate (0.0 = left, 1.0 = right)
     pub x: f64,

@@ -719,7 +719,7 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "commandType": {
-                        "description": "One backend command type, or a list of them, to describe. Omit for the name listing.",
+                        "description": "One backend command type, or a list of at most ten, to describe. Omit for the name listing. Ask for the commands you are about to compose rather than the whole surface: each schema costs a few thousand tokens.",
                         "anyOf": [
                             { "type": "string" },
                             { "type": "array", "items": { "type": "string" } }
@@ -1887,6 +1887,13 @@ fn text_preset_catalog_line() -> Vec<String> {
 /// payloads in the same `{ commandType, schema }` entries the CLI prints, so
 /// the two surfaces answer the same question the same way.
 fn read_command_schema(arguments: Value) -> Result<Value, ToolError> {
+    /// How many payload schemas one call may ask for.
+    ///
+    /// A schema runs to a few thousand tokens, so a request for all eighty is
+    /// not a lookup — it is a context window spent before the work starts. Ten
+    /// covers composing a plan; past that the agent should fetch per command.
+    const MAX_COMMAND_TYPES: usize = 10;
+
     let requested = match arguments.get("commandType") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::String(one)) => vec![one.clone()],
@@ -1909,7 +1916,23 @@ fn read_command_schema(arguments: Value) -> Result<Value, ToolError> {
         return Ok(build_command_schema());
     }
 
-    openreelio_core::ipc::command_payload_schemas(&requested).map_err(ToolError::InvalidArguments)
+    // The same name twice is one lookup, and it should not spend two of the ten.
+    let mut deduped: Vec<String> = Vec::with_capacity(requested.len());
+    for command_type in requested {
+        if !deduped.contains(&command_type) {
+            deduped.push(command_type);
+        }
+    }
+
+    if deduped.len() > MAX_COMMAND_TYPES {
+        return Err(ToolError::InvalidArguments(format!(
+            "commandType names {} commands; at most {MAX_COMMAND_TYPES} may be requested at once. \
+             Ask for the ones you are about to compose, not the whole surface.",
+            deduped.len()
+        )));
+    }
+
+    openreelio_core::ipc::command_payload_schemas(&deduped).map_err(ToolError::InvalidArguments)
 }
 
 fn build_command_schema() -> Value {
@@ -3641,7 +3664,17 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert_eq!(required, vec!["captionId", "sequenceId", "trackId"]);
+        assert_eq!(required, vec!["sequenceId", "trackId"]);
+
+        // The caption id is required through the group that also accepts its
+        // `clipId` spelling, so neither name is listed on its own.
+        let spellings: Vec<&str> = schema["allOf"][0]["anyOf"]
+            .as_array()
+            .expect("an aliased requirement is an anyOf of one-property groups")
+            .iter()
+            .filter_map(|option| option["required"][0].as_str())
+            .collect();
+        assert_eq!(spellings, vec!["captionId", "clipId"]);
     }
 
     #[test]
@@ -3681,6 +3714,35 @@ mod tests {
         let error = read_command_schema(serde_json::json!({ "commandType": 7 }))
             .expect_err("a number is not a command type");
         assert!(format!("{error:?}").contains("commandType"));
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: a bulk request is refused rather than silently truncated
+    ///
+    /// Each schema is a few thousand tokens, so "give me all of them" is a
+    /// context window spent before the editing starts. The cap says so, and
+    /// names itself, instead of answering with an unreadable wall.
+    #[test]
+    fn should_cap_a_bulk_command_schema_request_and_count_a_repeat_once() {
+        let many: Vec<&str> = openreelio_core::ipc::CommandPayload::SUPPORTED_COMMAND_TYPES
+            .iter()
+            .take(11)
+            .copied()
+            .collect();
+        let error = read_command_schema(serde_json::json!({ "commandType": many }))
+            .expect_err("eleven schemas at once is a context dump, not a lookup");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("10"),
+            "the cap must name itself: {message}"
+        );
+
+        // The same command twice is one lookup and must not spend two slots.
+        let repeated = read_command_schema(
+            serde_json::json!({ "commandType": ["SplitClip", "SplitClip", "InsertClip"] }),
+        )
+        .expect("a repeat is not an error");
+        assert_eq!(repeated["count"].as_u64(), Some(2));
     }
 
     /// The unknown-argument guard reads the advertised schema, so `commandType`

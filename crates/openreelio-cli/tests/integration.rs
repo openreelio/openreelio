@@ -5772,7 +5772,17 @@ fn test_command_schema_type_returns_the_payload_shape() {
         .iter()
         .map(|value| value.as_str().expect("required names are strings"))
         .collect();
-    assert_eq!(required, vec!["captionId", "sequenceId", "trackId"]);
+    assert_eq!(required, vec!["sequenceId", "trackId"]);
+
+    // A required field with a second accepted spelling cannot be named in
+    // `required` without forbidding the other spelling, so it becomes a group.
+    let spellings: Vec<&str> = schema["allOf"][0]["anyOf"]
+        .as_array()
+        .expect("an aliased requirement is an anyOf of one-property groups")
+        .iter()
+        .map(|option| option["required"][0].as_str().expect("named spellings"))
+        .collect();
+    assert_eq!(spellings, vec!["captionId", "clipId"]);
 
     for optional in ["text", "startSec", "endSec", "style", "position"] {
         assert!(
@@ -5880,18 +5890,34 @@ fn test_a_payload_built_from_the_schema_passes_command_validate() {
                 .to_string()
         })
         .collect();
-    assert_eq!(
-        required,
-        vec!["clipId", "sequenceId", "splitTime", "trackId"]
-    );
+    assert_eq!(required, vec!["clipId", "sequenceId", "trackId"]);
 
-    let payload = serde_json::json!({
-        "sequenceId": "seq_1",
-        "trackId": "track_v1",
-        "clipId": "clip_1",
-        "splitTime": 5.0
-    })
-    .to_string();
+    // `splitTime` is required through the group that also accepts the
+    // `atTimelineSec` spelling; a payload has to satisfy those groups too.
+    let spellings: Vec<String> = schema["schemas"][0]["schema"]["allOf"][0]["anyOf"]
+        .as_array()
+        .expect("an aliased requirement is an anyOf of one-property groups")
+        .iter()
+        .map(|option| {
+            option["required"][0]
+                .as_str()
+                .expect("named spellings")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(spellings, vec!["splitTime", "atTimelineSec"]);
+
+    let mut composed = serde_json::Map::new();
+    for name in required.iter().chain(std::iter::once(&spellings[0])) {
+        let value = match name.as_str() {
+            "sequenceId" => serde_json::json!("seq_1"),
+            "trackId" => serde_json::json!("track_v1"),
+            "clipId" => serde_json::json!("clip_1"),
+            _ => serde_json::json!(5.0),
+        };
+        composed.insert(name.clone(), value);
+    }
+    let payload = serde_json::Value::Object(composed).to_string();
 
     let result = run_cli_ok(&[
         "command",

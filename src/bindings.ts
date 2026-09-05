@@ -3311,7 +3311,8 @@ trackingSourceId?: string | null }
  * "fontFamily": "Arial",
  * "fontSize": 48,
  * "color": "#FFFFFF"
- * }
+ * },
+ * "position": { "x": 0.5, "y": 0.5 }
  * }
  * }
  * ```
@@ -3344,18 +3345,29 @@ timelineIn: number;
  */
 duration: number; 
 /**
- * Curated text preset id or alias, resolved into `text_data` on parse.
+ * Curated text preset id or alias to base the clip on.
  * 
- * Always `None` after deserialization: the preset has been expanded into
- * concrete values by then, and keeping the id would put a registry lookup
- * between the op log and the clip it describes.
+ * Send one when `textData` should carry only the fields that differ from
+ * the preset; run `packs list --kind text` for the ids. The preset is
+ * expanded into concrete values while the payload is parsed, so what
+ * reaches the op log is the resolved `textData` and never the id — replay
+ * does not consult the registry.
  */
 preset?: string | null; 
 /**
- * Text content and styling data
+ * Text content and styling data.
  * 
- * Required unless `preset` names a preset, in which case it carries only
- * the fields that override the preset.
+ * A full object when no `preset` is named, and then `content`, `style`
+ * (with at least `fontFamily`, `fontSize` and `color`) and `position` are
+ * all required. With a `preset` it is a partial override instead: any
+ * subset of the same keys, merged onto the preset key by key, and it may
+ * be omitted entirely.
+ * 
+ * Accepts `content`, `style`, `position`, `shadow`, `outline`, `rotation`
+ * and `opacity`. `style` accepts fontFamily, fontSize, fontWeight, color,
+ * backgroundColor, backgroundPadding, alignment, bold, italic, underline,
+ * lineHeight and letterSpacing; `position` accepts x and y as 0.0-1.0
+ * fractions of the canvas.
  */
 textData: TextClipData }
 /**
@@ -5304,6 +5316,10 @@ export type CreateExternalAgentApprovalTokenInput = { sessionId: string; runId: 
 export type CreateFolderPayload = { relativePath: string }
 /**
  * Payload for `CreateFreezeFrame` (hold one frame of a clip).
+ * 
+ * This is a ripple edit, not an overlay: the clip under `playheadSec` is split
+ * there, a still of that frame is inserted, and every clip after the playhead
+ * on the track moves later by `durationSec`.
  */
 export type CreateFreezeFramePayload = { sequenceId: string; trackId: string; clipId: string; 
 /**
@@ -7943,9 +7959,10 @@ tempoClassification: TempoClassification }
  * Payload for Ripple Delete (remove clips + close gaps).
  * 
  * A single clip may also be named as `clipId` instead of `clipIds`, and a
- * legacy `affectAllTracks` flag is accepted and ignored. Neither is listed as
- * a property below, which is why this payload does not declare
- * `additionalProperties: false`.
+ * legacy `affectAllTracks` flag is accepted and ignored. Both are declared on
+ * the derived schema even though the struct does not carry them, because the
+ * wire shape below rejects every *other* unknown field — a schema left open
+ * here would invite a typo the parser refuses.
  */
 export type RippleDeletePayload = { sequenceId: string; trackId: string; 
 /**

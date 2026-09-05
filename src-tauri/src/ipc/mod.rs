@@ -33,8 +33,8 @@ pub use events::*;
 // while the machinery that builds and searches the schemas lives in
 // `command_schema`.
 pub use command_schema::{
-    all_command_payload_schemas, closest_command_type, command_payload_schemas,
-    unsupported_command_type_error,
+    all_command_payload_schemas, closest_command_types, command_payload_schemas,
+    unsupported_command_type_error, EXECUTABLE_KEYWORD, NON_EXECUTABLE_COMMAND_TYPES,
 };
 pub use payloads::*;
 

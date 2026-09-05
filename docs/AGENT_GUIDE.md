@@ -100,6 +100,16 @@ types themselves, so it is the authoritative answer to "what goes in this
 payload" — read it before composing one instead of guessing and reading the
 parse error.
 
+Fetch the commands you are about to compose, not the whole surface: each schema
+runs to a few thousand tokens, so `--all` is ~80 of them and belongs in a file
+you grep, never in a context window. The MCP `openreelio.command.schema` tool
+caps `commandType` at ten names per call for the same reason. A field that is
+required but has more than one accepted spelling is not listed in `required`;
+it appears as an `allOf` of `anyOf` groups, one group per field, each listing
+the spellings that satisfy it. A schema carrying
+`"x-openreelio-executable": false` parses and validates but `command execute`
+refuses it.
+
 ### Self-diagnosis
 
 `openreelio-cli ffmpeg info` returns
