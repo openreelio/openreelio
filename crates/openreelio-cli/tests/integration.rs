@@ -7401,11 +7401,147 @@ fn test_verify_refuses_a_file_range_that_is_not_a_span() {
         );
     }
 
-    // A window with no file to apply it to is refused too: it declares which
-    // seconds a rendered file covers, and there is no file.
-    let (_stdout, stderr, code) =
-        run_cli_exit(&["verify", "--path", &path, "--file-range", "0", "2"]);
-    assert_eq!(code, 2, "a window needs a file: {stderr}");
+    // `--file-range` without `--file` never reaches the engine — clap's
+    // `requires = "file"` refuses it first — so the engine's own refusal is
+    // pinned by `test_file_range_should_refuse_without_a_rendered_file` in
+    // `core::qc::verify` rather than by an exit code that only proves clap ran.
+}
+
+/// Feature: Verifying a partial render
+/// Scenario: should grade an excerpt that starts partway into the timeline
+///
+/// The zero-offset case cannot tell a report that shifts detections onto the
+/// timeline from one that forgot to: both put a finding at the same second.
+/// This one renders seconds 1-3 of a longer edit, declares them, and checks
+/// that the black tail lands where the timeline says it is.
+#[test]
+fn test_verify_reports_a_shifted_range_in_timeline_seconds() {
+    let Some((_dir, path, _sequence_id, _track_id, _asset_id)) =
+        create_project_with_three_second_body("verify_shifted_range")
+    else {
+        return;
+    };
+
+    // The fixture is a black test pattern, so every second of the excerpt is a
+    // black frame; the question this test asks is *which* seconds the report
+    // says they are.
+    let render_path = std::path::Path::new(&path).join("excerpt.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--start",
+        "1.0",
+        "--end",
+        "3.0",
+        "--output",
+        render_path.to_str().unwrap(),
+    ]);
+    if !success {
+        eprintln!("Skipping shifted-range verify test: proxy render failed.\n{stdout}\n{stderr}");
+        return;
+    }
+
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        render_path.to_str().unwrap(),
+        "--file-range",
+        "1",
+        "3",
+        "--skip",
+        "audio.loudness",
+    ]);
+    assert_ne!(
+        code, 2,
+        "the run itself must complete.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    assert_eq!(report["target"]["fileRange"]["startSec"], 1.0);
+    assert_eq!(report["target"]["fileRange"]["endSec"], 3.0);
+    assert_eq!(report["measurements"]["timebase"], "timeline");
+
+    // Every measured span is a timeline second, so nothing the file holds can
+    // be reported before the second the window opens on. Without the shift the
+    // same detections would arrive at 0s and this is where that shows.
+    let black_ranges = report["measurements"]["blackRanges"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !black_ranges.is_empty(),
+        "the fixture is a black test pattern, so the excerpt must measure as black: {}",
+        report["measurements"]
+    );
+    for key in ["blackRanges", "freezeRanges", "silenceRanges"] {
+        for span in report["measurements"][key]
+            .as_array()
+            .unwrap_or(&Vec::new())
+        {
+            let start = span["startSec"].as_f64().expect("a start second");
+            assert!(
+                start >= 1.0 - 1e-3,
+                "{key} must be shifted onto the timeline, got {start}: {}",
+                report["measurements"]
+            );
+        }
+    }
+
+    let duration = find_check(&report, "render.duration_mismatch");
+    assert_ne!(
+        duration["status"], "failed",
+        "a two-second file holding a declared two-second window is not truncated: {duration}"
+    );
+}
+
+/// Feature: Verifying a partial render
+/// Scenario: should refuse a window that names timeline the sequence lacks
+///
+/// Clipping `--file-range 100 130` to a three-second edit left nothing, every
+/// rendered rule graded that empty span and reported `passed`, and the run
+/// exited 0 on a file nobody looked at — a verdict no `--fail-on` setting could
+/// have caught, because there was no violation to grade. The window is an
+/// argument, so an impossible one is refused like `--file-range 5 2` is: exit
+/// 2, before a frame is measured, which is why a placeholder file is enough to
+/// pin it.
+#[test]
+fn test_verify_refuses_a_file_range_beyond_the_end_of_the_edit() {
+    let Some((_dir, path, _sequence_id, _track_id, _asset_id)) =
+        create_project_with_three_second_body("verify_range_past_the_edit")
+    else {
+        return;
+    };
+
+    let render_path = std::path::Path::new(&path).join("beyond-the-edit.mp4");
+    std::fs::write(&render_path, b"not really a video").expect("placeholder render");
+
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        render_path.to_str().unwrap(),
+        "--file-range",
+        "100",
+        "130",
+    ]);
+    assert_eq!(
+        code, 2,
+        "a window outside the edit must be refused, not graded.
+stdout: {stdout}
+stderr:          {stderr}"
+    );
+    assert!(
+        stderr.contains("--file-range") && stderr.contains("lies outside the sequence"),
+        "the refusal must name the argument and what is wrong with it: {stderr}"
+    );
 }
 
 /// Builds a project with a single 3s file-backed clip at 0s on the first video

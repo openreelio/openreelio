@@ -764,7 +764,7 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
                         "items": { "type": "number", "minimum": 0 },
                         "minItems": 2,
                         "maxItems": 2,
-                        "description": "Timeline seconds 'file' holds, as [start, end] — the same pair openreelio.render.range reports and openreelio.frame.extract takes. Declaring it grades the render's length, black, freeze, silence and caption contrast against that window instead of against the whole sequence, and every rendered finding's timeRange is reported in TIMELINE seconds. Without it a partial render reads as a truncated deliverable and render.duration_mismatch fails the run. Only means something with 'file'."
+                        "description": "Timeline seconds 'file' holds, as [start, end] — the same pair openreelio.render.range reports and openreelio.frame.extract takes. Declaring it grades the render's length, black, freeze, silence and caption contrast against that window instead of against the whole sequence, and every rendered finding's timeRange is reported in TIMELINE seconds. Without it a partial render reads as a truncated deliverable and render.duration_mismatch fails the run. Only means something with 'file', and a window lying entirely past the end of the sequence is refused rather than graded against nothing."
                     },
                     "structuralOnly": {
                         "type": "boolean",

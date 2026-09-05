@@ -197,6 +197,20 @@ fn build_violation(
         && findings.iter().all(|finding| !finding.commands.is_empty());
 
     let cues: Vec<Value> = findings.iter().map(CaptionFinding::as_metric).collect();
+    // The violation's own `timeRange` spans the first cue to the last, which is
+    // the whole track for a defect that repeats across it — a range no agent
+    // can usefully extract a frame from. The individual windows are what an
+    // inspection loop needs, so they are published beside it under the name the
+    // frame samplers already take.
+    let time_ranges: Vec<Value> = findings
+        .iter()
+        .map(|finding| {
+            serde_json::json!({
+                "startSec": round_sec(finding.start_sec),
+                "endSec": round_sec(finding.end_sec),
+            })
+        })
+        .collect();
     let entities: Vec<String> = findings
         .iter()
         .map(|finding| finding.clip_id.clone())
@@ -207,6 +221,7 @@ fn build_violation(
         .with_details(group.details.clone())
         .with_metric("cueCount", findings.len())
         .with_metric("trackId", group.track_id.to_string())
+        .with_metric("timeRanges", Value::Array(time_ranges))
         .with_metric("cues", Value::Array(cues));
 
     if start_sec.is_finite() && end_sec.is_finite() {
@@ -293,6 +308,32 @@ mod tests {
         let location = violation.location.as_ref().expect("a span");
         assert_eq!(location.start_sec, 0.0);
         assert_eq!(location.end_sec, 41.0);
+    }
+
+    /// Feature: Grouped caption findings
+    /// Scenario: should publish the window of every cue, not just the span
+    ///
+    /// The violation's own `timeRange` covers the first cue to the last, which
+    /// for a defect repeating across a track is the whole track — nothing an
+    /// agent can extract a useful frame from. The per-cue windows go beside it.
+    #[test]
+    fn should_publish_a_window_for_every_cue_beside_the_grouped_span() {
+        let findings = (0..3).map(|index| finding(index, 1, true)).collect();
+
+        let violations = group_caption_findings(group(), findings, |count| format!("{count} cues"));
+
+        let violation = &violations[0];
+        let location = violation.location.as_ref().expect("a span");
+        assert_eq!((location.start_sec, location.end_sec), (0.0, 3.0));
+
+        let ranges = violation.metrics["timeRanges"]
+            .as_array()
+            .expect("timeRanges is a list");
+        assert_eq!(ranges.len(), 3, "one window per cue: {ranges:?}");
+        assert_eq!(
+            ranges[1],
+            serde_json::json!({ "startSec": 1.0, "endSec": 2.0 })
+        );
     }
 
     /// Feature: Grouped caption findings

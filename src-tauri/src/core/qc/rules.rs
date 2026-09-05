@@ -829,6 +829,12 @@ impl QCRule for RenderDurationRule {
         let expected_duration = context.expected_file_duration_sec(output_duration);
         let windowed = context.measured_window.is_some();
         if expected_duration <= 0.0 {
+            // Only an empty sequence reaches here: a declared window the
+            // program does not contain is refused before any check runs (see
+            // `check_window_overlaps` in `core::qc::verify`), because a report
+            // whose rendered checks all graded an empty span reads as a clean
+            // verdict on a file nobody looked at. An empty edit is
+            // `sequence.empty`'s finding, not this rule's.
             return Ok(Vec::new());
         }
 
@@ -2548,7 +2554,9 @@ impl QCRule for DurationRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::qc::context::{MeasuredStreams, MeasuredVideoStream, RenderMeasurements};
+    use crate::core::qc::context::{
+        MeasuredStreams, MeasuredVideoStream, MeasuredWindow, RenderMeasurements,
+    };
     use crate::core::timeline::{SequenceFormat, Track};
 
     // ========================================================================
@@ -4128,6 +4136,47 @@ mod tests {
             .await
             .expect("rule runs");
         assert!(violations.is_empty());
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should leave a window outside the sequence to the caller check
+    ///
+    /// Clipping `--file-range 100 130` to a 60-second edit leaves nothing, and
+    /// every rendered rule graded against that empty span reports `passed` — a
+    /// clean verdict on a file nobody looked at. The refusal belongs where it
+    /// can stop the whole run (`check_window_overlaps` in `core::qc::verify`),
+    /// not in one rule's findings, so this rule stays quiet and the run never
+    /// gets this far.
+    #[tokio::test]
+    async fn test_render_duration_rule_should_stay_quiet_when_the_window_clips_to_nothing() {
+        let sequence = sequence_with_video_clip(0.0, 60.0);
+        let state = state_with_video_asset("asset_001", Some(60.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_of_length(30.0))
+            .with_measured_window(MeasuredWindow::new(100.0, 130.0));
+
+        assert!(RenderDurationRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs")
+            .is_empty());
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should still say nothing about a whole-sequence run of an
+    /// empty edit, which `sequence.empty` owns
+    #[tokio::test]
+    async fn test_render_duration_rule_should_stay_quiet_without_a_declared_window() {
+        let sequence = sequence_with_video_clip(0.0, 60.0);
+        let state = state_with_video_asset("asset_001", Some(60.0));
+        let context =
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(60.0));
+
+        assert!(RenderDurationRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs")
+            .is_empty());
     }
 
     // ========================================================================
