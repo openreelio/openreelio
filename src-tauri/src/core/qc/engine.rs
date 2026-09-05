@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use super::caption_contrast::CaptionContrastRule;
 use super::context::{QCContext, RenderMeasurements};
 use super::rules::{
     AspectRatioRule, AudioClippingRule, AudioLoudnessRule, AudioPeakRule, BlackFrameRule,
@@ -412,6 +413,10 @@ impl QCEngine {
         self.register_rule(Arc::new(AudioPeakRule::new()));
         self.register_rule(Arc::new(AudioClippingRule::new()));
         self.register_rule(Arc::new(AudioLoudnessRule::new()));
+        // Reads the picture behind the words, so it belongs with the rendered
+        // rules — but it is the one of them that still has something to say
+        // without a file: that nobody has looked.
+        self.register_rule(Arc::new(CaptionContrastRule::new()));
     }
 
     /// Registers a custom rule

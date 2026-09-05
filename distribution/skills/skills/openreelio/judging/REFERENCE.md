@@ -228,7 +228,9 @@ read tool, available without `--allow-write`.
 only the 8 newest drafts, covers at most 300 s of timeline per call, and returns
 `{outputPath, durationSec, fileSize, encodingTimeSec, warnings, timelineRange,
 nextStep}` — `nextStep` names the `frame.extract` follow-ups below and
-`verify {file}`.
+`verify {file, fileRange}`. A draft is an excerpt, so pass its
+`fileRange: [start, start + durationSec]` — without it the draft reads as a
+truncated deliverable and `render.duration_mismatch` fails the candidate.
 
 ```jsonc
 // tools/call → openreelio.render.range — draw the draft
@@ -289,11 +291,11 @@ the visual scores.
 
 | Dimension   | Source | What 5 means |
 | ----------- | ------ | ------------ |
-| Deliverable | `verify --file` | Gate, not a score: any error-or-worse finding disqualifies the candidate before judging. |
+| Deliverable | `verify --file` (add `--file-range START END` for a partial render) | Gate, not a score: any error-or-worse finding disqualifies the candidate before judging. |
 | Pacing      | `shot.length_stats` (median, p90, count) + `shot.cut_rhythm` | Shot lengths match the brief's tempo; no unmotivated outliers. |
 | Hook        | First-row cells of the sheet | Something happens in the first seconds: motion, a face, a claim — not a slate or dead air. |
 | Continuity  | `--at-cuts --grid auto` sheet | Cuts land on action or rest; no jump-cut jitter, no mid-gesture amputation. |
-| Readability | `--at-captions --grid auto --cell-width 640` | Captions and text legible, inside safe areas, not fighting the background. |
+| Readability | `--at-captions --grid auto --cell-width 640`, plus `caption.contrast` from `verify --file` | Captions and text legible, inside safe areas, not fighting the background. The check measures the picture behind each bare cue, so read it before scoring by eye. |
 | Composition | Full sheet | Subjects framed intentionally; no accidental crops; a consistent look across cells. |
 
 Judge pointwise against this rubric — score each candidate alone, then compare
@@ -333,7 +335,7 @@ The winner's weaknesses become the next fix loop's worklist.
 | `verify --structural-only` | free, no FFmpeg | pacing stats; disqualifying broken candidates early |
 | `frame extract --range START END --grid auto` | cheap | seeing what an apply just did, before rendering |
 | timeline sheet (`--grid`, fast mode) | cheap | rough structure before rendering anything |
-| `render start --proxy --start/--end` + `--file --file-range` sampler sheet | moderate | judging one range of one candidate |
+| `render start --proxy --start/--end` + `--file --file-range` sampler sheet + `verify --file --file-range` | moderate | judging one range of one candidate |
 | full proxy render + `--file` sheet + `verify --file` | the judging unit | scoring a candidate |
 
 Two or three strong candidates judged well beat six judged carelessly. Spend

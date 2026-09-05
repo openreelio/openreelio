@@ -5654,6 +5654,30 @@ fn test_state_jump_adopts_operations_written_since_the_last_command() {
 // =============================================================================
 
 #[test]
+fn test_help_json_documents_verify_file_range_and_caption_contrast() {
+    let schema = run_cli_ok(&["help-json"]);
+    let verify = &schema["commands"]["verify"];
+
+    let file_range = verify["params"]["file-range"]["desc"]
+        .as_str()
+        .expect("file-range is documented for agents that never read --help");
+    assert!(
+        file_range.contains("START END"),
+        "the description must say the shape of the argument: {file_range}"
+    );
+
+    // The `--checks` list is generated from the QC registry, so a check the
+    // engine runs but the schema never names is a check no agent can select.
+    let checks = verify["params"]["checks"]["desc"]
+        .as_str()
+        .expect("checks lists every known id");
+    assert!(
+        checks.contains("caption.contrast"),
+        "every registered check must be selectable by name: {checks}"
+    );
+}
+
+#[test]
 fn test_help_json_contains_all_commands() {
     let result = run_cli_ok(&["help-json"]);
     let commands = result["commands"].as_object().unwrap();
@@ -7096,6 +7120,292 @@ fn test_verify_measures_a_rendered_file() {
     );
     assert_eq!(report["status"], "failed");
     assert_eq!(report["passed"], false);
+
+    // Feature: Verifying a partial render
+    // Scenario: should grade a declared excerpt against the window it holds
+    //
+    // The same two seconds of the same ten-second timeline, now declared for
+    // what they are. Nothing about the file changed; what changed is that the
+    // report knows which part of the edit it is looking at.
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        render_path.to_str().unwrap(),
+        "--file-range",
+        "0",
+        "2",
+        "--skip",
+        "audio.loudness",
+    ]);
+    assert_eq!(
+        code, 0,
+        "a declared excerpt is the render that was asked for.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    assert_eq!(report["target"]["fileRange"]["startSec"], 0.0);
+    assert_eq!(report["target"]["fileRange"]["endSec"], 2.0);
+    assert_eq!(
+        report["measurements"]["timebase"], "timeline",
+        "every span in the document is a timeline second: {}",
+        report["measurements"]
+    );
+
+    let duration = find_check(&report, "render.duration_mismatch");
+    assert_ne!(
+        duration["status"], "failed",
+        "the file holds exactly the window it declared: {duration}"
+    );
+}
+
+/// Style JSON for a caption with nothing between the words and the picture.
+///
+/// The background is present but fully transparent: a box the viewer cannot see
+/// is not a box, and it is the shape the style surface accepts.
+const BARE_WHITE_CAPTION_STYLE: &str = r##"{"color":"#FFFFFFFF","outlineWidth":0,"backgroundColor":{"r":0,"g":0,"b":0,"a":0},"fontSize":48}"##;
+
+/// Builds a project holding one solid-colour clip with one bare white caption
+/// over it, renders a proxy of the whole sequence, and returns that file.
+///
+/// Returns `None` on a machine without a usable FFmpeg, so the caller skips.
+fn render_project_with_a_bare_white_caption(
+    name: &str,
+    colour: &str,
+) -> Option<(tempfile::TempDir, String, std::path::PathBuf, String)> {
+    let (dir, path, asset_id) = create_project_with_media(name, "contrast_source.mp4", |target| {
+        create_solid_colour_video(target, colour, "640x360", 3)
+    })?;
+
+    let track_id = run_cli_ok(&["timeline", "tracks", "--path", &path])["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Can you read this",
+        "--start",
+        "0.5",
+        "--end",
+        "2.5",
+        "--style-json",
+        BARE_WHITE_CAPTION_STYLE,
+    ]);
+
+    let caption_id = run_cli_ok(&["caption", "list", "--path", &path])["captions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let render_path = dir.path().join("contrast-proxy.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--output",
+        render_path.to_str().unwrap(),
+    ]);
+    if !success {
+        eprintln!("Skipping caption contrast test: proxy render failed.\n{stdout}\n{stderr}");
+        return None;
+    }
+
+    Some((dir, path, render_path, caption_id))
+}
+
+/// Runs `verify --file` for the caption contrast check alone.
+fn verify_caption_contrast(path: &str, render: &std::path::Path) -> serde_json::Value {
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        path,
+        "--file",
+        render.to_str().unwrap(),
+        "--checks",
+        "caption.contrast",
+    ]);
+    assert_eq!(
+        code, 0,
+        "a legibility finding is a warning, never a failed run.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+    find_check(&report, "caption.contrast").clone()
+}
+
+/// Feature: Caption legibility
+/// Scenario: should report a bare white caption over a white picture
+///
+/// The failure every structural check passes: the words are inside the safe
+/// area, on screen long enough, not overlapping anything — and invisible.
+#[test]
+fn test_verify_reports_a_caption_the_rendered_picture_swallows() {
+    let Some((_dir, path, render_path, caption_id)) =
+        render_project_with_a_bare_white_caption("verify_caption_contrast_white", "white")
+    else {
+        return;
+    };
+
+    let check = verify_caption_contrast(&path, &render_path);
+    assert_eq!(check["status"], "warned", "{check}");
+    assert_eq!(check["severity"], "warning");
+    assert_eq!(check["violationCount"], 1);
+    assert!(
+        check["metrics"]["contrast"].as_f64().unwrap() < 0.35,
+        "white on white has nothing to separate it: {check}"
+    );
+    assert_eq!(check["metrics"]["hasBox"], false);
+    assert_eq!(check["metrics"]["hasOutline"], false);
+
+    let steps = check["suggestedFix"]["steps"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an unreadable caption carries a repair: {check}"));
+    assert_eq!(steps[0]["commandType"], "UpdateCaption");
+    assert_eq!(steps[0]["payload"]["stylePack"], "standard-outline");
+
+    // Scenario: should clear the same cue once an outline separates it
+    //
+    // Nothing about the file changes; the style now protects the words, so the
+    // cue is not even decoded.
+    run_cli_ok(&[
+        "caption",
+        "update",
+        "--path",
+        &path,
+        "--id",
+        &caption_id,
+        "--style-json",
+        r##"{"color":"#FFFFFFFF","outlineWidth":4,"outlineColor":"#000000FF","backgroundColor":{"r":0,"g":0,"b":0,"a":0},"fontSize":48}"##,
+    ]);
+
+    let check = verify_caption_contrast(&path, &render_path);
+    assert_eq!(
+        check["status"], "passed",
+        "an outlined caption reads over any background: {check}"
+    );
+}
+
+/// Feature: Caption legibility
+/// Scenario: should pass the same bare caption over a dark picture
+#[test]
+fn test_verify_passes_a_white_caption_over_a_dark_picture() {
+    let Some((_dir, path, render_path, _caption_id)) =
+        render_project_with_a_bare_white_caption("verify_caption_contrast_black", "black")
+    else {
+        return;
+    };
+
+    let check = verify_caption_contrast(&path, &render_path);
+    assert_eq!(
+        check["status"], "passed",
+        "white words on a black picture are legible: {check}"
+    );
+}
+
+/// Feature: Caption legibility
+/// Scenario: should say it did not look, rather than passing, without a render
+#[test]
+fn test_verify_reports_caption_contrast_as_unmeasured_without_a_file() {
+    let dir = create_temp_project("verify_caption_contrast_structural");
+    let path = project_path(&dir, "verify_caption_contrast_structural");
+
+    run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Can you read this",
+        "--start",
+        "0.5",
+        "--end",
+        "2.5",
+        "--style-json",
+        BARE_WHITE_CAPTION_STYLE,
+    ]);
+
+    let report = run_cli_ok(&[
+        "verify",
+        "--path",
+        &path,
+        "--structural-only",
+        "--checks",
+        "caption.contrast",
+    ]);
+    let check = find_check(&report, "caption.contrast");
+
+    assert_eq!(check["severity"], "info", "{check}");
+    assert_eq!(check["violationCount"], 1);
+    assert_eq!(check["metrics"]["measured"], false);
+    assert!(
+        check["message"].as_str().unwrap().contains("not measured"),
+        "a check that never looked must say so: {check}"
+    );
+}
+
+/// Feature: Verifying a partial render
+/// Scenario: should refuse a window that names no stretch of timeline
+///
+/// The check runs before anything is measured, so a typo costs nothing and is
+/// reported as a tool failure rather than as a finding about the video.
+#[test]
+fn test_verify_refuses_a_file_range_that_is_not_a_span() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let project_path = temp_dir.path().join("verify_range_project");
+    let path = project_path.to_str().unwrap().to_string();
+    run_cli_ok(&["project", "create", "--path", &path, "--name", "Range"]);
+
+    let render_path = project_path.join("excerpt.mp4");
+    std::fs::write(&render_path, b"not really a video").expect("placeholder render");
+
+    // A negative START is refused by the argument parser before the engine sees
+    // it, in the parser's own words, so it is covered by the engine's own tests
+    // rather than here.
+    for range in [["5", "2"], ["2", "2"]] {
+        let (_stdout, stderr, code) = run_cli_exit(&[
+            "verify",
+            "--path",
+            &path,
+            "--file",
+            render_path.to_str().unwrap(),
+            "--file-range",
+            range[0],
+            range[1],
+        ]);
+        assert_eq!(
+            code, 2,
+            "an unusable range is a tool failure, not a finding: {stderr}"
+        );
+        assert!(
+            stderr.contains("--file-range"),
+            "the refusal must name the flag the caller typed, got: {stderr}"
+        );
+    }
+
+    // A window with no file to apply it to is refused too: it declares which
+    // seconds a rendered file covers, and there is no file.
+    let (_stdout, stderr, code) =
+        run_cli_exit(&["verify", "--path", &path, "--file-range", "0", "2"]);
+    assert_eq!(code, 2, "a window needs a file: {stderr}");
 }
 
 /// Builds a project with a single 3s file-backed clip at 0s on the first video

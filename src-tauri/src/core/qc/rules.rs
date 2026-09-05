@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::caption_group::{group_caption_findings, CaptionFinding, CaptionGroup};
 use super::context::QCContext;
 use super::violation::{merged_span_duration_sec, QCViolation, Severity, ViolationFix};
 use crate::core::captions::{
@@ -711,8 +712,14 @@ impl QCRule for AudioLoudnessRule {
 /// which counts disabled clips and muted tracks the render drops. Comparing
 /// against the editing extent would fail correct renders of any sequence that
 /// ends on a disabled clip. The rule also anchors the other rendered checks:
-/// their timestamps are only comparable to the timeline while the file covers
-/// the whole output from zero.
+/// their timestamps are only comparable to the timeline while the file holds
+/// the stretch it is declared to hold.
+///
+/// A caller measuring a partial render declares that stretch as a
+/// [`MeasuredWindow`](crate::core::qc::MeasuredWindow), and the comparison is
+/// against the window instead. A mismatch there is graded as a warning: the
+/// window is the caller's own claim about a file it rendered deliberately, so
+/// the finding is a disagreement to look at rather than a missing deliverable.
 #[derive(Debug, Default)]
 pub struct RenderDurationRule;
 
@@ -808,16 +815,26 @@ impl QCRule for RenderDurationRule {
 
         // The render's own output length, so a correct render can never trip
         // this rule. See `Sequence::output_duration`.
-        let sequence_duration = sequence.output_duration();
-        if !sequence_duration.is_finite() || sequence_duration <= 0.0 {
+        let output_duration = sequence.output_duration();
+        if !output_duration.is_finite() || output_duration <= 0.0 {
             // An empty sequence has no duration to match; `sequence.empty`
             // owns that finding.
             return Ok(Vec::new());
         }
 
+        // A caller that declared which seconds the file holds is graded against
+        // that window: a 30s excerpt of a 90s edit is not a truncated render of
+        // the deliverable, it is exactly the render that was asked for.
+        let (span_start, span_end) = context.measured_span(output_duration);
+        let expected_duration = context.expected_file_duration_sec(output_duration);
+        let windowed = context.measured_window.is_some();
+        if expected_duration <= 0.0 {
+            return Ok(Vec::new());
+        }
+
         let tolerance_sec = Self::tolerance_sec(config, context);
 
-        let delta = file_duration - sequence_duration;
+        let delta = file_duration - expected_duration;
         if !delta.is_finite() || delta.abs() <= tolerance_sec {
             return Ok(Vec::new());
         }
@@ -826,41 +843,70 @@ impl QCRule for RenderDurationRule {
         // stale, or a partial render, and it is not the deliverable whatever
         // the reason. A longer file is suspicious but still contains the whole
         // program, so it is graded as a warning.
-        let severity = config.severity_override.unwrap_or(if delta < 0.0 {
+        //
+        // A declared window changes what a mismatch means. The window is the
+        // caller's own claim about a file it rendered on purpose, and encoders
+        // round a requested range outward by a frame or two; the finding is
+        // then "your declaration and your file disagree", which is worth
+        // seeing and is not a broken deliverable. So it warns either way.
+        let severity = config.severity_override.unwrap_or(if windowed {
+            Severity::Warning
+        } else if delta < 0.0 {
             self.default_severity()
         } else {
             Severity::Warning
         });
 
+        let subject = if windowed {
+            format!("the declared window {span_start:.2}s-{span_end:.2}s")
+        } else {
+            "the sequence".to_string()
+        };
         let message = if delta < 0.0 {
             format!(
-                "Rendered file is {:.2}s shorter than the sequence ({:.2}s vs {:.2}s)",
-                -delta, file_duration, sequence_duration
+                "Rendered file is {:.2}s shorter than {} ({:.2}s vs {:.2}s)",
+                -delta, subject, file_duration, expected_duration
             )
         } else {
             format!(
-                "Rendered file is {:.2}s longer than the sequence ({:.2}s vs {:.2}s)",
-                delta, file_duration, sequence_duration
+                "Rendered file is {:.2}s longer than {} ({:.2}s vs {:.2}s)",
+                delta, subject, file_duration, expected_duration
             )
         };
 
-        Ok(vec![QCViolation::new(self.name(), severity, message)
-            .with_location(0.0, sequence_duration)
-            .with_details(
-                "The measured file does not match the timeline, so every other rendered check \
-                 describes a different program. Re-render the sequence and verify again."
-                    .to_string(),
-            )
+        let details = if windowed {
+            "The file does not hold as much timeline as the caller declared, so the rendered \
+             findings are offset from the timeline by the difference. Re-declare the window to \
+             match the render, or render the window again."
+                .to_string()
+        } else {
+            "The measured file does not match the timeline, so every other rendered check \
+             describes a different program. Re-render the sequence and verify again."
+                .to_string()
+        };
+
+        let mut violation = QCViolation::new(self.name(), severity, message)
+            .with_location(span_start, span_end)
+            .with_details(details)
             .with_metric("fileDurationSec", (file_duration * 1000.0).round() / 1000.0)
             .with_metric(
                 "sequenceDurationSec",
-                (sequence_duration * 1000.0).round() / 1000.0,
+                (output_duration * 1000.0).round() / 1000.0,
+            )
+            .with_metric(
+                "expectedDurationSec",
+                (expected_duration * 1000.0).round() / 1000.0,
             )
             .with_metric("deltaSec", (delta * 1000.0).round() / 1000.0)
-            .with_metric(
-                "toleranceSec",
-                (tolerance_sec * 1000.0).round() / 1000.0,
-            )])
+            .with_metric("toleranceSec", (tolerance_sec * 1000.0).round() / 1000.0);
+
+        if windowed {
+            violation = violation
+                .with_metric("windowStartSec", (span_start * 1000.0).round() / 1000.0)
+                .with_metric("windowEndSec", (span_end * 1000.0).round() / 1000.0);
+        }
+
+        Ok(vec![violation])
     }
 }
 
@@ -1211,9 +1257,9 @@ impl QCRule for RenderResolutionRule {
 /// reported as [`Severity::Info`] without a verdict; a program that is frozen
 /// for most of its running time is [`Severity::Error`].
 ///
-/// Freeze ranges are timed against the measured file while the program length
-/// comes from the timeline, so this is only meaningful for a render that covers
-/// the whole sequence from zero.
+/// Freeze ranges reach this rule already translated into timeline seconds, and
+/// the program they are measured against is the stretch the file holds — the
+/// whole output, or the declared window of a partial render.
 #[derive(Debug, Default)]
 pub struct FrozenProgramRule;
 
@@ -1274,10 +1320,19 @@ impl QCRule for FrozenProgramRule {
             return Ok(Vec::new());
         }
 
-        let program_duration = sequence.output_duration();
-        if !program_duration.is_finite() || program_duration <= 0.0 {
+        let output_duration = sequence.output_duration();
+        if !output_duration.is_finite() || output_duration <= 0.0 {
             // An empty sequence has no program to freeze; `sequence.empty` owns
             // that finding.
+            return Ok(Vec::new());
+        }
+
+        // The program this file covers, which is the declared window for a
+        // partial render: judging an excerpt's frozen share against the whole
+        // edit would call every short excerpt clean.
+        let (span_start, span_end) = context.measured_span(output_duration);
+        let program_duration = context.expected_file_duration_sec(output_duration);
+        if program_duration <= 0.0 {
             return Ok(Vec::new());
         }
 
@@ -1326,7 +1381,7 @@ impl QCRule for FrozenProgramRule {
                 measurements.freeze_ranges.len()
             ),
         )
-        .with_location(0.0, program_duration)
+        .with_location(span_start, span_end)
         .with_details(details)
         .with_metric("frozenSec", (frozen_sec * 1000.0).round() / 1000.0)
         .with_metric("programFraction", (fraction * 1000.0).round() / 1000.0)
@@ -1680,6 +1735,111 @@ impl CaptionSafeAreaRule {
     }
 }
 
+/// Which safe band a caption breached.
+///
+/// The grouping key, and the only thing that separates two findings on the same
+/// track: a title-safe breach is informational while an action-safe one is
+/// graded, so they cannot share a violation. Which *way* a caption breached its
+/// band — a margin below the line, a block reaching across the frame, a custom
+/// anchor off the edge — is recorded per cue instead, because the repair is the
+/// same move in every case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SafeAreaBand {
+    /// Outside the action-safe band: at risk of being cropped or covered
+    ActionSafe,
+    /// Inside action-safe but outside title-safe: a style note, not a defect
+    TitleSafe,
+}
+
+impl SafeAreaBand {
+    /// Summary line for a group of `count` cues that breached this band.
+    fn summary(self, count: usize) -> String {
+        match self {
+            SafeAreaBand::ActionSafe => {
+                format!("{count} caption(s) on this track fall outside the action-safe area")
+            }
+            SafeAreaBand::TitleSafe => format!(
+                "{count} caption(s) on this track fall outside the title-safe area but inside the \
+                 action-safe one"
+            ),
+        }
+    }
+}
+
+/// Smallest band height sampled for a caption, as a percentage of the canvas.
+///
+/// A tiny font would otherwise crop to a strip a pixel or two tall, whose mean
+/// says more about the encoder's chroma than about what sits behind the words.
+const MIN_CAPTION_BAND_HEIGHT_PERCENT: f64 = 3.0;
+
+/// Returns the horizontal band a caption occupies, as `(top, bottom)`
+/// percentages of canvas height.
+///
+/// Shares [`CaptionSafeAreaRule`]'s block estimate rather than restating it, so
+/// the band the contrast check samples is the same block the safe-area check
+/// grades: two different guesses at where a caption sits would let one rule
+/// clear a caption the other one measured somewhere else. The span is widened
+/// to [`MIN_CAPTION_BAND_HEIGHT_PERCENT`] and clamped to the frame, so it is
+/// always a crop FFmpeg can take.
+pub(crate) fn caption_band_percent(
+    clip: &Clip,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (f64, f64) {
+    let position = clip
+        .caption_position
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok())
+        .unwrap_or_default();
+
+    let (top, bottom) = match &position {
+        CaptionPosition::Preset {
+            vertical,
+            margin_percent,
+        } => {
+            let (_, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
+                clip,
+                canvas_width,
+                canvas_height,
+                CAPTION_WRAP_BOX_WIDTH_PERCENT,
+            );
+            CaptionSafeAreaRule::preset_vertical_span(vertical, *margin_percent, box_height)
+        }
+        CaptionPosition::Custom(custom) => {
+            let (_, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
+                clip,
+                canvas_width,
+                canvas_height,
+                100.0,
+            );
+            (
+                custom.y_percent - box_height / 2.0,
+                custom.y_percent + box_height / 2.0,
+            )
+        }
+    };
+
+    let (top, bottom) = if top.is_finite() && bottom.is_finite() && bottom > top {
+        (top, bottom)
+    } else {
+        // A pathological style produced no usable block; fall back to the band
+        // the caption defaults put the words in.
+        (100.0 - 10.0 - MIN_CAPTION_BAND_HEIGHT_PERCENT, 90.0)
+    };
+
+    let deficit = MIN_CAPTION_BAND_HEIGHT_PERCENT - (bottom - top);
+    let (top, bottom) = if deficit > 0.0 {
+        (top - deficit / 2.0, bottom + deficit / 2.0)
+    } else {
+        (top, bottom)
+    };
+
+    let top = top.clamp(0.0, 100.0 - MIN_CAPTION_BAND_HEIGHT_PERCENT);
+    let bottom = bottom.clamp(top + MIN_CAPTION_BAND_HEIGHT_PERCENT, 100.0);
+
+    (top, bottom)
+}
+
 #[async_trait]
 impl QCRule for CaptionSafeAreaRule {
     fn name(&self) -> &str {
@@ -1719,6 +1879,9 @@ impl QCRule for CaptionSafeAreaRule {
                 continue;
             }
 
+            let mut action_safe: Vec<CaptionFinding> = Vec::new();
+            let mut title_safe: Vec<CaptionFinding> = Vec::new();
+
             for clip in &track.clips {
                 // A missing or unreadable position renders with the caption
                 // default, so the check follows the same fallback.
@@ -1728,7 +1891,7 @@ impl QCRule for CaptionSafeAreaRule {
                     .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok())
                     .unwrap_or_default();
 
-                let (violation_severity, message, details, suggested_position) = match &position {
+                let (band, reason, message, details, suggested_position) = match &position {
                     CaptionPosition::Preset {
                         vertical,
                         margin_percent,
@@ -1740,7 +1903,8 @@ impl QCRule for CaptionSafeAreaRule {
 
                         if margin_is_meaningful && *margin_percent < action_safe_margin {
                             (
-                                severity,
+                                SafeAreaBand::ActionSafe,
+                                "action_safe_margin",
                                 "Caption positioned outside the action-safe area".to_string(),
                                 format!(
                                     "Margin of {:.1}% is below the {:.1}% action-safe margin",
@@ -1753,7 +1917,8 @@ impl QCRule for CaptionSafeAreaRule {
                             )
                         } else if margin_is_meaningful && *margin_percent < title_safe_margin {
                             (
-                                Severity::Info,
+                                SafeAreaBand::TitleSafe,
+                                "title_safe_margin",
                                 "Caption positioned outside the title-safe area".to_string(),
                                 format!(
                                     "Margin of {:.1}% is below the {:.1}% title-safe margin but within the action-safe area",
@@ -1802,7 +1967,8 @@ impl QCRule for CaptionSafeAreaRule {
                             }
 
                             (
-                                severity,
+                                SafeAreaBand::ActionSafe,
+                                "text_block",
                                 "Caption text extends outside the action-safe area".to_string(),
                                 format!(
                                     "Estimated text block spans x {:.1}%-{:.1}%, y {:.1}%-{:.1}% at {:.0}px on a {}x{}px canvas, outside the {:.1}%-{:.1}% safe band (block size is an approximation)",
@@ -1865,7 +2031,8 @@ impl QCRule for CaptionSafeAreaRule {
                         };
 
                         (
-                            severity,
+                            SafeAreaBand::ActionSafe,
+                            "custom_anchor",
                             "Caption positioned outside the action-safe area".to_string(),
                             format!(
                                 "Estimated text box spans x {:.1}%-{:.1}%, y {:.1}%-{:.1}%, outside the {:.1}%-{:.1}% safe band (box size is an approximation)",
@@ -1883,28 +2050,64 @@ impl QCRule for CaptionSafeAreaRule {
                     }
                 };
 
-                let mut violation = QCViolation::new(self.name(), violation_severity, message)
-                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
-                    .with_entities(vec![clip.id.clone()])
-                    .with_details(details);
+                let mut finding = CaptionFinding::new(
+                    clip.id.clone(),
+                    clip.place.timeline_in_sec,
+                    clip.timeline_end(),
+                )
+                .with_metric("reason", reason)
+                .with_metric("issue", message)
+                .with_metric("detail", details);
 
                 if let Ok(position_json) = serde_json::to_value(&suggested_position) {
-                    violation = violation.with_fix(
-                        ViolationFix::new(
-                            "Move the caption inside the safe area",
-                            vec![serde_json::json!({
-                                "type": "UpdateCaption",
-                                "sequenceId": sequence.id,
-                                "trackId": track.id,
-                                "clipId": clip.id,
-                                "position": position_json
-                            })],
-                        )
-                        .with_confidence(0.95),
+                    finding = finding.with_commands(
+                        vec![serde_json::json!({
+                            "type": "UpdateCaption",
+                            "sequenceId": sequence.id,
+                            "trackId": track.id,
+                            "clipId": clip.id,
+                            "position": position_json
+                        })],
+                        // Moving a caption back inside the band is the whole
+                        // repair; nothing about the cue is left to decide.
+                        true,
                     );
                 }
 
-                violations.push(violation);
+                match band {
+                    SafeAreaBand::ActionSafe => action_safe.push(finding),
+                    SafeAreaBand::TitleSafe => title_safe.push(finding),
+                }
+            }
+
+            // One violation per band per track, not one per cue: a machine
+            // transcript anchored two percent too low is one mistake, and a
+            // report that states it once with a plan covering every cue is the
+            // one an agent can actually act on.
+            for (band, findings) in [
+                (SafeAreaBand::ActionSafe, action_safe),
+                (SafeAreaBand::TitleSafe, title_safe),
+            ] {
+                let band_severity = match band {
+                    SafeAreaBand::ActionSafe => severity,
+                    SafeAreaBand::TitleSafe => Severity::Info,
+                };
+                violations.extend(group_caption_findings(
+                    CaptionGroup {
+                        rule_name: self.name(),
+                        severity: band_severity,
+                        track_id: &track.id,
+                        details: "Each listed cue carries its own measurement under `cues`. The \
+                                  suggested fix moves every one of them back inside the band in a \
+                                  single plan."
+                            .to_string(),
+                        fix_description: "Move every listed caption inside the safe area"
+                            .to_string(),
+                        confidence: 0.95,
+                    },
+                    findings,
+                    |count| band.summary(count),
+                ));
             }
         }
 
@@ -2378,6 +2581,18 @@ mod tests {
 
         sequence.add_track(track);
         sequence
+    }
+
+    /// Reads the first per-cue entry out of a grouped caption violation.
+    ///
+    /// `caption.safe_area` reports one violation per track and puts each cue's
+    /// own measurement under `cues`, so a test about a single caption asks for
+    /// that cue rather than for prose on the group.
+    fn first_cue(violation: &QCViolation) -> &serde_json::Value {
+        violation.metrics["cues"]
+            .as_array()
+            .and_then(|cues| cues.first())
+            .expect("a grouped caption violation lists its cues")
     }
 
     fn measurements_with_black_ranges(ranges: Vec<(f64, f64)>) -> RenderMeasurements {
@@ -2982,14 +3197,17 @@ mod tests {
             .expect("rule runs");
 
         assert_eq!(violations.len(), 1);
-        let details = violations[0].details.as_deref().expect("details");
+        let detail = first_cue(&violations[0])["detail"]
+            .as_str()
+            .expect("each cue carries its own measurement")
+            .to_string();
         assert!(
-            details.contains("spans x") && details.contains("y "),
-            "both axes must be reported: {details}"
+            detail.contains("spans x") && detail.contains("y "),
+            "both axes must be reported: {detail}"
         );
         assert!(
-            details.contains("-"),
-            "the breach must be a negative top edge: {details}"
+            detail.contains("-"),
+            "the breach must be a negative top edge: {detail}"
         );
     }
 
@@ -3033,13 +3251,12 @@ mod tests {
             .expect("rule runs");
 
         assert_eq!(violations.len(), 1);
+        let cue = first_cue(&violations[0]);
         assert!(
-            violations[0]
-                .details
-                .as_deref()
-                .is_some_and(|details| details.contains("spans x")),
-            "the breach must be reported on the horizontal axis: {:?}",
-            violations[0].details
+            cue["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("spans x")),
+            "the breach must be reported on the horizontal axis: {cue}"
         );
     }
     #[tokio::test]

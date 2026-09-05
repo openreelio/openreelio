@@ -725,6 +725,8 @@ first.
 ```bash
 openreelio-cli verify --path ./demo                          # structural only
 openreelio-cli verify --path ./demo --file ./proxy.mp4       # + rendered measurements
+openreelio-cli verify --path ./demo --file ./excerpt.mp4 \
+  --file-range 10 40                                         # a partial render
 openreelio-cli verify --path ./demo --file ./proxy.mp4 \
   --target-lufs=-14 --max-true-peak=-1 --fail-on error
 ```
@@ -732,7 +734,7 @@ openreelio-cli verify --path ./demo --file ./proxy.mp4 \
 Without `--file`, only structural checks run and FFmpeg is never invoked.
 `--structural-only` makes that explicit and conflicts with `--file`.
 
-Twenty-three checks in two categories. **structural**: `sequence.empty`,
+Twenty-four checks in two categories. **structural**: `sequence.empty`,
 `timeline.gap`, `clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`,
 `audio.silent_clip`, `caption.overlap`, `caption.reading_rate`,
 `caption.out_of_bounds`, `caption.safe_area`, `shot.length_stats`,
@@ -740,8 +742,9 @@ Twenty-three checks in two categories. **structural**: `sequence.empty`,
 `sequence.duration`.
 **rendered**: `render.duration_mismatch`, `render.missing_video`,
 `render.resolution_mismatch`, `render.black_frames`, `render.frozen`,
-`audio.peak`, `audio.clipping`, `audio.loudness`. The two opt-ins run only when
-named in `--checks`; narrow any run with `--checks a,b` or `--skip a,b`.
+`audio.peak`, `audio.clipping`, `audio.loudness`, `caption.contrast`. The two
+opt-ins run only when named in `--checks`; narrow any run with `--checks a,b`
+or `--skip a,b`.
 
 `render.duration_mismatch` asks the question the other rendered checks assume
 an answer to: is the measured file this sequence at all? A stale or truncated
@@ -771,6 +774,34 @@ pass by keeping each one short. `audio.clipping` reports the flat-topped
 samples `astats` measures, at warning: a master limited on purpose reads the
 same way.
 
+`caption.contrast` (warning) asks the question no structural check can: can the
+words be read? For each caption cue the file covers it decodes one frame at the
+cue's midpoint, measures the luminance of the band the words occupy and compares
+it with the text colour. A cue whose style already carries a background box or
+an outline is never decoded — the mitigation settles it — so the cost scales
+with the captions that are actually bare. A bare cue whose text sits within
+`0.35` luminance of the picture behind it is reported with
+`{bandLuminance, bandLuminanceStddev, textLuminance, contrast, hasBox,
+hasOutline}` and an `UpdateCaption` fix applying the `standard-outline` pack.
+At most 60 frames are decoded per run, spread evenly across the file, and the
+report says so in `warnings` when the cap bites. Without `--file` the check
+emits one `info` finding saying it was not measured, rather than silently
+passing.
+
+The caption checks report **one violation per caption track**, not one per cue:
+`caption.safe_area`, `caption.out_of_bounds` and `caption.reading_rate` list
+every offending cue under `metrics.cues` (with `clipId`, `startSec`, `endSec`
+and that cue's own numbers) and in `entities`, and their `suggestedFix`
+is a single plan repairing all of them. A machine transcript anchored two
+percent too low is one mistake, and this is what stops the fix loop from having
+to run once per caption. A plan is capped at 200 steps; beyond that the finding
+splits into several violations carrying `part`/`partCount`. `autoFixable` is
+true only when the steps finish the job — `caption.reading_rate` extends a cue
+into the following gap where the gap is long enough (`repair: "extend"`), and
+where it is not it proposes a split at the nearest word boundary
+(`repair: "split"`, a `UpdateCaption` + `CreateCaption` pair) which a human or
+model still has to accept, so the group reports `autoFixable: false`.
+
 The report always lists every check that ran, was skipped, or errored — so
 "checked and clean" is distinguishable from "never looked". Each entry carries
 `id`, `category`, `status`, `violationCount`, `timeRanges`, `metrics`,
@@ -790,9 +821,33 @@ warning/info issues), `failed` (ran, found error or critical), `skipped` or
 turns exit `0` into exit `1`. Taste-adjacent findings stay at warning/info;
 `error` is reserved for objectively broken output.
 
-Measured times are file-relative while structural findings are
-timeline-relative, so `--file` expects a render of the whole sequence from zero.
-A partial render still measures correctly, but its timestamps no longer line up.
+### Verifying a partial render
+
+`--file` alone expects a render of the whole sequence from timeline zero. For an
+excerpt — anything `render start --start/--end` or `openreelio.render.range`
+produced — add `--file-range START END`, the timeline seconds the file holds
+(the same pair `frame extract --file-range` takes):
+
+```bash
+openreelio-cli render start --path ./demo --proxy --start 10 --end 40 \
+  --output ./excerpt.mp4
+openreelio-cli verify --path ./demo --file ./excerpt.mp4 --file-range 10 40
+```
+
+The rendered checks then grade the file against that window instead of the whole
+sequence, and every detection span is translated before any check sees it, so
+**every `timeRange` in the report is a timeline second** whatever was rendered
+(`measurements.timebase` says `"timeline"`, and `measurements.fileRange` /
+`target.fileRange` repeat what was declared). Without it a 30-second excerpt of
+a 90-second edit reads as a truncated deliverable and `render.duration_mismatch`
+fails the run.
+
+`START` must be non-negative and less than `END`; anything else is exit `2`.
+`--file-range` requires `--file`. When the file's own length disagrees with the
+declared window by more than a frame the run adds a `warnings` line rather than
+failing: the window is the caller's claim about a file it rendered on purpose,
+and `render.duration_mismatch` grades a windowed run at warning for the same
+reason.
 
 ### Feeding a fix back
 
@@ -1243,11 +1298,14 @@ stats it, and media that is not readable on this machine is refused as missing.
 Neither error echoes the resolved path.
 
 **`openreelio.verify`** is read-only-safe and always advertised. It accepts
-`{sequenceId?, file?, structuralOnly?, checks?[], skip?[], failOn?, targetLufs?,
-maxTruePeak?, durationToleranceSec?, timeoutSec?}` and returns
+`{sequenceId?, file?, fileRange?: [start, end], structuralOnly?, checks?[],
+skip?[], failOn?, targetLufs?, maxTruePeak?, durationToleranceSec?,
+timeoutSec?}` and returns
 the same report document the CLI prints — so an MCP client gets the fix loop
 without shelling out. `file` must be inside the project directory, so render
-into the project before verifying.
+into the project before verifying. `fileRange` is `--file-range`: the timeline
+seconds a *partial* render holds, without which an excerpt reads as a truncated
+deliverable.
 
 **`openreelio.render.range`** draws the draft the judge loop looks at, over the
 same core path as `render start --proxy --start/--end`. It accepts
@@ -1260,7 +1318,8 @@ are kept, and one call may cover at most 300 s of timeline — see
 of the file with `frame.extract {file, between: [0, durationSec], grid: "4x3"}`,
 which always has something to show; `frame.extract {file, fileRange: [start,
 start + durationSec], atCuts: true, grid: "auto"}` when the rendered range holds
-cuts; and `verify {file}` for the measurements.
+cuts; and `verify {file, fileRange: [start, start + durationSec]}` for the
+measurements — a draft is an excerpt, so pass the range it covers.
 
 **`openreelio.frame.extract`** is the judge loop over MCP: it answers with the
 picture itself, as an MCP `image` content block, so a vision model can look at

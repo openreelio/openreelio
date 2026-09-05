@@ -6,6 +6,8 @@ with a measurement instead of a guess.
 ```bash
 openreelio-cli verify --path ./demo                       # structural only
 openreelio-cli verify --path ./demo --file ./proxy.mp4    # + rendered measurements
+openreelio-cli verify --path ./demo --file ./excerpt.mp4 \
+  --file-range 10 40                                      # a partial render
 openreelio-cli verify --path ./demo --file ./proxy.mp4 \
   --target-lufs=-14 --max-true-peak=-1 --fail-on error [--json-pretty]
 ```
@@ -15,8 +17,33 @@ Without `--file`, only structural checks run and FFmpeg is never invoked.
 
 Negative numbers need the `=` form: `--target-lufs=-14`, `--max-true-peak=-1`.
 
-Measured times are file-relative while structural findings are
-timeline-relative, so `--file` expects a render of the whole sequence from zero.
+## Verifying a partial render
+
+`--file` alone expects a render of the whole sequence from timeline zero. For an
+excerpt - anything `render start --start/--end` produced - add
+`--file-range START END`, the timeline seconds the file holds (the same pair
+`frame extract --file-range` takes):
+
+```bash
+openreelio-cli render start --path ./demo --proxy --start 10 --end 40 \
+  --output ./excerpt.mp4
+openreelio-cli verify --path ./demo --file ./excerpt.mp4 --file-range 10 40
+```
+
+The rendered checks then grade the file against that window instead of the whole
+sequence, and every detection span is translated before any check sees it, so
+**every `timeRange` in the report is a timeline second** whatever was rendered
+(`measurements.timebase` is `"timeline"`; `measurements.fileRange` and
+`target.fileRange` repeat the declaration). Without it a 30-second excerpt of a
+90-second edit reads as a truncated deliverable and `render.duration_mismatch`
+fails the run.
+
+`START` must be non-negative and less than `END`, and `--file-range` requires
+`--file`; anything else is exit `2`. A file whose own length disagrees with the
+declared window by more than a frame adds a `warnings` line rather than failing,
+and `render.duration_mismatch` grades a windowed run at warning: the window is
+your own claim about a file you rendered on purpose, not a missing
+deliverable.
 
 ## Exit codes
 
@@ -50,7 +77,22 @@ to the caller, because the material to do it with is a judgement call.
 
 **rendered** (require `--file`) — `render.duration_mismatch`,
 `render.missing_video`, `render.resolution_mismatch`, `render.black_frames`,
-`render.frozen`, `audio.peak`, `audio.clipping`, `audio.loudness`.
+`render.frozen`, `audio.peak`, `audio.clipping`, `audio.loudness`,
+`caption.contrast`.
+
+The caption checks report **one violation per caption track**, not one per cue.
+`caption.safe_area`, `caption.out_of_bounds` and `caption.reading_rate` list
+every offending cue under `metrics.cues` (`clipId`, `startSec`, `endSec` and
+that cue's own numbers) and in `entities`, and their `suggestedFix` is a single
+plan that repairs all of them - a machine transcript anchored two percent too
+low is one mistake, not forty-one, and the fix loop runs once instead of once
+per caption. A plan is capped at 200 steps; past that the finding splits into
+violations carrying `part`/`partCount`. `autoFixable` is true only when the
+steps finish the job: `caption.reading_rate` extends a cue into the following
+gap when the gap is long enough (`repair: "extend"`), and otherwise proposes a
+split at the nearest word boundary (`repair: "split"`, an `UpdateCaption` +
+`CreateCaption` pair) that a human still has to accept - so that group reports
+`autoFixable: false` while still carrying the plan to read.
 
 `render.duration_mismatch` compares the measured file against the length a
 full-range render of the sequence writes — clips the export drops (disabled, or
@@ -76,6 +118,19 @@ error. `render.black_frames` grades on the **total** black in the program the
 same way, so a render broken into several dark stretches cannot pass by keeping
 each one under half the running time.
 
+`caption.contrast` (warning) asks whether the words can be read, which no
+structural check can answer. For each caption cue the file covers it decodes one
+frame at the cue's midpoint, measures the luminance of the band the words occupy
+and compares it with the text colour. A cue that already carries a background
+box or an outline is never decoded - the mitigation settles it - so the cost
+scales with the bare captions only. A bare cue within `0.35` luminance of its
+background is reported with `{bandLuminance, bandLuminanceStddev, textLuminance,
+contrast, hasBox, hasOutline}` and an `UpdateCaption` fix applying the
+`standard-outline` pack. At most 60 frames are decoded per run, spread evenly
+across the file, and `warnings` says so when the cap bites. Without `--file` the
+check emits a single `info` finding - "not measured" - instead of passing over a
+picture nobody looked at.
+
 `audio.clipping` reports the flat-topped samples `astats` measures, at warning
 — a master limited on purpose measures the same way, and `audio.peak` keeps the
 objectively broken half.
@@ -88,12 +143,12 @@ Narrow any run with `--checks a,b` or `--skip a,b`.
 ```json
 {
   "status": "warning", "passed": true, "checkedAt": "…", "durationMs": 812,
-  "target": { "sequenceId": "…", "renderedFile": "…", "measured": true, "selectedChecks": ["…"] },
+  "target": { "sequenceId": "…", "renderedFile": "…", "fileRange": null, "measured": true, "selectedChecks": ["…"] },
   "summary": { "critical": 0, "error": 0, "warning": 1, "info": 1, "skipped": 2 },
   "checks": [ { "id": "audio.loudness", "category": "rendered", "status": "warned",
                 "passed": false, "severity": "warning", "violationCount": 1, "timeRanges": [],
                 "metrics": { }, "autoFixable": true, "suggestedFix": { } } ],
-  "measurements": { "measured": true, "durationSec": 12.0,
+  "measurements": { "measured": true, "fileRange": null, "timebase": "timeline", "durationSec": 12.0,
                     "videoStream": { "width": 1920, "height": 1080, "fps": 30.0 },
                     "blackRanges": [], "freezeRanges": [], "silenceRanges": [],
                     "integratedLufs": -21.8, "loudnessRangeLu": 0.0,

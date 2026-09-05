@@ -747,7 +747,7 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.verify",
             "OpenReelio verify",
-            "Run deterministic quality control over a sequence and, with 'file', over a rendered export. Every check that ran, was skipped, or errored is reported, so 'checked and clean' is distinguishable from 'never checked'. Per-check status is passed (ran, found nothing), warned (ran, warning/info findings only), failed (ran, error or critical findings), skipped, or errored; checks[].passed is true only for 'passed', while the top-level status/passed follow severity. Violations carry an executable suggestedFix plan.",
+            "Run deterministic quality control over a sequence and, with 'file', over a rendered export. Every check that ran, was skipped, or errored is reported, so 'checked and clean' is distinguishable from 'never checked'. Per-check status is passed (ran, found nothing), warned (ran, warning/info findings only), failed (ran, error or critical findings), skipped, or errored; checks[].passed is true only for 'passed', while the top-level status/passed follow severity. Violations carry an executable suggestedFix plan; caption checks report one violation per track whose fix repairs every listed cue at once, so the loop does not have to be run once per caption.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -757,7 +757,14 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
                     },
                     "file": {
                         "type": "string",
-                        "description": "Rendered file to measure for black/freeze/silence, EBU R128 loudness, and peaks. Must be inside the project directory; a relative path resolves against the project root and anything outside it is rejected, so render into the project before verifying. Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and compared against timeline times, so pass a full-sequence render rather than a partial one."
+                        "description": "Rendered file to measure for black/freeze/silence, EBU R128 loudness, peaks, and caption legibility. Must be inside the project directory; a relative path resolves against the project root and anything outside it is rejected, so render into the project before verifying. Without it only structural checks run and FFmpeg is never invoked. A whole-sequence render from timeline zero needs nothing else; to judge a PARTIAL render pass 'fileRange' with the timeline seconds it holds."
+                    },
+                    "fileRange": {
+                        "type": "array",
+                        "items": { "type": "number", "minimum": 0 },
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "Timeline seconds 'file' holds, as [start, end] — the same pair openreelio.render.range reports and openreelio.frame.extract takes. Declaring it grades the render's length, black, freeze, silence and caption contrast against that window instead of against the whole sequence, and every rendered finding's timeRange is reported in TIMELINE seconds. Without it a partial render reads as a truncated deliverable and render.duration_mismatch fails the run. Only means something with 'file'."
                     },
                     "structuralOnly": {
                         "type": "boolean",
@@ -952,7 +959,7 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.render.range",
             "OpenReelio draft render",
-            &format!("Render a range of the timeline to a draft video file, for the questions a still cannot answer: motion, pacing, whether a transition reads. The file lands in the project's own agent render cache (.openreelio/cache/renders/agent/) and the caller does not choose where; only the {MAX_AGENT_RENDERS} newest drafts are kept, so use the reported outputPath before it ages out. A draft is a look, not a deliverable: at most {MAX_AGENT_RENDER_RANGE_SEC:.0}s of timeline per call, so render around the moment in question rather than the whole edit. Then judge it without re-rendering: openreelio.frame.extract with {{file, between:[0, durationSec], grid:'4x3', labelCells:true}} sweeps the whole draft and always has something to show, and openreelio.frame.extract with {{file, fileRange:[start, start + durationSec], atCuts:true, grid:'auto'}} sheets the cuts when the rendered range holds any — a sampler over a range with no such event errors rather than returning an empty sheet. openreelio.verify with {{file}} measures black, freeze, silence, loudness and peaks over the same file."),
+            &format!("Render a range of the timeline to a draft video file, for the questions a still cannot answer: motion, pacing, whether a transition reads. The file lands in the project's own agent render cache (.openreelio/cache/renders/agent/) and the caller does not choose where; only the {MAX_AGENT_RENDERS} newest drafts are kept, so use the reported outputPath before it ages out. A draft is a look, not a deliverable: at most {MAX_AGENT_RENDER_RANGE_SEC:.0}s of timeline per call, so render around the moment in question rather than the whole edit. Then judge it without re-rendering: openreelio.frame.extract with {{file, between:[0, durationSec], grid:'4x3', labelCells:true}} sweeps the whole draft and always has something to show, and openreelio.frame.extract with {{file, fileRange:[start, start + durationSec], atCuts:true, grid:'auto'}} sheets the cuts when the rendered range holds any — a sampler over a range with no such event errors rather than returning an empty sheet. openreelio.verify with {{file, fileRange:[start, start + durationSec]}} measures black, freeze, silence, loudness, peaks and caption legibility over the same file — pass the fileRange or the draft reads as a truncated deliverable."),
             serde_json::json!({
                 "type": "object",
                 "required": ["start", "end"],
@@ -2370,6 +2377,7 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
     let request = VerifyRequest {
         sequence: optional_string_argument(&arguments, "sequenceId")?,
         file,
+        file_range: optional_non_negative_number_array(&arguments, "fileRange")?,
         structural_only,
         checks: optional_string_array_argument(&arguments, "checks")?,
         skip: optional_string_array_argument(&arguments, "skip")?,
@@ -4851,6 +4859,70 @@ mod tests {
             .as_array()
             .expect("checks array")
             .is_empty());
+    }
+
+    /// Feature: Verifying a partial render over MCP
+    /// Scenario: should advertise the window a partial render declares
+    ///
+    /// The tool's schema is the only thing a client reads before calling, and
+    /// it is also what the unknown-argument guard checks against: a `fileRange`
+    /// missing from it would be refused as a typo.
+    #[test]
+    fn should_advertise_the_file_range_argument_on_the_verify_tool() {
+        let state = McpServerState::default();
+        let response = handle_jsonrpc_request(&state, request("tools/list", serde_json::json!({})));
+        let tools = response["result"]["tools"].as_array().expect("tools array");
+        let verify = tools
+            .iter()
+            .find(|tool| tool["name"] == "openreelio.verify")
+            .expect("verify is always advertised");
+
+        let file_range = &verify["inputSchema"]["properties"]["fileRange"];
+        assert_eq!(file_range["type"], "array");
+        assert_eq!(file_range["minItems"], 2);
+        assert_eq!(file_range["maxItems"], 2);
+    }
+
+    /// Feature: Verifying a partial render over MCP
+    /// Scenario: should refuse a window that names no stretch of timeline
+    ///
+    /// The refusal comes from the shared engine, so it has to arrive in the
+    /// client's own vocabulary rather than the command line's.
+    #[test]
+    fn should_refuse_a_verify_file_range_that_is_not_a_span() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("verify_range_project");
+        drop(
+            openreelio_core::ActiveProject::create("Verify Range", project_path.clone())
+                .expect("project"),
+        );
+
+        let state = McpServerState {
+            project: Some(project_path.clone()),
+            ..Default::default()
+        };
+        let render = project_path.join("excerpt.mp4");
+        std::fs::write(&render, b"not really a video").expect("placeholder render");
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.verify",
+                    "arguments": { "file": "excerpt.mp4", "fileRange": [40.0, 10.0] }
+                }),
+            ),
+        );
+
+        let message = response["result"]["content"][0]["text"]
+            .as_str()
+            .or_else(|| response["error"]["message"].as_str())
+            .unwrap_or_else(|| panic!("a refusal carries a message: {response}"));
+        assert!(
+            message.contains("fileRange"),
+            "the refusal must name the argument the client sent: {message}"
+        );
     }
 
     // ── openreelio.frame.extract ────────────────────────────────────────────
