@@ -3,6 +3,9 @@
 //! Automated quality control rules for video editing validation.
 //! Provides rules engine, built-in rules, and auto-fix capabilities.
 
+pub mod caption_contrast;
+/// Groups repeated per-cue caption findings into one actionable violation.
+pub(crate) mod caption_group;
 pub mod context;
 pub mod engine;
 pub mod measure;
@@ -16,7 +19,13 @@ pub mod violation;
 mod fix_roundtrip_tests;
 
 // Re-export main types
-pub use context::{MeasuredStreams, MeasuredVideoStream, QCContext, RenderMeasurements};
+pub use caption_contrast::{
+    sample_caption_bands, CaptionBandSample, CaptionBandSampling, CaptionContrastRule,
+    CaptionSampleCoverage, CaptionSampleOptions, CAPTION_CONTRAST_CHECK_ID,
+};
+pub use context::{
+    MeasuredStreams, MeasuredVideoStream, MeasuredWindow, QCContext, RenderMeasurements,
+};
 pub use engine::{
     QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleFailure, RuleOutcome, RuleStatus,
 };

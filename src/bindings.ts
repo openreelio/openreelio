@@ -10226,10 +10226,18 @@ sequence?: string | null;
  * Rendered video inside the project to measure.
  * 
  * Without it only structural checks run and FFmpeg is never invoked.
- * Measured times are file-relative and compared against timeline times, so
- * this should be a render of the whole sequence from timeline zero.
+ * A whole-sequence render from timeline zero needs nothing else; a partial
+ * render must declare its span with [`file_range`](Self::file_range).
  */
 file?: string | null; 
+/**
+ * Timeline seconds `file` holds, as `[start, end]`.
+ * 
+ * Same semantics as the frame probe's own `fileRange`: the rendered checks
+ * grade the file against this window and every finding is reported in
+ * timeline seconds.
+ */
+fileRange?: number[] | null; 
 /**
  * Run structural checks only and never touch FFmpeg.
  */

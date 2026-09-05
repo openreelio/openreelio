@@ -38,6 +38,11 @@ pub struct VerifyArgs {
     #[arg(long, conflicts_with = "structural_only")]
     pub file: Option<PathBuf>,
 
+    /// Timeline seconds --file holds, as two values START END; grades a partial
+    /// render against that window and reports findings in timeline seconds
+    #[arg(long, num_args = 2, value_names = ["START", "END"], requires = "file")]
+    pub file_range: Option<Vec<f64>>,
+
     /// Run structural checks only and never touch FFmpeg
     #[arg(long)]
     pub structural_only: bool,
@@ -86,6 +91,7 @@ impl VerifyArgs {
             VerifyRequest {
                 sequence: self.sequence,
                 file: self.file,
+                file_range: self.file_range,
                 structural_only: self.structural_only,
                 checks: self.checks,
                 skip: self.skip,

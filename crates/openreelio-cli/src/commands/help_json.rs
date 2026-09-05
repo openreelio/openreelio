@@ -833,7 +833,8 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
-                    "file": { "type": "string", "required": false, "desc": "Rendered file to measure (black/freeze/silence detection, EBU R128 loudness, peaks). Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and are compared against timeline times, so pass a full-sequence render rather than a partial one." },
+                    "file": { "type": "string", "required": false, "desc": "Rendered file to measure (black/freeze/silence detection, EBU R128 loudness, peaks, caption legibility). Without it only structural checks run and FFmpeg is never invoked. A whole-sequence render from timeline zero needs nothing else; for a PARTIAL render add --file-range." },
+                    "file-range": { "type": "string", "required": false, "desc": "Timeline seconds --file holds, as two values START END (the same pair 'render start --start/--end' rendered and 'frame extract --file-range' takes). The rendered checks then grade the file against that window instead of the whole sequence, and every rendered finding's timeRange is reported in TIMELINE seconds. Without it a partial render reads as a truncated deliverable and render.duration_mismatch fails the run. Requires --file; START must be below END and the window must name timeline the sequence actually has, or the run exits 2 rather than grading the file against nothing." },
                     "structural-only": { "type": "boolean", "required": false, "desc": "Run structural checks only and never touch FFmpeg; conflicts with --file" },
                     "checks": { "type": "string", "required": false, "desc": verify_checks_desc() },
                     "skip": { "type": "string", "required": false, "desc": "Comma-separated check IDs to disable" },
@@ -844,7 +845,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "timeout-sec": { "type": "number", "required": false, "desc": "Timeout for the rendered-file measurement pass in seconds (default: 600)" },
                     "json-pretty": { "type": "boolean", "required": false, "desc": "Pretty-print the JSON output" }
                 },
-                "example": "openreelio-cli verify --path ./project --file proxy.mp4 --target-lufs=-14 --fail-on error"
+                "example": "openreelio-cli verify --path ./project --file proxy.mp4 --file-range 10 40 --target-lufs=-14 --fail-on error"
             },
             "mcp": {
                 "description": "Serve OpenReelio MCP tools for external AI agents. Read-only by default; mutating tools appear with a host-issued approval token or with --allow-write.",
