@@ -90,6 +90,15 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
                     }
                 });
 
+            // The media-length guards `help-json` promises of the whole
+            // command surface: an insert measures an asset nothing has read
+            // yet, and a trim past the end of the media is refused. Applying
+            // them here rather than only in the hand-written verbs is what
+            // stops `command execute --type TrimClip` from being the way round
+            // a refusal `timeline trim` makes.
+            let warnings =
+                crate::media_probe::guard_command_media_length(&mut project, &typed_payload)?;
+
             let command = typed_payload.build_command(&project.path);
             // Through the same recorder every other mutating verb uses, so this
             // one cannot drift from them about what `--affected` will point at.
@@ -128,6 +137,7 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
                 "sequenceId": sequence_id,
                 "affectedRanges": affected_ranges,
                 "changes": camel_cased_changes(&result.changes),
+                "warnings": warnings,
             }))
         }
 

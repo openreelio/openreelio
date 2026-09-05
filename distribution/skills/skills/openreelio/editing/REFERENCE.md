@@ -29,10 +29,21 @@ openreelio-cli timeline set-format --path ./demo --fps 25 --width 1080 --height 
 The trim flags are `--source-in` and `--source-out` (source-media in/out points),
 not `--in` / `--out`.
 
-> **`timeline insert` places a 10-second clip.** `asset import` records no probed
-> duration, so the length is the default regardless of the file, and a second
-> `timeline insert --at 4.0` is refused as an overlap. Trim each clip to its real
-> length — `analysis shots` gives `totalDurationSec` — before inserting after it.
+> **`timeline insert` places a clip as long as the media.** An asset with no
+> recorded duration — one imported with `--no-probe` — is probed first and
+> updated through `UpdateAsset`. `timeline trim --source-out` past the end of
+> the media is refused, and the error names the asset's measured length. Both
+> hold on every surface: this verb, `command execute --type
+> InsertMedia|TrimClip`, `plan execute` and the MCP tools. Only an asset nothing
+> could probe still takes the 10-second default. Chain the next insert off the
+> first clip's *reported* end, not off the nominal length.
+
+> **A video with sound arrives as two clips.** The insert mutes the picture clip
+> and puts the sound on its own audio track as a linked clip, creating that
+> track when there is none — `linkedAudio {trackId, clipId, createdTrack}` in
+> the response, both ids in `createdIds`. `trim`, `split`, `move` and `remove`
+> apply to the **one clip named**; nothing follows the link group, so trim the
+> audio clip id as well or the sound outlives the picture.
 
 `timeline set-format` changes the sequence's frame rate, canvas size and audio
 format. Every option is optional and at least one is required; the rest keep

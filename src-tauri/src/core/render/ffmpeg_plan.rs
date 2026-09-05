@@ -329,6 +329,12 @@ pub(super) fn build_sequence_ffmpeg_args(
                         &mut filter_complex,
                         handles,
                         resolve_trim_source_kind(asset, &mut source_frame_counts),
+                        // The video stream's own length, falling back to the
+                        // container's - the same reading the transition planner
+                        // and export validation take, and the same one asset
+                        // import records, so no two of them can disagree about
+                        // where the media ends.
+                        resolve_asset_source_duration(asset, &mut source_durations),
                     );
 
                     if clip_filter_graph.has_video_effects() {

@@ -84,12 +84,18 @@ so pin it with `--after-op <OP_ID>`.
 Install the CLI, point it at a project, and confirm the media toolchain.
 Load [Setup](./setup/REFERENCE.md).
 
-Two things about a fresh project that will otherwise cost you a render:
+One thing about a fresh project will otherwise cost you a render:
 `project create` makes a **30fps 1920x1080** sequence whatever the media is —
-pass `--fps/--width/--height`, or run `timeline set-format` — and `asset import`
-records **no probed duration**, so every clip `timeline insert` places is 10
-seconds long and a second insert at 4.0s is refused as an overlap. Trim to the
-real length (`analysis shots` → `totalDurationSec`) before building on it.
+pass `--fps/--width/--height`, or run `timeline set-format`. Asset length is
+handled for you: `asset import` probes the file, so `timeline insert` places a
+clip as long as the media and a second insert at its reported end does not
+overlap. Pass `--no-probe` to skip the reading in bulk; the first insert of that
+asset probes it lazily before placing the clip.
+
+One thing to carry into every later edit: inserting a video that carries sound
+places **two** clips — a muted picture clip and a linked audio clip on its own
+audio track (`linkedAudio` in the response). `trim`, `split`, `move` and
+`remove` act on the single clip you name, so edit the audio clip id too.
 
 ## Perception
 

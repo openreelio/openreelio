@@ -375,6 +375,12 @@ impl Command for InsertMediaCommand {
 /// Returns `(Some((source_in, source_out)), duration)` when a range is known,
 /// or `(None, default_duration)` when the asset has neither a known duration
 /// nor an explicit range.
+///
+/// A recorded duration of `0` or a non-finite one is read as *unknown* rather
+/// than as a length. Assets imported before the probe recorded only measurable
+/// readings carry exactly that: FFprobe gives a PNG no `format.duration` at
+/// all, which lands as `Some(0.0)`, and an insert that trusted it would fail
+/// with "sourceOut must be greater than sourceIn" instead of placing the still.
 pub fn media_insert_source_range(
     asset_id: &str,
     asset_duration_sec: Option<TimeSec>,
@@ -392,7 +398,8 @@ pub fn media_insert_source_range(
         Ok(())
     }
 
-    validate_time(asset_duration_sec, "asset duration")?;
+    let asset_duration_sec =
+        asset_duration_sec.filter(|duration| duration.is_finite() && *duration > 0.0);
     validate_time(source_in, "sourceIn")?;
     validate_time(source_out, "sourceOut")?;
 
@@ -551,11 +558,32 @@ mod tests {
 
     #[test]
     fn media_insert_source_range_rejects_invalid_times() {
-        assert!(media_insert_source_range("asset", Some(f64::NAN), None, None).is_err());
         assert!(media_insert_source_range("asset", Some(12.0), Some(-1.0), None).is_err());
         assert!(
             media_insert_source_range("asset", Some(12.0), Some(0.0), Some(f64::INFINITY)).is_err()
         );
+    }
+
+    /// A duration nobody could measure is not a length.
+    ///
+    /// Projects recorded before the import probe filtered its reading carry
+    /// `Some(0.0)` for a PNG, and trusting it turned every insert of that still
+    /// into "sourceOut must be greater than sourceIn".
+    #[test]
+    fn media_insert_source_range_reads_an_unmeasurable_duration_as_unknown() {
+        for duration in [Some(0.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            let (range, duration_sec) = media_insert_source_range("asset", duration, None, None)
+                .expect("an unmeasurable duration falls back to the default length");
+            assert_eq!(range, None);
+            assert_eq!(duration_sec, DEFAULT_MEDIA_INSERT_DURATION_SEC);
+        }
+
+        // An explicit range still wins: nothing about it depends on the asset.
+        let (range, duration_sec) =
+            media_insert_source_range("asset", Some(0.0), Some(1.0), Some(3.0))
+                .expect("an explicit range is independent of the asset's duration");
+        assert_eq!(range, Some((1.0, 3.0)));
+        assert_eq!(duration_sec, 2.0);
     }
 
     #[test]

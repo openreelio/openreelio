@@ -1,9 +1,12 @@
 //! Timeline editing commands: insert, move, trim, split, speed, tracks, effects.
 
+use crate::media_probe;
 use crate::output;
 use crate::validate;
 use clap::Subcommand;
+use openreelio_core::assets::AssetKind;
 use openreelio_core::commands::*;
+use openreelio_core::ActiveProject;
 use std::path::PathBuf;
 
 #[derive(Subcommand)]
@@ -408,11 +411,34 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             // that carry audio) instead of re-implementing a bare single-clip
             // insert. For audio-less assets this behaves identically to a plain
             // clip insert.
-            let cmd = InsertMediaCommand::new(&seq_id, &track, &asset, at);
+            // An asset imported before probing existed — or with `--no-probe`
+            // — carries no duration, and an insert with no duration falls back
+            // to a default length whatever the media is. Measuring it here, and
+            // recording the measurement through a command, is what keeps a
+            // four-second file from becoming a ten-second clip.
+            let measurement = media_probe::measure_asset(&project, &asset);
+            let mut warnings = measurement.warnings;
+
             let mut edit = super::EditRecorder::begin(&project, &seq_id);
+            // Inside the insert's own batch, so the hand-off record and the
+            // reported ranges cover the measurement and the placement together.
+            // Undo still steps per operation: `timeline undo` after this takes
+            // the clip away and leaves the measured duration recorded, which is
+            // what a caller wants — the file's length did not stop being true.
+            if let Some(command) = measurement.command {
+                edit.execute(&mut project, Box::new(command)).map_err(|e| {
+                    anyhow::anyhow!("Recording the probed asset duration failed: {}", e)
+                })?;
+            }
+
+            let cmd = InsertMediaCommand::new(&seq_id, &track, &asset, at);
             let result = edit
                 .execute(&mut project, Box::new(cmd))
                 .map_err(|e| anyhow::anyhow!("Insert failed: {}", e))?;
+
+            let linked_audio =
+                super::linked_audio_json(&project.state, &seq_id, &result.created_ids);
+            warnings.extend(unmeasured_asset_warning(&project, &asset));
             let affected_ranges = edit.finish(&mut project)?;
 
             output::print_json(&serde_json::json!({
@@ -421,6 +447,8 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
                 "createdIds": result.created_ids,
                 "sequenceId": seq_id,
                 "affectedRanges": affected_ranges,
+                "linkedAudio": linked_audio,
+                "warnings": warnings,
             }))
         }
 
@@ -497,6 +525,17 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             validate::trim_points_ordered(source_in, source_out)?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
+            // Trimming past the end of the media is how a clip that renders as
+            // black gets made by hand; refusing it here names the length the
+            // caller should have asked for. The same core guard runs on every
+            // other surface that trims — see `media_probe::guard_command_media_length`.
+            openreelio_core::commands::ensure_source_out_within_media(
+                &project.state,
+                &seq_id,
+                &clip,
+                source_out,
+            )
+            .map_err(|error| anyhow::anyhow!("Trim failed: {}", error))?;
             let cmd = TrimClipCommand::new(
                 &seq_id, &track, &clip, source_in, source_out, None, // timeline_in
             );
@@ -773,4 +812,33 @@ fn merge_summary(
     };
     object.extend(fields);
     Ok(())
+}
+
+// =============================================================================
+// Media-length guards
+// =============================================================================
+
+/// Warns that an insert took the default length because nothing measured it.
+///
+/// The lazy probe runs first, so this only fires when the measurement itself
+/// could not be made — no FFmpeg, a missing file, a container FFprobe cannot
+/// read. The clip is then as long as the fallback rather than as long as the
+/// media, which is exactly the surprise an agent needs in the response instead
+/// of in a render.
+fn unmeasured_asset_warning(project: &ActiveProject, asset_id: &str) -> Option<String> {
+    let asset = project.state.assets.get(asset_id)?;
+    // A still has no length; it holds whatever slot the timeline gives it.
+    if asset.kind == AssetKind::Image {
+        return None;
+    }
+    if asset
+        .duration_sec
+        .is_some_and(|duration| duration.is_finite() && duration > 0.0)
+    {
+        return None;
+    }
+
+    Some(format!(
+        "Asset '{asset_id}' has no known duration, so the inserted clip takes the default length and may overrun its media"
+    ))
 }

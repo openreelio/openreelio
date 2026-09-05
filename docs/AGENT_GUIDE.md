@@ -113,18 +113,20 @@ openreelio-cli project create --name "Vertical" --path ./vertical --fps 25 --wid
 openreelio-cli project open   --path ./demo
 openreelio-cli project info   --path ./demo
 openreelio-cli project save   --path ./demo
-openreelio-cli asset import   --path ./demo --file ./footage.mp4 [--name "A-roll"]
+openreelio-cli asset import   --path ./demo --file ./footage.mp4 [--name "A-roll"] [--no-probe]
 openreelio-cli asset list     --path ./demo
 openreelio-cli asset info     --path ./demo --id <ASSET_ID>
 openreelio-cli asset remove   --path ./demo --id <ASSET_ID>
 ```
 
-> **Duration gap.** `asset import` does not probe media duration. A clip placed
-> with `timeline insert` therefore gets the 10-second default length regardless
-> of how long the file actually is. The reliable source of real duration is
-> perception: `analysis shots` returns `totalDurationSec`, and `analysis audio`
-> returns `durationSec`. Insert, then `timeline trim --source-in 0
-> --source-out <totalDurationSec>` to make the clip match the media.
+> **Duration.** `asset import` probes the file with ffprobe, exactly as the app
+> does, so the asset records `durationSec` and `video {width,height,fps}` and a
+> clip placed with `timeline insert` is as long as the media. `asset info` and
+> `asset list` report both. `--no-probe` skips the reading for bulk imports; the
+> asset then records no duration, and `timeline insert` probes it lazily and
+> records what it found through `UpdateAsset` before placing the clip. When no
+> probe is possible at all — FFmpeg unresolvable, the file gone — the response
+> says so in `warnings[]` and the clip falls back to the 10-second default.
 
 ## 4. Editing
 
@@ -154,10 +156,24 @@ openreelio-cli timeline redo --path ./demo
 The trim flags are `--source-in` / `--source-out` (source-media in/out points),
 not `--in` / `--out`.
 
-> **Insert length.** `timeline insert` gives the clip the 10-second default
-> length, because `asset import` records no probed duration — see the *Duration
-> gap* note in §3. Trim it to the real length before inserting anything after it,
-> or a second `timeline insert --at 4.0` is refused as an overlap.
+> **Insert length.** `timeline insert` gives the clip the length of the media,
+> so two inserts at `0` and at the first clip's end do not overlap. Read the
+> first clip's reported end rather than assuming the nominal length — a
+> container rounds to its own timebase. `timeline trim --source-out` past the
+> end of the media is refused, and the error names the asset's measured length.
+> Both hold on every surface that inserts or trims: this verb, `command execute
+> --type InsertMedia|TrimClip`, `plan execute` and the MCP tools. Only an asset
+> nothing could probe falls back to the 10-second default — see the *Duration*
+> note in §3.
+
+> **A video with sound is placed as two clips.** `timeline insert` does what a
+> drag-and-drop in the app does: the picture clip is muted and the sound goes
+> onto its own audio track as a *linked* clip, creating that track if the
+> sequence has none. The response names it under `linkedAudio`
+> `{trackId, clipId, createdTrack}` and lists both ids in `createdIds`.
+> `timeline trim`, `split`, `move` and `remove` each act on the **one clip you
+> name** — following the link group is not implemented — so trim the audio clip
+> id as well, or the sound outlives the picture.
 
 `timeline set-format` changes the frame rate, canvas size and audio format of a
 sequence; every option is optional and at least one is required. A decimal
