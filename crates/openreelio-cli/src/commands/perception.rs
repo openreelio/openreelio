@@ -412,6 +412,9 @@ pub fn audio(args: AudioArgs) -> anyhow::Result<()> {
         "durationSec": metadata.duration_sec,
         "bpm": profile.bpm,
         "peakDb": profile.peak_db,
+        "truePeakDbtp": profile.true_peak_dbtp,
+        "integratedLufs": profile.integrated_lufs,
+        "loudnessRangeLu": profile.loudness_range_lu,
         "spectralCentroidHz": profile.spectral_centroid_hz,
         "loudnessSampleCount": profile.loudness_profile.len(),
         "silenceRegionCount": profile.silence_regions.len(),
@@ -964,6 +967,7 @@ mod tests {
             peak_db: -3.0,
             silence_regions: Vec::new(),
             speech_regions: Vec::new(),
+            ..Default::default()
         });
 
         let applied = apply_silence_regions(

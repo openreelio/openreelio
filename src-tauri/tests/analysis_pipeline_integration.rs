@@ -27,6 +27,7 @@ fn create_mock_audio_profile() -> AudioProfile {
         peak_db: -3.0,
         silence_regions: vec![],
         speech_regions: vec![SpeechRegion::new(0.0, 12.0)],
+        ..Default::default()
     }
 }
 
@@ -307,6 +308,7 @@ async fn test_compatibility_score_dissimilar_content() {
         peak_db: -3.0,
         silence_regions: vec![],
         speech_regions: vec![SpeechRegion::new(0.0, 2.6)],
+        ..Default::default()
     });
     let esd = EsdGenerator::generate(&ref_bundle).unwrap();
 
@@ -326,6 +328,7 @@ async fn test_compatibility_score_dissimilar_content() {
         peak_db: -20.0,
         silence_regions: vec![],
         speech_regions: vec![SpeechRegion::new(0.0, 120.0)],
+        ..Default::default()
     });
 
     let score = StylePlanner::compute_compatibility_score(&esd, &source_bundle);

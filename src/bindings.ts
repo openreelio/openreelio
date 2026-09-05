@@ -4069,6 +4069,14 @@ interpolation?: KeyframeInterpolation }
  */
 export type AudioProfile = { 
 /**
+ * Version of the loudness/peak measurement that produced this profile.
+ * 
+ * Profiles cached by an older measurement are dropped on load rather than
+ * trusted; see [`AUDIO_MEASUREMENT_VERSION`]. Legacy bundles carry no
+ * field and deserialize as version 0.
+ */
+measurementVersion?: number; 
+/**
  * Estimated beats per minute (null if no clear rhythm detected)
  */
 bpm: number | null; 
@@ -4077,16 +4085,33 @@ bpm: number | null;
  */
 spectralCentroidHz: number; 
 /**
- * Per-second RMS loudness values in dB.
+ * Per-second momentary loudness values in LUFS.
  * 
  * Sampled at 1 Hz (one value per second), so `loudness_profile[i]`
- * represents the average loudness during the i-th second of audio.
+ * represents the average momentary loudness during the i-th second of
+ * audio. Windows the meter reports as digital silence are dropped rather
+ * than averaged in, so the profile can be shorter than the audio.
  */
 loudnessProfile: number[]; 
 /**
- * Maximum loudness in dB
+ * Peak level in dB relative to full scale.
+ * 
+ * True peak when the FFmpeg build measures it, otherwise the sample peak.
+ * Falls back to [`SILENCE_FLOOR_DB`] only when nothing could be measured.
  */
 peakDb: number; 
+/**
+ * Integrated program loudness in LUFS (EBU R128), when it was measured.
+ */
+integratedLufs?: number | null; 
+/**
+ * Loudness range in LU (EBU R128), when it was measured.
+ */
+loudnessRangeLu?: number | null; 
+/**
+ * True peak in dBTP, when the FFmpeg build measured it.
+ */
+truePeakDbtp?: number | null; 
 /**
  * Regions where audio is below -40 dB for > 0.5s
  */

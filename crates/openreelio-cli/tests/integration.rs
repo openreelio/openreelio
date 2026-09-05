@@ -440,6 +440,49 @@ fn create_sample_audio(path: &std::path::Path) -> bool {
     status.success()
 }
 
+/// Generates a 4-second 440 Hz stereo tone at -6 dBFS, 48 kHz, as PCM WAV.
+///
+/// A reference signal rather than "some audio": its level is known exactly, so
+/// `analysis audio` can be asserted against a number instead of against
+/// whatever the fixture happened to encode to. PCM on purpose - a lossy
+/// encoder would move both the peak and the loudness unpredictably.
+///
+/// A sine of amplitude `A` has mean square `A^2 / 2`, so R128 sums the two
+/// unity-weighted channels to `-0.691 + 10 * log10(2 * 0.5012^2 / 2)`, which is
+/// -6.7 LUFS.
+///
+/// The tone comes from `aevalsrc` rather than the `sine` source, which has no
+/// amplitude option and emits well below full scale (-21 dBFS on the bundled
+/// FFmpeg 9 build) - that would make the expected level a property of the
+/// FFmpeg build rather than of the signal.
+fn create_reference_tone(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return false;
+    };
+
+    let status = Command::new(ffmpeg_path)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=exprs=0.501187*sin(2*PI*440*t)|0.501187*sin(2*PI*440*t)\
+             :s=48000:d=4:c=stereo",
+            "-c:a",
+            "pcm_s16le",
+        ])
+        .arg(path)
+        .status()
+        .expect("Failed to generate the reference tone with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping test: ffmpeg could not generate the reference tone");
+    }
+    status.success()
+}
+
 /// Generates a 4-second fixture with a hard black-to-white cut at 2s and an
 /// attenuated tone whose 1s–3s window is muted.
 ///
@@ -6584,6 +6627,73 @@ fn test_analysis_audio_profiles_and_caches_the_bundle() {
 
     let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
     assert_eq!(report["coverage"]["audio"], true);
+}
+
+/// Feature: headless audio perception
+/// Scenario: an agent profiles a tone of known level
+///   Given an imported 440 Hz stereo tone at -6 dBFS, 48 kHz
+///   When `analysis audio` runs against it
+///   Then the reported peak, loudness and sample count describe the signal
+///
+/// The regression this pins: `analysis audio` used to report `peakDb: -90` with
+/// `loudnessSampleCount: 0` for plainly audible content, because its `ebur128`
+/// pass demoted the per-frame log below the level it read the log at. Asserting
+/// against a synthesized level is what makes the failure visible - a run over
+/// arbitrary media could only assert that some number came back.
+#[test]
+fn test_analysis_audio_measures_a_reference_tone() {
+    let Some((_dir, path, asset_id)) =
+        create_project_with_media("audio_tone_test", "tone.wav", create_reference_tone)
+    else {
+        return;
+    };
+
+    let result = run_cli_ok(&["analysis", "audio", "--path", &path, "--id", &asset_id]);
+
+    assert_eq!(result["status"], "ok");
+    assert!(
+        result["loudnessSampleCount"].as_u64().unwrap() > 0,
+        "an audible tone must produce loudness readings: {result}"
+    );
+
+    let peak_db = result["peakDb"].as_f64().expect("peakDb must be a number");
+    assert!(
+        (peak_db - -6.0).abs() <= 0.5,
+        "peak {peak_db} dB is further than 0.5 dB from the synthesized -6 dBFS"
+    );
+
+    let integrated_lufs = result["integratedLufs"]
+        .as_f64()
+        .expect("integratedLufs must be reported for a measurable tone");
+    assert!(
+        (integrated_lufs - -6.7).abs() <= 1.0,
+        "integrated loudness {integrated_lufs} LUFS is further than 1 LU from the \
+         expected -6.7 LUFS"
+    );
+
+    // The same numbers must survive the round trip through the cached bundle,
+    // which is what the GUI and every later `analysis` verb read. The bundle is
+    // inspected directly rather than through `analysis report`, which serves
+    // video assets only.
+    let cached: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(bundle_path(&path, &asset_id)).unwrap())
+            .unwrap();
+    let cached_profile = &cached["audioProfile"];
+    assert!(
+        (cached_profile["integratedLufs"].as_f64().unwrap() - -6.7).abs() <= 1.0,
+        "the cached bundle must carry the measured loudness: {cached_profile}"
+    );
+    assert!(
+        !cached_profile["loudnessProfile"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the cached bundle must carry the loudness readings: {cached_profile}"
+    );
+    assert!(
+        cached_profile["measurementVersion"].as_u64().unwrap() >= 1,
+        "a freshly measured profile must be stamped so the loader keeps it: {cached_profile}"
+    );
 }
 
 #[test]

@@ -545,6 +545,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            ..Default::default()
         }
     }
 
@@ -596,6 +597,7 @@ mod tests {
             peak_db: -5.0,
             silence_regions: Vec::new(),
             speech_regions: vec![SpeechRegion::new(0.0, 20.0)],
+            ..Default::default()
         };
 
         let segmenter = ContentSegmenter::new();
@@ -863,6 +865,7 @@ mod tests {
             peak_db: f64::NEG_INFINITY,
             silence_regions: Vec::new(),
             speech_regions: vec![SpeechRegion::new(0.0, 10.0)],
+            ..Default::default()
         };
 
         let segmenter = ContentSegmenter::new();

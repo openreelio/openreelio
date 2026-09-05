@@ -267,13 +267,34 @@ struct CachedSpeechRegion {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedAudioProfile {
+    /// Version of the measurement that produced this profile; legacy bundles
+    /// carry none and deserialize as 0.
+    #[serde(default)]
+    measurement_version: u32,
     bpm: Option<f64>,
     spectral_centroid_hz: f64,
     loudness_profile: Vec<f64>,
     peak_db: f64,
+    #[serde(default)]
+    integrated_lufs: Option<f64>,
+    #[serde(default)]
+    loudness_range_lu: Option<f64>,
+    #[serde(default)]
+    true_peak_dbtp: Option<f64>,
     silence_regions: Vec<CachedSilenceRegion>,
     #[serde(default)]
     speech_regions: Vec<CachedSpeechRegion>,
+}
+
+impl CachedAudioProfile {
+    /// Whether this profile predates the current loudness measurement.
+    ///
+    /// The report reads `bundle.json` with its own types, so it repeats the
+    /// staleness check the core loader performs rather than trusting whatever
+    /// numbers the file happens to hold.
+    fn is_outdated(&self) -> bool {
+        self.measurement_version < openreelio_core::analysis::AUDIO_MEASUREMENT_VERSION
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -920,9 +941,13 @@ fn build_source_analysis_report(
         .as_ref()
         .and_then(|cached| cached.transcript.clone())
         .unwrap_or(annotation_transcript);
+    // A profile measured by a superseded loudness pass is not reported: it would
+    // claim `peakDb: -90` for audible content. Dropping it here matches what the
+    // core bundle loader does, so the report and the GUI agree.
     let audio_profile = bundle
         .as_ref()
-        .and_then(|cached| cached.audio_profile.clone());
+        .and_then(|cached| cached.audio_profile.clone())
+        .filter(|profile| !profile.is_outdated());
     let segments = bundle
         .as_ref()
         .and_then(|cached| cached.segments.clone())
@@ -1217,6 +1242,9 @@ fn build_source_analysis_report(
             "hasAudioProfile": audio_profile.is_some(),
             "bpm": audio_profile.as_ref().and_then(|profile| profile.bpm.map(round_to)),
             "peakDb": audio_profile.as_ref().map(|profile| round_to(profile.peak_db)),
+            "truePeakDbtp": audio_profile.as_ref().and_then(|profile| profile.true_peak_dbtp.map(round_to)),
+            "integratedLufs": audio_profile.as_ref().and_then(|profile| profile.integrated_lufs.map(round_to)),
+            "loudnessRangeLu": audio_profile.as_ref().and_then(|profile| profile.loudness_range_lu.map(round_to)),
             "spectralCentroidHz": audio_profile.as_ref().map(|profile| round_to(profile.spectral_centroid_hz)),
             "silenceRegionCount": silence_region_count,
             "silenceDurationSec": round_to(silence_duration_sec),
