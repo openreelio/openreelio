@@ -12188,11 +12188,54 @@ fn test_command_execute_resolves_the_active_sequence_for_a_format_change() {
 // Sequence audio: what renders is what transcribes
 // =============================================================================
 
+/// Seconds every clip in a fixture project is trimmed to.
+///
+/// Two seconds is a whole number of frames at 24, 25 and 30 fps, so a caption or
+/// render check can change the sequence rate without the clip itself drawing a
+/// frame-alignment warning. It also fits inside the four-second fixture.
+const FIXTURE_CLIP_SEC: f64 = 2.0;
+
+/// Trims every clip on the sequence to a frame-aligned length.
+///
+/// `timeline insert` gives a clip whatever length the asset advertises, which is
+/// the file's real duration when the import probed it and a default when it did
+/// not. Neither is guaranteed to land on the frame grid, and an off-grid *clip*
+/// draws the same alignment warning an off-grid caption does — which would make
+/// a caption test pass or fail for reasons that have nothing to do with
+/// captions. Trimming pins it.
+fn trim_all_clips_to_fixture_length(path: &str) {
+    let clips = run_cli_ok(&["timeline", "clips", "--path", path]);
+    let out = FIXTURE_CLIP_SEC.to_string();
+    for clip in clips["clips"].as_array().expect("clips") {
+        run_cli_ok(&[
+            "timeline",
+            "trim",
+            "--path",
+            path,
+            "--clip",
+            clip["id"].as_str().unwrap(),
+            "--track",
+            clip["trackId"].as_str().unwrap(),
+            "--source-in",
+            "0",
+            "--source-out",
+            &out,
+        ]);
+    }
+}
+
 /// Imports an A/V fixture and puts it on the sequence's first (video) track.
 ///
 /// This is the shape a headless agent produces: `asset import` records the file
-/// from its extension without opening it, and `timeline insert` drops it on the
-/// video track. Its embedded audio still reaches the render.
+/// and `timeline insert` drops it on the video track. Its embedded audio still
+/// reaches the render.
+///
+/// Deliberately agnostic about what `asset import` records. An extension-only
+/// import produces one clip carrying its own sound; an import that probes can
+/// produce a picture clip plus a linked audio clip, and gives clips the file's
+/// real length. Callers must not assume either, which is why every clip is
+/// trimmed to [`FIXTURE_CLIP_SEC`] here and why the assertions below count
+/// "at least one audio layer for this asset" rather than exactly one.
 fn project_with_av_clip_on_video_track(
     name: &str,
 ) -> Option<(tempfile::TempDir, String, String, String)> {
@@ -12207,6 +12250,7 @@ fn project_with_av_clip_on_video_track(
         "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
         "0.0",
     ]);
+    trim_all_clips_to_fixture_length(&path);
 
     Some((dir, path, asset_id, track_id))
 }
@@ -12217,9 +12261,22 @@ fn whisper_ready() -> bool {
     status["ready"].as_bool().unwrap_or(false)
 }
 
+/// The audio layers a graph reports for one asset.
+fn audio_layers_for_asset<'a>(
+    graph: &'a serde_json::Value,
+    asset_id: &str,
+) -> Vec<&'a serde_json::Value> {
+    graph["audioLayers"]
+        .as_array()
+        .expect("audioLayers")
+        .iter()
+        .filter(|layer| layer["assetId"] == serde_json::json!(asset_id))
+        .collect()
+}
+
 #[test]
 fn test_render_graph_reports_the_audio_of_an_av_clip_on_a_video_track() {
-    let Some((_dir, path, _asset_id, track_id)) =
+    let Some((_dir, path, asset_id, _track_id)) =
         project_with_av_clip_on_video_track("graph_av_audio")
     else {
         eprintln!("Skipping render graph audio test: ffmpeg unavailable");
@@ -12227,14 +12284,47 @@ fn test_render_graph_reports_the_audio_of_an_av_clip_on_a_video_track() {
     };
 
     let graph = run_cli_ok(&["render", "graph", "--path", &path]);
-    let audio_layers = graph["audioLayers"].as_array().expect("audioLayers");
 
-    assert_eq!(
-        audio_layers.len(),
-        1,
+    // "At least one", not "exactly one": whether the import probed decides
+    // whether the file arrives as a single A/V clip or as a picture clip with a
+    // linked audio clip. Either way the render has sound, and that is the claim.
+    assert!(
+        !audio_layers_for_asset(&graph, &asset_id).is_empty(),
         "an A/V clip on the video track renders with sound, so the graph has to say so: {graph}"
     );
-    assert_eq!(audio_layers[0]["trackId"], serde_json::json!(track_id));
+}
+
+#[test]
+fn test_render_start_plans_the_same_audio_render_graph_reports() {
+    let Some((dir, path, asset_id, _track_id)) =
+        project_with_av_clip_on_video_track("start_av_audio")
+    else {
+        eprintln!("Skipping render start audio test: ffmpeg unavailable");
+        return;
+    };
+
+    let graph = run_cli_ok(&["render", "graph", "--path", &path]);
+    let expected = audio_layers_for_asset(&graph, &asset_id).len();
+    assert!(expected > 0, "{graph}");
+
+    let output_path = dir.path().join("audio_agreement.mp4");
+    let result = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+
+    // `render start` reports how many layers the plan it rendered carries.
+    // Building that plan from the stored metadata instead of the probe would
+    // report no audio layers at all for a render `render graph` says has sound.
+    let planned = result["audioLayerCount"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("render start must report its layer counts: {result}"));
+    assert_eq!(planned as usize, expected, "{result}");
 }
 
 #[test]
@@ -12247,14 +12337,20 @@ fn test_transcription_generate_sequence_accepts_an_av_clip_on_a_video_track() {
     };
 
     if !whisper_ready() {
-        // Whisper is optional, but the mixdown is not: the refusal that used to
-        // stop this sequence came from the mixdown, long before any model was
-        // needed. Prove it is gone even when no model is installed.
+        // The model check runs before the mixdown, so with no model installed
+        // this run cannot say anything about the mixdown at all — asserting
+        // that it did not complain about audio would pass no matter what the
+        // mixdown does. All this branch honestly proves is where the run
+        // stopped; the mixdown itself is covered by the core-side
+        // `mixdown_captures_the_sound_of_an_av_clip_on_a_video_track`.
         let (_stdout, stderr) =
             run_cli_err(&["transcription", "generate-sequence", "--path", &path]);
+        // Either refusal is a stop before the mixdown: "not available" is a
+        // build without the `whisper` feature, "not installed" a build with it
+        // and no model file.
         assert!(
-            !stderr.contains("no audible audio clips"),
-            "the mixdown must accept a video-track A/V clip: {stderr}"
+            stderr.contains("is not installed") || stderr.contains("is not available"),
+            "without a model the run must stop before the mixdown: {stderr}"
         );
         eprintln!("Skipping sequence transcription test: no Whisper model installed");
         return;
@@ -12349,6 +12445,71 @@ fn test_caption_import_snaps_cues_to_the_sequence_frame_grid() {
         captions[1]["startSec"].as_f64().unwrap() >= captions[0]["endSec"].as_f64().unwrap(),
         "{list}"
     );
+}
+
+/// A held cue with two dialogue cues running underneath it, the shape a music
+/// or forced-narrative subtitle track takes.
+const OVERLAPPING_SRT: &str = "1\n00:00:00,001 --> 00:00:10,002\n\u{266a}\n\n\
+     2\n00:00:01,003 --> 00:00:03,004\nFirst line\n\n\
+     3\n00:00:03,005 --> 00:00:05,006\nSecond line\n";
+
+#[test]
+fn test_caption_import_reproduces_an_overlapping_subtitle_file() {
+    let dir = create_temp_project("caption_overlap");
+    let path = project_path(&dir, "caption_overlap");
+    set_sequence_to_24fps(&path);
+
+    let subtitle_file = dir.path().join("overlapping.srt");
+    std::fs::write(&subtitle_file, OVERLAPPING_SRT).unwrap();
+
+    let result = run_cli_ok(&[
+        "caption",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        subtitle_file.to_str().unwrap(),
+    ]);
+    assert_eq!(result["status"], "ok", "{result}");
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    let captions = list["captions"].as_array().expect("captions");
+    assert_eq!(captions.len(), 3, "{list}");
+
+    let cue = |text: &str| -> (f64, f64) {
+        let found = captions
+            .iter()
+            .find(|caption| caption["text"] == serde_json::json!(text))
+            .unwrap_or_else(|| panic!("cue '{text}' missing: {list}"));
+        (
+            found["startSec"].as_f64().unwrap(),
+            found["endSec"].as_f64().unwrap(),
+        )
+    };
+
+    let (held_start, held_end) = cue("\u{266a}");
+    let (first_start, first_end) = cue("First line");
+    let (second_start, second_end) = cue("Second line");
+
+    // Every boundary is on the grid, and none moved by more than half a frame.
+    for (start, end) in [
+        (held_start, held_end),
+        (first_start, first_end),
+        (second_start, second_end),
+    ] {
+        assert!(is_on_24fps_grid(start), "start {start} off grid: {list}");
+        assert!(is_on_24fps_grid(end), "end {end} off grid: {list}");
+    }
+    assert!((held_start - 0.0).abs() < 1e-9, "{list}");
+    assert!((held_end - 10.0).abs() < 1e-9, "{list}");
+
+    // The dialogue keeps the times the file gave it. Serializing these behind
+    // the held cue would flush both past ten seconds as one-frame flashes.
+    assert!((first_start - 1.0).abs() < 1e-9, "{list}");
+    assert!((first_end - 3.0).abs() < 1e-9, "{list}");
+    assert!((second_start - 3.0).abs() < 1e-9, "{list}");
+    assert!((second_end - 5.0).abs() < 1e-9, "{list}");
+    assert!(first_start < held_end && second_end < held_end, "{list}");
 }
 
 #[test]

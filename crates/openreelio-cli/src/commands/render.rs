@@ -6,9 +6,9 @@ use crate::validate;
 use clap::Subcommand;
 use openreelio_core::ffmpeg::FFmpegRunner;
 use openreelio_core::render::{
-    build_render_graph, build_render_graph_with_audio_info, build_render_plan,
-    probe_sequence_audio_info, validate_export_settings, AudioCodec, ExportEngine, ExportPreset,
-    ExportProgress, ExportSettings, HdrMode, VideoCodec,
+    build_render_graph_with_audio_info, build_render_plan, probe_sequence_audio_info,
+    validate_export_settings, AudioCodec, ExportEngine, ExportPreset, ExportProgress,
+    ExportSettings, HdrMode, VideoCodec,
 };
 use openreelio_core::timeline::Canvas;
 use std::path::PathBuf;
@@ -48,7 +48,14 @@ pub enum RenderAction {
     /// List available render presets
     Presets,
 
-    /// Output the renderer-agnostic graph for preview/export tooling
+    /// Output the renderer-agnostic graph for preview/export tooling.
+    ///
+    /// Costs one FFprobe per unique asset on the sequence the first time it sees
+    /// a file: whether a clip carries sound is a property of the media, not of
+    /// the metadata an extension-based import guessed. Repeat runs in the same
+    /// process reuse the measurement for a file whose size and modification time
+    /// have not changed. Without FFmpeg the stored metadata is all there is, and
+    /// the graph still builds.
     Graph {
         /// Project directory path
         #[arg(long)]
@@ -221,12 +228,19 @@ pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
     let effects = project.state.effects.clone();
     let settings =
         build_export_settings(&preset_id, output_path, &sequence.format.canvas, start, end)?;
-    let graph = build_render_graph(&project.state, &seq_id)
-        .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
 
-    // Validation measures transformed clips with FFprobe, so the resolved
-    // binaries have to be registered before it runs — see `ffmpeg_env`.
+    // Validation measures transformed clips with FFprobe, and so does the audio
+    // probe below, so the resolved binaries have to be registered first — see
+    // `ffmpeg_env`.
     let ffmpeg_info = ensure_ffmpeg()?;
+
+    // The same measured audio presence `render graph` reports. Building the plan
+    // from the stored metadata instead would have `render start` plan a silent
+    // render for a sequence `render graph` says has sound — an A/V file imported
+    // from its extension carries no audio metadata at all.
+    let audio_info = probe_sequence_audio_info(&project.state, &seq_id);
+    let graph = build_render_graph_with_audio_info(&project.state, &seq_id, &audio_info)
+        .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
 
     let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
     if !validation.is_valid {
@@ -243,6 +257,10 @@ pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
         ));
     }
     let plan_hash = render_plan.plan_hash.clone();
+    // Reported so an agent can see, without a second command, that the render it
+    // asked for carries the layers `render graph` said it would.
+    let planned_video_layers = render_plan.video_layers.len();
+    let planned_audio_layers = render_plan.audio_layers.len();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -312,6 +330,8 @@ pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
         "fileSize": result.file_size,
         "encodingTimeSec": result.encoding_time_sec,
         "planHash": plan_hash,
+        "videoLayerCount": planned_video_layers,
+        "audioLayerCount": planned_audio_layers,
         "warnings": validation.warnings,
     }))
 }

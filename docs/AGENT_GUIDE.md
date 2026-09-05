@@ -999,16 +999,24 @@ shape a plain `timeline insert` produces. `render graph` reports the same audio
 layers the mixdown and the export will use, so an empty `audioLayers` means the
 render really is silent.
 
+`audioLayers` lists every clip that *has* sound, muted ones included — muting is
+a property of the layer, not a reason to leave it out, and the export still opens
+the input to apply the gain. Read `audio.muted` on each layer before concluding
+that a sequence will be audible; the transcription mixdown is the one caller that
+drops muted layers outright.
+
 `--start`/`--end` bound the work: asset seconds for `generate`, timeline seconds
 for `generate-sequence`. Only that window is decoded, so transcribing 90 seconds
 of a 14-minute talk costs 90 seconds. Reported segment times stay absolute, so a
 ranged run imports exactly like a full one.
 
 Imported cues are snapped to the sequence frame grid — nearest frame, always at
-least one frame long, ordering and non-overlap preserved. Without it a
-transcriber's millisecond times land between frames and every composite and
-render warns about each cue. The response reports `snappedCues`; pass `--no-snap`
-to keep the raw times.
+least one frame long. Without it a transcriber's millisecond times land between
+frames and every composite and render warns about each cue. Generated cues, which
+the readability pass already de-overlapped, are additionally kept in order and
+clear of one another; an SRT or VTT file imported with `caption import` is
+reproduced as written, overlaps and all. The response reports `snappedCues`; pass
+`--no-snap` to keep the raw times.
 
 **Caption cue boundaries come from DTW-aligned word timings.** Instead of
 Whisper's cheap heuristic token timestamps, whisper.cpp aligns tokens by dynamic

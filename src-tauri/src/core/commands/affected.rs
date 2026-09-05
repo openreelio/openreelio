@@ -180,7 +180,11 @@ pub fn affected_ranges(
             // themselves; the edit that uses the asset does.
             StateChange::AssetAdded { .. }
             | StateChange::AssetModified { .. }
-            | StateChange::AssetRemoved { .. } => {}
+            | StateChange::AssetRemoved { .. }
+            // Reports how many cues the frame grid moved. The cues
+            // themselves arrive as `CaptionCreated`, which is what marks
+            // the affected span; this carries no range of its own.
+            | StateChange::CaptionsSnappedToFrameGrid { .. } => {}
         }
     }
 

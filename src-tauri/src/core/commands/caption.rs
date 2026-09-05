@@ -34,23 +34,74 @@ fn is_valid_time_sec(value: TimeSec) -> bool {
 /// from every composite and render — forty-one of them on a single talk, enough
 /// to bury the warnings that mattered.
 ///
-/// Each boundary goes to the nearest frame, and then three invariants are
-/// restored in one pass over the cues in time order:
+/// Each cue is snapped on its own and nothing else about it changes:
 ///
-/// * every cue lasts at least one frame, so rounding cannot collapse one;
-/// * no cue ends after the next one starts (touching is allowed — it is exactly
-///   what the overlap clamp in `enforce_readability` already produces);
-/// * ordering survives. Two cues less than a frame apart both want the frame
-///   the earlier one had to keep whole; the later one is pushed off it rather
-///   than dropped, which moves a cue's start by under a frame but never loses
-///   a line.
+/// * each boundary goes to the nearest frame;
+/// * a cue that would collapse — both boundaries rounding to the same frame —
+///   is given one frame of length, because a zero-length caption clip is not a
+///   caption.
 ///
-/// `cues` need not arrive sorted — a subtitle file can list them in any order,
-/// and only `ImportGeneratedCaptionsCommand` sorts beforehand. Each cue is
-/// written back to the slot it came in, so the caller's order is untouched.
+/// Cues are **not** compared with each other. A subtitle file is allowed to
+/// overlap its cues, and many do: a held `♪` under a whole song, a rolling
+/// VTT where every line is still on screen when the next arrives. Serializing
+/// those would push every later cue past the held one and rewrite the file into
+/// something it never was. Callers that need cues in order and clear of one
+/// another call [`keep_cues_ordered_and_non_overlapping`] afterwards; the
+/// generated-captions import does, because its cues were already de-overlapped
+/// before rounding could nudge two of them back together.
+///
+/// `cues` need not arrive sorted, and their order is untouched.
 ///
 /// Returns how many cues moved.
 pub fn snap_cue_times_to_frame_grid(cues: &mut [(TimeSec, TimeSec)], fps: &Ratio) -> usize {
+    let clock = TimelineClock::new(fps.clone());
+    let mut moved = 0usize;
+
+    for cue in cues.iter_mut() {
+        let (start_sec, end_sec) = *cue;
+
+        let start_frame = clock.seconds_to_nearest_frame(start_sec);
+        let end_frame = clock.seconds_to_nearest_frame(end_sec).max(start_frame + 1);
+
+        let snapped = (
+            clock.frame_to_seconds(start_frame),
+            clock.frame_to_seconds(end_frame),
+        );
+        if snapped.0 != start_sec || snapped.1 != end_sec {
+            moved += 1;
+        }
+        *cue = snapped;
+    }
+
+    moved
+}
+
+/// Restores cue ordering and non-overlap on the frame grid, in place.
+///
+/// Opt-in, and only correct for a cue list that was already ordered and clear of
+/// overlap before it was snapped — rounding two neighbours a fraction of a frame
+/// apart can put them back on top of each other, and this is the pass that
+/// separates them again. Run on cues that genuinely overlap it would serialize
+/// them, which is why [`snap_cue_times_to_frame_grid`] no longer does it.
+///
+/// Walking the cues in time order restores three invariants in one pass:
+///
+/// * every cue lasts at least one frame;
+/// * no cue ends after the next one starts (touching is allowed — it is exactly
+///   what the overlap clamp in [`ImportGeneratedCaptionsCommand::enforce_readability`]
+///   already produces);
+/// * ordering survives. Two cues less than a frame apart both want the frame the
+///   earlier one had to keep whole; the later one is pushed off it rather than
+///   dropped, which moves a cue's start by under a frame but never loses a line.
+///
+/// Each cue is written back to the slot it came in, so the caller's order is
+/// untouched.
+///
+/// Returns how many cues moved.
+pub fn keep_cues_ordered_and_non_overlapping(
+    cues: &mut [(TimeSec, TimeSec)],
+    fps: &Ratio,
+) -> usize {
     let clock = TimelineClock::new(fps.clone());
     let mut moved = 0usize;
 
@@ -349,6 +400,10 @@ impl ImportGeneratedCaptionsCommand {
                 .map(|segment| (segment.start_sec, segment.end_sec))
                 .collect::<Vec<_>>();
             snap_cue_times_to_frame_grid(&mut times, fps);
+            // These cues left `enforce_readability` ordered and clear of one
+            // another; rounding can put two neighbours back on the same frame,
+            // so the invariant is restored rather than assumed.
+            keep_cues_ordered_and_non_overlapping(&mut times, fps);
             for (segment, (start_sec, end_sec)) in segments.iter_mut().zip(times) {
                 segment.start_sec = start_sec;
                 segment.end_sec = end_sec;
@@ -477,6 +532,20 @@ impl Command for ImportGeneratedCaptionsCommand {
             .fps
             .clone();
         let segments = self.plan_segments(&fps, self.snap_to_frames)?;
+        // How many cues the grid moved, so the caller can say so. Planning is
+        // pure arithmetic, so the unsnapped plan costs nothing to produce and is
+        // the only honest baseline — the readability rules run either way.
+        let snapped_cues = if self.snap_to_frames {
+            let raw = self.plan_segments(&fps, false)?;
+            raw.iter()
+                .zip(segments.iter())
+                .filter(|(raw, snapped)| {
+                    raw.start_sec != snapped.start_sec || raw.end_sec != snapped.end_sec
+                })
+                .count()
+        } else {
+            0
+        };
         self.created_caption_ids.clear();
         self.removed_clips.clear();
 
@@ -496,6 +565,11 @@ impl Command for ImportGeneratedCaptionsCommand {
 
         let op_id = ulid::Ulid::new().to_string();
         let mut result = CommandResult::new(&op_id);
+        if snapped_cues > 0 {
+            result = result.with_change(StateChange::CaptionsSnappedToFrameGrid {
+                count: snapped_cues,
+            });
+        }
 
         if self.replace_existing {
             self.removed_clips = track.clips.iter().cloned().enumerate().collect();
@@ -939,20 +1013,25 @@ mod tests {
     }
 
     #[test]
-    fn snap_cue_times_keeps_neighbours_ordered_and_non_overlapping() {
-        // Two cues barely apart round onto the same pair of frames. The second
-        // is pushed off the frame the first had to keep, rather than dropped.
+    fn snap_cue_times_leaves_overlapping_cues_overlapping() {
+        // A held cue under a whole song, with dialogue running underneath it.
+        // Serializing these would push every line of dialogue past the held cue
+        // and turn each into a one-frame flash.
         let fps = Ratio::new(24, 1);
-        let mut cues = vec![(1.0, 1.004), (1.008, 1.02)];
+        let mut cues = vec![(0.001, 600.002), (1.003, 3.004), (3.005, 5.006)];
 
         snap_cue_times_to_frame_grid(&mut cues, &fps);
 
-        assert!(cues[0].1 > cues[0].0);
-        assert!(cues[1].1 > cues[1].0);
-        assert!(cues[1].0 >= cues[0].1, "{cues:?}");
+        assert!((cues[0].0 - 0.0).abs() < 1e-9, "{cues:?}");
+        assert!((cues[0].1 - 600.0).abs() < 1e-9, "{cues:?}");
+        // The dialogue keeps its own place under the held cue.
+        assert!(cues[1].0 < cues[0].1, "{cues:?}");
+        assert!((cues[1].0 - 24.0 / 24.0).abs() < 1e-9, "{cues:?}");
+        assert!((cues[2].0 - 72.0 / 24.0).abs() < 1e-9, "{cues:?}");
         for (start_sec, end_sec) in &cues {
             assert!(is_on_frame_grid(*start_sec, &fps));
             assert!(is_on_frame_grid(*end_sec, &fps));
+            assert!(end_sec - start_sec >= 1.0 / 24.0 - 1e-9, "{cues:?}");
         }
     }
 
@@ -971,6 +1050,36 @@ mod tests {
         assert!((cues[0].0 - 96.0 / 24.0).abs() < 1e-9, "{cues:?}");
         assert!((cues[1].0 - 0.0).abs() < 1e-9, "{cues:?}");
         assert!(cues[1].1 < cues[0].0, "{cues:?}");
+    }
+
+    #[test]
+    fn ordering_pass_keeps_neighbours_ordered_and_non_overlapping() {
+        // Two cues barely apart round onto the same pair of frames. The second
+        // is pushed off the frame the first had to keep, rather than dropped.
+        let fps = Ratio::new(24, 1);
+        let mut cues = vec![(1.0, 1.004), (1.008, 1.02)];
+
+        snap_cue_times_to_frame_grid(&mut cues, &fps);
+        keep_cues_ordered_and_non_overlapping(&mut cues, &fps);
+
+        assert!(cues[0].1 > cues[0].0);
+        assert!(cues[1].1 > cues[1].0);
+        assert!(cues[1].0 >= cues[0].1, "{cues:?}");
+        for (start_sec, end_sec) in &cues {
+            assert!(is_on_frame_grid(*start_sec, &fps));
+            assert!(is_on_frame_grid(*end_sec, &fps));
+        }
+    }
+
+    #[test]
+    fn ordering_pass_reads_time_order_rather_than_slot_order() {
+        // The pass sorts by time before it walks, so a file that lists a late
+        // cue first is not read as "this one comes first".
+        let fps = Ratio::new(24, 1);
+        let mut cues = vec![(4.0, 5.0), (0.0, 1.0)];
+
+        assert_eq!(keep_cues_ordered_and_non_overlapping(&mut cues, &fps), 0);
+        assert_eq!(cues, vec![(4.0, 5.0), (0.0, 1.0)]);
     }
 
     #[test]
@@ -997,6 +1106,36 @@ mod tests {
             assert!(clip.place.duration_sec >= 1.0 / 24.0 - 1e-9);
         }
         assert!(track.clips[1].place.timeline_in_sec >= track.clips[0].place.timeline_out_sec());
+    }
+
+    #[test]
+    fn import_generated_captions_separates_cues_that_rounding_pushed_together() {
+        // Both cues want frame 24 once the readability rules and rounding are
+        // through. The generated path is the one that de-overlaps beforehand, so
+        // it is the one that runs the ordering pass and pushes the second off.
+        let (mut state, seq_id, track_id) = state_with_caption_track_at(format_24fps());
+        let segments = vec![
+            GeneratedCaptionSegment::new(1.0, 1.004, "First"),
+            GeneratedCaptionSegment::new(1.008, 1.02, "Second"),
+        ];
+
+        let mut cmd = ImportGeneratedCaptionsCommand::new(&seq_id, &track_id, segments);
+        cmd.execute(&mut state).expect("import");
+
+        let track = state
+            .get_sequence(&seq_id)
+            .unwrap()
+            .get_track(&track_id)
+            .unwrap();
+        assert_eq!(track.clips.len(), 2);
+        assert!(
+            track.clips[1].place.timeline_in_sec >= track.clips[0].place.timeline_out_sec(),
+            "{:?}",
+            track.clips
+        );
+        for clip in &track.clips {
+            assert!(clip.place.duration_sec >= 1.0 / 24.0 - 1e-9);
+        }
     }
 
     #[test]

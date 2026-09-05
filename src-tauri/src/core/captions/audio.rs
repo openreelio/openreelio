@@ -3,6 +3,7 @@
 //! Provides audio extraction functionality for transcription using FFmpeg.
 //! Extracts audio as 16kHz mono WAV format suitable for Whisper.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
@@ -252,6 +253,13 @@ struct MixdownLayer {
     audio: AudioSettings,
 }
 
+impl MixdownLayer {
+    /// How many source seconds this layer reads, after the window trimmed it.
+    fn source_span_sec(&self) -> f64 {
+        (self.source_out_sec - self.source_in_sec).max(0.0)
+    }
+}
+
 /// Renders the audible audio layers of a sequence to a 16kHz mono WAV for transcription.
 ///
 /// Every clip that reaches the render with sound is mixed, including the
@@ -330,29 +338,11 @@ pub fn mix_sequence_audio_for_transcription(
         .unwrap_or_else(resolved_ffmpeg_path);
     let mut cmd = Command::new(ffmpeg);
     configure_std_command(&mut cmd);
-    cmd.arg("-y").arg("-hide_banner");
-
-    for layer in &audible_layers {
-        cmd.arg("-i").arg(&layer.asset_path);
-    }
-
-    let filter_complex = build_sequence_mixdown_filter(&audible_layers);
-    let duration_arg = format_filter_seconds(window_end - window_start);
-    cmd.args([
-        "-filter_complex",
-        &filter_complex,
-        "-map",
-        "[aout]",
-        "-t",
-        &duration_arg,
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        "-c:a",
-        "pcm_s16le",
-        output_path.to_str().unwrap_or_default(),
-    ]);
+    cmd.args(build_sequence_mixdown_args(
+        &audible_layers,
+        window_end - window_start,
+        output_path,
+    ));
 
     let output = cmd.output()?;
     if !output.status.success() {
@@ -426,15 +416,63 @@ fn narrow_layer_to_window(
     })
 }
 
+/// Builds the FFmpeg arguments for one transcription mixdown.
+///
+/// Every layer gets its own `-ss`/`-t` in front of its `-i`, so FFmpeg seeks the
+/// demuxer and reads only the stretch the window kept — the same reason
+/// [`extract_audio_range_for_transcription`] does it. Without them a ranged
+/// `generate-sequence` still decoded every input end to end and let `atrim`
+/// throw the rest away, so transcribing ninety seconds of a fourteen-minute talk
+/// cost the whole talk.
+///
+/// An input `-ss` also rebases that input's timestamps to zero, which is why the
+/// filtergraph's `atrim` measures from zero rather than from the layer's source
+/// in point.
+fn build_sequence_mixdown_args(
+    audible_layers: &[MixdownLayer],
+    output_duration_sec: f64,
+    output_path: &Path,
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["-y".into(), "-hide_banner".into()];
+
+    for layer in audible_layers {
+        args.push("-ss".into());
+        args.push(format_filter_seconds(layer.source_in_sec).into());
+        args.push("-t".into());
+        args.push(format_filter_seconds(layer.source_span_sec()).into());
+        args.push("-i".into());
+        args.push(layer.asset_path.clone().into_os_string());
+    }
+
+    args.push("-filter_complex".into());
+    args.push(build_sequence_mixdown_filter(audible_layers).into());
+    args.push("-map".into());
+    args.push("[aout]".into());
+    args.push("-t".into());
+    args.push(format_filter_seconds(output_duration_sec).into());
+    args.push("-ar".into());
+    args.push("16000".into());
+    args.push("-ac".into());
+    args.push("1".into());
+    args.push("-c:a".into());
+    args.push("pcm_s16le".into());
+    args.push(output_path.as_os_str().to_os_string());
+
+    args
+}
+
 fn build_sequence_mixdown_filter(audible_layers: &[MixdownLayer]) -> String {
     let mut filters = Vec::new();
 
     for (index, layer) in audible_layers.iter().enumerate() {
+        // The input's own `-ss` already put the layer's source in point at zero,
+        // so the trim is expressed as a span rather than as absolute source
+        // seconds. Keeping it belt-and-braces guards against a demuxer that
+        // seeks to the keyframe before the requested point.
         let mut chain = vec![
             format!(
-                "[{index}:a]atrim=start={}:end={}",
-                format_filter_seconds(layer.source_in_sec),
-                format_filter_seconds(layer.source_out_sec)
+                "[{index}:a]atrim=start=0:end={}",
+                format_filter_seconds(layer.source_span_sec())
             ),
             "asetpts=PTS-STARTPTS".to_string(),
             "aresample=16000".to_string(),
@@ -954,7 +992,53 @@ mod tests {
 
         // Two seconds into the window, not ten seconds into the sequence.
         assert!(filter.contains("adelay=2000:all=1"), "{filter}");
-        assert!(filter.contains("atrim=start=30:end=38"), "{filter}");
+        // The input's own `-ss` put source second 30 at zero, so the trim is the
+        // eight-second span the window kept rather than 30s-38s.
+        assert!(filter.contains("atrim=start=0:end=8"), "{filter}");
+    }
+
+    #[test]
+    fn mixdown_args_seek_each_input_to_the_stretch_the_window_kept() {
+        // Two clips, each reading a different part of its source. Without a
+        // per-input `-ss` FFmpeg would decode both files end to end and let
+        // `atrim` discard the rest, which is what made a ranged
+        // `generate-sequence` cost the whole talk.
+        let first =
+            narrow_layer_to_window(&layer(10.0, 20.0, 30.0), Path::new("a.mp4"), 12.0, 18.0)
+                .expect("overlap");
+        let second =
+            narrow_layer_to_window(&layer(14.0, 24.0, 100.0), Path::new("b.mp4"), 12.0, 18.0)
+                .expect("overlap");
+
+        let args = build_sequence_mixdown_args(&[first, second], 6.0, Path::new("out.wav"))
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        let input_positions = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| arg.as_str() == "-i")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(input_positions.len(), 2, "{args:?}");
+
+        // `-ss <in> -t <span>` sits immediately in front of each `-i`.
+        assert_eq!(args[input_positions[0] - 4], "-ss");
+        assert_eq!(args[input_positions[0] - 3], "32");
+        assert_eq!(args[input_positions[0] - 2], "-t");
+        assert_eq!(args[input_positions[0] - 1], "6");
+        assert_eq!(args[input_positions[0] + 1], "a.mp4");
+
+        assert_eq!(args[input_positions[1] - 4], "-ss");
+        assert_eq!(args[input_positions[1] - 3], "100");
+        assert_eq!(args[input_positions[1] - 2], "-t");
+        assert_eq!(args[input_positions[1] - 1], "4");
+        assert_eq!(args[input_positions[1] + 1], "b.mp4");
+
+        // The output still runs for the window's own length.
+        assert_eq!(args.last().map(String::as_str), Some("out.wav"));
+        assert!(args.windows(2).any(|pair| pair == ["-map", "[aout]"]));
     }
 
     #[test]
@@ -972,5 +1056,179 @@ mod tests {
             narrow_layer_to_window(&clip, Path::new("a.wav"), 12.0, 20.0).expect("overlap");
         let filter = build_sequence_mixdown_filter(std::slice::from_ref(&narrowed));
         assert!(!filter.contains("afade=t=in"), "{filter}");
+    }
+}
+
+#[cfg(test)]
+mod ffmpeg_backed_tests {
+    //! Tests that put a real FFmpeg behind the transcription mixdown.
+    //!
+    //! They are `#[ignore]`d because they need a binary the machine may not
+    //! have; `require_or_skip_ffmpeg` turns the skip into a failure when
+    //! `REQUIRE_FFMPEG_TESTS` is set, so a CI job that installs FFmpeg cannot
+    //! report green without having run them.
+
+    use super::*;
+    use crate::core::assets::{Asset, VideoInfo};
+    use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+    use crate::core::timeline::{Clip, ClipPlace, ClipRange, Sequence, SequenceFormat, Track};
+
+    /// Writes a four-second A/V file: black picture with a 440 Hz tone.
+    ///
+    /// Returns `false` when FFmpeg could not produce it, which is the same
+    /// "skip quietly" answer a missing binary gives.
+    fn write_av_fixture(ffmpeg: &Path, path: &Path) -> bool {
+        let mut cmd = Command::new(ffmpeg);
+        configure_std_command(&mut cmd);
+        let output = cmd
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=160x90:r=25:d=4",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100:duration=4",
+                "-pix_fmt",
+                "yuv420p",
+                "-shortest",
+            ])
+            .arg(path)
+            .output();
+
+        matches!(output, Ok(output) if output.status.success()) && path.exists()
+    }
+
+    /// A project holding `asset_path` as one clip on the sequence's video track.
+    ///
+    /// The asset carries no audio metadata, which is exactly what the CLI's
+    /// `asset import` records for a file it never opened. Whether the mixdown
+    /// finds the sound therefore depends on it probing rather than trusting the
+    /// stored guess.
+    fn state_with_av_clip_on_a_video_track(asset_path: &Path) -> ProjectState {
+        let mut state = ProjectState::new("Mixdown Test");
+        state.sequences.clear();
+
+        let mut asset = Asset::new_video(
+            "fixture",
+            &asset_path.to_string_lossy(),
+            VideoInfo::default(),
+        );
+        asset.id = "asset-av".to_string();
+        assert!(
+            asset.audio.is_none(),
+            "the fixture stands in for an unprobed import"
+        );
+        state.assets.insert(asset.id.clone(), asset);
+
+        let mut clip = Clip::new("asset-av");
+        clip.id = "clip-av".to_string();
+        clip.place = ClipPlace::new(0.0, 4.0);
+        clip.range = ClipRange::new(0.0, 4.0);
+
+        let mut sequence = Sequence::new("Sequence", SequenceFormat::youtube_1080());
+        sequence.id = "seq-1".to_string();
+        let mut video_track = Track::new("Video 1", crate::core::timeline::TrackKind::Video);
+        video_track.id = "video-track".to_string();
+        video_track.clips.push(clip);
+        sequence.tracks.push(video_track);
+
+        state.active_sequence_id = Some(sequence.id.clone());
+        state.sequences.insert(sequence.id.clone(), sequence);
+        state
+    }
+
+    /// The loudest sample in a mixdown, as a fraction of full scale.
+    fn peak_amplitude(samples: &[f32]) -> f32 {
+        samples
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg"]
+    fn mixdown_captures_the_sound_of_an_av_clip_on_a_video_track() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let Ok(dir) = tempfile::tempdir() else {
+            skip_without_ffmpeg("a temporary directory could not be created");
+            return;
+        };
+
+        let source_path = dir.path().join("av_source.mp4");
+        if !write_av_fixture(&ffmpeg, &source_path) {
+            skip_without_ffmpeg("FFmpeg could not build the A/V fixture");
+            return;
+        }
+
+        let state = state_with_av_clip_on_a_video_track(&source_path);
+        let output_path = dir.path().join("mixdown.wav");
+        let result = mix_sequence_audio_for_transcription(
+            &state,
+            "seq-1",
+            &output_path,
+            AudioWindow::FULL,
+            ffmpeg.to_str(),
+        )
+        .expect("the embedded audio of a video-track clip has to reach the mixdown");
+
+        assert_eq!(result.layer_count, 1);
+        assert!((result.duration_sec - 4.0).abs() < 0.5, "{result:?}");
+
+        let samples = load_audio_samples(&output_path).expect("mixdown is a 16 kHz mono WAV");
+        assert!(!samples.is_empty(), "the mixdown wrote no samples");
+        let peak = peak_amplitude(&samples);
+        assert!(
+            peak > 0.1,
+            "a 440 Hz tone must not transcribe as silence: peak {peak}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg"]
+    fn mixdown_of_a_window_reads_only_that_window() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let Ok(dir) = tempfile::tempdir() else {
+            skip_without_ffmpeg("a temporary directory could not be created");
+            return;
+        };
+
+        let source_path = dir.path().join("av_source.mp4");
+        if !write_av_fixture(&ffmpeg, &source_path) {
+            skip_without_ffmpeg("FFmpeg could not build the A/V fixture");
+            return;
+        }
+
+        let state = state_with_av_clip_on_a_video_track(&source_path);
+        let output_path = dir.path().join("window.wav");
+        let window = AudioWindow::new(Some(1.0), Some(3.0)).expect("window");
+        let result = mix_sequence_audio_for_transcription(
+            &state,
+            "seq-1",
+            &output_path,
+            window,
+            ffmpeg.to_str(),
+        )
+        .expect("mixdown");
+
+        assert!((result.duration_sec - 2.0).abs() < 0.2, "{result:?}");
+        assert_eq!(result.start_sec, 1.0);
+
+        let samples = load_audio_samples(&output_path).expect("mixdown is a 16 kHz mono WAV");
+        // Two seconds at 16 kHz, give or take a resampler's tail.
+        assert!(samples.len() > 16_000, "{} samples", samples.len());
+        assert!(samples.len() < 48_000, "{} samples", samples.len());
+        assert!(
+            peak_amplitude(&samples) > 0.1,
+            "the window must carry sound"
+        );
     }
 }

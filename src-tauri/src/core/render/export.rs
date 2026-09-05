@@ -2308,6 +2308,35 @@ impl AssetAudioInfo {
         }
     }
 
+    /// Create from an FFprobe [`crate::core::assets::MediaMetadata`] result.
+    ///
+    /// The same measurement [`Self::from_media_info`] describes, from the probe
+    /// the asset pipeline runs. Every field comes from the probe: filling in only
+    /// `has_audio` and taking the rest from the stored metadata would give a
+    /// measured file the dimensions and length an extension-based import guessed,
+    /// which for such an import is nothing at all.
+    pub fn from_media_metadata(metadata: &crate::core::assets::MediaMetadata) -> Self {
+        Self {
+            has_audio: metadata.audio.is_some(),
+            source_dimensions: metadata
+                .video
+                .as_ref()
+                .map(|video| {
+                    crate::core::ffmpeg::display_dimensions(
+                        video.width,
+                        video.height,
+                        metadata.rotation_deg,
+                    )
+                })
+                .filter(|(width, height)| *width > 0 && *height > 0),
+            source_duration_sec: metadata
+                .video_duration_sec
+                .filter(|duration| duration.is_finite() && *duration > 0.0)
+                .or(Some(metadata.duration_sec))
+                .filter(|duration| duration.is_finite() && *duration > 0.0),
+        }
+    }
+
     /// Create from Asset metadata (fallback when MediaInfo is not available)
     ///
     /// Uses presence of audio info as heuristic for audio presence.

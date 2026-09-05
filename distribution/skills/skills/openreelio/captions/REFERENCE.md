@@ -33,10 +33,17 @@ openreelio-cli caption export --path ./demo --format srt --output subs.srt
 Export supports `srt` and `vtt`.
 
 Imported cue boundaries are snapped to the sequence frame grid: each start and
-end goes to the nearest frame, every cue keeps at least one frame, and ordering
-and non-overlap survive. Subtitle files carry millisecond times, which otherwise
-land between frames and make every composite and render warn about each cue. The
-response reports `snappedCues`; pass `--no-snap` to keep the file's raw times.
+end goes to the nearest frame, and every cue keeps at least one frame. Subtitle
+files carry millisecond times, which otherwise land between frames and make
+every composite and render warn about each cue. The response reports
+`snappedCues`; pass `--no-snap` to keep the file's raw times.
+
+Each cue is rounded on its own, and nothing else about it changes. A file whose
+cues overlap — a held `♪` under a song, a rolling VTT where a line is still on
+screen when the next arrives — imports with those overlaps intact, on the grid.
+Cues are only put in order and pulled clear of one another on the
+`--import`/generated path, where they were already de-overlapped before rounding
+could nudge two of them back together.
 
 ## Caption style packs
 
@@ -297,9 +304,11 @@ reorders nor starves a neighbour.
 
 Grid snapping runs after all of that, on import rather than on transcription: it
 moves each boundary by up to half a frame so the cue clips sit on the sequence's
-frame grid, which is what silences the per-cue alignment warnings. It does not
-make the timings more accurate — a boundary is only ever as good as the word
-timing under it.
+frame grid, which is what silences the per-cue alignment warnings. Because these
+cues left the readability pass already ordered and clear of one another, a
+second pass then pushes apart any two that rounding landed on the same frame. It
+does not make the timings more accurate — a boundary is only ever as good as the
+word timing under it.
 
 Accuracy is indicative, not contractual: on English and Korean test clips whose
 speech is preceded by silence, the leading cue edge landed on the hand-measured

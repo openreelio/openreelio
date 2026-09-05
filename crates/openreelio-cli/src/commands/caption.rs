@@ -203,7 +203,8 @@ pub enum CaptionAction {
         ///
         /// Snapping is on by default: subtitle files carry millisecond times,
         /// which land between frames and make every composite and render warn
-        /// about each cue.
+        /// about each cue. Each cue is rounded on its own — cues that overlap in
+        /// the file still overlap after the import.
         #[arg(long)]
         no_snap: bool,
     },
@@ -1424,6 +1425,12 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 // here — but these cues are placed one command at a time, and
                 // `CreateCaption` deliberately honours the times it is given.
                 // Snapping therefore happens on the way in.
+                //
+                // Only the snap: a subtitle file is free to overlap its cues,
+                // and unlike the generated path nothing has de-overlapped these.
+                // Running the ordering pass here would serialize a held cue with
+                // everything underneath it, so the file is reproduced as written,
+                // on the frame grid.
                 let mut captions = captions;
                 if snap_to_frames {
                     let mut times = captions

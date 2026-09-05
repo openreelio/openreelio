@@ -692,7 +692,21 @@ fn import_generated_captions(
     let command = ImportGeneratedCaptionsCommand::new(&sequence_id, &track_id, segments)
         .replace_existing(replace_existing)
         .snap_to_frames(snap_to_frames);
-    let snapped_cues = super::caption::count_snapped_cues(&command, &fps, snap_to_frames)?;
+    // Planning can still refuse the segments, and by now the caption track may
+    // be one this call created. It goes back the same way an import failure
+    // takes it, or the project keeps an empty track nobody asked for.
+    let snapped_cues = match super::caption::count_snapped_cues(&command, &fps, snap_to_frames) {
+        Ok(count) => count,
+        Err(error) => {
+            if created_track {
+                let rollback = RemoveTrackCommand::new(&sequence_id, &track_id);
+                let _ = project
+                    .executor
+                    .execute(Box::new(rollback), &mut project.state);
+            }
+            return Err(error);
+        }
+    };
 
     match project
         .executor
@@ -770,5 +784,85 @@ impl Drop for TempFileGuard {
         if self.0.exists() {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openreelio_core::timeline::TrackKind;
+
+    /// A transcription whose every cue is blank once trimmed.
+    ///
+    /// Whisper emits these — a segment of pure silence comes back as a space —
+    /// and the caption command refuses them, which is the failure this import
+    /// has to unwind cleanly.
+    fn blank_transcription() -> TranscriptionCliOutput {
+        TranscriptionCliOutput {
+            status: "ok".to_string(),
+            asset_id: "asset".to_string(),
+            asset_name: "asset.mp4".to_string(),
+            language: "en".to_string(),
+            model: "tiny".to_string(),
+            duration_sec: 2.0,
+            segment_count: 2,
+            full_text: String::new(),
+            segments: vec![
+                TranscriptionSegmentJson {
+                    start_time: 0.0,
+                    end_time: 1.0,
+                    text: " ".to_string(),
+                },
+                TranscriptionSegmentJson {
+                    start_time: 1.0,
+                    end_time: 2.0,
+                    text: "\n".to_string(),
+                },
+            ],
+        }
+    }
+
+    /// How many caption tracks the project's active sequence carries.
+    fn caption_track_count(project: &ActiveProject) -> usize {
+        let sequence_id = project
+            .state
+            .active_sequence_id
+            .clone()
+            .expect("a new project has an active sequence");
+        project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Caption)
+            .count()
+    }
+
+    #[test]
+    fn a_refused_import_leaves_no_caption_track_behind() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut project = ActiveProject::create("Blank Import", dir.path().join("project"))
+            .expect("create project");
+        assert_eq!(caption_track_count(&project), 0);
+
+        let error = import_generated_captions(
+            &mut project,
+            None,
+            None,
+            false,
+            true,
+            &blank_transcription(),
+            None,
+            None,
+        )
+        .expect_err("blank cues cannot become captions");
+
+        assert!(
+            error.to_string().contains("text cannot be empty"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            caption_track_count(&project),
+            0,
+            "the track this import created has to go back with it"
+        );
     }
 }

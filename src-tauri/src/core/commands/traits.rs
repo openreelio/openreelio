@@ -94,6 +94,13 @@ pub enum StateChange {
     SequenceCreated { sequence_id: String },
     /// An existing sequence was modified
     SequenceModified { sequence_id: String },
+    /// Imported caption cues were moved onto the sequence's frame grid.
+    ///
+    /// Reported so a GUI can say "41 cues were nudged onto the frame grid"
+    /// rather than leaving a silent rewrite of the times the user handed over.
+    /// `count` is how many cues moved; the change is only emitted when at least
+    /// one did.
+    CaptionsSnappedToFrameGrid { count: usize },
     /// A new marker was created
     MarkerCreated { marker_id: String },
     /// A marker was deleted

@@ -559,8 +559,12 @@ pub async fn validate_export(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &crate::core::render::probe_sequence_audio_info(&project.state, &sequence_id),
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -663,8 +667,12 @@ pub async fn start_render(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &crate::core::render::probe_sequence_audio_info(&project.state, &sequence_id),
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -985,8 +993,12 @@ pub async fn render_range(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &crate::core::render::probe_sequence_audio_info(&project.state, &sequence_id),
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -1229,8 +1241,12 @@ pub async fn batch_render(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &crate::core::render::probe_sequence_audio_info(&project.state, &sequence_id),
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -1677,8 +1693,12 @@ pub async fn export_audio_only(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &crate::core::render::probe_sequence_audio_info(&project.state, &sequence_id),
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -2644,8 +2664,12 @@ pub async fn get_cache_status(
     // The status snapshot re-fingerprints a private copy of the manifest so the
     // indicator reports staleness honestly (it never persists). That needs the
     // same render graph / assets / effects the fill path builds.
-    let render_graph = crate::core::render::build_render_graph(&project.state, seq_id)
-        .map_err(|error| format!("Failed to build render graph: {error}"))?;
+    let render_graph = crate::core::render::build_render_graph_with_audio_info(
+        &project.state,
+        seq_id,
+        &crate::core::render::probe_sequence_audio_info(&project.state, seq_id),
+    )
+    .map_err(|error| format!("Failed to build render graph: {error}"))?;
 
     let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
         .state
@@ -3070,8 +3094,12 @@ async fn gather_cache_render_inputs(
         .ok_or_else(|| format!("Sequence not found: {seq_id}"))?
         .clone();
 
-    let render_graph = crate::core::render::build_render_graph(&project.state, &seq_id)
-        .map_err(|error| format!("Failed to build render graph: {error}"))?;
+    let render_graph = crate::core::render::build_render_graph_with_audio_info(
+        &project.state,
+        &seq_id,
+        &crate::core::render::probe_sequence_audio_info(&project.state, &seq_id),
+    )
+    .map_err(|error| format!("Failed to build render graph: {error}"))?;
 
     let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
         .state
@@ -3647,9 +3675,13 @@ fn ensure_cache_fill(
                                 break;
                             }
                         };
-                        let graph = match crate::core::render::build_render_graph(
+                        let graph = match crate::core::render::build_render_graph_with_audio_info(
                             &project.state,
                             &job_seq_id,
+                            &crate::core::render::probe_sequence_audio_info(
+                                &project.state,
+                                &job_seq_id,
+                            ),
                         ) {
                             Ok(graph) => graph,
                             Err(error) => {

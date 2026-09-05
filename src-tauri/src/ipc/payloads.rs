@@ -740,6 +740,15 @@ pub struct ImportGeneratedCaptionsPayload {
     ///
     /// Defaults to `true`: a transcriber's millisecond times otherwise land
     /// between frames and make every composite and render warn about each cue.
+    /// Each boundary moves by at most half a frame, and because these cues were
+    /// already de-overlapped by the readability pass, any two that rounding put
+    /// on the same frame are pushed apart again.
+    ///
+    /// Snapping rewrites times the caller supplied, so it is reported rather
+    /// than silent: the command answers with a
+    /// `captionsSnappedToFrameGrid` state change carrying the number of cues
+    /// that moved, which is the GUI's cue to say so. No change is emitted when
+    /// nothing moved, or when this is `false`.
     #[serde(default = "default_snap_to_frames")]
     pub snap_to_frames: bool,
 }

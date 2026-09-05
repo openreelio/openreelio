@@ -199,6 +199,16 @@ impl InsertMediaCommand {
             .ok_or_else(|| CoreError::AssetNotFound(self.asset_id.clone()))?;
         let asset_kind = asset.kind.clone();
         let asset_duration_sec = asset.duration_sec;
+        // Read from the *stored* metadata, deliberately: a command must replay
+        // identically from the op log, and an FFprobe here would make the same
+        // op produce a different timeline depending on whether the file is still
+        // on the machine. The consequence is that an asset recorded from its file
+        // extension — the CLI's `asset import` without a probe — is inserted with
+        // no linked audio clip even when the file has sound. Nothing downstream
+        // is silenced by that: the render graph, the export and the transcription
+        // mixdown all measure the file, so the clip's own audio is still mixed.
+        // Fixing it belongs with `asset import`, which is where the metadata goes
+        // missing.
         let asset_has_audio = asset.audio.is_some();
 
         let sequence = state
