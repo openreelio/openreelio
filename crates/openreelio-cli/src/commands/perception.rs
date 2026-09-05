@@ -412,6 +412,9 @@ pub fn audio(args: AudioArgs) -> anyhow::Result<()> {
         "durationSec": metadata.duration_sec,
         "bpm": profile.bpm,
         "peakDb": profile.peak_db,
+        "truePeakDbtp": profile.true_peak_dbtp,
+        "integratedLufs": profile.integrated_lufs,
+        "loudnessRangeLu": profile.loudness_range_lu,
         "spectralCentroidHz": profile.spectral_centroid_hz,
         "loudnessSampleCount": profile.loudness_profile.len(),
         "silenceRegionCount": profile.silence_regions.len(),
@@ -964,6 +967,7 @@ mod tests {
             peak_db: -3.0,
             silence_regions: Vec::new(),
             speech_regions: Vec::new(),
+            ..Default::default()
         });
 
         let applied = apply_silence_regions(
@@ -976,6 +980,42 @@ mod tests {
         assert_eq!(profile.bpm, Some(120.0));
         assert_eq!(profile.peak_db, -3.0);
         assert_eq!(profile.silence_regions.len(), 1);
+    }
+
+    /// Feature: silence caching
+    /// Scenario: the cached profile lost its loudness numbers as stale
+    ///   Given a profile whose loudness fields were cleared on load
+    ///   When freshly detected silence regions are merged in
+    ///   Then the write is accepted, so the command reports `persisted: true`
+    ///
+    /// `analysis silence` may only write into an existing profile. Discarding
+    /// the whole profile when its loudness went stale turned every default
+    /// -40 dB / 0.5 s run into `"persisted": false`, even though the regions
+    /// being written had nothing to do with the stale measurement.
+    #[test]
+    fn apply_silence_regions_should_accept_a_profile_whose_loudness_went_stale() {
+        let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(10.0));
+        let mut profile = AudioProfile {
+            measurement_version: 0,
+            bpm: Some(120.0),
+            spectral_centroid_hz: 2500.0,
+            loudness_profile: vec![-18.0],
+            peak_db: -3.0,
+            speech_regions: vec![openreelio_core::analysis::SpeechRegion::new(0.0, 4.0)],
+            ..Default::default()
+        };
+        profile.clear_loudness_measurement();
+        bundle.audio_profile = Some(profile);
+
+        let applied = apply_silence_regions(
+            &mut bundle,
+            vec![openreelio_core::analysis::SilenceRegion::new(4.0, 5.0)],
+        );
+
+        assert!(applied);
+        let profile = bundle.audio_profile.expect("profile must be preserved");
+        assert_eq!(profile.silence_regions.len(), 1);
+        assert_eq!(profile.speech_regions.len(), 1);
     }
 
     #[test]

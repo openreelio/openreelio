@@ -537,7 +537,17 @@ openreelio-cli analysis report  --path ./demo --id <ASSET_ID>
   ``"no audio profile in bundle; run `analysis audio` first"``. The numbers are
   still correct — they just do not update the cache the GUI reads.
 - **`analysis audio`** runs the full profiler (silence, loudness curve, peak,
-  BPM, speech regions) and always persists into the bundle.
+  BPM, speech regions) and always persists into the bundle. It returns
+  `integratedLufs` and `loudnessRangeLu` (EBU R128) alongside `truePeakDbtp`.
+  **`peakDb` is a peak level in dB relative to full scale, not a loudness**: it
+  reports `truePeakDbtp` when the FFmpeg build measures true peak and the
+  `astats` sample peak (dBFS) otherwise. It used to be the maximum momentary
+  loudness in LUFS, so a `peakDb` read from a report written before this change
+  is a different quantity. `loudnessProfile` has one entry per second of audio,
+  including seconds of digital silence, which read `-90`. A pass that measures
+  nothing now fails instead of reporting `-90 dB`, and `analysis report` says
+  `coverage.loudness: false` when the cached numbers predate the current
+  measurement — rerun `analysis audio` when you see that.
 - **`analysis run`** drives the job runner with local-only providers.
   Transcript is off unless `--transcript` is passed, and fails fast with an
   `openreelio-cli transcription install` hint when no Whisper model is present.

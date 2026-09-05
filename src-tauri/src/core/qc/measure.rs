@@ -14,6 +14,9 @@ use std::time::Duration;
 
 use super::context::{MeasuredStreams, MeasuredVideoStream, RenderMeasurements};
 use crate::core::analysis::audio::parse_silence_regions;
+use crate::core::analysis::loudness::{
+    parse_astats_overall, parse_loudness_summary, ASTATS_FILTER, EBUR128_FILTER,
+};
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::{CoreError, CoreResult};
 
@@ -278,15 +281,16 @@ fn build_filter_graph(
     }
 
     if has_audio {
-        // `framelog` is deliberately left at its default: FFmpeg 4.4 and 6.1
-        // only accept `info`/`verbose` there, so passing `quiet` fails option
-        // parsing on the builds most users have. The per-frame lines it would
-        // have suppressed carry the `[Parsed_ebur128` marker, so the bounded
-        // filter buffer absorbs them, and the Summary block still prints.
+        // The `ebur128`/`astats` spelling comes from the shared loudness module
+        // so this pass and the asset audio profile measure the same way. Its
+        // per-frame lines carry the `[Parsed_ebur128` marker, so the bounded
+        // filter buffer absorbs them and the Summary block still prints.
         chains.push(format!(
-            "[0:a]ebur128=peak=true,\
+            "[0:a]{ebur128},\
              silencedetect=n={silence_n:.1}dB:d={silence_d:.3},\
-             astats=metadata=0:measure_perchannel=none:measure_overall=Peak_level+Flat_factor[a]",
+             {astats}[a]",
+            ebur128 = EBUR128_FILTER,
+            astats = ASTATS_FILTER,
             silence_n = opts.silence_threshold_db.clamp(-90.0, 0.0),
             silence_d = opts.silence_min_duration.clamp(0.01, 600.0),
         ));
@@ -300,25 +304,11 @@ fn build_filter_graph(
 // Parsers (pure, testable without FFmpeg)
 // =============================================================================
 
-/// Loudness values read from the `ebur128` summary block.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct LoudnessSummary {
-    /// Integrated program loudness in LUFS.
-    pub integrated_lufs: Option<f64>,
-    /// Loudness range in LU.
-    pub loudness_range_lu: Option<f64>,
-    /// True peak in dBTP.
-    pub true_peak_dbtp: Option<f64>,
-}
-
-/// Overall values read from the `astats` summary.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct AstatsOverall {
-    /// Sample peak in dBFS.
-    pub sample_peak_db: Option<f64>,
-    /// Flatness factor (high values indicate a clipped or flat signal).
-    pub flat_factor: Option<f64>,
-}
+/// Loudness and peak values, re-exported from the shared measurement module.
+///
+/// `verify --file` and the asset audio profile measure the same quantities, so
+/// they share one implementation; see [`crate::core::analysis::loudness`].
+pub use crate::core::analysis::loudness::{AstatsOverall, LoudnessSummary};
 
 /// Parses `blackdetect` ranges from FFmpeg stderr.
 ///
@@ -392,90 +382,6 @@ pub fn parse_freeze_ranges(stderr: &str, duration_sec: f64) -> Vec<(f64, f64)> {
     ranges
 }
 
-/// Parses the `ebur128` summary block.
-///
-/// The block is emitted once at end of stream and its values sit on indented
-/// continuation lines, so parsing keys off the labels rather than the layout:
-/// ```text
-/// [Parsed_ebur128_0 @ 0x1] Summary:
-///
-///   Integrated loudness:
-///     I:         -23.0 LUFS
-///     Threshold: -33.6 LUFS
-///
-///   Loudness range:
-///     LRA:         5.2 LU
-///
-///   True peak:
-///     Peak:       -1.2 dBFS
-/// ```
-/// A build without true-peak support simply omits the last section; the caller
-/// then falls back to the sample peak reported by `astats`.
-pub fn parse_loudness_summary(stderr: &str) -> LoudnessSummary {
-    let mut summary = LoudnessSummary::default();
-    let mut in_true_peak_section = false;
-
-    for line in stderr.lines() {
-        let content = strip_log_prefix(line).trim();
-
-        if content.starts_with("True peak") {
-            in_true_peak_section = true;
-            continue;
-        }
-        if content.starts_with("Integrated loudness") || content.starts_with("Loudness range") {
-            in_true_peak_section = false;
-            continue;
-        }
-
-        if let Some(rest) = content.strip_prefix("I:") {
-            if let Some(value) = parse_leading_f64(rest) {
-                summary.integrated_lufs = Some(value);
-            }
-        } else if let Some(rest) = content.strip_prefix("LRA:") {
-            if let Some(value) = parse_leading_f64(rest) {
-                summary.loudness_range_lu = Some(value);
-            }
-        } else if in_true_peak_section {
-            if let Some(rest) = content.strip_prefix("Peak:") {
-                if let Some(value) = parse_leading_f64(rest) {
-                    summary.true_peak_dbtp = Some(value);
-                }
-            }
-        }
-    }
-
-    summary
-}
-
-/// Parses the overall `astats` summary.
-///
-/// Expects lines of the form:
-/// ```text
-/// [Parsed_astats_2 @ 0x1] Peak level dB: -1.234567
-/// [Parsed_astats_2 @ 0x1] Flat factor: 0.000000
-/// ```
-/// A digital-silence pass reports `-inf`, which is returned as `None` rather
-/// than a numeric floor so callers can tell it apart from a measured level.
-pub fn parse_astats_overall(stderr: &str) -> AstatsOverall {
-    let mut overall = AstatsOverall::default();
-
-    for line in stderr.lines() {
-        let content = strip_log_prefix(line).trim();
-
-        if let Some(rest) = content.strip_prefix("Peak level dB:") {
-            if let Some(value) = parse_leading_f64(rest) {
-                overall.sample_peak_db = Some(value);
-            }
-        } else if let Some(rest) = content.strip_prefix("Flat factor:") {
-            if let Some(value) = parse_leading_f64(rest) {
-                overall.flat_factor = Some(value);
-            }
-        }
-    }
-
-    overall
-}
-
 /// Appends a range, ignoring degenerate or non-finite values.
 fn push_range(ranges: &mut Vec<(f64, f64)>, start: f64, end: f64) {
     if start.is_finite() && end.is_finite() && end > start {
@@ -491,28 +397,8 @@ fn extract_marker_value(line: &str, marker: &str) -> Option<f64> {
     parse_leading_f64(rest)
 }
 
-/// Parses the first numeric token of `text`, ignoring trailing units.
-fn parse_leading_f64(text: &str) -> Option<f64> {
-    let trimmed = text.trim_start();
-    let token: String = trimmed
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.' || *c == 'e')
-        .collect();
-
-    token.parse::<f64>().ok().filter(|value| value.is_finite())
-}
-
-/// Removes a leading `[filter @ 0x…]` log prefix, if present.
-fn strip_log_prefix(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    if !trimmed.starts_with('[') {
-        return line;
-    }
-    match trimmed.find(']') {
-        Some(end) => &trimmed[end + 1..],
-        None => line,
-    }
-}
+// The numeric helper is shared with the audio-profile measurement.
+use crate::core::analysis::loudness::parse_leading_f64;
 
 // ============================================================================
 // Tests
@@ -550,8 +436,8 @@ mod tests {
   True peak:
     Peak:       -1.2 dBFS";
 
-    /// Real `ebur128` per-frame lines, which print whenever `framelog` is left
-    /// at its default (the only portable setting across FFmpeg builds).
+    /// Real `ebur128` per-frame lines, which the shared chain prints because it
+    /// pins `framelog=info`.
     const EBUR128_PER_FRAME: &str = "\
 [Parsed_ebur128_0 @ 000001f3f7a0] t: 0.19999   M: -21.4 S:-120.7     I: -21.4 LUFS       LRA:   0.0 LU
 [Parsed_ebur128_0 @ 000001f3f7a0] t: 0.29999   M: -19.8 S:-120.7     I: -20.3 LUFS       LRA:   0.0 LU
@@ -731,15 +617,6 @@ Output #0, null, to 'pipe:':";
         assert!((regions[0].end_sec - 7.25).abs() < 1e-9);
     }
 
-    #[test]
-    fn test_strip_log_prefix() {
-        assert_eq!(
-            strip_log_prefix("[Parsed_x @ 0x1] I: -5.0").trim(),
-            "I: -5.0"
-        );
-        assert_eq!(strip_log_prefix("    I: -5.0").trim(), "I: -5.0");
-    }
-
     // ========================================================================
     // Filter graph
     // ========================================================================
@@ -750,10 +627,11 @@ Output #0, null, to 'pipe:':";
 
         assert!(graph.contains("[0:v]blackdetect="));
         assert!(graph.contains("freezedetect="));
-        assert!(graph.contains("[0:a]ebur128=peak=true,"));
+        assert!(graph.contains("[0:a]ebur128=peak=true"));
         assert!(
-            !graph.contains("framelog"),
-            "framelog is unsupported on FFmpeg 4.4/6.1 and must stay off the graph: {graph}"
+            graph.contains("framelog=info"),
+            "the shared chain must pin framelog so per-frame lines survive \
+             -loglevel info: {graph}"
         );
         assert!(graph.contains("silencedetect="));
         assert!(graph.contains("astats=metadata=0"));

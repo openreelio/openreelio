@@ -32,6 +32,7 @@ pub mod diarization_runner;
 pub mod dtw;
 pub mod ducking;
 pub mod esd;
+pub mod loudness;
 #[cfg(feature = "ai-providers")]
 pub mod openai_perception;
 pub mod segmentation;
@@ -554,7 +555,21 @@ impl AnalysisJobRunner {
         }
 
         let content = std::fs::read_to_string(&path)?;
-        let bundle: AnalysisBundle = serde_json::from_str(&content)?;
+        let mut bundle: AnalysisBundle = serde_json::from_str(&content)?;
+
+        // Every read of the cache goes through here, including the one inside
+        // `locked_bundle_update`, so clearing the stale numbers here is enough
+        // to keep a superseded measurement from being served or re-persisted.
+        // The rest of the profile — silence and speech regions — was produced
+        // by passes the loudness fix never touched and stays.
+        if bundle.reset_outdated_audio_loudness() {
+            tracing::info!(
+                asset_id = %asset_id,
+                "Cleared the loudness numbers of an audio profile from an older \
+                 measurement; rerun `analysis audio` to recompute them"
+            );
+        }
+
         Ok(Some(bundle))
     }
 
@@ -1114,6 +1129,7 @@ mod tests {
             peak_db: -0.5,
             silence_regions: vec![],
             speech_regions: vec![],
+            ..Default::default()
         });
         bundle.contact_sheet = Some(ContactSheetArtifact {
             path: temp_dir.path().join("sheet.jpg").display().to_string(),

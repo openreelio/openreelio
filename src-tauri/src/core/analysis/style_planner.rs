@@ -1026,6 +1026,7 @@ mod tests {
             peak_db: -10.0,
             silence_regions: vec![],
             speech_regions: vec![SpeechRegion::new(0.0, total_duration)],
+            ..Default::default()
         });
 
         bundle

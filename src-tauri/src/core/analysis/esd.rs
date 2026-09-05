@@ -811,6 +811,7 @@ mod tests {
             peak_db: -5.0,
             silence_regions: vec![],
             speech_regions: vec![SpeechRegion::new(0.0, 5.0)],
+            ..Default::default()
         };
 
         let sync = EsdGenerator::detect_sync_points(&shots, &audio);
@@ -837,6 +838,7 @@ mod tests {
             peak_db: -5.0,
             silence_regions: vec![],
             speech_regions: vec![SpeechRegion::new(0.0, 10.0)],
+            ..Default::default()
         };
 
         let sync = EsdGenerator::detect_sync_points(&shots, &audio);
@@ -854,6 +856,7 @@ mod tests {
             peak_db: -20.0,
             silence_regions: vec![],
             speech_regions: vec![SpeechRegion::new(0.0, 10.0)],
+            ..Default::default()
         };
 
         let sync = EsdGenerator::detect_sync_points(&shots, &audio);
@@ -910,6 +913,7 @@ mod tests {
             peak_db: -8.0,
             silence_regions: vec![],
             speech_regions: vec![SpeechRegion::new(0.0, 12.0)],
+            ..Default::default()
         });
         bundle
     }

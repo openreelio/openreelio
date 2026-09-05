@@ -525,6 +525,46 @@ impl Default for ContentSegmenter {
 
 #[cfg(test)]
 mod tests {
+    /// Feature: content segmentation
+    /// Scenario: a window is queried after a second of digital silence
+    ///   Given a 3 s loudness profile built from a real `ebur128` log whose
+    ///   middle second is digital silence
+    ///   When the average loudness of the last second is computed
+    ///   Then it reads the last second's level, not the silent second's
+    ///
+    /// This is the alignment the profile exists for: the profile is addressed
+    /// by `floor(start)..ceil(end)`, so a reading dropped anywhere earlier
+    /// shifts every window after it onto the wrong audio.
+    #[test]
+    fn should_read_the_window_that_was_asked_for_when_an_earlier_second_was_silent() {
+        use crate::core::analysis::loudness::{
+            parse_momentary_loudness, per_second_loudness_profile,
+        };
+
+        let mut log = String::new();
+        for index in 0..30 {
+            let level = match index {
+                0..=9 => -30.0,
+                10..=19 => -120.7,
+                _ => -12.0,
+            };
+            log.push_str(&format!(
+                "[Parsed_ebur128_0 @ 0x1] t: {:.1} TARGET:-23 LUFS M: {:.1} S: {:.1}\n",
+                index as f64 / 10.0,
+                level,
+                level,
+            ));
+        }
+        let profile = per_second_loudness_profile(&parse_momentary_loudness(&log), 10);
+
+        let last_second = ContentSegmenter::compute_avg_loudness(2.0, 3.0, &profile);
+
+        assert!(
+            (last_second - -12.0).abs() < 0.05,
+            "the last second must read -12 LUFS, got {last_second}"
+        );
+    }
+
     use super::*;
     use crate::core::analysis::types::SpeechRegion;
 
@@ -545,6 +585,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            ..Default::default()
         }
     }
 
@@ -596,6 +637,7 @@ mod tests {
             peak_db: -5.0,
             silence_regions: Vec::new(),
             speech_regions: vec![SpeechRegion::new(0.0, 20.0)],
+            ..Default::default()
         };
 
         let segmenter = ContentSegmenter::new();
@@ -863,6 +905,7 @@ mod tests {
             peak_db: f64::NEG_INFINITY,
             silence_regions: Vec::new(),
             speech_regions: vec![SpeechRegion::new(0.0, 10.0)],
+            ..Default::default()
         };
 
         let segmenter = ContentSegmenter::new();

@@ -511,11 +511,18 @@ interface AnalysisOptions {
 
 ```typescript
 interface AudioProfile {
+  measurementVersion: number; // Loudness/peak pass that produced the numbers
   bpm: number | null;
   spectralCentroidHz: number;
-  loudnessProfile: number[]; // Per-second RMS dB values
-  peakDb: number;
+  loudnessProfile: number[]; // Per-second momentary loudness in LUFS, one entry
+                             // per second; a silent second reads -90
+  peakDb: number; // True peak in dBTP when measured, else the sample peak in
+                  // dBFS; -90 means nothing was measured
+  integratedLufs: number | null; // EBU R128 program loudness
+  loudnessRangeLu: number | null; // EBU R128 loudness range
+  truePeakDbtp: number | null; // True peak, when the FFmpeg build measures one
   silenceRegions: SilenceRegion[];
+  speechRegions: SpeechRegion[];
 }
 
 interface SilenceRegion {
