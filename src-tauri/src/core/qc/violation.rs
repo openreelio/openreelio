@@ -246,6 +246,20 @@ impl QCViolation {
         self.suggested_fix = Some(fix);
         self
     }
+
+    /// Overrides whether the attached fix finishes the job on its own.
+    ///
+    /// [`with_fix`](Self::with_fix) assumes it does, which is true of every fix
+    /// that only changes a setting. It is not true of a fix that *proposes*
+    /// something — re-worded caption text, a line split at a guessed word
+    /// boundary — and a report claiming otherwise sends an agent to apply an
+    /// edit nobody agreed to. Call this after `with_fix`; on a violation with
+    /// no fix, `true` is ignored, because a violation cannot be automatically
+    /// fixed by commands it does not carry.
+    pub fn with_auto_fixable(mut self, auto_fixable: bool) -> Self {
+        self.auto_fixable = auto_fixable && self.suggested_fix.is_some();
+        self
+    }
 }
 
 // ============================================================================
@@ -474,6 +488,27 @@ mod tests {
 
         assert!(violation.auto_fixable);
         assert!(violation.suggested_fix.is_some());
+    }
+
+    #[test]
+    fn test_violation_fix_can_be_marked_as_a_proposal() {
+        let violation = QCViolation::new("TestRule", Severity::Warning, "Issue")
+            .with_fix(ViolationFix::new("Split the line", vec![]))
+            .with_auto_fixable(false);
+
+        assert!(!violation.auto_fixable);
+        assert!(
+            violation.suggested_fix.is_some(),
+            "a proposal is still worth showing"
+        );
+    }
+
+    #[test]
+    fn test_violation_cannot_claim_auto_fixability_without_a_fix() {
+        let violation =
+            QCViolation::new("TestRule", Severity::Warning, "Issue").with_auto_fixable(true);
+
+        assert!(!violation.auto_fixable);
     }
 
     #[test]

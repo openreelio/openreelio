@@ -308,7 +308,7 @@ describe('openreelio.render_proxy', () => {
     expect(result.nextStep).toContain('atCuts');
     expect(result.nextStep).toContain("grid: 'auto'");
     // Looking is only half of it: the draft is also what the QC pass measures.
-    expect(result.nextStep).toContain('openreelio.verify { file: outputPath }');
+    expect(result.nextStep).toContain('openreelio.verify { file: outputPath, fileRange:');
     expect(unlistened()).toBe(2);
   });
 
@@ -773,6 +773,7 @@ describe('openreelio.verify', () => {
 
     await callTool('verify', {
       file: 'D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4',
+      fileRange: [10, 40],
       structuralOnly: false,
       checks: ['audio.loudness'],
       skip: ['asset.license'],
@@ -786,6 +787,7 @@ describe('openreelio.verify', () => {
     expect(invoke).toHaveBeenCalledWith('verify_sequence', {
       request: {
         file: 'D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4',
+        fileRange: [10, 40],
         structuralOnly: false,
         checks: ['audio.loudness'],
         skip: ['asset.license'],
@@ -798,6 +800,22 @@ describe('openreelio.verify', () => {
     });
   });
 
+  it('should refuse a file range that names no stretch of timeline', async () => {
+    vi.mocked(invoke).mockResolvedValue({ payload: { status: 'ok', checks: [] }, exitCode: 0 });
+
+    const reversed = await callTool('verify', { file: 'proxy.mp4', fileRange: [40, 10] });
+    expect(reversed.success).toBe(false);
+    expect(JSON.parse(responseText(reversed)).message).toMatch(/before its end/);
+
+    const orphaned = await callTool('verify', { fileRange: [10, 40] });
+    expect(orphaned.success).toBe(false);
+    expect(JSON.parse(responseText(orphaned)).message).toMatch(
+      /only means something with file/,
+    );
+
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('should send a complete structural request when the agent passes nothing', async () => {
     vi.mocked(invoke).mockResolvedValue({ payload: { status: 'ok', checks: [] }, exitCode: 0 });
 
@@ -806,6 +824,7 @@ describe('openreelio.verify', () => {
     expect(invoke).toHaveBeenCalledWith('verify_sequence', {
       request: {
         file: null,
+        fileRange: null,
         structuralOnly: false,
         checks: null,
         skip: null,
@@ -1138,7 +1157,9 @@ describe('developer instructions', () => {
 
   it('should close the loop on a verified result before reporting done', () => {
     expect(instructions).toContain('openreelio.verify');
-    expect(instructions).toContain('openreelio.verify { file: outputPath }');
+    expect(instructions).toContain(
+      'openreelio.verify { file: outputPath, fileRange: [start, start + durationSec] }',
+    );
     expect(instructions).toContain('exitCode');
     expect(instructions).toContain('openreelio.plan_apply only after reviewing it');
   });

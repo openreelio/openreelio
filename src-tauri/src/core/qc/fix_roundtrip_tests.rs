@@ -27,6 +27,7 @@ use crate::ipc::CommandPayload;
 /// being emitted is caught by the coverage assertion.
 const EXPECTED_FIX_COMMAND_TYPES: &[&str] = &[
     "CloseGap",
+    "CreateCaption",
     "RemoveClip",
     "SetMasterVolume",
     "TrimClip",
@@ -95,6 +96,7 @@ fn video_clip(asset_id: &str, timeline_in_sec: f64, duration_sec: f64) -> Clip {
 /// * a hole between two clips on one track — `CloseGap`
 /// * a sub-frame leftover clip — `RemoveClip`
 /// * a caption pinned to the very bottom of the canvas — `UpdateCaption`
+/// * a caption that reads too fast with no gap to grow into — `CreateCaption`
 /// * black at the head of a clip whose source has room — `TrimClip`
 /// * a clipped, over-loud mix — `SetMasterVolume`
 fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
@@ -125,6 +127,22 @@ fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
         .expect("caption position serialises"),
     );
     captions.add_clip(caption);
+
+    // Far too much text for the time it is up, and the cue that follows starts
+    // immediately, so the repair cannot simply extend it: it has to propose a
+    // split, which is the only path that emits `CreateCaption`.
+    let mut hurried = Clip::with_range("caption", 0.0, 0.2);
+    hurried.place.timeline_in_sec = 4.0;
+    hurried.place.duration_sec = 0.2;
+    hurried.label = Some("Far too many characters to read in a fifth of a second".to_string());
+    captions.add_clip(hurried);
+
+    let mut follower = Clip::with_range("caption", 0.0, 0.8);
+    follower.place.timeline_in_sec = 4.2;
+    follower.place.duration_sec = 0.8;
+    follower.label = Some("Next".to_string());
+    captions.add_clip(follower);
+
     sequence.add_track(captions);
 
     let mut state = ProjectState::new("QC Fix Round Trip");
@@ -175,11 +193,6 @@ async fn test_every_suggested_fix_should_parse_as_a_real_command() {
         };
 
         assert!(
-            violation.auto_fixable,
-            "{} carries a fix but is not marked auto-fixable",
-            violation.rule_name
-        );
-        assert!(
             !fix.commands.is_empty(),
             "{} suggested a fix with no commands",
             violation.rule_name
@@ -218,13 +231,46 @@ async fn test_auto_fixable_violations_should_always_carry_a_fix() {
     let violations = run_every_rule(&sequence, &state).await;
 
     for violation in &violations {
-        assert_eq!(
-            violation.auto_fixable,
-            violation.suggested_fix.is_some(),
-            "{} disagrees with itself about whether it can be fixed",
-            violation.rule_name
-        );
+        // The implication runs one way only. A violation may carry a fix that
+        // merely *proposes* something — a caption line split at a guessed word
+        // boundary — and report `autoFixable: false`; what it may never do is
+        // claim it can be fixed automatically by commands it does not carry.
+        if violation.auto_fixable {
+            assert!(
+                violation.suggested_fix.is_some(),
+                "{} claims it can be fixed automatically but carries no commands",
+                violation.rule_name
+            );
+        }
     }
+}
+
+/// Feature: QC fix suggestions
+/// Scenario: should mark a repair that only proposes something as not automatic
+///
+/// The counterpart of the guard above: a report where every fix claims to be
+/// automatic sends an agent to apply edits nobody agreed to, so at least one
+/// rule has to be honest about proposing rather than repairing.
+#[tokio::test]
+async fn test_a_proposed_caption_split_should_not_claim_to_be_automatic() {
+    let (sequence, state) = project_with_every_fixable_finding();
+    let violations = run_every_rule(&sequence, &state).await;
+
+    let split = violations
+        .iter()
+        .find(|violation| {
+            violation.suggested_fix.as_ref().is_some_and(|fix| {
+                fix.commands
+                    .iter()
+                    .any(|command| command["type"] == "CreateCaption")
+            })
+        })
+        .expect("the fixture holds a cue that can only be repaired by splitting it");
+
+    assert!(
+        !split.auto_fixable,
+        "a split rewrites the caption into two lines, which is a proposal to read"
+    );
 }
 
 /// Feature: QC fix suggestions

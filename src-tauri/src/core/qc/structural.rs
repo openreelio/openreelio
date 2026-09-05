@@ -11,6 +11,7 @@
 
 use async_trait::async_trait;
 
+use super::caption_group::{group_caption_findings, CaptionFinding, CaptionGroup};
 use super::context::QCContext;
 use super::engine::QCReport;
 use super::rules::{QCRule, RuleConfig};
@@ -974,6 +975,64 @@ impl CaptionReadingRateRule {
             CaptionScript::Cjk => (Self::CJK_WARN_CPS, Self::CJK_SEVERE_CPS),
         }
     }
+
+    /// Returns the latest second this cue may be extended to.
+    ///
+    /// The next cue's start less one frame, so an extension can never create
+    /// the overlap `caption.overlap` reports; for the last cue on a track, the
+    /// end of the edit, because there is nothing after it to collide with.
+    fn extension_ceiling(
+        starts: &[f64],
+        clip_start_sec: f64,
+        clip_end_sec: f64,
+        sequence_end_sec: f64,
+        frame_sec: f64,
+    ) -> f64 {
+        let next_start = starts
+            .iter()
+            .copied()
+            .filter(|start| *start > clip_start_sec)
+            .fold(f64::INFINITY, f64::min);
+
+        if next_start.is_finite() {
+            next_start - frame_sec
+        } else {
+            sequence_end_sec.max(clip_end_sec)
+        }
+    }
+
+    /// Splits caption text in two at the word boundary nearest the middle.
+    ///
+    /// Returns `None` when there is nothing to split — a single word, or text
+    /// whose halves would be empty. CJK has no spaces to break on, so an
+    /// unbroken run falls back to the character midpoint, which is where a
+    /// subtitler would break it too.
+    fn split_text(text: &str) -> Option<(String, String)> {
+        let characters: Vec<char> = text.chars().collect();
+        if characters.len() < 2 {
+            return None;
+        }
+        let middle = characters.len() / 2;
+
+        let boundary = characters
+            .iter()
+            .enumerate()
+            .filter(|(index, character)| {
+                character.is_whitespace() && *index > 0 && *index < characters.len() - 1
+            })
+            .min_by_key(|(index, _)| index.abs_diff(middle))
+            .map(|(index, _)| index)
+            .unwrap_or(middle);
+
+        let first: String = characters[..boundary].iter().collect();
+        let second: String = characters[boundary..].iter().collect();
+        let (first, second) = (first.trim().to_string(), second.trim().to_string());
+
+        if first.is_empty() || second.is_empty() {
+            return None;
+        }
+        Some((first, second))
+    }
 }
 
 /// Returns whether a character belongs to a CJK script block.
@@ -1016,12 +1075,28 @@ impl QCRule for CaptionReadingRateRule {
         sequence: &Sequence,
         _state: &ProjectState,
         config: &RuleConfig,
-        _context: &QCContext,
+        context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
         let severity = config.severity_override.unwrap_or(self.default_severity());
+        let frame_sec = context.frame_duration_sec();
+        let sequence_end_sec = sequence.duration();
         let mut violations = Vec::new();
 
         for track in sequence.tracks.iter().filter(|track| track.is_caption()) {
+            // Clip order on a track is not guaranteed, and "the following gap"
+            // is meaningless without it.
+            let mut starts: Vec<f64> = track
+                .clips
+                .iter()
+                .map(|clip| clip.place.timeline_in_sec)
+                .filter(|start| start.is_finite())
+                .collect();
+            starts.sort_by(|left, right| {
+                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let mut findings: Vec<CaptionFinding> = Vec::new();
+
             for clip in &track.clips {
                 let Some(text) = clip.label.as_ref().map(|label| label.trim()) else {
                     continue;
@@ -1044,49 +1119,181 @@ impl QCRule for CaptionReadingRateRule {
                 let warn_cps = config.get_param::<f64>("warn_cps").unwrap_or(warn_cps);
                 let severe_cps = config.get_param::<f64>("severe_cps").unwrap_or(severe_cps);
 
-                if cps <= warn_cps {
+                if cps <= warn_cps || warn_cps <= 0.0 {
                     continue;
                 }
 
-                let qualifier = if cps > severe_cps {
-                    "far above"
-                } else {
-                    "above"
-                };
+                let clip_start = clip.place.timeline_in_sec;
+                let clip_end = clip.timeline_end();
+                let repair = Self::repair_for(
+                    RepairInputs {
+                        sequence_id: &sequence.id,
+                        track_id: &track.id,
+                        clip_id: &clip.id,
+                        text,
+                        clip_start_sec: clip_start,
+                        clip_end_sec: clip_end,
+                        required_duration_sec: char_count / warn_cps,
+                        frame_sec,
+                    },
+                    &starts,
+                    sequence_end_sec,
+                );
 
-                violations.push(
-                    QCViolation::new(
-                        self.name(),
-                        severity,
-                        format!(
-                            "Caption reads at {:.1} characters/second, {} the {:.1} limit for {} text",
-                            cps,
-                            qualifier,
-                            warn_cps,
-                            script.as_str()
-                        ),
-                    )
-                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
-                    .with_entities(vec![clip.id.clone()])
-                    .with_details(format!(
-                        "{:.0} characters in {:.2}s. Script detected as {} (CJK glyphs carry more \
-                         meaning per character, so they use a lower budget). Extend the caption or \
-                         split the line.",
-                        char_count,
-                        duration,
-                        script.as_str()
-                    ))
-                    .with_metric("cps", (cps * 100.0).round() / 100.0)
-                    .with_metric("charCount", char_count)
-                    .with_metric("durationSec", duration)
-                    .with_metric("script", script.as_str())
-                    .with_metric("warnCps", warn_cps)
-                    .with_metric("severeCps", severe_cps),
+                findings.push(
+                    CaptionFinding::new(clip.id.clone(), clip_start, clip_end)
+                        .with_metric("cps", (cps * 100.0).round() / 100.0)
+                        .with_metric("charCount", char_count)
+                        .with_metric("durationSec", duration)
+                        .with_metric("script", script.as_str())
+                        .with_metric("warnCps", warn_cps)
+                        .with_metric("severeCps", severe_cps)
+                        .with_metric("severe", cps > severe_cps)
+                        .with_metric("repair", repair.label)
+                        .with_commands(repair.commands, repair.resolved),
                 );
             }
+
+            violations.extend(group_caption_findings(
+                CaptionGroup {
+                    rule_name: self.name(),
+                    severity,
+                    track_id: &track.id,
+                    details:
+                        "Each listed cue carries its own rate under `cues`. Where the following \
+                         gap is long enough the fix simply extends the cue; where it is not, the \
+                         cue is split at a word boundary and the pair uses every second \
+                         available. A split does not by itself lower characters per second — it \
+                         lowers how much text is on screen at once — so a group containing one is \
+                         a proposal to read rather than an automatic repair."
+                            .to_string(),
+                    fix_description: "Give every listed caption more time to be read".to_string(),
+                    confidence: 0.7,
+                },
+                findings,
+                |count| format!("{count} caption(s) on this track read faster than is comfortable"),
+            ));
         }
 
         Ok(violations)
+    }
+
+    fn supports_auto_fix(&self) -> bool {
+        true
+    }
+}
+
+/// Everything the repair for one over-fast cue is derived from.
+struct RepairInputs<'a> {
+    sequence_id: &'a str,
+    track_id: &'a str,
+    clip_id: &'a str,
+    text: &'a str,
+    clip_start_sec: f64,
+    clip_end_sec: f64,
+    /// How long the cue would have to be up to reach the comfortable rate
+    required_duration_sec: f64,
+    frame_sec: f64,
+}
+
+/// The repair proposed for one over-fast cue.
+struct CaptionRepair {
+    /// What was done, for the cue's `repair` metric
+    label: &'static str,
+    /// Commands that carry it out
+    commands: Vec<serde_json::Value>,
+    /// Whether the commands finish the job on their own
+    resolved: bool,
+}
+
+impl CaptionReadingRateRule {
+    /// Builds the repair for one cue: extend it, or split it and extend the pair.
+    ///
+    /// Extension is preferred because it is complete — a cue held long enough
+    /// *is* readable, and nothing about the edit is left to judge, so the group
+    /// it belongs to stays automatically fixable. A split rewrites the caption
+    /// into two, which is a proposal: it is offered when the gap cannot hold
+    /// the time the cue needs.
+    fn repair_for(
+        inputs: RepairInputs<'_>,
+        starts: &[f64],
+        sequence_end_sec: f64,
+    ) -> CaptionRepair {
+        let ceiling = Self::extension_ceiling(
+            starts,
+            inputs.clip_start_sec,
+            inputs.clip_end_sec,
+            sequence_end_sec,
+            inputs.frame_sec,
+        );
+        let required_end = inputs.clip_start_sec + inputs.required_duration_sec;
+
+        if required_end <= ceiling {
+            return CaptionRepair {
+                label: "extend",
+                commands: vec![serde_json::json!({
+                    "type": "UpdateCaption",
+                    "sequenceId": inputs.sequence_id,
+                    "trackId": inputs.track_id,
+                    "clipId": inputs.clip_id,
+                    "endSec": (required_end * 1000.0).round() / 1000.0,
+                })],
+                resolved: true,
+            };
+        }
+
+        // Take every second the gap does offer, then break the line so each
+        // half carries less text.
+        let extended_end = ceiling.max(inputs.clip_end_sec);
+        let Some((first, second)) = Self::split_text(inputs.text) else {
+            return CaptionRepair {
+                label: "none",
+                commands: Vec::new(),
+                resolved: false,
+            };
+        };
+
+        let first_share = first.chars().count() as f64
+            / (first.chars().count() + second.chars().count()).max(1) as f64;
+        let split_sec =
+            inputs.clip_start_sec + (extended_end - inputs.clip_start_sec) * first_share;
+        // Both halves must be real cues, not sub-frame slivers `clip.orphan`
+        // would then report.
+        let earliest = inputs.clip_start_sec + inputs.frame_sec;
+        let latest = extended_end - inputs.frame_sec;
+        if latest <= earliest {
+            return CaptionRepair {
+                label: "none",
+                commands: Vec::new(),
+                resolved: false,
+            };
+        }
+        let split_sec = (split_sec.clamp(earliest, latest) * 1000.0).round() / 1000.0;
+
+        CaptionRepair {
+            label: "split",
+            commands: vec![
+                // Shrink first, so the two cues never overlap at any point in
+                // the plan.
+                serde_json::json!({
+                    "type": "UpdateCaption",
+                    "sequenceId": inputs.sequence_id,
+                    "trackId": inputs.track_id,
+                    "clipId": inputs.clip_id,
+                    "text": first,
+                    "endSec": split_sec,
+                }),
+                serde_json::json!({
+                    "type": "CreateCaption",
+                    "sequenceId": inputs.sequence_id,
+                    "trackId": inputs.track_id,
+                    "text": second,
+                    "startSec": split_sec,
+                    "endSec": (extended_end * 1000.0).round() / 1000.0,
+                }),
+            ],
+            resolved: false,
+        }
     }
 }
 
@@ -1215,6 +1422,8 @@ impl QCRule for CaptionOutOfBoundsRule {
         let mut violations = Vec::new();
 
         for track in sequence.tracks.iter().filter(|track| track.is_caption()) {
+            let mut findings: Vec<CaptionFinding> = Vec::new();
+
             for clip in &track.clips {
                 // A missing or unreadable position renders with the caption
                 // default, so the check follows the same fallback.
@@ -1236,26 +1445,38 @@ impl QCRule for CaptionOutOfBoundsRule {
                     continue;
                 }
 
-                violations.push(
-                    QCViolation::new(
-                        self.name(),
-                        severity,
-                        "Caption is positioned outside the canvas".to_string(),
+                findings.push(
+                    CaptionFinding::new(
+                        clip.id.clone(),
+                        clip.place.timeline_in_sec,
+                        clip.timeline_end(),
                     )
-                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
-                    .with_entities(vec![clip.id.clone()])
-                    .with_details(format!(
-                        "Estimated text box spans x {:.1}%-{:.1}%, y {:.1}%-{:.1}%, outside the \
-                         0%-100% canvas. Text outside the frame is cropped away.",
-                        left, right, top, bottom
-                    ))
                     .with_metric("leftPercent", left)
                     .with_metric("rightPercent", right)
                     .with_metric("topPercent", top)
-                    .with_metric("bottomPercent", bottom)
-                    .with_metric("trackId", track.id.clone()),
+                    .with_metric("bottomPercent", bottom),
                 );
             }
+
+            // One violation per track, not one per cue: a caption track pushed
+            // off the frame is one wrong setting, and a fix that repairs one
+            // cue at a time makes an agent run the loop once per caption.
+            violations.extend(group_caption_findings(
+                CaptionGroup {
+                    rule_name: self.name(),
+                    severity,
+                    track_id: &track.id,
+                    details: "Text outside the frame is cropped away. Each listed cue carries its \
+                              own estimated box under `cues`. No fix is offered: where a caption \
+                              pushed off the canvas belongs is a composition decision, and \
+                              `caption.safe_area` proposes the move for the cues it can measure."
+                        .to_string(),
+                    fix_description: String::new(),
+                    confidence: 0.0,
+                },
+                findings,
+                |count| format!("{count} caption(s) on this track are positioned off the canvas"),
+            ));
         }
 
         Ok(violations)
@@ -1787,6 +2008,18 @@ mod tests {
 
     fn context_for(sequence: &Sequence) -> QCContext {
         QCContext::from_sequence(sequence)
+    }
+
+    /// Reads the first per-cue entry out of a grouped caption violation.
+    ///
+    /// The caption rules report one violation per track and put each cue's own
+    /// numbers under `cues`, so a test about a single caption asks for that
+    /// cue rather than for a metric on the group.
+    fn first_cue(violation: &QCViolation) -> &serde_json::Value {
+        violation.metrics["cues"]
+            .as_array()
+            .and_then(|cues| cues.first())
+            .expect("a grouped caption violation lists its cues")
     }
 
     fn video_clip(asset_id: &str, timeline_in: f64, duration: f64) -> Clip {
@@ -2477,9 +2710,11 @@ mod tests {
             .await
             .expect("rule runs");
 
+        // One violation for the track, listing the single cue that breached.
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].severity, Severity::Warning);
-        assert_eq!(violations[0].metrics["script"], "latin");
+        assert_eq!(violations[0].metrics["cueCount"], 1);
+        assert_eq!(first_cue(&violations[0])["script"], "latin");
     }
 
     #[tokio::test]
@@ -2502,8 +2737,143 @@ mod tests {
             .expect("rule runs");
 
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].metrics["script"], "cjk");
-        assert_eq!(violations[0].metrics["warnCps"], 9.0);
+        assert_eq!(first_cue(&violations[0])["script"], "cjk");
+        assert_eq!(first_cue(&violations[0])["warnCps"], 9.0);
+    }
+
+    /// Runs the reading-rate rule over a sequence.
+    async fn reading_rate_violations(sequence: &Sequence) -> Vec<QCViolation> {
+        CaptionReadingRateRule::new()
+            .check(
+                sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &context_for(sequence),
+            )
+            .await
+            .expect("rule runs")
+    }
+
+    /// A sequence with ten seconds of picture, so a caption has room after it.
+    fn sequence_with_ten_seconds_of_picture() -> Sequence {
+        let mut sequence = sequence_30fps();
+        let mut video = Track::new_video("V1");
+        video.add_clip(video_clip("asset_1", 0.0, 10.0));
+        sequence.add_track(video);
+        sequence
+    }
+
+    /// Feature: Repairing an over-fast caption
+    /// Scenario: should extend the cue into the gap that follows it
+    ///
+    /// Holding the words longer is the complete repair — the cue then reads at
+    /// a comfortable rate and nothing about the edit is left to judge — so the
+    /// finding really is automatically fixable.
+    #[tokio::test]
+    async fn test_reading_rate_rule_should_extend_a_cue_into_the_following_gap() {
+        let mut sequence = sequence_with_ten_seconds_of_picture();
+        let mut track = Track::new_caption("C1");
+        // 29 characters in 1s: 29 cps against the 20 cps Latin limit, so the
+        // cue needs 1.45s to be comfortable and the track has room to give it.
+        track.add_clip(caption_clip("abcdefghij abcdefghij abcdefg", 0.0, 1.0));
+        sequence.add_track(track);
+
+        let violations = reading_rate_violations(&sequence).await;
+
+        assert_eq!(violations.len(), 1);
+        let violation = &violations[0];
+        assert!(violation.auto_fixable, "an extension finishes the job");
+        assert_eq!(first_cue(violation)["repair"], "extend");
+
+        let fix = violation.suggested_fix.as_ref().expect("a repair");
+        assert_eq!(fix.commands.len(), 1);
+        assert_eq!(fix.commands[0]["type"], "UpdateCaption");
+        assert!(
+            (fix.commands[0]["endSec"].as_f64().expect("an end time") - 1.45).abs() < 1e-6,
+            "the cue must be held exactly long enough: {}",
+            fix.commands[0]
+        );
+    }
+
+    /// Feature: Repairing an over-fast caption
+    /// Scenario: should propose a split when the gap cannot hold the time
+    ///
+    /// A split rewrites one caption into two, which is a judgement about the
+    /// line rather than a setting, so the finding keeps the plan and drops the
+    /// claim that it can be applied unread.
+    #[tokio::test]
+    async fn test_reading_rate_rule_should_propose_a_split_when_extension_is_not_enough() {
+        let mut sequence = sequence_with_ten_seconds_of_picture();
+        let mut track = Track::new_caption("C1");
+        track.add_clip(caption_clip("abcdefghij abcdefghij abcdefg", 0.0, 1.0));
+        // Starts almost immediately, so there is nowhere for the cue to grow.
+        track.add_clip(caption_clip("Next", 1.2, 0.8));
+        sequence.add_track(track);
+
+        let violations = reading_rate_violations(&sequence).await;
+
+        assert_eq!(violations.len(), 1, "one violation for the track");
+        let violation = &violations[0];
+        assert_eq!(violation.metrics["cueCount"], 1, "only the fast cue");
+        assert!(
+            !violation.auto_fixable,
+            "a proposed split is not an automatic repair"
+        );
+        assert_eq!(first_cue(violation)["repair"], "split");
+
+        let fix = violation.suggested_fix.as_ref().expect("a proposal");
+        assert_eq!(fix.commands[0]["type"], "UpdateCaption");
+        assert_eq!(fix.commands[1]["type"], "CreateCaption");
+
+        let split_sec = fix.commands[0]["endSec"].as_f64().expect("a split point");
+        assert_eq!(
+            fix.commands[1]["startSec"].as_f64().expect("a start"),
+            split_sec,
+            "the second half must begin where the first one ends"
+        );
+        // The ceiling is a frame before the next cue; times are reported to the
+        // millisecond, so what has to hold is that the pair never reaches it.
+        assert!(
+            fix.commands[1]["endSec"].as_f64().expect("an end") < 1.2,
+            "the pair must not run into the cue that follows: {}",
+            fix.commands[1]
+        );
+        assert_ne!(
+            fix.commands[0]["text"], fix.commands[1]["text"],
+            "the line has to actually be broken in two"
+        );
+    }
+
+    /// Feature: Repairing an over-fast caption
+    /// Scenario: should report one violation covering every fast cue on a track
+    #[tokio::test]
+    async fn test_reading_rate_rule_should_group_every_fast_cue_on_a_track() {
+        let mut sequence = sequence_with_ten_seconds_of_picture();
+        let mut track = Track::new_caption("C1");
+        for index in 0..3 {
+            track.add_clip(caption_clip(
+                "abcdefghij abcdefghij abcdefg",
+                f64::from(index) * 2.0,
+                1.0,
+            ));
+        }
+        sequence.add_track(track);
+
+        let violations = reading_rate_violations(&sequence).await;
+
+        assert_eq!(violations.len(), 1, "three cues, one thing to do about it");
+        assert_eq!(violations[0].metrics["cueCount"], 3);
+        assert_eq!(violations[0].affected_entities.len(), 3);
+        assert_eq!(
+            violations[0]
+                .suggested_fix
+                .as_ref()
+                .expect("a grouped repair")
+                .commands
+                .len(),
+            3,
+            "one step per cue, applied as a single plan"
+        );
     }
 
     // ========================================================================
@@ -2536,6 +2906,59 @@ mod tests {
 
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].severity, Severity::Error);
+    }
+
+    /// Feature: Captions pushed off the canvas
+    /// Scenario: should report one violation for the whole track
+    ///
+    /// A caption track anchored off the frame is one wrong setting. Reported
+    /// one cue at a time it looked like forty problems, and the report had no
+    /// way to say that the answer to all of them is the same.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_group_every_off_canvas_cue() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_caption("C1");
+        for index in 0..4 {
+            let mut clip = caption_clip("Way off", f64::from(index) * 2.0, 2.0);
+            clip.caption_position = Some(serde_json::json!({
+                "type": "custom",
+                "xPercent": 120.0,
+                "yPercent": 50.0
+            }));
+            track.add_clip(clip);
+        }
+        sequence.add_track(track);
+
+        let context = context_for(&sequence);
+        let violations = CaptionOutOfBoundsRule::new()
+            .check(
+                &sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &context,
+            )
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].metrics["cueCount"], 4);
+        assert_eq!(violations[0].affected_entities.len(), 4);
+        assert_eq!(
+            violations[0]
+                .metrics
+                .get("cues")
+                .and_then(|cues| cues.as_array())
+                .map(Vec::len),
+            Some(4),
+            "every cue has to be listed, not just counted"
+        );
+        assert!(
+            violations[0].suggested_fix.is_none() && !violations[0].auto_fixable,
+            "where a caption pushed off the frame belongs is a composition call"
+        );
+        let location = violations[0].location.as_ref().expect("a span");
+        assert_eq!(location.start_sec, 0.0);
+        assert_eq!(location.end_sec, 8.0);
     }
 
     #[tokio::test]
