@@ -2052,6 +2052,9 @@ describe('reference style transfer analysis tools', () => {
           spectralCentroidHz: 1400,
           loudnessProfile: [-18.2, -16.8, -17.4],
           peakDb: -3.1,
+          integratedLufs: -16.4,
+          loudnessRangeLu: 5.2,
+          truePeakDbtp: -1.9,
           silenceRegions: [{ startSec: 10, endSec: 11 }],
           speechRegions: [
             { startSec: 0, endSec: 10 },
@@ -2347,6 +2350,12 @@ describe('reference style transfer analysis tools', () => {
       expect(String(data.markdown)).toContain('![Shot 1 keyframe](shots/0001.jpg)');
       expect(String(data.markdown)).toContain('## Chapters');
       expect(String(data.markdown)).toContain('## Candidate Highlights');
+      // The delivery numbers must read the same here as in the CLI report, so
+      // an agent does not have to know which surface wrote a report to know
+      // whether a mix is legal.
+      expect(String(data.markdown)).toContain('- Integrated loudness: -16.4 LUFS');
+      expect(String(data.markdown)).toContain('- True peak: -1.9 dBTP');
+      expect(String(data.markdown)).toContain('- Loudness range: 5.2 LU');
       expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
         assetId: 'source-1',
       });
