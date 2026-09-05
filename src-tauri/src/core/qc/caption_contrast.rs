@@ -1885,7 +1885,9 @@ mod tests {
 
     /// Renders a short fixture clip from a `lavfi` description.
     async fn render_fixture(runner: &FFmpegRunner, file: &Path, source: &str) {
-        let output = tokio::process::Command::new(&runner.info().ffmpeg_path)
+        let mut command = tokio::process::Command::new(&runner.info().ffmpeg_path);
+        configure_tokio_command(&mut command);
+        let output = command
             .args([
                 "-hide_banner",
                 "-loglevel",
