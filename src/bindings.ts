@@ -3207,12 +3207,32 @@ export type AddEffectPayload = { sequenceId: string; trackId: string; clipId: st
 /**
  * Curated transition recipe id, resolved into `effectType` + `params`.
  */
-recipe?: string | null; params?: { [key in string]: ParamValue }; keyframes?: { [key in string]: Keyframe[] }; 
+recipe?: string | null; 
+/**
+ * Effect parameters, overriding a `recipe`'s baseline key by key.
+ * 
+ * Accepts both `params` and `parameters`.
+ */
+params?: { [key in string]: ParamValue }; 
+/**
+ * Keyframed parameter tracks, keyed by parameter name.
+ */
+keyframes?: { [key in string]: Keyframe[] }; 
 /**
  * Optional position in the effect list (None = append at end)
  */
 position: number | null }
-export type AddMarkerPayload = { sequenceId: string; timeSec: number; label: string; color?: Color | null; markerType?: MarkerType | null }
+export type AddMarkerPayload = { sequenceId: string; 
+/**
+ * Timeline position of the marker, in seconds.
+ * 
+ * Accepts both `timeSec` and `time`.
+ */
+timeSec: number; 
+/**
+ * Marker label.
+ */
+label: string; color?: Color | null; markerType?: MarkerType | null }
 /**
  * Payload for adding a mask to an effect.
  * 
@@ -3291,7 +3311,8 @@ trackingSourceId?: string | null }
  * "fontFamily": "Arial",
  * "fontSize": 48,
  * "color": "#FFFFFF"
- * }
+ * },
+ * "position": { "x": 0.5, "y": 0.5 }
  * }
  * }
  * ```
@@ -3315,6 +3336,8 @@ trackingSourceId?: string | null }
 export type AddTextClipPayload = { sequenceId: string; trackId: string; 
 /**
  * Timeline position to insert the text clip at (seconds)
+ * 
+ * Accepts both `timelineIn` and `timelineStart`.
  */
 timelineIn: number; 
 /**
@@ -3322,18 +3345,29 @@ timelineIn: number;
  */
 duration: number; 
 /**
- * Curated text preset id or alias, resolved into `text_data` on parse.
+ * Curated text preset id or alias to base the clip on.
  * 
- * Always `None` after deserialization: the preset has been expanded into
- * concrete values by then, and keeping the id would put a registry lookup
- * between the op log and the clip it describes.
+ * Send one when `textData` should carry only the fields that differ from
+ * the preset; run `packs list --kind text` for the ids. The preset is
+ * expanded into concrete values while the payload is parsed, so what
+ * reaches the op log is the resolved `textData` and never the id — replay
+ * does not consult the registry.
  */
 preset?: string | null; 
 /**
- * Text content and styling data
+ * Text content and styling data.
  * 
- * Required unless `preset` names a preset, in which case it carries only
- * the fields that override the preset.
+ * A full object when no `preset` is named, and then `content`, `style`
+ * (with at least `fontFamily`, `fontSize` and `color`) and `position` are
+ * all required. With a `preset` it is a partial override instead: any
+ * subset of the same keys, merged onto the preset key by key, and it may
+ * be omitted entirely.
+ * 
+ * Accepts `content`, `style`, `position`, `shadow`, `outline`, `rotation`
+ * and `opacity`. `style` accepts fontFamily, fontSize, fontWeight, color,
+ * backgroundColor, backgroundPadding, alignment, bold, italic, underline,
+ * lineHeight and letterSpacing; `position` accepts x and y as 0.0-1.0
+ * fractions of the canvas.
  */
 textData: TextClipData }
 /**
@@ -4756,7 +4790,39 @@ export type ClipAnalysisWindow = { windowId: string; timelineStartSec: number; t
 /**
  * Serialized clip attributes for paste operations.
  */
-export type ClipAttributeValues = { transform?: JsonValue | null; opacity?: number | null; blendMode?: JsonValue | null; speed?: number | null; reverse?: boolean | null; audio?: JsonValue | null }
+export type ClipAttributeValues = { 
+/**
+ * Source clip transform, pasted when `selection.transform` is set.
+ * 
+ * Held as raw JSON so a stored attribute set survives a `Transform` field
+ * being added; a value that does not parse is skipped rather than failing
+ * the paste. The schema states the shape the paste reads.
+ */
+transform?: JsonValue | null; 
+/**
+ * Source clip opacity (0.0-1.0), pasted when `selection.opacity` is set.
+ */
+opacity?: number | null; 
+/**
+ * Source clip blend mode, pasted when `selection.blendMode` is set.
+ * 
+ * Raw JSON for the same forward-compatibility reason as `transform`.
+ */
+blendMode?: JsonValue | null; 
+/**
+ * Source clip speed multiplier, pasted when `selection.speed` is set.
+ */
+speed?: number | null; 
+/**
+ * Whether the source clip plays in reverse, pasted with `selection.speed`.
+ */
+reverse?: boolean | null; 
+/**
+ * Source clip audio settings, pasted when `selection.audioSettings` is set.
+ * 
+ * Raw JSON for the same forward-compatibility reason as `transform`.
+ */
+audio?: JsonValue | null }
 /**
  * Clip event payload.
  */
@@ -5196,7 +5262,43 @@ export type CreateAdjustmentLayerPayload = { sequenceId: string; trackId: string
  * Input payload for creating an agent session kernel row.
  */
 export type CreateAgentSessionInputDto = { projectId: string; sequenceId: string | null; title: string | null; runtimeKind: string | null; agentProfileId: string | null; sessionMode: string | null; parentSessionId: string | null; branchFromSessionId: string | null; rootSessionId: string | null; modelProvider: string | null; modelId: string | null; id: string | null }
-export type CreateCaptionPayload = { sequenceId: string; trackId: string; text: string; startSec: number; endSec: number; style: JsonValue | null; position: JsonValue | null; 
+/**
+ * Payload for `CreateCaption` (one caption line).
+ * 
+ * Use `ImportGeneratedCaptions` for transcript segments, which imports them
+ * atomically as a single undoable command.
+ */
+export type CreateCaptionPayload = { sequenceId: string; trackId: string; 
+/**
+ * Caption text.
+ */
+text: string; 
+/**
+ * Start time in timeline seconds.
+ * 
+ * Accepts both `startSec` and `startTime`.
+ */
+startSec: number; 
+/**
+ * End time in timeline seconds.
+ * 
+ * Accepts both `endSec` and `endTime`.
+ */
+endSec: number; 
+/**
+ * Caption style overrides, applied on top of `stylePack` key by key.
+ * 
+ * Accepts fontFamily, fontSize, fontWeight, bold, italic, underline,
+ * color, opacity, backgroundColor, backgroundPadding, outlineColor,
+ * outlineWidth, shadowColor, shadowOffsetX, shadowOffsetY, shadowBlur,
+ * alignment, lineHeight and letterSpacing.
+ */
+style: JsonValue | null; 
+/**
+ * Caption anchor: a `preset` of top/center/bottom, or custom
+ * `xPercent`/`yPercent`.
+ */
+position: JsonValue | null; 
 /**
  * Curated caption pack id, resolved into `style` + `position`.
  */
@@ -5212,12 +5314,35 @@ export type CreateCompoundClipPayload = { sequenceId: string; trackId: string; c
 export type CreateDelegationRecordInput = { id: string | null; parentSessionId: string; childSessionId: string; parentRunId: string; agentProfileId: string; delegatedGoal: string; contextPacketJson: string; allowedToolsDeltaJson: string | null; permissionSnapshotJson: string | null; status: string | null; mergeStatus: string | null; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; completedAt: number | null }
 export type CreateExternalAgentApprovalTokenInput = { sessionId: string; runId: string | null; planId: string | null; projectId: string; runtimeId: string; scopes: string[]; ttlMs: number | null }
 export type CreateFolderPayload = { relativePath: string }
-export type CreateFreezeFramePayload = { sequenceId: string; trackId: string; clipId: string; playheadSec: number; durationSec?: number }
+/**
+ * Payload for `CreateFreezeFrame` (hold one frame of a clip).
+ * 
+ * This is a ripple edit, not an overlay: the clip under `playheadSec` is split
+ * there, a still of that frame is inserted, and every clip after the playhead
+ * on the track moves later by `durationSec`.
+ */
+export type CreateFreezeFramePayload = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * Timeline position, in seconds, of the frame to hold. It must fall
+ * inside the clip.
+ */
+playheadSec: number; 
+/**
+ * How long the held frame lasts, in seconds. Defaults to the standard
+ * freeze-frame duration when omitted.
+ */
+durationSec?: number }
 /**
  * Input payload for creating a resume checkpoint.
  */
 export type CreateResumeCheckpointInput = { id: string | null; sessionId: string; runId: string | null; checkpointKind: string; status: string | null; resumeCursorJson: string; sessionStateJson: string; pendingWorkJson: string | null; createdAt: number | null }
 export type CreateSequencePayload = { name: string; format: string | null }
+/**
+ * Payload for `CreateTrack`.
+ * 
+ * Editable text clips need a `video` or `overlay` track; `AddTextClip`
+ * requires one and does not create it.
+ */
 export type CreateTrackPayload = { sequenceId: string; kind: TrackKind; name: string; position: number | null }
 /**
  * Status of credentials for each provider
@@ -5227,7 +5352,16 @@ export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google:
  * Persisted delegation DTO aligned with the frontend session kernel vocabulary.
  */
 export type DelegationRecordDto = { id: string; parentSessionId: string; childSessionId: string; parentRunId: string; agentProfileId: string; delegatedGoal: string; contextPacketJson: string; allowedToolsDeltaJson: string | null; permissionSnapshotJson: string | null; status: string; mergeStatus: string; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; createdAt: number; updatedAt: number; completedAt: number | null }
-export type DeleteCaptionPayload = { sequenceId: string; trackId: string; captionId: string }
+/**
+ * Payload for `DeleteCaption` (remove one caption line).
+ */
+export type DeleteCaptionPayload = { sequenceId: string; trackId: string; 
+/**
+ * Caption to delete.
+ * 
+ * Accepts both `captionId` and `clipId`.
+ */
+captionId: string }
 export type DeleteFilePayload = { relativePath: string }
 /**
  * Arguments for deleting a transcript time range from a clip.
@@ -5878,7 +6012,44 @@ end: number;
  */
 duration: number }
 export type GeneralSettingsDto = { language: string; showWelcomeOnStartup: boolean; hasCompletedSetup: boolean; recentProjectsLimit: number; checkUpdatesOnStartup: boolean; defaultProjectLocation: string | null }
-export type GeneratedCaptionSegmentPayload = { startSec: number; endSec: number; text: string; confidence: number | null; speaker: string | null; language: string | null }
+/**
+ * One transcript segment in an `ImportGeneratedCaptions` payload.
+ * 
+ * The times are TIMELINE-relative. A transcription of a single source asset
+ * returns SOURCE-relative times, which must be mapped onto the placed clip
+ * before they are used here.
+ */
+export type GeneratedCaptionSegmentPayload = { 
+/**
+ * Segment start in timeline seconds.
+ * 
+ * Accepts `startSec`, `startTime` or `start`.
+ */
+startSec: number; 
+/**
+ * Segment end in timeline seconds.
+ * 
+ * Accepts `endSec`, `endTime` or `end`.
+ */
+endSec: number; 
+/**
+ * Transcribed text for the segment.
+ */
+text: string; 
+/**
+ * Recognition confidence, when the transcriber reported one.
+ */
+confidence: number | null; 
+/**
+ * Speaker label from diarization.
+ * 
+ * Accepts both `speaker` and `speakerId`.
+ */
+speaker: string | null; 
+/**
+ * BCP-47-ish language code for the segment, e.g. `en` or `ko`.
+ */
+language: string | null }
 /**
  * Response for get_annotation command
  */
@@ -6127,11 +6298,58 @@ undoCount: number;
  */
 redoCount: number }
 export type ImportAssetPayload = { name: string; uri: string }
-export type ImportGeneratedCaptionsPayload = { sequenceId: string; trackId: string; segments: GeneratedCaptionSegmentPayload[]; style: JsonValue | null; position: JsonValue | null; 
+/**
+ * Payload for `ImportGeneratedCaptions` (a whole transcript, atomically).
+ * 
+ * Every segment is imported as one undoable command. Prefer `stylePack` over
+ * hand-assembled style values: the curated packs are the checked quality
+ * floor and stay inside the title-safe area on landscape and vertical
+ * canvases alike.
+ */
+export type ImportGeneratedCaptionsPayload = { 
+/**
+ * Sequence holding the caption track.
+ */
+sequenceId: string; 
+/**
+ * Caption track to import into.
+ */
+trackId: string; 
+/**
+ * Transcript segments, in timeline seconds.
+ */
+segments: GeneratedCaptionSegmentPayload[]; 
+/**
+ * Caption style overrides applied to every imported segment, on top of
+ * `stylePack` key by key.
+ * 
+ * Accepts fontFamily, fontSize, fontWeight, bold, italic, underline,
+ * color, opacity, backgroundColor, backgroundPadding, outlineColor,
+ * outlineWidth, shadowColor, shadowOffsetX, shadowOffsetY, shadowBlur,
+ * alignment, lineHeight and letterSpacing.
+ */
+style: JsonValue | null; 
+/**
+ * Caption anchor for every imported segment: a `preset` of
+ * top/center/bottom, or custom `xPercent`/`yPercent`.
+ */
+position: JsonValue | null; 
 /**
  * Curated caption pack id, resolved into `style` + `position`.
  */
-stylePack?: string | null; replaceExisting?: boolean }
+stylePack?: string | null; 
+/**
+ * Whether to clear the track's existing captions before importing.
+ */
+replaceExisting?: boolean }
+/**
+ * Payload for `InsertClip` (primitive placement at an exact timeline position).
+ * 
+ * Overwrites nothing and ripples nothing: the clip is placed where
+ * `timelineStart` says. This primitive does not create the linked audio a
+ * video asset carries — use `InsertMedia` for normal media placement so the
+ * video stays visible and its audio stays in sync.
+ */
 export type InsertClipPayload = { sequenceId: string; trackId: string; assetId: string; 
 /**
  * Timeline position to insert at.
@@ -6173,6 +6391,8 @@ sourceOut: number | null }
 export type InsertMediaPayload = { sequenceId: string; trackId: string; assetId: string; 
 /**
  * Timeline position to insert at.
+ * 
+ * Accepts both `timelineStart` and legacy `timelineIn`.
  */
 timelineStart: number; 
 /**
@@ -6770,6 +6990,9 @@ export type MotionDirection =
  */
 "unknown"
 export type MoveAudioKeyframePayload = { sequenceId: string; trackId: string; clipId: string; keyframeIndex: number; newTimeOffset: number }
+/**
+ * Payload for `MoveClip` (move one clip in time, and optionally across tracks).
+ */
 export type MoveClipPayload = { sequenceId: string; 
 /**
  * Source track (required for strict input validation; ignored by core move logic).
@@ -6780,7 +7003,11 @@ trackId: string; clipId: string;
  * 
  * Accepts both `newTimelineIn` and legacy `newStart`.
  */
-newTimelineIn: number; newTrackId: string | null }
+newTimelineIn: number; 
+/**
+ * Track to move the clip onto; it stays on `trackId` when omitted.
+ */
+newTrackId: string | null }
 export type MoveFilePayload = { sourcePath: string; destFolderPath: string }
 /**
  * A detected object in a frame
@@ -7401,6 +7628,11 @@ effectIds?: string[];
  */
 resetTransform?: boolean; resetOpacity?: boolean; resetBlendMode?: boolean; resetSpeed?: boolean; resetAudio?: boolean }
 export type RemoveAudioKeyframePayload = { sequenceId: string; trackId: string; clipId: string; keyframeIndex: number }
+/**
+ * Payload for `RemoveClip` (remove one clip, leaving a gap).
+ * 
+ * Use `RippleDelete` to remove clips and close the gap behind them.
+ */
 export type RemoveClipPayload = { sequenceId: string; trackId: string; clipId: string }
 /**
  * Arguments for batch-removing detected regions from a clip.
@@ -7464,7 +7696,13 @@ export type RemoveMaskPayload = { effectId: string; maskId: string }
 export type RemoveTextClipPayload = { sequenceId: string; trackId: string; clipId: string }
 export type RemoveTrackPayload = { sequenceId: string; trackId: string }
 export type RenameFilePayload = { oldRelativePath: string; newName: string }
-export type RenameTrackPayload = { sequenceId: string; trackId: string; newName: string }
+export type RenameTrackPayload = { sequenceId: string; trackId: string; 
+/**
+ * New track name.
+ * 
+ * Accepts both `newName` and `name`.
+ */
+newName: string }
 /**
  * Result of starting a render cache job
  */
@@ -7719,10 +7957,19 @@ maxDuration: number;
 tempoClassification: TempoClassification }
 /**
  * Payload for Ripple Delete (remove clips + close gaps).
+ * 
+ * A single clip may also be named as `clipId` instead of `clipIds`, and a
+ * legacy `affectAllTracks` flag is accepted and ignored. Both are declared on
+ * the derived schema even though the struct does not carry them, because the
+ * wire shape below rejects every *other* unknown field — a schema left open
+ * here would invite a typo the parser refuses.
  */
 export type RippleDeletePayload = { sequenceId: string; trackId: string; 
 /**
  * One or more clip IDs to remove.
+ * 
+ * Accepts `clipIds`, or `clipId` for a single clip; one of the two is
+ * required.
  */
 clipIds: string[] }
 /**
@@ -8114,15 +8361,93 @@ export type SessionWithMessagesDto = { session: SessionSummaryDto; messages: Mes
 export type SetAudioFadeInPayload = { sequenceId: string; trackId: string; clipId: string; duration: number; fadeType?: FadeType }
 export type SetAudioFadeOutPayload = { sequenceId: string; trackId: string; clipId: string; duration: number; fadeType?: FadeType }
 export type SetAudioKeyframeValuePayload = { sequenceId: string; trackId: string; clipId: string; keyframeIndex: number; valueDb: number; interpolation: KeyframeInterpolation | null }
+/**
+ * Payload for `SetCaptionTrackLanguage`.
+ * 
+ * Caption tracks only. The language is a BCP-47-ish code such as `en`, `ko`,
+ * `ja`, `zh`, `es` or `en-us`.
+ */
 export type SetCaptionTrackLanguagePayload = { sequenceId: string; trackId: string; language: string }
-export type SetClipAudioPayload = { sequenceId: string; trackId: string; clipId: string; volumeDb: number | null; pan: number | null; muted: boolean | null; fadeInSec: number | null; fadeOutSec: number | null; audioRole: string | null; audioTags: string[] | null }
+/**
+ * Payload for `SetClipAudio` (clip gain, pan, mute, fades and roles).
+ * 
+ * Every field but the ids is optional and an omitted one is left alone, but
+ * at least one of them must be present.
+ */
+export type SetClipAudioPayload = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * Clip gain in decibels, clamped to -60..=+6. `0` is unity gain.
+ */
+volumeDb: number | null; 
+/**
+ * Stereo pan, clamped to -1.0 (left) ..= 1.0 (right); `0` is centred.
+ */
+pan: number | null; 
+/**
+ * Whether the clip's audio is silenced.
+ */
+muted: boolean | null; 
+/**
+ * Fade-in length in seconds, clamped to the clip's duration.
+ */
+fadeInSec: number | null; 
+/**
+ * Fade-out length in seconds, clamped to the clip's duration.
+ * 
+ * A fade pair longer than the clip is shortened rather than rejected.
+ */
+fadeOutSec: number | null; 
+/**
+ * Editorial role: `dialogue`, `music`, `sfx`, `ambience` or `voiceover`.
+ * `none` or an empty string clears it; anything else is rejected.
+ */
+audioRole: string | null; 
+/**
+ * Free-form editorial tags, lowercased and de-duplicated on write.
+ */
+audioTags: string[] | null }
 export type SetClipBlendModePayload = { sequenceId: string; trackId: string; clipId: string; blendMode: BlendMode }
 export type SetClipEnabledPayload = { sequenceId: string; trackId: string; clipId: string; enabled: boolean }
 export type SetClipMotionKeyframesPayload = { sequenceId: string; trackId: string; clipId: string; keyframes: TransformKeyframe[] }
 export type SetClipMutePayload = { sequenceId: string; trackId: string; clipId: string; muted: boolean }
-export type SetClipOpacityPayload = { sequenceId: string; trackId: string; clipId: string; opacity: number }
+/**
+ * Payload for `SetClipOpacity` (one clip's constant opacity).
+ */
+export type SetClipOpacityPayload = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * Opacity as a fraction: `0.0` fully transparent, `1.0` fully opaque.
+ * 
+ * Values outside that range are clamped into it, so `100` means opaque,
+ * not "100 percent".
+ */
+opacity: number }
 export type SetClipSlowMotionInterpolationPayload = { sequenceId: string; trackId: string; clipId: string; interpolation: SlowMotionInterpolation }
-export type SetClipSpeedPayload = { sequenceId: string; trackId: string; clipId: string; speed: number; reverse?: boolean }
+/**
+ * Payload for `SetClipSpeed` (constant clip speed and direction).
+ * 
+ * Use `SetTimeRemap` for speed that varies across the clip.
+ */
+export type SetClipSpeedPayload = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * Playback rate multiplier: `1.0` real time, `0.5` half speed, `2.0`
+ * double speed. Must be finite and greater than zero.
+ * 
+ * The clip's timeline duration changes with it; use
+ * `SetClipSlowMotionInterpolation` to choose how sub-real-time frames are
+ * generated.
+ */
+speed: number; 
+/**
+ * Whether the clip plays backwards. Defaults to `false`.
+ */
+reverse?: boolean }
+/**
+ * Payload for `SetClipTransform` (position, scale, rotation and anchor).
+ * 
+ * This renders in the final export for every visual clip, not just in the
+ * preview. Motion keyframes (`SetClipMotionKeyframes`) still render static at
+ * the clip's base transform, and the render reports a warning saying so.
+ */
 export type SetClipTransformPayload = { sequenceId: string; trackId: string; clipId: string; transform: Transform }
 export type SetMasterVolumePayload = { sequenceId: string; volumeDb: number }
 /**
@@ -8425,7 +8750,16 @@ startSec: number;
  * End time in seconds
  */
 endSec: number }
-export type SplitClipPayload = { sequenceId: string; trackId: string; clipId: string; splitTime: number }
+/**
+ * Payload for `SplitClip` (razor cut at a timeline position).
+ */
+export type SplitClipPayload = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * Timeline position to cut at, in timeline seconds.
+ * 
+ * Accepts both `splitTime` and `atTimelineSec`.
+ */
+splitTime: number }
 /**
  * Arguments for the stabilize_clip command.
  */
@@ -10002,11 +10336,32 @@ rendersAsCut: boolean;
  * Why the renderer refuses it; `None` when the file really gets the blend.
  */
 refusalReason: string | null }
+/**
+ * Payload for `TrimClip` (change a clip's source range and timeline position).
+ * 
+ * Every field but the ids is optional; an omitted one keeps its current value.
+ */
 export type TrimClipPayload = { sequenceId: string; 
 /**
  * Track containing the clip.
  */
-trackId: string; clipId: string; newSourceIn: number | null; newSourceOut: number | null; newTimelineIn: number | null }
+trackId: string; clipId: string; 
+/**
+ * New source in-point, in source seconds.
+ * 
+ * Accepts both `newSourceIn` and legacy `newStart`.
+ */
+newSourceIn: number | null; 
+/**
+ * New source out-point, in source seconds.
+ * 
+ * Accepts both `newSourceOut` and legacy `newEnd`.
+ */
+newSourceOut: number | null; 
+/**
+ * New timeline position for the trimmed clip.
+ */
+newTimelineIn: number | null }
 /**
  * Lightweight history entry for IPC transport.
  */
@@ -10071,7 +10426,59 @@ export type UnnestCompoundClipPayload = { sequenceId: string; trackId: string; c
  */
 export type UpdateAgentRunPhaseInput = { runId: string; phase: string; traceId: string | null; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
 export type UpdateAssetPayload = { assetId: string; name: string | null; tags: string[] | null; license: LicenseInfo | null; thumbnailUrl: string | null; proxyStatus: ProxyStatus | null; proxyUrl: string | null; uri: string | null; durationSec: number | null; fileSize: number | null; video: VideoInfo | null; audio: AudioInfo | null; relativePath: string | null; workspaceManaged: boolean | null; missing: boolean | null }
-export type UpdateCaptionPayload = { sequenceId: string; trackId: string; captionId: string; text: string | null; startSec: number | null; endSec: number | null; style: JsonValue | null; position: JsonValue | null; 
+/**
+ * Payload for `UpdateCaption` (restyle or retime one caption line).
+ * 
+ * Every field but the ids is optional; an omitted one keeps its current value.
+ * `stylePack` contributes style only here: the command replaces the stored
+ * anchor whenever the payload carries one, so an update restyles without
+ * moving the caption unless it also passes `position`.
+ */
+export type UpdateCaptionPayload = { 
+/**
+ * Sequence holding the caption track.
+ */
+sequenceId: string; 
+/**
+ * Caption track holding the caption.
+ */
+trackId: string; 
+/**
+ * Caption to update.
+ * 
+ * Accepts both `captionId` and `clipId`.
+ */
+captionId: string; 
+/**
+ * New caption text; the existing text is kept when omitted.
+ */
+text: string | null; 
+/**
+ * New start time in timeline seconds; the existing one is kept when omitted.
+ * 
+ * Accepts both `startSec` and `startTime`.
+ */
+startSec: number | null; 
+/**
+ * New end time in timeline seconds; the existing one is kept when omitted.
+ * 
+ * Accepts both `endSec` and `endTime`.
+ */
+endSec: number | null; 
+/**
+ * Caption style overrides, applied on top of `stylePack` key by key.
+ * 
+ * Accepts fontFamily, fontSize, fontWeight, bold, italic, underline,
+ * color, opacity, backgroundColor, backgroundPadding, outlineColor,
+ * outlineWidth, shadowColor, shadowOffsetX, shadowOffsetY, shadowBlur,
+ * alignment, lineHeight and letterSpacing.
+ */
+style: JsonValue | null; 
+/**
+ * Caption anchor: a `preset` of top/center/bottom, or custom
+ * `xPercent`/`yPercent`. The stored anchor is kept when omitted.
+ */
+position: JsonValue | null; 
 /**
  * Curated caption pack id, resolved into `style` only.
  * 

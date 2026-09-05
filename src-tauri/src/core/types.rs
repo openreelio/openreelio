@@ -55,7 +55,7 @@ pub type TimeSec = f64;
 pub type Frame = i64;
 
 /// Ratio (for fps, aspect ratio, etc.)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 pub struct Ratio {
     /// Numerator
     pub num: i32,
@@ -93,7 +93,7 @@ impl Default for Ratio {
 // =============================================================================
 
 /// 2D coordinates (normalized or pixel)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 pub struct Point2D {
     pub x: f64,
     pub y: f64,
@@ -130,7 +130,7 @@ impl Size2D {
 }
 
 /// Color (RGBA)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 pub struct Color {
     /// Red (0.0 ~ 1.0)
     pub r: f32,

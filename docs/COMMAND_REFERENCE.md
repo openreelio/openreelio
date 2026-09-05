@@ -2,6 +2,16 @@
 
 This document describes all edit commands (Command) used in OpenReelio in detail.
 
+> **The payload schemas below are prose; the authoritative shape is derived.**
+> Run `openreelio-cli command schema --type <CommandType>` (repeatable, or
+> `--all`) for the JSON Schema generated from the payload types themselves —
+> property names in the camelCase the parser reads, types, which properties are
+> required, enums, the alternative spellings a field also accepts, and
+> `"additionalProperties": false` wherever an unknown field is a parse error.
+> The same lookup is on the MCP tool `openreelio.command.schema`, via its
+> `commandType` argument. When this page and that schema disagree, the schema is
+> right: it cannot drift from the parser, and this page can.
+
 ---
 
 ## Table of Contents
