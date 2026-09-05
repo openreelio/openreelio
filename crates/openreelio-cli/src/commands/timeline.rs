@@ -1,9 +1,12 @@
 //! Timeline editing commands: insert, move, trim, split, speed, tracks, effects.
 
+use crate::media_probe;
 use crate::output;
 use crate::validate;
 use clap::Subcommand;
+use openreelio_core::assets::AssetKind;
 use openreelio_core::commands::*;
+use openreelio_core::ActiveProject;
 use std::path::PathBuf;
 
 #[derive(Subcommand)]
@@ -408,6 +411,13 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             // that carry audio) instead of re-implementing a bare single-clip
             // insert. For audio-less assets this behaves identically to a plain
             // clip insert.
+            // An asset imported before probing existed — or with `--no-probe`
+            // — carries no duration, and an insert with no duration falls back
+            // to a default length whatever the media is. Measuring it here, and
+            // recording the measurement through a command, is what keeps a
+            // four-second file from becoming a ten-second clip.
+            let mut warnings = back_fill_asset_duration(&mut project, &asset)?;
+
             let cmd = InsertMediaCommand::new(&seq_id, &track, &asset, at);
             let mut edit = super::EditRecorder::begin(&project, &seq_id);
             let result = edit
@@ -415,12 +425,20 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("Insert failed: {}", e))?;
             let affected_ranges = edit.finish(&mut project)?;
 
+            warnings.extend(inserted_clip_warnings(
+                &project,
+                &seq_id,
+                &asset,
+                &result.created_ids,
+            ));
+
             output::print_json(&serde_json::json!({
                 "status": "ok",
                 "opId": result.op_id,
                 "createdIds": result.created_ids,
                 "sequenceId": seq_id,
                 "affectedRanges": affected_ranges,
+                "warnings": warnings,
             }))
         }
 
@@ -497,6 +515,10 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             validate::trim_points_ordered(source_in, source_out)?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
+            // Trimming past the end of the media is how a clip that renders as
+            // black gets made by hand; refusing it here names the length the
+            // caller should have asked for.
+            reject_source_out_past_media(&project, &seq_id, &clip, source_out)?;
             let cmd = TrimClipCommand::new(
                 &seq_id, &track, &clip, source_in, source_out, None, // timeline_in
             );
@@ -772,5 +794,167 @@ fn merge_summary(
         anyhow::bail!("Timeline info payload is not a JSON object");
     };
     object.extend(fields);
+    Ok(())
+}
+
+// =============================================================================
+// Media-length guards
+// =============================================================================
+
+/// Slack below which a clamp is rounding rather than a change worth reporting.
+const SOURCE_CLAMP_EPSILON_SEC: f64 = 1e-6;
+
+/// Measures an asset that carries no duration, and records what it found.
+///
+/// The GUI probes on import, so its assets always know how long they are. An
+/// asset imported headlessly before probing existed, or with `asset import
+/// --no-probe`, does not — and every insert from it then falls back to a
+/// default length regardless of the file, which overruns short media and
+/// collides with whatever is placed after it. Correcting it through
+/// `UpdateAsset` rather than by mutating the asset keeps the correction in the
+/// ops log, so replaying the project reproduces it.
+///
+/// Returns the warnings the verb should report; a probe that cannot run is one
+/// of them rather than a failure, because the insert itself is still valid.
+fn back_fill_asset_duration(
+    project: &mut ActiveProject,
+    asset_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let already_known = project
+        .state
+        .assets
+        .get(asset_id)
+        .and_then(|asset| asset.duration_sec)
+        .is_some_and(|duration| duration.is_finite() && duration > 0.0);
+    if already_known {
+        return Ok(Vec::new());
+    }
+
+    let Some(source_path) = media_probe::asset_source_path(&project.state, &project.path, asset_id)
+    else {
+        return Ok(vec![format!(
+            "Asset '{asset_id}' records no duration and its file could not be located, so the clip takes the default length"
+        )]);
+    };
+
+    let media_info = match media_probe::probe_media(&source_path) {
+        Ok(info) => info,
+        Err(reason) => {
+            return Ok(vec![format!(
+                "{reason}; asset '{asset_id}' still records no duration, so the clip takes the default length"
+            )])
+        }
+    };
+
+    let Some(command) = media_probe::back_fill_command(asset_id, &media_info) else {
+        return Ok(vec![format!(
+            "FFprobe reported no usable duration for asset '{asset_id}', so the clip takes the default length"
+        )]);
+    };
+    let duration_sec = media_info.duration_sec;
+
+    project
+        .executor
+        .execute(Box::new(command), &mut project.state)
+        .map_err(|error| {
+            anyhow::anyhow!("Recording the probed asset duration failed: {}", error)
+        })?;
+
+    Ok(vec![format!(
+        "Asset '{asset_id}' recorded no duration; it was probed at {duration_sec:.3}s and updated before the insert"
+    )])
+}
+
+/// Reports an inserted clip whose source range had to be bounded by the media.
+///
+/// The insert command clamps the range itself; this only says so, because a
+/// clip that came out shorter than asked for is exactly the surprise an agent
+/// needs to see in the response rather than discover in a render.
+fn inserted_clip_warnings(
+    project: &ActiveProject,
+    sequence_id: &str,
+    asset_id: &str,
+    created_ids: &[String],
+) -> Vec<String> {
+    let Some(asset_duration) = project
+        .state
+        .assets
+        .get(asset_id)
+        .and_then(|asset| asset.duration_sec)
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+    else {
+        return vec![format!(
+            "Asset '{asset_id}' has no known duration, so the inserted clip takes the default length and may overrun its media"
+        )];
+    };
+
+    let Some(sequence) = project.state.sequences.get(sequence_id) else {
+        return Vec::new();
+    };
+
+    sequence
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .filter(|clip| created_ids.iter().any(|id| id == &clip.id))
+        .filter(|clip| clip.range.source_out_sec < asset_duration - SOURCE_CLAMP_EPSILON_SEC)
+        .map(|clip| {
+            format!(
+                "Clip '{}' was clamped to the {asset_duration:.3}s of media asset '{asset_id}' holds",
+                clip.id
+            )
+        })
+        .collect()
+}
+
+/// Refuses a trim whose new out point is past the end of the media.
+///
+/// Nothing downstream can recover the frames such a trim asks for: the render
+/// pads the missing seconds with black and the preview shows the same. Naming
+/// the asset's measured length here is what lets the caller retry with a number
+/// that exists.
+fn reject_source_out_past_media(
+    project: &ActiveProject,
+    sequence_id: &str,
+    clip_id: &str,
+    source_out: Option<f64>,
+) -> anyhow::Result<()> {
+    let Some(source_out) = source_out else {
+        return Ok(());
+    };
+
+    let Some(sequence) = project.state.sequences.get(sequence_id) else {
+        return Ok(());
+    };
+    let Some(clip) = sequence
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.id == clip_id)
+    else {
+        return Ok(());
+    };
+    let Some(asset) = project.state.assets.get(&clip.asset_id) else {
+        return Ok(());
+    };
+    // A still holds its slot however long the timeline gives it, so its source
+    // window bounds nothing.
+    if asset.kind == AssetKind::Image {
+        return Ok(());
+    }
+    let Some(duration_sec) = asset
+        .duration_sec
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+    else {
+        return Ok(());
+    };
+
+    if source_out > duration_sec + SOURCE_CLAMP_EPSILON_SEC {
+        anyhow::bail!(
+            "Trim failed: --source-out {source_out} is past the end of asset '{}', which holds only {duration_sec:.3}s of media. Use --source-out {duration_sec:.3} or less.",
+            asset.id
+        );
+    }
+
     Ok(())
 }

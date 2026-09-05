@@ -138,11 +138,12 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli project save --path ./project"
             },
             "asset.import": {
-                "description": "Import a media file as a project asset",
+                "description": "Import a media file as a project asset. The file is probed with ffprobe by default, so the asset records durationSec, video {width,height,fps} and audio, and a clip inserted from it is as long as the media. 'probed' says whether the reading happened and 'warnings' says why it did not",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "file": { "type": "string", "required": true, "desc": "Path to media file" },
-                    "name": { "type": "string", "required": false, "desc": "Display name (defaults to filename)" }
+                    "name": { "type": "string", "required": false, "desc": "Display name (defaults to filename)" },
+                    "no-probe": { "type": "boolean", "required": false, "desc": "Skip the ffprobe read. Faster in bulk, but the asset records no duration, so timeline insert falls back to a 10-second default until the asset is probed" }
                 },
                 "example": "openreelio-cli asset import --path ./project --file video.mp4"
             },
@@ -293,7 +294,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline tracks --path ./project"
             },
             "timeline.insert": {
-                "description": edit_desc("Insert a clip onto the timeline from an asset"),
+                "description": edit_desc("Insert a clip onto the timeline from an asset. The clip is as long as the media: an asset with no recorded duration is probed first and updated through UpdateAsset, and the source range is clamped to the asset length with a 'warnings' entry naming the clamp"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "asset": { "type": "string", "required": true, "desc": "Asset ID to insert" },
@@ -332,7 +333,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
                     "track": { "type": "string", "required": true, "desc": "Track ID" },
                     "source-in": { "type": "number", "required": false, "desc": "New source in point (seconds)" },
-                    "source-out": { "type": "number", "required": false, "desc": "New source out point (seconds)" },
+                    "source-out": { "type": "number", "required": false, "desc": "New source out point (seconds). Refused when it is past the end of the asset's media; the error names the asset's measured length" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli timeline trim --path ./project --clip clip_001 --track track_v1 --source-in 2.0 --source-out 8.0"

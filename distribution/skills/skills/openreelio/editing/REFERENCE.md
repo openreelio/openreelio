@@ -29,10 +29,13 @@ openreelio-cli timeline set-format --path ./demo --fps 25 --width 1080 --height 
 The trim flags are `--source-in` and `--source-out` (source-media in/out points),
 not `--in` / `--out`.
 
-> **`timeline insert` places a 10-second clip.** `asset import` records no probed
-> duration, so the length is the default regardless of the file, and a second
-> `timeline insert --at 4.0` is refused as an overlap. Trim each clip to its real
-> length — `analysis shots` gives `totalDurationSec` — before inserting after it.
+> **`timeline insert` places a clip as long as the media.** An asset with no
+> recorded duration — one imported with `--no-probe` — is probed first and
+> updated through `UpdateAsset`, and the source range is clamped to the asset
+> length with a `warnings[]` entry naming the clamp. `timeline trim
+> --source-out` past the end of the media is refused, and the error names the
+> asset's measured length. Only an asset nothing could probe still takes the
+> 10-second default.
 
 `timeline set-format` changes the sequence's frame rate, canvas size and audio
 format. Every option is optional and at least one is required; the rest keep

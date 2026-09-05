@@ -329,6 +329,10 @@ pub(super) fn build_sequence_ffmpeg_args(
                         &mut filter_complex,
                         handles,
                         resolve_trim_source_kind(asset, &mut source_frame_counts),
+                        // The same measurement the transition planner and
+                        // validation read, so no two of them can disagree about
+                        // where the media ends.
+                        resolve_asset_source_duration(asset, &mut source_durations),
                     );
 
                     if clip_filter_graph.has_video_effects() {

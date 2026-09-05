@@ -2431,6 +2431,150 @@ fn handled_source_window(clip: &Clip, handles: ClipHandles) -> (f64, f64) {
     )
 }
 
+/// How far past its media a clip may reach before the render calls it an
+/// overrun.
+///
+/// A cut lands on the output frame grid, not on whatever fraction of a second
+/// FFprobe rounded the container's duration to, so a clip that ends exactly at
+/// the end of its media routinely reads as a hair past it. One 60fps frame is
+/// the smallest slack that absorbs that rounding, and padding black for less
+/// than a frame would be noise rather than a fix.
+const SOURCE_OVERRUN_TOLERANCE_SEC: f64 = 1.0 / 60.0;
+
+/// A clip's source window split into what its media can decode and what cannot.
+///
+/// A clip may name more source than the file holds — an insert made before the
+/// asset was probed takes a default length regardless of the media, and a split
+/// hands the tail half a range that starts past the end. FFmpeg answers such a
+/// `trim` with fewer frames than the timeline slot asked for and exit code 0,
+/// so the segment lands short, `concat` pulls every later clip forward, and in
+/// the degenerate case the render writes a file with no video stream at all and
+/// the user's only signal is raw FFmpeg stderr.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct BoundedSourceWindow {
+    /// Source seconds the trim starts at.
+    pub(super) source_in: f64,
+    /// Source seconds the trim ends at, bounded by the media when it is known.
+    pub(super) source_out: f64,
+    /// Timeline seconds of black that stand in for the unreadable remainder.
+    pub(super) black_pad_sec: f64,
+}
+
+/// Bounds a clip's source window by the media behind it.
+///
+/// `media_duration_sec` is what [`resolve_asset_source_duration`] measured;
+/// `None` (an unmeasurable file) leaves the window exactly as the clip states
+/// it, because guessing a bound would cut picture the file may well hold.
+///
+/// The pad is expressed in *timeline* seconds — the filter applies it after
+/// `setpts`, where a 2x clip has already halved its own duration.
+pub(super) fn bounded_source_window(
+    clip: &Clip,
+    handles: ClipHandles,
+    media_duration_sec: Option<f64>,
+) -> BoundedSourceWindow {
+    let (source_in, source_out) = handled_source_window(clip, handles);
+    let unbounded = BoundedSourceWindow {
+        source_in,
+        source_out,
+        black_pad_sec: 0.0,
+    };
+
+    let Some(available) = media_duration_sec.filter(|value| value.is_finite() && *value > 0.0)
+    else {
+        return unbounded;
+    };
+    if source_out <= available + SOURCE_OVERRUN_TOLERANCE_SEC {
+        return unbounded;
+    }
+
+    // A window that starts at or past the end decodes nothing whatever it is
+    // trimmed to; validation refuses that clip up front. Keeping the trim
+    // non-empty here only stops the filtergraph from being nonsense in the
+    // meantime.
+    let decodable_out = available
+        .max(source_in + TIMELINE_EPSILON_SEC)
+        .min(source_out);
+
+    BoundedSourceWindow {
+        source_in,
+        source_out: decodable_out,
+        black_pad_sec: (source_out - decodable_out) / clip.safe_speed(),
+    }
+}
+
+/// How badly a clip's source range outruns the media behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceOverrunSeverity {
+    /// The clip starts at or past the end: nothing decodes, so the render would
+    /// write a segment with no frames in it.
+    NoPictureAtAll,
+    /// Part of the clip decodes and the remainder is padded with black.
+    RendersAsBlack,
+}
+
+/// One clip's source-overrun finding, ready to be filed against the clip.
+#[derive(Debug, Clone)]
+pub(super) struct SourceOverrunFinding {
+    /// Whether the render can still show something for this clip.
+    pub(super) severity: SourceOverrunSeverity,
+    /// The message shown to whoever asked for the render.
+    pub(super) message: String,
+}
+
+/// Reports a clip whose source range reaches past the end of its media.
+///
+/// `None` for every clip the render does not bound this way: audio, stills
+/// (which hold their slot whatever their window says), freeze frames (which
+/// clone one picture) and time-remapped clips (whose window comes from the
+/// curve, not from `clip.range`). `None` too when the media is unmeasurable,
+/// because a bound nobody could measure is not a finding.
+pub(super) fn source_overrun_finding(
+    clip: &Clip,
+    asset: &Asset,
+    track: &crate::core::timeline::Track,
+    source_durations: &mut SourceDurationCache,
+) -> Option<SourceOverrunFinding> {
+    if track.kind != TrackKind::Video
+        || asset.kind == AssetKind::Image
+        || clip.freeze_frame
+        || clip.has_time_remap()
+    {
+        return None;
+    }
+
+    let available = resolve_asset_source_duration(asset, source_durations)
+        .filter(|value| value.is_finite() && *value > 0.0)?;
+    if clip.range.source_out_sec <= available + SOURCE_OVERRUN_TOLERANCE_SEC {
+        return None;
+    }
+
+    if clip.range.source_in_sec >= available {
+        return Some(SourceOverrunFinding {
+            severity: SourceOverrunSeverity::NoPictureAtAll,
+            message: format!(
+                "Clip '{}' on track '{}' starts {:.3}s into asset '{}', which holds only {:.3}s of \
+                 media, so it decodes no picture at all. Trim the clip back inside its source, or \
+                 remove it.",
+                clip.id, track.name, clip.range.source_in_sec, asset.id, available
+            ),
+        });
+    }
+
+    Some(SourceOverrunFinding {
+        severity: SourceOverrunSeverity::RendersAsBlack,
+        message: format!(
+            "Clip '{}' on track '{}' runs {:.3}s past the end of asset '{}', which holds only \
+             {:.3}s of media; the overrun renders as black. Trim the clip to the media length.",
+            clip.id,
+            track.name,
+            clip.range.source_out_sec - available,
+            asset.id,
+            available
+        ),
+    })
+}
+
 /// What kind of picture the input of a video trim decodes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TrimSourceKind {
@@ -2528,6 +2672,13 @@ fn still_image_slot_duration(clip: &Clip, handles: ClipHandles) -> f64 {
 ///
 /// `source` says whether the input decodes to moving pictures or to a single
 /// still — see [`TrimSourceKind`].
+///
+/// `media_duration_sec` is how much media the file actually holds, from
+/// [`resolve_asset_source_duration`]. Only the plain constant-speed branch is
+/// bounded by it: a still already holds its slot whatever its window says, a
+/// freeze frame clones one picture, and the reversed and time-remapped branches
+/// map timeline to source in ways a tail pad would land in the wrong place.
+/// Validation reports the overrun for every one of them regardless.
 pub(super) fn build_video_trim_filter(
     clip: &Clip,
     input_index: usize,
@@ -2535,6 +2686,7 @@ pub(super) fn build_video_trim_filter(
     filter_complex: &mut String,
     handles: ClipHandles,
     source: TrimSourceKind,
+    media_duration_sec: Option<f64>,
 ) {
     debug_assert!(
         handles.is_none() || (!clip.freeze_frame && !clip.has_time_remap() && !clip.reverse),
@@ -2611,10 +2763,26 @@ pub(super) fn build_video_trim_filter(
         let interpolation = build_slow_motion_interpolation_filter(clip)
             .map(|filter| format!(",{}", filter))
             .unwrap_or_default();
-        let (source_in, source_out) = handled_source_window(clip, handles);
+        let window = bounded_source_window(clip, handles, media_duration_sec);
+        // Black rather than a cloned last frame: a hold reads as a deliberate
+        // freeze, while black reads as missing media, which is what it is.
+        let black_pad = if window.black_pad_sec > 0.0 {
+            format!(
+                ",tpad=stop_mode=add:color=black:stop_duration={}",
+                format_speed_number(window.black_pad_sec)
+            )
+        } else {
+            String::new()
+        };
         let filter = format!(
-            "[{}:v]trim=start={}:end={},setpts={}{}[{}]",
-            input_index, source_in, source_out, setpts, interpolation, trim_label
+            "[{}:v]trim=start={}:end={},setpts={}{}{}[{}]",
+            input_index,
+            window.source_in,
+            window.source_out,
+            setpts,
+            interpolation,
+            black_pad,
+            trim_label
         );
         filter_complex.push_str(&filter);
     }
@@ -8157,6 +8325,23 @@ pub fn validate_export_settings_with_dimensions(
                     &clip.id,
                     format!("Invalid asset path for asset '{}': {}", asset.id, err),
                 );
+            }
+
+            // A clip may name more source than its media holds — an insert made
+            // before the asset was probed takes a default length whatever the
+            // file is, and splitting such a clip hands the tail half a range
+            // that starts past the end. Saying so here is what keeps raw FFmpeg
+            // stderr from being the only signal.
+            if let Some(finding) = source_overrun_finding(clip, asset, track, &mut source_durations)
+            {
+                match finding.severity {
+                    SourceOverrunSeverity::NoPictureAtAll => {
+                        validation.add_clip_error(&sequence.id, &clip.id, finding.message)
+                    }
+                    SourceOverrunSeverity::RendersAsBlack => {
+                        validation.add_clip_warning(&sequence.id, &clip.id, finding.message)
+                    }
+                }
             }
 
             // Placing a transformed clip needs the source's real pixel size. An
@@ -18347,6 +18532,7 @@ mod tests {
             &mut filter,
             ClipHandles::default(),
             TrimSourceKind::Motion,
+            None,
         );
 
         assert!(
@@ -18371,6 +18557,7 @@ mod tests {
             &mut filter,
             ClipHandles::default(),
             TrimSourceKind::Motion,
+            None,
         );
 
         assert!(
@@ -18395,6 +18582,7 @@ mod tests {
             &mut filter,
             ClipHandles::default(),
             TrimSourceKind::Motion,
+            None,
         );
 
         assert!(
@@ -18495,6 +18683,7 @@ mod tests {
             &mut filter,
             ClipHandles::default(),
             TrimSourceKind::Motion,
+            None,
         );
 
         // Then filter includes the reverse filter
@@ -18525,6 +18714,7 @@ mod tests {
             &mut filter,
             ClipHandles::default(),
             TrimSourceKind::Motion,
+            None,
         );
 
         // Then filter includes tpad clone
@@ -18556,6 +18746,7 @@ mod tests {
             &mut filter,
             ClipHandles::default(),
             TrimSourceKind::StillImage,
+            None,
         );
 
         assert!(
@@ -18589,6 +18780,7 @@ mod tests {
             &mut filter,
             ClipHandles::default(),
             TrimSourceKind::StillImage,
+            None,
         );
 
         assert!(
@@ -18621,6 +18813,7 @@ mod tests {
                 tail_sec: 0.25,
             },
             TrimSourceKind::StillImage,
+            None,
         );
 
         assert!(
@@ -18684,6 +18877,7 @@ mod tests {
             &mut filter_complex,
             ClipHandles::default(),
             TrimSourceKind::for_asset(&animated, Some(30)),
+            None,
         );
 
         assert!(
@@ -18784,6 +18978,7 @@ mod tests {
                 &mut filter_complex,
                 ClipHandles::default(),
                 source_kind,
+                None,
             );
 
             if zoomed {
@@ -18946,6 +19141,7 @@ mod tests {
             &mut filter_complex,
             ClipHandles::default(),
             kind_of(&animated, &mut frame_counts),
+            None,
         );
         filter_complex.push_str("[trim0]null[v0];");
         append_video_stream_normalization(
@@ -19198,6 +19394,7 @@ mod tests {
             &mut filter,
             ClipHandles::default(),
             TrimSourceKind::Motion,
+            None,
         );
 
         assert!(
