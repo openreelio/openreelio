@@ -85,15 +85,21 @@ pub struct AudioProfile {
     pub spectral_centroid_hz: f64,
     /// Per-second momentary loudness values in LUFS.
     ///
-    /// Sampled at 1 Hz (one value per second), so `loudness_profile[i]`
-    /// represents the average momentary loudness during the i-th second of
-    /// audio. Windows the meter reports as digital silence are dropped rather
-    /// than averaged in, so the profile can be shorter than the audio.
+    /// Sampled at 1 Hz (one value per second), so `loudness_profile[i]` is the
+    /// average momentary loudness during the i-th second of audio and the
+    /// profile has one entry per second of measured audio. Consumers address it
+    /// by time, so a second the meter reports as digital silence keeps its slot
+    /// and reads [`SILENCE_FLOOR_DB`] rather than being omitted.
     pub loudness_profile: Vec<f64>,
     /// Peak level in dB relative to full scale.
     ///
-    /// True peak when the FFmpeg build measures it, otherwise the sample peak.
-    /// Falls back to [`SILENCE_FLOOR_DB`] only when nothing could be measured.
+    /// **This is true peak (dBTP) whenever the FFmpeg build measures one**, and
+    /// the `astats` sample peak (dBFS) otherwise; the two differ by the
+    /// inter-sample overshoot, so a true-peak reading can sit a few tenths of a
+    /// dB above the sample peak of the same file. Before the shared loudness
+    /// measurement this field was the maximum momentary loudness in LUFS, which
+    /// is a different quantity entirely. Read [`Self::true_peak_dbtp`] when the
+    /// distinction matters. [`SILENCE_FLOOR_DB`] means nothing was measured.
     pub peak_db: f64,
     /// Integrated program loudness in LUFS (EBU R128), when it was measured.
     #[serde(default)]
@@ -151,6 +157,27 @@ impl AudioProfile {
             silence_regions: silence,
             speech_regions: Vec::new(),
         }
+    }
+
+    /// Returns `true` when the loudness numbers come from the current pass.
+    ///
+    /// A profile whose per-second curve is empty counts as unmeasured even at
+    /// the current version: that is exactly the shape the superseded pass
+    /// produced, and no caller can tell the two apart from the numbers alone.
+    pub fn has_current_loudness(&self) -> bool {
+        self.measurement_version >= AUDIO_MEASUREMENT_VERSION && !self.loudness_profile.is_empty()
+    }
+
+    /// Clears every field the loudness pass produces, leaving the regions.
+    ///
+    /// The peak returns to [`SILENCE_FLOOR_DB`], which is what "nothing was
+    /// measured" means everywhere else in the profile.
+    pub fn clear_loudness_measurement(&mut self) {
+        self.loudness_profile.clear();
+        self.peak_db = SILENCE_FLOOR_DB;
+        self.integrated_lufs = None;
+        self.loudness_range_lu = None;
+        self.true_peak_dbtp = None;
     }
 }
 
@@ -530,6 +557,26 @@ impl AnalysisOptions {
     pub fn has_any(&self) -> bool {
         self.shots || self.transcript || self.audio || self.segments || self.visual
     }
+
+    /// Options that run the audio profile and nothing else.
+    ///
+    /// Used when a bundle is complete apart from its loudness numbers: the shot
+    /// list, transcript and segments are still good, and re-running them would
+    /// spend minutes of FFmpeg to arrive at the same answers. The pipeline
+    /// merges the partial result back over the cached bundle, so the slots this
+    /// run leaves empty keep whatever the previous run produced.
+    ///
+    /// `local_only` is set because the audio pass has no vision component.
+    pub fn audio_only() -> Self {
+        Self {
+            shots: false,
+            transcript: false,
+            audio: true,
+            segments: false,
+            visual: false,
+            local_only: true,
+        }
+    }
 }
 
 // =============================================================================
@@ -614,25 +661,53 @@ impl AnalysisBundle {
         }
     }
 
-    /// Drops a cached audio profile produced by an older measurement.
+    /// Clears the loudness numbers of a cached audio profile measured by an
+    /// older pass, keeping everything else the profile holds.
     ///
-    /// Returns `true` when a profile was discarded. The loudness/peak pass has
+    /// Returns `true` when a profile was reset. The loudness/peak pass has
     /// shipped wrong numbers before — a whole class of bundles carries
     /// `peakDb: -90` with an empty loudness profile — and nothing else in the
-    /// bundle can tell a stale profile from a fresh one. Dropping it here makes
-    /// the next `analysis audio` / `analyze_asset` run recompute it, while every
-    /// other slot the bundle paid for survives.
-    pub fn drop_outdated_audio_profile(&mut self) -> bool {
-        let outdated = self
-            .audio_profile
-            .as_ref()
-            .is_some_and(|profile| profile.measurement_version < AUDIO_MEASUREMENT_VERSION);
-
-        if outdated {
-            self.audio_profile = None;
+    /// bundle can tell a stale measurement from a fresh one.
+    ///
+    /// Only the loudness fields go: the silence and speech regions in the same
+    /// profile were produced by `silencedetect` and the VAD, which the loudness
+    /// fix never touched, and several surfaces depend on them. `analysis
+    /// silence` may only write into an existing profile, so discarding the
+    /// whole struct turned every cache update into `"persisted": false`, and
+    /// `analysis report` lost `coverage.audio` for an asset whose regions were
+    /// perfectly good.
+    ///
+    /// [`AudioProfile::measurement_version`] deliberately keeps its stale value.
+    /// The cleared fields say the numbers are gone; the version says which pass
+    /// produced them, and that is what lets a reader report the profile as
+    /// awaiting re-measurement instead of as a silent file.
+    pub fn reset_outdated_audio_loudness(&mut self) -> bool {
+        let Some(profile) = self.audio_profile.as_mut() else {
+            return false;
+        };
+        if profile.measurement_version >= AUDIO_MEASUREMENT_VERSION {
+            return false;
         }
 
-        outdated
+        profile.clear_loudness_measurement();
+        true
+    }
+
+    /// Returns `true` when the bundle should have loudness numbers but does not.
+    ///
+    /// True for a profile whose measurement is superseded (see
+    /// [`Self::reset_outdated_audio_loudness`]) and for one whose per-second
+    /// profile is empty on an asset that has an audio stream. Both mean the
+    /// same thing to a caller: the regions are usable, the loudness is not, and
+    /// an audio pass has to run before anything reads a level from here.
+    pub fn needs_loudness_measurement(&self) -> bool {
+        if !self.metadata.has_audio {
+            return false;
+        }
+
+        self.audio_profile
+            .as_ref()
+            .is_some_and(|profile| !profile.has_current_loudness())
     }
 
     /// Records an error for a specific analysis type
@@ -868,25 +943,46 @@ mod tests {
 
     /// Feature: audio profile measurement versioning
     /// Scenario: a bundle cached before the loudness fix is loaded
-    ///   Given a bundle whose audio profile predates the current measurement
+    ///   Given a stale profile carrying silence and speech regions
     ///   When the bundle is normalised on load
-    ///   Then the stale profile is dropped so the next run recomputes it,
-    ///   while every other slot the bundle paid for survives
+    ///   Then only the loudness numbers are cleared and the regions survive
     #[test]
-    fn should_drop_an_audio_profile_measured_by_a_superseded_pass() {
+    fn should_clear_only_the_loudness_of_a_profile_from_a_superseded_pass() {
         let mut bundle = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0));
         bundle.transcript = Some(Vec::new());
         bundle.audio_profile = Some(AudioProfile {
             measurement_version: AUDIO_MEASUREMENT_VERSION - 1,
+            loudness_profile: vec![SILENCE_FLOOR_DB; 4],
             peak_db: SILENCE_FLOOR_DB,
+            integrated_lufs: Some(-90.0),
+            loudness_range_lu: Some(0.0),
+            true_peak_dbtp: Some(-90.0),
+            silence_regions: vec![SilenceRegion::new(1.0, 2.0)],
+            speech_regions: vec![SpeechRegion::new(2.0, 6.0)],
             ..Default::default()
         });
 
-        assert!(bundle.drop_outdated_audio_profile());
-        assert!(bundle.audio_profile.is_none());
+        assert!(bundle.reset_outdated_audio_loudness());
+
+        let profile = bundle
+            .audio_profile
+            .as_ref()
+            .expect("the profile itself must survive so its regions stay usable");
+        assert!(profile.loudness_profile.is_empty());
+        assert_eq!(profile.peak_db, SILENCE_FLOOR_DB);
+        assert_eq!(profile.integrated_lufs, None);
+        assert_eq!(profile.loudness_range_lu, None);
+        assert_eq!(profile.true_peak_dbtp, None);
+        assert_eq!(profile.silence_regions.len(), 1);
+        assert_eq!(profile.speech_regions.len(), 1);
+        assert_eq!(
+            profile.measurement_version,
+            AUDIO_MEASUREMENT_VERSION - 1,
+            "the stale version is what keeps the missing measurement visible"
+        );
         assert!(
             bundle.transcript.is_some(),
-            "only the audio profile is stale; the rest of the bundle must survive"
+            "only the loudness is stale; the rest of the bundle must survive"
         );
     }
 
@@ -894,14 +990,71 @@ mod tests {
     /// Scenario: a bundle carries a profile from the current measurement
     ///   Given an audio profile stamped with the current version
     ///   When the bundle is normalised on load
-    ///   Then the profile is kept, so a good measurement is not thrown away
+    ///   Then nothing is cleared, so a good measurement is not thrown away
     #[test]
     fn should_keep_an_audio_profile_measured_by_the_current_pass() {
         let mut bundle = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0));
+        bundle.audio_profile = Some(AudioProfile {
+            loudness_profile: vec![-18.0, -17.5],
+            peak_db: -1.2,
+            ..Default::default()
+        });
+
+        assert!(!bundle.reset_outdated_audio_loudness());
+        assert_eq!(
+            bundle
+                .audio_profile
+                .as_ref()
+                .map(|profile| profile.loudness_profile.len()),
+            Some(2)
+        );
+    }
+
+    /// Feature: stale loudness detection
+    /// Scenario: an asset with audio carries a profile with no loudness curve
+    ///   Given a bundle whose audio profile was cleared as stale
+    ///   When the bundle is asked whether loudness has to be measured
+    ///   Then it says yes, so a reader can queue an audio pass
+    #[test]
+    fn should_report_that_loudness_is_missing_when_the_profile_was_cleared() {
+        let mut bundle = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0).with_audio(true));
+        bundle.audio_profile = Some(AudioProfile {
+            measurement_version: AUDIO_MEASUREMENT_VERSION - 1,
+            ..Default::default()
+        });
+        bundle.reset_outdated_audio_loudness();
+
+        assert!(bundle.needs_loudness_measurement());
+    }
+
+    /// Feature: stale loudness detection
+    /// Scenario: the asset has no audio stream at all
+    ///   Given a bundle whose metadata reports no audio
+    ///   When the bundle is asked whether loudness has to be measured
+    ///   Then it says no, because there is nothing to measure
+    #[test]
+    fn should_not_ask_for_loudness_when_the_asset_has_no_audio() {
+        let mut bundle = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0).with_audio(false));
         bundle.audio_profile = Some(AudioProfile::silent(10.0));
 
-        assert!(!bundle.drop_outdated_audio_profile());
-        assert!(bundle.audio_profile.is_some());
+        assert!(!bundle.needs_loudness_measurement());
+    }
+
+    /// Feature: stale loudness detection
+    /// Scenario: the profile carries a current measurement
+    ///   Given an audio profile with a populated per-second curve
+    ///   When the bundle is asked whether loudness has to be measured
+    ///   Then it says no
+    #[test]
+    fn should_not_ask_for_loudness_when_the_measurement_is_current() {
+        let mut bundle = AnalysisBundle::new("asset_1", VideoMetadata::new(10.0).with_audio(true));
+        bundle.audio_profile = Some(AudioProfile {
+            loudness_profile: vec![-18.0, -17.5],
+            peak_db: -1.2,
+            ..Default::default()
+        });
+
+        assert!(!bundle.needs_loudness_measurement());
     }
 
     // -------------------------------------------------------------------------

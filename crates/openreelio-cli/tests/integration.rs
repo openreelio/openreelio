@@ -6629,6 +6629,65 @@ fn test_analysis_audio_profiles_and_caches_the_bundle() {
     assert_eq!(report["coverage"]["audio"], true);
 }
 
+/// Feature: cached audio profile staleness
+/// Scenario: a bundle measured by the superseded loudness pass is reused
+///   Given a cached profile whose measurement version predates the current pass
+///   When `analysis silence` and `analysis report` run against it
+///   Then the silence write is still accepted and the report separates the
+///   usable regions from the loudness numbers it must not quote
+///
+/// The regression this pins: the loader used to discard the whole profile when
+/// its loudness went stale. `analysis silence` may only write into an existing
+/// profile, so every default-threshold run started reporting
+/// `"persisted": false`, and the report lost `coverage.audio` for an asset
+/// whose silence and speech regions were perfectly good.
+#[test]
+fn test_a_stale_loudness_measurement_keeps_the_regions_and_flags_itself() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "stale_loudness_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    run_cli_ok(&["analysis", "audio", "--path", &path, "--id", &asset_id]);
+
+    // Age the cached measurement in place, which is exactly the shape a bundle
+    // written before the loudness fix has on disk.
+    let bundle_file = bundle_path(&path, &asset_id);
+    let mut cached: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&bundle_file).unwrap()).unwrap();
+    cached["audioProfile"]["measurementVersion"] = serde_json::json!(0);
+    std::fs::write(&bundle_file, serde_json::to_string_pretty(&cached).unwrap()).unwrap();
+
+    let silence = run_cli_ok(&["analysis", "silence", "--path", &path, "--id", &asset_id]);
+    assert_eq!(
+        silence["persisted"], true,
+        "a stale loudness measurement must not stop silence regions being cached: {silence}"
+    );
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(
+        report["coverage"]["audio"], true,
+        "the regions are still usable, so audio coverage stands: {report}"
+    );
+    assert_eq!(
+        report["coverage"]["loudness"], false,
+        "the loudness numbers are stale, which is what tells an agent to rerun \
+         `analysis audio`: {report}"
+    );
+    assert!(
+        report["audio"]["peakDb"].is_null(),
+        "a stale peak must not be quoted as a measurement: {report}"
+    );
+    assert_eq!(report["audio"]["loudnessSampleCount"], 0);
+    assert!(
+        report["audio"]["silenceRegionCount"].as_u64().unwrap() >= 1,
+        "the cached regions must still be reported: {report}"
+    );
+}
+
 /// Feature: headless audio perception
 /// Scenario: an agent profiles a tone of known level
 ///   Given an imported 440 Hz stereo tone at -6 dBFS, 48 kHz

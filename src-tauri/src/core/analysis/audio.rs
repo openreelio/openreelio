@@ -14,8 +14,9 @@ use webrtc_vad::{SampleRate as VadSampleRate, Vad, VadMode};
 
 use super::ducking::invert_silence_to_speech;
 use super::loudness::{
-    loudness_filter_chain, parse_astats_overall, parse_loudness_summary, parse_momentary_loudness,
-    per_second_loudness_profile, MOMENTARY_SAMPLES_PER_SECOND,
+    audible_momentary_readings, loudness_filter_chain, parse_astats_overall,
+    parse_loudness_summary, parse_momentary_loudness, per_second_loudness_profile,
+    MOMENTARY_SAMPLES_PER_SECOND,
 };
 use super::types::{
     AudioProfile, SilenceRegion, SpeechRegion, AUDIO_MEASUREMENT_VERSION, SILENCE_FLOOR_DB,
@@ -125,9 +126,13 @@ impl AudioProfiler {
             0.0
         });
 
-        let bpm =
-            Self::estimate_bpm_from_samples(&loudness.momentary_lufs, LOUDNESS_SAMPLES_PER_SECOND)
-                .or_else(|| Self::estimate_bpm(&loudness.loudness_profile));
+        // Onset detection runs over the audible readings: the momentary series
+        // keeps its silence windows so the per-second profile stays addressable
+        // by the second, but a stretch of floor readings is a pair of artificial
+        // jumps rather than a beat.
+        let onset_samples = audible_momentary_readings(&loudness.momentary_lufs);
+        let bpm = Self::estimate_bpm_from_samples(&onset_samples, LOUDNESS_SAMPLES_PER_SECOND)
+            .or_else(|| Self::estimate_bpm(&loudness.loudness_profile));
         let speech_regions = match self
             .detect_speech_regions_vad(video_path, duration_sec)
             .await
@@ -247,7 +252,7 @@ impl AudioProfiler {
         let capture = self
             .run_ffmpeg_filter(video_path, &loudness_filter_chain())
             .await?;
-        Ok(measure_loudness(&capture.stderr))
+        measure_loudness(&capture.stderr)
     }
 
     // =========================================================================
@@ -609,35 +614,76 @@ impl LoudnessMeasurement {
     /// Returns the peak level to report, in dB relative to full scale.
     ///
     /// True peak is preferred because it accounts for inter-sample overs; the
-    /// `astats` sample peak stands in on builds without true-peak support. Only
-    /// when neither was measured does the value fall back to the silence floor,
-    /// which is what "nothing was measured" has always looked like to callers.
+    /// `astats` sample peak stands in on builds without true-peak support. The
+    /// measured value is reported as measured — a quiet master really can peak
+    /// below the silence floor, and clamping it would invent a level the file
+    /// does not have. The floor is reached only when both fields are empty,
+    /// which for a completed pass means the input was digital silence:
+    /// [`measure_loudness`] rejects a pass that measured nothing at all.
     pub fn peak_db(&self) -> f64 {
         self.true_peak_dbtp
             .or(self.sample_peak_db)
-            .filter(|value| value.is_finite())
             .unwrap_or(SILENCE_FLOOR_DB)
-            .max(SILENCE_FLOOR_DB)
     }
 }
+
+/// Number of stderr lines quoted when a measurement pass parsed nothing.
+const EMPTY_MEASUREMENT_STDERR_LINES: usize = 3;
 
 /// Turns one `ebur128,astats` filter log into a [`LoudnessMeasurement`].
 ///
 /// Pure over the captured stderr so it is testable without invoking FFmpeg.
-pub(crate) fn measure_loudness(stderr: &str) -> LoudnessMeasurement {
+///
+/// # Errors
+///
+/// Returns [`CoreError::AnalysisFailed`] when the pass exited successfully but
+/// the log carries no momentary readings, no integrated loudness and no peak.
+/// A pass that measured *nothing* is a broken pass, not a silent file: even
+/// digital silence produces frame lines at the meter's floor. Reporting it as
+/// silence is how the `metadata=1` regression stayed invisible for so long, so
+/// the numbers a caller cannot trust are refused instead of published.
+pub(crate) fn measure_loudness(stderr: &str) -> CoreResult<LoudnessMeasurement> {
     let momentary_lufs = parse_momentary_loudness(stderr);
     let loudness_profile =
         per_second_loudness_profile(&momentary_lufs, LOUDNESS_SAMPLES_PER_SECOND as usize);
     let summary = parse_loudness_summary(stderr);
     let astats = parse_astats_overall(stderr);
 
-    LoudnessMeasurement {
+    if momentary_lufs.is_empty()
+        && summary.integrated_lufs.is_none()
+        && astats.sample_peak_db.is_none()
+    {
+        return Err(CoreError::AnalysisFailed(format!(
+            "The `{}` pass completed but measured nothing: no momentary readings, \
+             no integrated loudness and no peak. First stderr lines: {}",
+            loudness_filter_chain(),
+            first_stderr_lines(stderr, EMPTY_MEASUREMENT_STDERR_LINES),
+        )));
+    }
+
+    Ok(LoudnessMeasurement {
         loudness_profile,
         momentary_lufs,
         integrated_lufs: summary.integrated_lufs,
         loudness_range_lu: summary.loudness_range_lu,
         true_peak_dbtp: summary.true_peak_dbtp,
         sample_peak_db: astats.sample_peak_db,
+    })
+}
+
+/// Joins the first `limit` non-empty stderr lines into one diagnostic string.
+fn first_stderr_lines(stderr: &str, limit: usize) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(limit)
+        .collect();
+
+    if lines.is_empty() {
+        "<no stderr output>".to_string()
+    } else {
+        lines.join(" | ")
     }
 }
 
@@ -882,7 +928,7 @@ size=N/A time=00:00:20.00 bitrate=N/A speed=50.0x
             ebur128_summary(-6.7, -6.0),
         );
 
-        let measurement = measure_loudness(&log);
+        let measurement = measure_loudness(&log).expect("a full log must measure");
 
         assert_eq!(
             measurement.loudness_profile.len(),
@@ -913,20 +959,69 @@ size=N/A time=00:00:20.00 bitrate=N/A speed=50.0x
     LRA:  5.0 LU
 [Parsed_astats_1 @ 0x1] Peak level dB: -1.900000";
 
-        let measurement = measure_loudness(log);
+        let measurement = measure_loudness(log).expect("a summary with a peak must measure");
 
         assert_eq!(measurement.true_peak_dbtp, None);
         assert!((measurement.peak_db() - (-1.9)).abs() < 0.01);
     }
 
+    /// Feature: audio loudness measurement
+    /// Scenario: the filter pass runs but its output carries no measurement
+    ///   Given a capture with no frame lines, no summary and no astats block
+    ///   When the loudness pass is parsed
+    ///   Then it fails, naming the filter and quoting the start of the log
+    ///
+    /// The old behaviour folded this into `-90 dB` and reported it as a
+    /// successful measurement of silence, which is how a pass that measured
+    /// nothing shipped as a number users acted on.
     #[test]
-    fn should_report_the_silence_floor_when_nothing_could_be_measured() {
-        let measurement = measure_loudness("no relevant data here");
+    fn should_fail_when_a_successful_pass_measured_nothing() {
+        let error = measure_loudness("Stream #0:0: Audio: aac\nno relevant data here")
+            .expect_err("a pass that measured nothing must not report silence");
 
-        assert!(measurement.loudness_profile.is_empty());
-        assert!(measurement.momentary_lufs.is_empty());
-        assert_eq!(measurement.integrated_lufs, None);
+        let message = error.to_string();
+        assert!(
+            message.contains("ebur128"),
+            "the error must name the filter: {message}"
+        );
+        assert!(
+            message.contains("Stream #0:0"),
+            "the error must quote the start of the log: {message}"
+        );
+    }
+
+    /// Feature: audio loudness measurement
+    /// Scenario: the input really is digital silence
+    ///   Given frame lines at the meter's silence sentinel and an astats peak
+    ///   When the loudness pass is parsed
+    ///   Then it succeeds with a floor-level profile
+    #[test]
+    fn should_measure_digital_silence_rather_than_rejecting_it() {
+        let log = "\
+[Parsed_ebur128_0 @ 0x1] t: 0.4 TARGET:-23 LUFS M:-120.7 S:-120.7
+[Parsed_ebur128_0 @ 0x1] t: 0.5 TARGET:-23 LUFS M:-120.7 S:-120.7";
+
+        let measurement = measure_loudness(log).expect("digital silence is a measurement");
+
+        assert_eq!(measurement.momentary_lufs.len(), 2);
+        assert_eq!(measurement.loudness_profile, vec![SILENCE_FLOOR_DB]);
         assert_eq!(measurement.peak_db(), SILENCE_FLOOR_DB);
+    }
+
+    /// Feature: audio profile peak reporting
+    /// Scenario: a very quiet master peaks below the silence floor
+    ///   Given an astats peak of -95 dBFS
+    ///   When the peak is reported
+    ///   Then the measured value survives instead of being clamped
+    #[test]
+    fn should_report_a_measured_peak_below_the_silence_floor_as_measured() {
+        let log = "\
+[Parsed_ebur128_0 @ 0x1] t: 0.4 TARGET:-23 LUFS M: -96.0 S: -96.0
+[Parsed_astats_1 @ 0x1] Peak level dB: -95.000000";
+
+        let measurement = measure_loudness(log).expect("a measured peak is a measurement");
+
+        assert!((measurement.peak_db() - (-95.0)).abs() < 0.01);
     }
 
     /// Feature: audio profile loudness measurement
@@ -946,7 +1041,7 @@ size=N/A time=00:00:20.00 bitrate=N/A speed=50.0x
             ebur128_summary(-16.4, -1.9),
         );
 
-        let measurement = measure_loudness(&log);
+        let measurement = measure_loudness(&log).expect("audible content must measure");
 
         assert!(
             !measurement.loudness_profile.is_empty(),

@@ -287,13 +287,20 @@ struct CachedAudioProfile {
 }
 
 impl CachedAudioProfile {
-    /// Whether this profile predates the current loudness measurement.
+    /// Whether the loudness numbers in this profile can be reported.
     ///
     /// The report reads `bundle.json` with its own types, so it repeats the
     /// staleness check the core loader performs rather than trusting whatever
-    /// numbers the file happens to hold.
-    fn is_outdated(&self) -> bool {
-        self.measurement_version < openreelio_core::analysis::AUDIO_MEASUREMENT_VERSION
+    /// numbers the file happens to hold. An empty per-second curve counts as
+    /// unmeasured at any version: that is the exact shape the superseded pass
+    /// produced, and nothing in the file distinguishes the two.
+    ///
+    /// Only the loudness fields hang off this. The silence and speech regions
+    /// in the same profile came from `silencedetect` and the VAD, which the
+    /// loudness fix never touched, so they are reported regardless.
+    fn has_current_loudness(&self) -> bool {
+        self.measurement_version >= openreelio_core::analysis::AUDIO_MEASUREMENT_VERSION
+            && !self.loudness_profile.is_empty()
     }
 }
 
@@ -941,13 +948,16 @@ fn build_source_analysis_report(
         .as_ref()
         .and_then(|cached| cached.transcript.clone())
         .unwrap_or(annotation_transcript);
-    // A profile measured by a superseded loudness pass is not reported: it would
-    // claim `peakDb: -90` for audible content. Dropping it here matches what the
-    // core bundle loader does, so the report and the GUI agree.
     let audio_profile = bundle
         .as_ref()
-        .and_then(|cached| cached.audio_profile.clone())
-        .filter(|profile| !profile.is_outdated());
+        .and_then(|cached| cached.audio_profile.clone());
+    // A profile measured by a superseded loudness pass keeps its regions but
+    // loses its numbers: reporting them would claim `peakDb: -90` for audible
+    // content. `coverage.loudness` is what tells an agent to run
+    // `analysis audio` again; `coverage.audio` still reflects the regions.
+    let loudness = audio_profile
+        .as_ref()
+        .filter(|profile| profile.has_current_loudness());
     let segments = bundle
         .as_ref()
         .and_then(|cached| cached.segments.clone())
@@ -1177,6 +1187,7 @@ fn build_source_analysis_report(
         "shots": !shots.is_empty(),
         "transcript": !transcript.is_empty(),
         "audio": audio_profile.is_some(),
+        "loudness": loudness.is_some(),
         "segments": !segments.is_empty(),
         "visual": !frame_analysis.is_empty(),
         "annotation": annotation.is_some(),
@@ -1241,10 +1252,11 @@ fn build_source_analysis_report(
         "audio": {
             "hasAudioProfile": audio_profile.is_some(),
             "bpm": audio_profile.as_ref().and_then(|profile| profile.bpm.map(round_to)),
-            "peakDb": audio_profile.as_ref().map(|profile| round_to(profile.peak_db)),
-            "truePeakDbtp": audio_profile.as_ref().and_then(|profile| profile.true_peak_dbtp.map(round_to)),
-            "integratedLufs": audio_profile.as_ref().and_then(|profile| profile.integrated_lufs.map(round_to)),
-            "loudnessRangeLu": audio_profile.as_ref().and_then(|profile| profile.loudness_range_lu.map(round_to)),
+            "hasLoudnessMeasurement": loudness.is_some(),
+            "peakDb": loudness.map(|profile| round_to(profile.peak_db)),
+            "truePeakDbtp": loudness.and_then(|profile| profile.true_peak_dbtp.map(round_to)),
+            "integratedLufs": loudness.and_then(|profile| profile.integrated_lufs.map(round_to)),
+            "loudnessRangeLu": loudness.and_then(|profile| profile.loudness_range_lu.map(round_to)),
             "spectralCentroidHz": audio_profile.as_ref().map(|profile| round_to(profile.spectral_centroid_hz)),
             "silenceRegionCount": silence_region_count,
             "silenceDurationSec": round_to(silence_duration_sec),
@@ -1260,7 +1272,7 @@ fn build_source_analysis_report(
                 "endSec": round_to(region.end_sec),
                 "durationSec": round_to((region.end_sec - region.start_sec).max(0.0)),
             })).collect::<Vec<_>>(),
-            "loudnessSampleCount": audio_profile.as_ref().map(|profile| profile.loudness_profile.len()).unwrap_or(0),
+            "loudnessSampleCount": loudness.map(|profile| profile.loudness_profile.len()).unwrap_or(0),
         },
         "segments": {
             "count": segments.len(),
@@ -1366,9 +1378,12 @@ fn build_source_analysis_report(
         audio_profile
             .as_ref()
             .and_then(|profile| profile.bpm.map(round_to)),
-        audio_profile
-            .as_ref()
-            .map(|profile| round_to(profile.peak_db)),
+        loudness.map(|profile| round_to(profile.peak_db)),
+        LoudnessReportFields {
+            integrated_lufs: loudness.and_then(|profile| profile.integrated_lufs.map(round_to)),
+            true_peak_dbtp: loudness.and_then(|profile| profile.true_peak_dbtp.map(round_to)),
+            loudness_range_lu: loudness.and_then(|profile| profile.loudness_range_lu.map(round_to)),
+        },
         audio_profile
             .as_ref()
             .map(|profile| round_to(profile.spectral_centroid_hz)),
@@ -4213,6 +4228,21 @@ fn annotation_ocr_preview(annotation: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Program-level loudness numbers rendered in the Markdown audio summary.
+///
+/// Grouped into a struct because [`build_markdown`] already takes a long
+/// positional argument list, and three bare `Option<f64>` in a row there would
+/// be trivially swappable at the call site.
+#[derive(Clone, Copy, Debug, Default)]
+struct LoudnessReportFields {
+    /// Integrated program loudness in LUFS.
+    integrated_lufs: Option<f64>,
+    /// True peak in dBTP.
+    true_peak_dbtp: Option<f64>,
+    /// Loudness range in LU.
+    loudness_range_lu: Option<f64>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_markdown(
     asset_name: &str,
@@ -4241,6 +4271,7 @@ fn build_markdown(
     transcript_excerpt: Option<&str>,
     bpm: Option<f64>,
     peak_db: Option<f64>,
+    loudness: LoudnessReportFields,
     spectral_centroid_hz: Option<f64>,
     silence_region_count: usize,
     silence_duration_sec: f64,
@@ -4532,6 +4563,14 @@ fn build_markdown(
             }
         ),
         format!(
+            "- Loudness measurement: {}",
+            if coverage["loudness"].as_bool().unwrap_or(false) {
+                "available"
+            } else {
+                "missing (run `analysis audio`)"
+            }
+        ),
+        format!(
             "- Segments: {}",
             if coverage["segments"].as_bool().unwrap_or(false) {
                 "available"
@@ -4673,7 +4712,11 @@ fn build_markdown(
         }
     }
 
-    if bpm.is_some() || peak_db.is_some() || spectral_centroid_hz.is_some() {
+    if bpm.is_some()
+        || peak_db.is_some()
+        || spectral_centroid_hz.is_some()
+        || loudness.integrated_lufs.is_some()
+    {
         lines.extend([
             String::new(),
             "## Audio Summary".to_string(),
@@ -4686,6 +4729,27 @@ fn build_markdown(
             format!(
                 "- Peak dB: {}",
                 peak_db
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ),
+            format!(
+                "- Integrated loudness: {} LUFS",
+                loudness
+                    .integrated_lufs
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ),
+            format!(
+                "- True peak: {} dBTP",
+                loudness
+                    .true_peak_dbtp
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ),
+            format!(
+                "- Loudness range: {} LU",
+                loudness
+                    .loudness_range_lu
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "unknown".to_string())
             ),
@@ -4935,9 +4999,10 @@ mod tests {
         annotation_typed_results, build_markdown, build_report_chapters, build_report_highlights,
         build_report_moments, build_report_visual_items, build_segment_distribution,
         build_transcript_excerpt, format_duration_label, normalize_search_sections,
-        search_source_analysis_report_value, top_counts, CachedContactSheet, CachedContentSegment,
-        CachedFaceDetection, CachedFrameAnalysis, CachedObjectDetection, CachedShotResult,
-        CachedSpeechRegion, CachedTextDetection, CachedTranscriptSegment,
+        search_source_analysis_report_value, top_counts, CachedAudioProfile, CachedContactSheet,
+        CachedContentSegment, CachedFaceDetection, CachedFrameAnalysis, CachedObjectDetection,
+        CachedShotResult, CachedSpeechRegion, CachedTextDetection, CachedTranscriptSegment,
+        LoudnessReportFields,
     };
     use serde_json::{json, Value};
 
@@ -5216,6 +5281,172 @@ mod tests {
         assert_eq!(visual_items[0]["endSec"], 4.0);
     }
 
+    /// Renders the Markdown report for an audio-only scenario.
+    ///
+    /// Every argument the audio summary does not read is filled with its empty
+    /// value, so the assertions below are about the audio section alone.
+    fn audio_markdown(
+        coverage: &Value,
+        peak_db: Option<f64>,
+        loudness: LoudnessReportFields,
+    ) -> String {
+        let empty_languages: Vec<String> = Vec::new();
+        let empty_distribution: Vec<(String, usize, f64, f64)> = Vec::new();
+        let empty_counts: Vec<(String, usize)> = Vec::new();
+        let empty_values: Vec<Value> = Vec::new();
+        let empty_strings: Vec<String> = Vec::new();
+
+        build_markdown(
+            "talk.mp4",
+            "asset-1",
+            "cached",
+            "2026-03-07T00:00:00Z",
+            coverage,
+            "video",
+            "summary",
+            &json!({}),
+            "4s",
+            Some(1920),
+            Some(1080),
+            Some(30.0),
+            Some("h264"),
+            true,
+            0,
+            None,
+            None,
+            None,
+            0,
+            0,
+            0,
+            0,
+            &empty_languages,
+            None,
+            Some(96.0),
+            peak_db,
+            loudness,
+            Some(2500.0),
+            0,
+            0.0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+            None,
+            &empty_distribution,
+            0,
+            None,
+            &empty_counts,
+            &empty_counts,
+            &empty_values,
+            None,
+            &empty_values,
+            &empty_values,
+            &empty_values,
+            &empty_values,
+            &empty_strings,
+            &empty_strings,
+            0,
+            0,
+            0,
+            &empty_counts,
+            &empty_strings,
+            &empty_strings,
+        )
+    }
+
+    /// Feature: source analysis report
+    /// Scenario: the bundle carries a current loudness measurement
+    ///   Given integrated loudness, true peak and loudness range
+    ///   When the Markdown report is built
+    ///   Then the audio summary reports all three
+    ///
+    /// The CLI report and the in-app one describe the same bundle, so an agent
+    /// must not have to know which surface produced a report to know whether a
+    /// mix is legal for delivery.
+    #[test]
+    fn build_markdown_should_report_the_program_loudness_numbers() {
+        let coverage = json!({
+            "shots": false,
+            "transcript": false,
+            "audio": true,
+            "loudness": true,
+            "segments": false,
+            "visual": false,
+            "annotation": false,
+        });
+
+        let markdown = audio_markdown(
+            &coverage,
+            Some(-1.9),
+            LoudnessReportFields {
+                integrated_lufs: Some(-16.4),
+                true_peak_dbtp: Some(-1.9),
+                loudness_range_lu: Some(5.2),
+            },
+        );
+
+        assert!(markdown.contains("- Loudness measurement: available"));
+        assert!(markdown.contains("- Peak dB: -1.9"));
+        assert!(markdown.contains("- Integrated loudness: -16.4 LUFS"));
+        assert!(markdown.contains("- True peak: -1.9 dBTP"));
+        assert!(markdown.contains("- Loudness range: 5.2 LU"));
+    }
+
+    /// Feature: source analysis report
+    /// Scenario: the cached profile predates the current loudness pass
+    ///   Given a report whose loudness coverage is missing
+    ///   When the Markdown report is built
+    ///   Then the coverage section says so and points at `analysis audio`
+    #[test]
+    fn build_markdown_should_flag_a_missing_loudness_measurement() {
+        let coverage = json!({
+            "shots": false,
+            "transcript": false,
+            "audio": true,
+            "loudness": false,
+            "segments": false,
+            "visual": false,
+            "annotation": false,
+        });
+
+        let markdown = audio_markdown(&coverage, None, LoudnessReportFields::default());
+
+        assert!(markdown.contains("- Audio profile: available"));
+        assert!(markdown.contains("- Loudness measurement: missing (run `analysis audio`)"));
+        assert!(markdown.contains("- Integrated loudness: unknown LUFS"));
+    }
+
+    /// Feature: cached bundle staleness
+    /// Scenario: a profile carries regions but no loudness curve
+    ///   Given a profile at the current version with an empty curve
+    ///   When its loudness is checked
+    ///   Then it counts as unmeasured, because that is the shape the
+    ///   superseded pass produced
+    #[test]
+    fn cached_audio_profile_should_treat_an_empty_curve_as_unmeasured() {
+        let mut profile = CachedAudioProfile {
+            measurement_version: openreelio_core::analysis::AUDIO_MEASUREMENT_VERSION,
+            bpm: None,
+            spectral_centroid_hz: 0.0,
+            loudness_profile: Vec::new(),
+            peak_db: -90.0,
+            integrated_lufs: None,
+            loudness_range_lu: None,
+            true_peak_dbtp: None,
+            silence_regions: Vec::new(),
+            speech_regions: Vec::new(),
+        };
+
+        assert!(!profile.has_current_loudness());
+
+        profile.loudness_profile = vec![-18.0];
+        assert!(profile.has_current_loudness());
+
+        profile.measurement_version = 0;
+        assert!(!profile.has_current_loudness());
+    }
+
     #[test]
     fn build_markdown_should_include_visual_breakdown() {
         let coverage = json!({
@@ -5299,6 +5530,7 @@ mod tests {
             None,
             None,
             None,
+            LoudnessReportFields::default(),
             None,
             0,
             0.0,
@@ -5423,6 +5655,7 @@ mod tests {
             None,
             None,
             None,
+            LoudnessReportFields::default(),
             None,
             0,
             0.0,

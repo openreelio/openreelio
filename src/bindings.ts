@@ -2112,8 +2112,18 @@ async analyzeVideoFull(assetId: string, options: AnalysisOptions) : Promise<Resu
 /**
  * Retrieves a cached analysis bundle for an asset.
  * 
- * Returns the previously computed bundle from disk without re-running analysis.
- * Returns `Ok(None)` when no cached bundle exists yet.
+ * Returns the previously computed bundle from disk. Returns `Ok(None)` when no
+ * cached bundle exists yet.
+ * 
+ * The one thing this does compute is a missing loudness measurement. A bundle
+ * cached by the superseded audio pass comes back with its loudness fields
+ * cleared, and nothing else in the system would ever fill them in: the caller
+ * sees a bundle, so it does not ask for analysis, and the numbers it reads are
+ * simply absent. Rather than serve that, an audio-only pass is queued and
+ * awaited — see [`AnalysisOptions::audio_only`] for why the rest of the bundle
+ * is left alone. If the pass cannot be set up or fails, the cached bundle is
+ * returned as it is: a stale-loudness bundle is still better than no bundle,
+ * and `analysis report` marks the gap.
  */
 async getAnalysisBundle(assetId: string) : Promise<Result<AnalysisBundle | null, string>> {
     try {
@@ -4087,17 +4097,23 @@ spectralCentroidHz: number;
 /**
  * Per-second momentary loudness values in LUFS.
  * 
- * Sampled at 1 Hz (one value per second), so `loudness_profile[i]`
- * represents the average momentary loudness during the i-th second of
- * audio. Windows the meter reports as digital silence are dropped rather
- * than averaged in, so the profile can be shorter than the audio.
+ * Sampled at 1 Hz (one value per second), so `loudness_profile[i]` is the
+ * average momentary loudness during the i-th second of audio and the
+ * profile has one entry per second of measured audio. Consumers address it
+ * by time, so a second the meter reports as digital silence keeps its slot
+ * and reads [`SILENCE_FLOOR_DB`] rather than being omitted.
  */
 loudnessProfile: number[]; 
 /**
  * Peak level in dB relative to full scale.
  * 
- * True peak when the FFmpeg build measures it, otherwise the sample peak.
- * Falls back to [`SILENCE_FLOOR_DB`] only when nothing could be measured.
+ * **This is true peak (dBTP) whenever the FFmpeg build measures one**, and
+ * the `astats` sample peak (dBFS) otherwise; the two differ by the
+ * inter-sample overshoot, so a true-peak reading can sit a few tenths of a
+ * dB above the sample peak of the same file. Before the shared loudness
+ * measurement this field was the maximum momentary loudness in LUFS, which
+ * is a different quantity entirely. Read [`Self::true_peak_dbtp`] when the
+ * distinction matters. [`SILENCE_FLOOR_DB`] means nothing was measured.
  */
 peakDb: number; 
 /**

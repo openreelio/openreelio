@@ -558,13 +558,15 @@ impl AnalysisJobRunner {
         let mut bundle: AnalysisBundle = serde_json::from_str(&content)?;
 
         // Every read of the cache goes through here, including the one inside
-        // `locked_bundle_update`, so dropping the stale slot here is enough to
-        // keep a superseded measurement from being served or re-persisted.
-        if bundle.drop_outdated_audio_profile() {
+        // `locked_bundle_update`, so clearing the stale numbers here is enough
+        // to keep a superseded measurement from being served or re-persisted.
+        // The rest of the profile — silence and speech regions — was produced
+        // by passes the loudness fix never touched and stays.
+        if bundle.reset_outdated_audio_loudness() {
             tracing::info!(
                 asset_id = %asset_id,
-                "Discarded an audio profile from an older loudness measurement; \
-                 rerun `analysis audio` to recompute it"
+                "Cleared the loudness numbers of an audio profile from an older \
+                 measurement; rerun `analysis audio` to recompute them"
             );
         }
 
