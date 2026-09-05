@@ -145,7 +145,7 @@ tempfile = "3"
 # probe's artifact helpers are part of the Tauri-free core the CLI links, which
 # is built without `ai-providers`. Keeping this optional would leave the core's
 # only encoder behind a feature the core never turns on.
-base64 = "0.22"
+base64 = "0.23"
 
 # FFmpeg bundler and AI providers (optional)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json", "multipart"], optional = true }
