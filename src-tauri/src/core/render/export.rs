@@ -5842,8 +5842,7 @@ fn append_ass_text_style_and_event(
         "outline_color",
         "#000000",
         decoration_alpha("outline_opacity", 1.0),
-    )
-    .unwrap_or_else(AssColor::transparent_black);
+    );
     let outline_width = if effect.get_param("outline_color").is_some() {
         effect_int_param(effect, "outline_width", 2).clamp(0, 100) as f64
     } else {
@@ -5884,9 +5883,17 @@ fn append_ass_text_style_and_event(
     } else {
         outline_width
     };
-    let back_color = background_color
-        .or(shadow_color)
+    // `BorderStyle: 3` draws its opaque box in the *OutlineColour* column and
+    // uses BackColour only for the drop-shadow box behind it. Writing the box
+    // colour to BackColour therefore painted it nowhere unless the style also
+    // carried a shadow offset, and left the box column fully transparent: a
+    // boxed caption burned in as bare white text over the footage. The box
+    // replaces the outline in this border style, so nothing is lost by giving
+    // it the column, and the shadow keeps its own.
+    let border_color = background_color
+        .or(outline_color)
         .unwrap_or_else(AssColor::transparent_black);
+    let back_color = shadow_color.unwrap_or_else(AssColor::transparent_black);
     let alignment = anchor.alignment();
     let (margin_l, margin_r, margin_v) = anchor.margin_columns();
 
@@ -5894,7 +5901,7 @@ fn append_ass_text_style_and_event(
         "Style: {style_name},{font_family},{font_size:.2},{},{},{},{},{},{},{},0,{scale_x_percent:.2},{scale_y_percent:.2},{letter_spacing},0,{border_style},{style_outline_width:.2},{shadow_size:.2},{alignment},{margin_l},{margin_r},{margin_v},1\n",
         primary.ass_value(),
         primary.ass_value(),
-        outline_color.ass_value(),
+        border_color.ass_value(),
         back_color.ass_value(),
         if bold { -1 } else { 0 },
         if italic { -1 } else { 0 },
@@ -8755,6 +8762,156 @@ mod tests {
             script.contains(r"\bord24.00"),
             "Expected dialogue override to preserve background padding. Got: {script}"
         );
+    }
+
+    /// Builds the ASS script for one caption carrying `style` at the default anchor.
+    fn caption_ass_script_for_style(style: serde_json::Value) -> String {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some("Boxed".to_string());
+        clip.caption_style = Some(style);
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists")
+    }
+
+    /// Column indices of the `[V4+ Styles]` `Format:` line this exporter writes.
+    mod ass_style_column {
+        /// `OutlineColour`, which `BorderStyle: 3` draws its opaque box in.
+        pub const BORDER_COLOUR: usize = 5;
+        /// `BackColour`, which carries the drop shadow.
+        pub const BACK_COLOUR: usize = 6;
+        /// `BorderStyle`: 1 for outline plus shadow, 3 for an opaque box.
+        pub const BORDER_STYLE: usize = 15;
+    }
+
+    /// Splits the script's single `Style:` line into its columns.
+    fn ass_style_columns(script: &str) -> Vec<String> {
+        script
+            .lines()
+            .find(|line| line.starts_with("Style: "))
+            .expect("the script carries a style line")
+            .split(',')
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Reads the `OutlineColour` and `BackColour` columns out of a `Style:` line.
+    fn ass_border_and_back_colour(script: &str) -> (String, String) {
+        let columns = ass_style_columns(script);
+        (
+            columns[ass_style_column::BORDER_COLOUR].clone(),
+            columns[ass_style_column::BACK_COLOUR].clone(),
+        )
+    }
+
+    /// Reads the visible alpha of an `&HAABBGGRR` colour, where `0xFF` is invisible.
+    fn ass_colour_visible_alpha(raw: &str) -> u8 {
+        let hex = raw.trim().trim_start_matches("&H");
+        assert_eq!(hex.len(), 8, "an ASS colour is eight hex digits: {raw}");
+        255 - u8::from_str_radix(&hex[0..2], 16).expect("the alpha byte parses")
+    }
+
+    #[test]
+    fn a_boxed_caption_writes_its_box_colour_to_the_ass_border_column() {
+        // libass draws a `BorderStyle: 3` box in the OutlineColour column and
+        // reserves BackColour for the drop-shadow box behind it. Writing the
+        // box colour to BackColour left the box column fully transparent, so a
+        // boxed caption burned in as bare text over the footage.
+        let script = caption_ass_script_for_style(serde_json::json!({
+            "color": { "r": 255, "g": 255, "b": 255, "a": 255 },
+            "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 180 },
+            "shadowColor": { "r": 0, "g": 0, "b": 0, "a": 120 },
+            "shadowOffset": 2.0,
+        }));
+
+        let (border, back) = ass_border_and_back_colour(&script);
+        // Alpha is inverted in ASS: 180/255 visible becomes 0x4B opaque-from-255.
+        assert_eq!(
+            border, "&H4B000000",
+            "the box colour must reach the border column. Got: {script}"
+        );
+        assert_eq!(
+            back, "&H87000000",
+            "the shadow colour must keep the back column. Got: {script}"
+        );
+        assert!(
+            script.contains(",3,10.00,2.00,"),
+            "a box must select BorderStyle 3 and keep its shadow. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn an_outlined_caption_still_writes_its_outline_to_the_ass_border_column() {
+        // The border column is shared: without a box it carries the outline,
+        // exactly as it did before boxes were routed through it.
+        let script = caption_ass_script_for_style(serde_json::json!({
+            "color": { "r": 255, "g": 255, "b": 255, "a": 255 },
+            "outlineColor": { "r": 0, "g": 0, "b": 0, "a": 255 },
+            "outlineWidth": 4.0,
+        }));
+
+        let (border, back) = ass_border_and_back_colour(&script);
+        assert_eq!(border, "&H00000000", "Got: {script}");
+        assert_eq!(
+            back, "&HFF000000",
+            "no shadow leaves the back column transparent. Got: {script}"
+        );
+        assert!(
+            script.contains(",1,4.00,0.00,"),
+            "an outline must stay on BorderStyle 1. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn every_curated_pack_with_a_background_burns_a_visible_box() {
+        use crate::core::style::caption_packs::CAPTION_PACKS;
+
+        // `boxed-contrast`, `broadcast-lower` and `high-contrast-accessible`
+        // are the packs whose whole point is the box. Walking the table rather
+        // than naming them keeps a future boxed pack from shipping unchecked.
+        let boxed: Vec<&str> = CAPTION_PACKS
+            .iter()
+            .filter(|pack| pack.style().background_color.is_some())
+            .map(|pack| pack.id)
+            .collect();
+        assert!(
+            boxed.contains(&"boxed-contrast")
+                && boxed.contains(&"broadcast-lower")
+                && boxed.contains(&"high-contrast-accessible"),
+            "the boxed packs must still be boxed, got {boxed:?}"
+        );
+
+        for pack in CAPTION_PACKS
+            .iter()
+            .filter(|pack| pack.style().background_color.is_some())
+        {
+            let style =
+                serde_json::to_value(pack.style()).expect("a pack style serializes to JSON");
+            let script = caption_ass_script_for_style(style);
+            let columns = ass_style_columns(&script);
+
+            assert_eq!(
+                columns[ass_style_column::BORDER_STYLE],
+                "3",
+                "pack '{}' must select BorderStyle 3. Got: {script}",
+                pack.id
+            );
+            let alpha = ass_colour_visible_alpha(&columns[ass_style_column::BORDER_COLOUR]);
+            assert!(
+                alpha >= 128,
+                "pack '{}' must draw a box the footage cannot swallow, got alpha {alpha}",
+                pack.id
+            );
+        }
     }
 
     #[test]
