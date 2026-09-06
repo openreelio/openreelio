@@ -585,6 +585,41 @@ pub(crate) const PAYLOAD_EITHER_OR_REQUIREMENTS: &[EitherOrRequirement] = &[
     },
 ];
 
+/// A property whose shape holds whichever either/or branch a payload takes.
+///
+/// A branch of an `anyOf` says nothing at all about a payload that satisfies a
+/// different branch, so with a `preset` every shape constraint `AddTextClip`'s
+/// `textData` branch states disappears: `{"preset": "quote", "textData":
+/// {"style": "nope"}}` was schema-valid and parser-refused. What the merge step
+/// demands of a `textData` it is handed is true in every branch — an object,
+/// whose `content` is a string and whose `style` and `position` are objects —
+/// so it is stated on the root property rather than inside one branch.
+///
+/// Only the facts that hold everywhere belong here: the property stays open
+/// otherwise, because a preset supplies whatever the override leaves out.
+pub(crate) struct PropertyShape {
+    /// Rust type that declares the property.
+    pub owner: &'static str,
+    /// The property, in the spelling the parser reads.
+    pub property: &'static str,
+    /// The JSON types the value may have.
+    pub types: &'static [&'static str],
+    /// The JSON type each named member of the value must have, when present.
+    pub members: &'static [(&'static str, &'static str)],
+}
+
+/// Every branch-independent property shape, by the type that declares it.
+pub(crate) const PAYLOAD_PROPERTY_SHAPES: &[PropertyShape] = &[PropertyShape {
+    owner: "AddTextClipPayload",
+    property: "textData",
+    types: &["object", "null"],
+    members: &[
+        ("content", "string"),
+        ("style", "object"),
+        ("position", "object"),
+    ],
+}];
+
 impl EitherOrRequirement {
     /// The `anyOf` group this requirement states.
     ///
@@ -784,6 +819,24 @@ fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name
                 canonical_constraints: constraints,
             }),
         }
+    }
+
+    // Stated on the property itself, because an `anyOf` branch constrains only
+    // the payloads that take it.
+    for shape in PAYLOAD_PROPERTY_SHAPES
+        .iter()
+        .filter(|shape| shape.owner == type_name)
+    {
+        let Some(Value::Object(declared)) = properties.get_mut(shape.property) else {
+            continue;
+        };
+        declared.insert("type".to_string(), json!(shape.types));
+        let members: serde_json::Map<String, Value> = shape
+            .members
+            .iter()
+            .map(|(name, declared)| ((*name).to_string(), json!({ "type": declared })))
+            .collect();
+        declared.insert("properties".to_string(), Value::Object(members));
     }
 
     let either_or: Vec<Value> = PAYLOAD_EITHER_OR_REQUIREMENTS
@@ -1224,18 +1277,21 @@ fn check_requirement_group(
 /// requires, and the `allOf`/`anyOf` nesting the exclusivity constraints are
 /// built from.
 ///
-/// A property whose value is an explicit `null` does not satisfy `required`
-/// here. That is stricter than JSON Schema reads the keyword alone, and it is
-/// what every group the derived schemas state means: each pairs its `required`
-/// with a `not: {"type": "null"}` on the same property, because the parser
-/// reads a null as the absent field it is.
+/// `required` is presence and nothing else, exactly as Draft-07 reads it: a
+/// property written as an explicit `null` was sent. Reading a null as absent
+/// here looked stricter and was the opposite — an exclusivity group says "not
+/// both" through `required` alone, so `TrimClip`'s
+/// `{"newSourceIn": null, "newStart": 5.0}` passed a guard the parser refuses
+/// as a duplicate field. The null refusal an either/or branch needs comes from
+/// the `not: {"type": "null"}` it states beside its `required`, which
+/// [`satisfies_constraints`] applies.
 #[cfg(test)]
 fn satisfies_branch(payload: &serde_json::Map<String, Value>, branch: &Value) -> bool {
     if let Some(names) = branch.get("required").and_then(Value::as_array) {
         if !names
             .iter()
             .filter_map(Value::as_str)
-            .all(|name| payload.get(name).is_some_and(|value| !value.is_null()))
+            .all(|name| payload.contains_key(name))
         {
             return false;
         }
@@ -1350,6 +1406,11 @@ fn resolve_local_ref<'a>(
 }
 
 /// Checks one value against a property schema's `type`, when it states one.
+///
+/// The shape stated on the property itself is checked before a `$ref` is
+/// followed: `AddTextClip`'s `textData` states the facts that hold whichever
+/// either/or branch a payload takes, and resolving the reference first would
+/// walk straight past them.
 #[cfg(test)]
 fn check_declared_type(
     root: &Value,
@@ -1360,6 +1421,8 @@ fn check_declared_type(
     let Some(property) = property.as_object() else {
         return Ok(());
     };
+
+    check_declared_shape(property, value)?;
 
     if depth > 0 {
         if let Some(definition) = resolve_local_ref(root, property) {
@@ -1377,19 +1440,54 @@ fn check_declared_type(
         }
     }
 
-    // `Option<T>` is emitted as `["T", "null"]`, and an untagged enum as an
-    // `anyOf` with no type of its own. Both are satisfied by anything the
-    // shallow check could say, so they are passed over.
-    let declared = match property.get("type") {
-        Some(Value::String(declared)) => declared.as_str(),
-        _ => return Ok(()),
+    Ok(())
+}
+
+/// Checks a value against the `type` and the one-level `properties` map a
+/// schema states directly.
+///
+/// `type` is either a single name or the list `schemars` emits for an
+/// `Option<T>` — `["number", "null"]` — and a value has to match one of the
+/// names on the list. A keyword this shallow guard does not model, such as the
+/// `anyOf` an untagged enum becomes, answers `Ok`.
+#[cfg(test)]
+fn check_declared_shape(
+    property: &serde_json::Map<String, Value>,
+    value: &Value,
+) -> Result<(), String> {
+    match property.get("type") {
+        Some(Value::String(declared)) => {
+            if !value_is(declared, value) {
+                return Err(format!("expected {declared}, got {value}"));
+            }
+        }
+        Some(Value::Array(declared)) => {
+            let names: Vec<&str> = declared.iter().filter_map(Value::as_str).collect();
+            if !names.is_empty() && !names.iter().any(|name| value_is(name, value)) {
+                return Err(format!(
+                    "expected one of {}, got {value}",
+                    names.join(" or ")
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    let (Some(members), Some(object)) = (
+        property.get("properties").and_then(Value::as_object),
+        value.as_object(),
+    ) else {
+        return Ok(());
     };
 
-    if value_is(declared, value) {
-        Ok(())
-    } else {
-        Err(format!("expected {declared}, got {value}"))
+    for (name, member) in members {
+        let (Some(member), Some(present)) = (member.as_object(), object.get(name)) else {
+            continue;
+        };
+        check_declared_shape(member, present).map_err(|error| format!("'{name}': {error}"))?;
     }
+
+    Ok(())
 }
 
 /// Reads one property's schema out of a derived command schema.

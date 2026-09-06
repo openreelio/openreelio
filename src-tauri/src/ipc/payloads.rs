@@ -961,7 +961,10 @@ pub struct AddEffectPayload {
     ///
     /// The two together are fine only when they agree; a recipe beside a
     /// different `effectType` is refused, because the pair expresses
-    /// contradictory intent rather than an override.
+    /// contradictory intent rather than an override. That agreement is checked
+    /// while the payload is parsed and is not expressible in the JSON Schema,
+    /// which can only say that one of the two has to be there — so a
+    /// schema-valid pair can still be a parse error.
     #[serde(default)]
     pub effect_type: Option<EffectType>,
     /// Curated transition recipe id, resolved into `effectType` + `params`.
@@ -4018,7 +4021,7 @@ mod tests {
     use crate::ipc::command_schema::{
         all_command_payload_schemas, canonical_command_type, check_against_schema,
         command_payload_schemas, property, required, PAYLOAD_EITHER_OR_REQUIREMENTS,
-        PAYLOAD_FIELD_ALIASES, PAYLOAD_VARIANT_ALIASES,
+        PAYLOAD_FIELD_ALIASES, PAYLOAD_PROPERTY_SHAPES, PAYLOAD_VARIANT_ALIASES,
     };
     use serde_json::Value;
 
@@ -4955,6 +4958,33 @@ pub struct SamplePayload {
              lookup has to resolve, and nothing else belongs in PAYLOAD_VARIANT_ALIASES"
         );
 
+        // `rename_all = "camelCase"` gives every variant a spelling of its own,
+        // so one scanned pair naming it is the proof the scan saw it. Counting
+        // them against the command surface catches a variant written in a shape
+        // this scan cannot read — a unit variant, say — whatever that shape
+        // turns out to be, where a guess about the shape would catch one.
+        let mut seen: Vec<&str> = scanned
+            .iter()
+            .map(|(_, canonical)| canonical.as_str())
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        let missing: Vec<&&str> = CommandPayload::SUPPORTED_COMMAND_TYPES
+            .iter()
+            .filter(|command_type| !seen.contains(*command_type))
+            .collect();
+        let extra: Vec<&&str> = seen
+            .iter()
+            .filter(|variant| !CommandPayload::SUPPORTED_COMMAND_TYPES.contains(variant))
+            .collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "the scan read {} of the {} advertised commands — a variant it cannot read drops out \
+             of every check this table drives. Missing: {missing:?}; not a command type: {extra:?}",
+            seen.len(),
+            CommandPayload::SUPPORTED_COMMAND_TYPES.len()
+        );
+
         for (spelling, canonical) in PAYLOAD_VARIANT_ALIASES {
             assert_eq!(
                 canonical_command_type(spelling),
@@ -5014,19 +5044,11 @@ pub struct SamplePayload {
                 .strip_suffix("),")
                 .and_then(|rest| rest.split('(').next())
             else {
-                // A unit variant carries no payload, so this scan would walk
-                // straight past it and the table would silently stop covering
-                // a command. Say so rather than drift.
-                if let Some(unit) = trimmed
-                    .strip_suffix(',')
-                    .filter(|name| is_variant_name(name))
-                {
-                    panic!(
-                        "`{unit}` is a CommandPayload variant carrying no payload; this scan reads \
-                         only variants written as `Variant(Payload),`, so teach it that shape \
-                         before adding one"
-                    );
-                }
+                // A variant this scan cannot read — one carrying no payload,
+                // one wrapped by rustfmt — is walked past here and caught by
+                // the count the caller checks against the command surface,
+                // which sees every shape rather than the one shape a guess
+                // about the shape would name.
                 continue;
             };
             if !is_variant_name(variant) {
@@ -5101,11 +5123,18 @@ pub enum CommandPayload {
     }
 
     /// Feature: derived command payload schemas
-    /// Scenario: a variant this scan cannot read is named rather than skipped
+    /// Scenario: a variant this scan cannot read is missing from what it reads
+    ///
+    /// The count in [`the_variant_alias_table_should_match_the_command_enum`]
+    /// is what turns that into a failure against the real enum; here it is only
+    /// worth stating that the scan is silent about a shape it cannot read, so
+    /// nothing downstream may treat its output as the whole enum.
     #[test]
-    #[should_panic(expected = "carrying no payload")]
-    fn the_variant_scanner_should_refuse_a_unit_variant_rather_than_walk_past_it() {
-        scan_variant_aliases("pub enum CommandPayload {\n    Undo,\n}\n");
+    fn the_variant_scanner_should_read_no_spelling_of_a_variant_carrying_no_payload() {
+        assert_eq!(
+            scan_variant_aliases("pub enum CommandPayload {\n    Undo,\n}\n"),
+            Vec::<(String, String)>::new()
+        );
     }
 
     /// Feature: derived command payload schemas
@@ -5237,6 +5266,43 @@ pub enum CommandPayload {
         }
     }
 
+    /// Feature: derived command payload schemas
+    /// Scenario: a spelling written as null still counts as the field being sent
+    ///
+    /// The bug this replaces: the guard read `required` as "present and not
+    /// null" everywhere, which is what an either/or branch wants and the
+    /// opposite of what an exclusivity group wants — a group says "not both"
+    /// through `required` alone, so `{"newSourceIn": null, "newStart": 5.0}`
+    /// walked past the one check that exists to match serde's `duplicate
+    /// field`. A null on its own is a field the parser reads as absent and both
+    /// have to keep accepting.
+    #[test]
+    fn a_spelling_written_as_null_should_still_count_as_the_field_being_sent() {
+        let schema = command_payload_schema("TrimClip").expect("TrimClip has a schema");
+        let base = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_v1",
+            "clipId": "clip_1"
+        });
+
+        let mut pair = base.clone();
+        pair["newSourceIn"] = Value::Null;
+        pair["newStart"] = serde_json::json!(5.0);
+        check_against_schema(&schema, &pair).expect_err(
+            "a null is a spelling that was sent, so the schema must refuse the pair its parser \
+             refuses as a duplicate field",
+        );
+        CommandPayload::parse("TrimClip".to_string(), pair)
+            .expect_err("serde reads the second spelling as a duplicate field whatever its value");
+
+        let mut alone = base;
+        alone["newSourceIn"] = Value::Null;
+        check_against_schema(&schema, &alone)
+            .expect("one spelling written as null is the absent optional field it is");
+        CommandPayload::parse("TrimClip".to_string(), alone)
+            .expect("the parser reads a null optional as the absent field it is");
+    }
+
     /// Whether a schema states that a field's spellings exclude each other.
     ///
     /// Either as the `oneOf` a required field's group is, or as the `not` over
@@ -5360,6 +5426,69 @@ pub enum CommandPayload {
     /// `required` that can only apply to an object.
     #[test]
     fn an_either_or_branch_should_refuse_a_null_or_a_non_object_in_both_places() {
+        // The payload cases below run through `check_against_schema`, which is
+        // a guard rather than a validator and reads a null as an absent field
+        // in more than one place. Assert on the artifact a real Draft-07
+        // validator reads, so the refusals cannot quietly stop being stated.
+        for requirement in PAYLOAD_EITHER_OR_REQUIREMENTS {
+            let (command_type, struct_name, schema) = schema_declaring(requirement.owner);
+            let declaring = if struct_name == requirement.owner {
+                schema.clone()
+            } else {
+                schema["definitions"][requirement.owner].clone()
+            };
+            let wanted: Vec<&str> = requirement
+                .branches
+                .iter()
+                .map(|branch| branch.property)
+                .collect();
+            let group = declaring["allOf"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|group| branch_properties(group) == wanted)
+                .unwrap_or_else(|| {
+                    panic!("{command_type}'s schema states an anyOf over {wanted:?}")
+                })
+                .clone();
+
+            for (index, branch) in requirement.branches.iter().enumerate() {
+                let property = branch.property;
+                let stated = &group["anyOf"][index]["properties"][property];
+
+                assert_eq!(
+                    stated["not"],
+                    serde_json::json!({ "type": "null" }),
+                    "{command_type}'s '{property}' branch must exclude the explicit null the \
+                     parser reads as the absent field it is: {stated}"
+                );
+
+                if branch.value_requires.is_empty() && branch.nested_requires.is_empty() {
+                    continue;
+                }
+
+                assert_eq!(
+                    stated["type"],
+                    serde_json::json!("object"),
+                    "{command_type}'s '{property}' branch descends into the value, so it must say \
+                     the value is an object — `required` alone says nothing about a string: \
+                     {stated}"
+                );
+                if !branch.value_requires.is_empty() {
+                    assert_eq!(stated["required"], serde_json::json!(branch.value_requires));
+                }
+                for (name, names) in branch.nested_requires {
+                    let nested = &stated["properties"][name];
+                    assert_eq!(
+                        nested["type"],
+                        serde_json::json!("object"),
+                        "{command_type}'s '{property}.{name}' must say it is an object: {nested}"
+                    );
+                    assert_eq!(nested["required"], serde_json::json!(names));
+                }
+            }
+        }
+
         let effect = serde_json::json!({
             "sequenceId": "seq_1",
             "trackId": "track_v1",
@@ -5407,6 +5536,90 @@ pub enum CommandPayload {
                 "{command_type} must refuse this payload for the guard to mean anything: {payload}"
             ));
         }
+    }
+
+    /// The property each branch of an `anyOf` group takes, in order.
+    fn branch_properties(group: &Value) -> Vec<&str> {
+        group["anyOf"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|branch| branch["required"][0].as_str())
+            .collect()
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a branch-independent shape reaches the property it describes
+    ///
+    /// A shape naming a property the payload no longer has would be dropped in
+    /// silence, and the property would go back to being unconstrained wherever
+    /// no branch of an either/or group happens to reach it.
+    #[test]
+    fn every_property_shape_should_reach_the_property_it_describes() {
+        for shape in PAYLOAD_PROPERTY_SHAPES {
+            let (command_type, struct_name, schema) = schema_declaring(shape.owner);
+            let declaring = if struct_name == shape.owner {
+                schema.clone()
+            } else {
+                schema["definitions"][shape.owner].clone()
+            };
+            let declared = &declaring["properties"][shape.property];
+            let property = shape.property;
+
+            assert_eq!(
+                declared["type"],
+                serde_json::json!(shape.types),
+                "{command_type}.{property} must state the types that hold in every branch: \
+                 {declared}"
+            );
+            for (name, declared_type) in shape.members {
+                assert_eq!(
+                    declared["properties"][name]["type"],
+                    serde_json::json!(declared_type),
+                    "{command_type}.{property}.{name} must state the type that holds in every \
+                     branch: {declared}"
+                );
+            }
+        }
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a preset does not switch off the shape of a textData override
+    ///
+    /// The bug this covers: `textData`'s shape was stated only inside the
+    /// branch that requires it, and a branch of an `anyOf` constrains only the
+    /// payloads that take it. With a `preset` every shape constraint therefore
+    /// disappeared, so `{"style": "nope"}` was schema-valid while the parser
+    /// refused to merge it onto the preset.
+    #[test]
+    fn a_preset_should_not_switch_off_the_shape_of_a_text_data_override() {
+        let schema = command_payload_schema("AddTextClip").expect("AddTextClip has a schema");
+        let base = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_v1",
+            "timelineIn": 5.0,
+            "duration": 3.0,
+            "preset": "quote"
+        });
+        let overriding = |style: Value| {
+            let mut payload = base.clone();
+            payload["textData"] = serde_json::json!({ "style": style });
+            payload
+        };
+
+        let refused = overriding(Value::String("nope".to_string()));
+        check_against_schema(&schema, &refused).expect_err(
+            "a style that is not an object is refused by the parser whether or not a preset \
+             supplies the rest, so the schema has to refuse it too",
+        );
+        CommandPayload::parse("AddTextClip".to_string(), refused)
+            .expect_err("the parser refuses a style that is not an object");
+
+        let accepted = overriding(serde_json::json!({ "fontSize": 40 }));
+        check_against_schema(&schema, &accepted)
+            .expect("a partial override of the preset's style stays valid");
+        CommandPayload::parse("AddTextClip".to_string(), accepted)
+            .expect("the parser merges a partial style override onto the preset");
     }
 
     /// Feature: derived command payload schemas
@@ -5765,8 +5978,19 @@ pub enum CommandPayload {
                 declared.is_object(),
                 "{command_type}.{property} must still be a property of the schema"
             );
+            // Naming a member is not describing it: `textData` says its `style`
+            // is an object, which is what a caller must not send and still not
+            // what a valid one looks like, so no sampler can build one from it.
+            // The sample has to go the moment a member is described well enough
+            // to generate — a `$ref`, or properties of its own.
+            let buildable = declared["$ref"].is_string()
+                || declared["properties"].as_object().is_some_and(|members| {
+                    members.values().any(|member| {
+                        member["$ref"].is_string() || member["properties"].is_object()
+                    })
+                });
             assert!(
-                !declared["properties"].is_object() && !declared["$ref"].is_string(),
+                !buildable,
                 "{command_type}.{property} declares a shape now, so the sampler can build it and \
                  the hand-written sample has to go: {declared}"
             );

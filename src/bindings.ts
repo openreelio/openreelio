@@ -3212,7 +3212,10 @@ export type AddEffectPayload = { sequenceId: string; trackId: string; clipId: st
  * 
  * The two together are fine only when they agree; a recipe beside a
  * different `effectType` is refused, because the pair expresses
- * contradictory intent rather than an override.
+ * contradictory intent rather than an override. That agreement is checked
+ * while the payload is parsed and is not expressible in the JSON Schema,
+ * which can only say that one of the two has to be there — so a
+ * schema-valid pair can still be a parse error.
  */
 effectType?: EffectType | null; 
 /**

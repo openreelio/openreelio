@@ -124,7 +124,10 @@ Requirements a `required` list cannot state appear as `allOf` groups:
   its preset key by key, while a recipe beside a different `effectType` is
   refused. Each branch also excludes an explicit `null`, which is the absent
   field written out. Without a preset the `textData` branch spells out the
-  complete object the parser then needs.
+  complete object the parser then needs. Whether the two actually agree is
+  checked by the parser and is not expressible in the schema, which can only
+  say that one of them has to be there — a schema-valid `recipe` beside an
+  `effectType` it does not apply is still a parse error.
 - `RippleDelete` is the one `anyOf` over spellings, because its parser really
   does read `clipIds` and `clipId` as two properties: a non-empty `clipIds`
   wins, and an empty one falls back to `clipId`.
