@@ -9,10 +9,12 @@
 //! This module closes that hole from the pixels. For each caption cue that the
 //! rendered file covers, it decodes one frame at the cue's midpoint, measures
 //! the luminance of the band the cue occupies, and compares it with the
-//! luminance of the text itself. A cue whose style already carries a background
-//! box or an outline is never decoded: the mitigation settles the question
-//! before a pixel is read, and skipping it keeps the pass cheap on the ordinary
-//! project where every caption is outlined.
+//! luminance of the text itself. A cue whose style already carries an outline,
+//! or a background box at [`MIN_PROTECTING_BOX_ALPHA`] or above, is never
+//! decoded: the mitigation settles the question before a pixel is read, and
+//! skipping it keeps the pass cheap on the ordinary project where every caption
+//! is outlined. A fainter box is measured like any other cue, with the box
+//! composited over the band it covers.
 //!
 //! # Two halves
 //!
@@ -37,13 +39,14 @@
 //!   only once the colour is there. A style carrying `outlineWidth` and no
 //!   colour therefore renders bare, and so does a style with no `caption_style`
 //!   at all.
-//! * **Box** — same shape for `backgroundColor`/`background_color`. A box whose
-//!   alpha is zero is painted at zero opacity and selects no box at all, so the
-//!   ASS path keeps `BorderStyle: 1` and the outline it would otherwise have
-//!   replaced. Where a box *is* painted it takes the stroke's place, so an
-//!   outline behind a box is not protection; and a box has to clear
-//!   [`MIN_PROTECTING_BOX_ALPHA`] before it counts as protection itself, since
-//!   a wash the footage reads straight through hides nothing.
+//! * **Box** — same shape for `backgroundColor`/`background_color`. A box the
+//!   renderer quantises away — both paths round the alpha before they draw, so
+//!   anything under half a step of it paints nothing — selects no box at all,
+//!   and the ASS path keeps `BorderStyle: 1` and the outline it would otherwise
+//!   have replaced. Where a box *is* painted it takes the stroke's place, so an
+//!   outline behind a box is not protection; and only a box at
+//!   [`MIN_PROTECTING_BOX_ALPHA`] or above lets the cue go unmeasured, since a
+//!   wash the footage reads through decides nothing on its own.
 //! * **Text colour** — the renderers fall back to `#FFFFFF`, not to
 //!   [`CaptionStyle::default`](crate::core::captions::CaptionStyle::default), when the blob names no readable colour.
 //!
@@ -75,6 +78,12 @@
 //! cue with nothing to separate it from one is reported whatever the mean says.
 //! Both numbers reach the report as `bandLuminance` and `bandLuminanceStddev`,
 //! so an agent can see which half of the rule fired.
+//!
+//! Both are graded *after* the cue's own background box is composited over the
+//! band — `alpha` of a flat colour over `1 - alpha` of the picture, which
+//! raises the mean toward the box and scales the spread down. A translucent box
+//! is therefore neither waved through nor ignored: it is worth exactly as much
+//! as it hides.
 //!
 //! # Coverage
 //!
@@ -187,16 +196,44 @@ pub struct CaptionBandSample {
     pub band_luminance_stddev: f64,
     /// Luminance of the cue's effective text colour, 0–1
     pub text_luminance: f64,
-    /// Whether the cue carries an opaque-enough background box
+    /// Whether the renderer paints a background box behind the cue at all
     pub has_box: bool,
-    /// Whether the cue carries an outline
+    /// Whether the renderer strokes the cue's glyphs
     pub has_outline: bool,
+    /// Alpha of that background box, 0–1; `0.0` where none is painted
+    ///
+    /// Defaulted on read so a report written before the box was measured still
+    /// deserializes, as a cue with no box - which is what it recorded.
+    #[serde(default)]
+    pub box_alpha: f64,
+    /// Luminance of that background box's colour, 0–1
+    #[serde(default)]
+    pub box_luminance: f64,
 }
 
 impl CaptionBandSample {
+    /// Luminance the words are actually read against, 0–1.
+    ///
+    /// A translucent box does not remove the picture, it dilutes it: the viewer
+    /// sees `alpha` of the box over `1 - alpha` of the shot. A box opaque
+    /// enough to settle the question on its own is never measured at all (see
+    /// [`MIN_PROTECTING_BOX_ALPHA`]), so this is what the faint ones do.
+    pub fn effective_band_luminance(&self) -> f64 {
+        let alpha = self.box_alpha.clamp(0.0, 1.0);
+        alpha * self.box_luminance + (1.0 - alpha) * self.band_luminance
+    }
+
+    /// Spread of the picture that survives the box, 0–1.
+    ///
+    /// The box is one flat colour, so it contributes no variation of its own
+    /// and scales down what the picture behind it contributes.
+    pub fn effective_band_stddev(&self) -> f64 {
+        (1.0 - self.box_alpha.clamp(0.0, 1.0)) * self.band_luminance_stddev
+    }
+
     /// Separation between the text and what sits behind it, 0–1.
     pub fn contrast(&self) -> f64 {
-        (self.text_luminance - self.band_luminance).abs()
+        (self.text_luminance - self.effective_band_luminance()).abs()
     }
 }
 
@@ -300,15 +337,17 @@ impl Default for CaptionSampleOptions {
 // Style reading
 // =============================================================================
 
-/// Faintest background box that counts as protection, on alpha 0–1.
+/// Faintest background box that lets a cue go unmeasured, on alpha 0–1.
 ///
-/// A box is only a mitigation if it actually hides the picture behind the
-/// words, and a five-percent wash does not: the footage reads straight through
-/// it while the check, seeing a box, declines to measure the cue at all. The
-/// floor is deliberately low - anything a viewer would call a box clears it -
-/// because its job is to catch the styles that carry a box in name only, not to
-/// grade the ones that carry a real, translucent one.
-const MIN_PROTECTING_BOX_ALPHA: f64 = 0.1;
+/// Skipping a cue is a claim that the picture behind the words cannot matter,
+/// and only a box that is very nearly opaque earns it: at 0.8 the footage
+/// contributes a fifth of what the text is read against, which no ordinary
+/// shot can turn into a contrast failure. Everything below is still a box and
+/// still helps, so it is measured with the box blended over the band rather
+/// than waved through - a half-opaque black wash under white text is the
+/// difference between legible and not, and the check can only know which by
+/// looking.
+const MIN_PROTECTING_BOX_ALPHA: f64 = 0.8;
 
 /// What a cue's style says about the words themselves.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -317,6 +356,8 @@ struct CaptionPaint {
     text_luminance: f64,
     /// Alpha of the background box the renderer would paint, `0.0` for none
     box_alpha: f64,
+    /// Luminance of that box's colour, 0–1; meaningless where none is painted
+    box_luminance: f64,
     /// Whether the style asks for a stroke around the glyphs
     strokes_glyphs: bool,
 }
@@ -326,13 +367,17 @@ impl CaptionPaint {
     ///
     /// The gate the ASS path keys `BorderStyle: 3` off, and the one `drawtext`
     /// keys `box=1` off, so it is what both renderers can be asserted against.
+    /// Both quantise the alpha before they draw - `AssColor` to an inverted
+    /// byte, `drawtext` to two decimals - so a box under half a step of alpha
+    /// is written out and paints nothing, and this mirrors that rounding rather
+    /// than asking whether the alpha is merely non-zero.
     fn paints_box(&self) -> bool {
-        self.box_alpha > 0.0
+        ((1.0 - self.box_alpha) * 255.0).round() < 255.0
     }
 
-    /// Whether a box that counts as protection is painted.
+    /// Whether a box opaque enough to settle the question on its own is painted.
     fn protects_with_box(&self) -> bool {
-        self.box_alpha >= MIN_PROTECTING_BOX_ALPHA
+        self.paints_box() && self.box_alpha >= MIN_PROTECTING_BOX_ALPHA
     }
 
     /// Whether the outline the style asks for actually reaches the picture.
@@ -465,6 +510,7 @@ fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
     let bare = CaptionPaint {
         text_luminance: DEFAULT_TEXT_LUMINANCE,
         box_alpha: 0.0,
+        box_luminance: 0.0,
         strokes_glyphs: false,
     };
 
@@ -483,12 +529,13 @@ fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
     // A box the renderer cannot paint is not a box: the ASS path leaves
     // `BorderStyle: 1` and the outline in place for a fully transparent
     // `backgroundColor`, and `drawtext` writes `box=1` with a colour that draws
-    // nothing. The alpha is carried rather than collapsed to a flag so
-    // `protects_with_box` can hold a box that paints something to a floor.
-    let box_alpha = style_field(style, &["backgroundColor", "background_color"])
-        .and_then(parse_paint_colour)
-        .map(|colour| colour.alpha)
-        .unwrap_or(0.0);
+    // nothing. Both the alpha and the colour are carried rather than collapsed
+    // to a flag, because a box below the protection floor is not waved through:
+    // it is composited over the measured band, which needs both.
+    let background =
+        style_field(style, &["backgroundColor", "background_color"]).and_then(parse_paint_colour);
+    let box_alpha = background.map(|colour| colour.alpha).unwrap_or(0.0);
+    let box_luminance = background.map(|colour| colour.luminance).unwrap_or(0.0);
 
     // The outline is keyed off the colour, exactly as both renderers key it:
     // no `outlineColor`, no stroke, whatever `outlineWidth` says. The width
@@ -508,6 +555,7 @@ fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
     CaptionPaint {
         text_luminance,
         box_alpha,
+        box_luminance,
         strokes_glyphs,
     }
 }
@@ -750,8 +798,14 @@ pub async fn sample_caption_bands(
                 band_luminance: mean,
                 band_luminance_stddev: stddev,
                 text_luminance: cue.paint.text_luminance,
-                has_box: cue.paint.protects_with_box(),
+                has_box: cue.paint.paints_box(),
                 has_outline: cue.paint.draws_outline(),
+                box_alpha: if cue.paint.paints_box() {
+                    cue.paint.box_alpha
+                } else {
+                    0.0
+                },
+                box_luminance: cue.paint.box_luminance,
             }),
             Err(error) => {
                 sampling.coverage.decode_failures += 1;
@@ -1010,19 +1064,27 @@ impl CaptionContrastRule {
     }
 
     /// Grades one sample, or `None` when the cue reads fine.
+    ///
+    /// An outline settles the question, because it separates the glyphs from
+    /// anything, and so does a box at or above [`MIN_PROTECTING_BOX_ALPHA`]. A
+    /// fainter box does not: it is composited over the band, and the diluted
+    /// picture is what the words are graded against, so a wash that genuinely
+    /// rescues a white-on-white cue clears the check and one that only looks
+    /// like a box does not.
     fn fault_for(
         sample: &CaptionBandSample,
         min_contrast: f64,
         max_stddev: f64,
     ) -> Option<ContrastFault> {
-        if sample.has_box || sample.has_outline {
+        if sample.has_outline || sample.box_alpha >= MIN_PROTECTING_BOX_ALPHA {
             return None;
         }
         let contrast = sample.contrast();
         if contrast.is_finite() && contrast < min_contrast {
             return Some(ContrastFault::LowContrast);
         }
-        if sample.band_luminance_stddev.is_finite() && sample.band_luminance_stddev > max_stddev {
+        let stddev = sample.effective_band_stddev();
+        if stddev.is_finite() && stddev > max_stddev {
             return Some(ContrastFault::MixedBackground);
         }
         None
@@ -1123,25 +1185,53 @@ impl QCRule for CaptionContrastRule {
                 continue;
             };
 
+            // A cue with a faint box was graded with that box blended over the
+            // picture, so saying it has nothing behind the words would be
+            // wrong; a bare one has exactly nothing, which is the point.
+            let separation = if sample.box_alpha > 0.0 {
+                format!(
+                    "even with the {:.0}%-opaque box behind them",
+                    sample.box_alpha * 100.0
+                )
+            } else {
+                "with no box or outline to separate them".to_string()
+            };
+
             let message = match fault {
                 ContrastFault::LowContrast => format!(
                     "Caption text and the picture behind it differ by only {:.2} luminance \
-                     (limit {:.2}), with no box or outline to separate them",
+                     (limit {:.2}), {separation}",
                     sample.contrast(),
                     min_contrast
                 ),
                 ContrastFault::MixedBackground => format!(
                     "Caption text sits over a mixed background (luminance spread {:.2}, limit \
-                     {:.2}), with no box or outline to separate them",
-                    sample.band_luminance_stddev, max_stddev
+                     {:.2}), {separation}",
+                    sample.effective_band_stddev(),
+                    max_stddev
                 ),
+            };
+
+            // What the box did to the numbers, for a cue that carries one: the
+            // metrics report the picture as measured, and the verdict was
+            // reached on the picture the box left behind.
+            let blended = if sample.box_alpha > 0.0 {
+                format!(
+                    " The cue's {:.0}%-opaque box leaves that reading {:.2} (spread {:.2}) where \
+                     the words sit.",
+                    sample.box_alpha * 100.0,
+                    sample.effective_band_luminance(),
+                    sample.effective_band_stddev()
+                )
+            } else {
+                String::new()
             };
 
             let details = match fault {
                 ContrastFault::LowContrast => format!(
                     "Measured at {:.2}s: the band the words occupy averages {:.2} luminance \
-                     (spread {:.2}) and the text is {:.2}. Give the cue an outline so it reads \
-                     over any background.",
+                     (spread {:.2}) and the text is {:.2}.{blended} Give the cue an outline so \
+                     it reads over any background.",
                     sample.sampled_at_sec,
                     sample.band_luminance,
                     sample.band_luminance_stddev,
@@ -1150,8 +1240,8 @@ impl QCRule for CaptionContrastRule {
                 ContrastFault::MixedBackground => format!(
                     "Measured at {:.2}s: the band the words occupy averages {:.2} luminance but \
                      varies by {:.2} across its width, so text at {:.2} clears part of it and \
-                     disappears into the rest. Give the cue an outline so it reads over any \
-                     background.",
+                     disappears into the rest.{blended} Give the cue an outline so it reads over \
+                     any background.",
                     sample.sampled_at_sec,
                     sample.band_luminance,
                     sample.band_luminance_stddev,
@@ -1188,6 +1278,7 @@ impl QCRule for CaptionContrastRule {
                     )
                     .with_metric("hasBox", sample.has_box)
                     .with_metric("hasOutline", sample.has_outline)
+                    .with_metric("boxAlpha", (sample.box_alpha * 1000.0).round() / 1000.0)
                     .with_metric("trackId", sample.track_id.clone())
                     .with_fix(
                         ViolationFix::new(
@@ -1303,6 +1394,19 @@ mod tests {
             text_luminance,
             has_box: false,
             has_outline: false,
+            box_alpha: 0.0,
+            box_luminance: 0.0,
+        }
+    }
+
+    /// A sample of `text_luminance` text over a `band_luminance` picture, with
+    /// a black background box painted at `box_alpha`.
+    fn boxed_sample(band_luminance: f64, text_luminance: f64, box_alpha: f64) -> CaptionBandSample {
+        CaptionBandSample {
+            has_box: box_alpha > 0.0,
+            box_alpha,
+            box_luminance: 0.0,
+            ..sample(band_luminance, text_luminance)
         }
     }
 
@@ -1519,8 +1623,14 @@ mod tests {
     /// Scenario: should read protection only where the renderer draws it
     #[test]
     fn should_read_mitigation_the_way_the_renderer_draws_it() {
-        let boxed = serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 180 } });
+        let boxed = serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 230 } });
         assert!(caption_paint(Some(&boxed)).protects_with_box());
+
+        // A box the picture still shows through is measured, not waved past.
+        let translucent =
+            serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 180 } });
+        assert!(caption_paint(Some(&translucent)).paints_box());
+        assert!(!caption_paint(Some(&translucent)).is_mitigated());
 
         // A box the viewer cannot see is not a box, and it does not take the
         // outline with it either: the ASS path keeps `BorderStyle: 1`.
@@ -1572,6 +1682,105 @@ mod tests {
 
         // And no style at all is the barest case of the lot.
         assert!(!caption_paint(None).is_mitigated());
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should grade a translucent box by what it actually hides
+    ///
+    /// A ten-percent wash used to buy a cue a free pass: the check saw a box,
+    /// declined to decode the frame and reported nothing, while the footage
+    /// read straight through it. Now only a box that settles the question on
+    /// its own goes unmeasured, and everything below it is composited over the
+    /// band and graded on what is left.
+    #[test]
+    fn should_blend_a_translucent_box_into_the_band_it_covers() {
+        let black_box_at = |alpha: f64| {
+            serde_json::json!({
+                "color": "#FFFFFF",
+                "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": (alpha * 255.0).round() },
+            })
+        };
+
+        // A tenth of a black box over white leaves the band at 0.9, which white
+        // text cannot be read against.
+        assert!(
+            !caption_paint(Some(&black_box_at(0.1))).is_mitigated(),
+            "a box this faint must still be measured"
+        );
+        assert_eq!(
+            CaptionContrastRule::fault_for(
+                &boxed_sample(1.0, 1.0, 0.1),
+                DEFAULT_MIN_CONTRAST,
+                DEFAULT_MAX_BAND_STDDEV
+            ),
+            Some(ContrastFault::LowContrast)
+        );
+
+        // At the floor the box decides the question by itself, and the cue is
+        // never decoded in the first place.
+        assert!(
+            caption_paint(Some(&black_box_at(MIN_PROTECTING_BOX_ALPHA))).is_mitigated(),
+            "a box at the floor protects the words"
+        );
+        assert_eq!(
+            CaptionContrastRule::fault_for(
+                &boxed_sample(1.0, 1.0, MIN_PROTECTING_BOX_ALPHA),
+                DEFAULT_MIN_CONTRAST,
+                DEFAULT_MAX_BAND_STDDEV
+            ),
+            None
+        );
+
+        // Half a black box brings a white band to 0.5, which white text clears.
+        assert!(
+            !caption_paint(Some(&black_box_at(0.5))).is_mitigated(),
+            "a half-opaque box is measured, not waved through"
+        );
+        assert_eq!(
+            CaptionContrastRule::fault_for(
+                &boxed_sample(1.0, 1.0, 0.5),
+                DEFAULT_MIN_CONTRAST,
+                DEFAULT_MAX_BAND_STDDEV
+            ),
+            None,
+            "a box that genuinely rescues the cue must clear the check"
+        );
+
+        // And the spread it hides counts for as much as the mean it lifts.
+        let mut mixed = boxed_sample(0.5, 1.0, 0.5);
+        mixed.band_luminance_stddev = 0.3;
+        assert_eq!(
+            CaptionContrastRule::fault_for(&mixed, DEFAULT_MIN_CONTRAST, DEFAULT_MAX_BAND_STDDEV),
+            None,
+            "half the picture is half the spread"
+        );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should say what a measured box did to the numbers
+    #[tokio::test]
+    async fn should_report_the_box_a_measured_cue_carries() {
+        let sequence = sequence_with_captions(vec![caption_clip(
+            "Barely boxed",
+            1.0,
+            3.0,
+            Some(bare_white_style()),
+        )]);
+        let measurements = RenderMeasurements {
+            caption_band_samples: vec![boxed_sample(1.0, 1.0, 0.1)],
+            ..Default::default()
+        };
+
+        let violations = run_rule(&sequence, Some(measurements)).await;
+
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].metrics["hasBox"], true);
+        assert_eq!(violations[0].metrics["boxAlpha"], 0.1);
+        assert!(
+            violations[0].message.contains("10%-opaque box"),
+            "the finding must not claim the cue has no box: {}",
+            violations[0].message
+        );
     }
 
     /// Feature: Style reading
@@ -1648,6 +1857,15 @@ mod tests {
             (
                 "fully transparent box",
                 Some(serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 0 } })),
+            ),
+            // Under half a step of alpha: both paths round it away and paint
+            // nothing, so a check that only asked whether the alpha was
+            // non-zero saw a box the renderer never draws.
+            (
+                "a box rounded away to nothing",
+                Some(
+                    serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 0.4 } }),
+                ),
             ),
             (
                 "fully transparent box over an outline",
@@ -2237,6 +2455,224 @@ mod tests {
             CaptionContrastRule::fault_for(sample, DEFAULT_MIN_CONTRAST, DEFAULT_MAX_BAND_STDDEV)
                 .is_some(),
             "an unreadable top-aligned caption must be reported"
+        );
+    }
+
+    /// Measures the band of the one caption a position and style describe.
+    async fn measure_one_band(
+        runner: &FFmpegRunner,
+        file: &Path,
+        position: serde_json::Value,
+        style: serde_json::Value,
+    ) -> CaptionBandSample {
+        let mut clip = caption_clip_with_style("Readable words", 0.0, 2.0, Some(style));
+        clip.caption_position = Some(position);
+        let sequence = sequence_with_captions(vec![clip]);
+
+        let sampling = sample_caption_bands(
+            runner,
+            file,
+            &sequence,
+            (0.0, 2.0),
+            &CaptionSampleOptions {
+                file_duration_sec: Some(2.0),
+                ..CaptionSampleOptions::default()
+            },
+        )
+        .await;
+
+        sampling
+            .samples
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("the cue must be measured: {:?}", sampling.notes))
+    }
+
+    /// Feature: Band geometry
+    /// Scenario: should measure the position shapes the CLI writes where the
+    /// renderer draws them
+    ///
+    /// The band was mirrored through `serde`, which refuses all three of these
+    /// and the burn-in accepts all three. Over a frame that is black on top and
+    /// white underneath, the difference is the whole verdict: measured where
+    /// the renderer draws, white text on the top band reads; measured against
+    /// the default bottom band, the same cue is graded over white.
+    #[tokio::test]
+    #[ignore = "needs a real FFmpeg binary"]
+    async fn should_measure_lenient_position_shapes_where_the_renderer_draws_them() {
+        let Some(runner) = ffmpeg_runner_for_tests() else {
+            return;
+        };
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let white = serde_json::json!({ "color": "#FFFFFF" });
+
+        let black_top = temp.path().join("black-top.mp4");
+        render_fixture(
+            &runner,
+            &black_top,
+            "color=c=black:s=1920x1080:d=2,drawbox=x=0:y=540:w=1920:h=540:color=white:t=fill",
+        )
+        .await;
+
+        for (label, position) in [
+            ("a bare string", serde_json::json!("top")),
+            (
+                "a preset with no margin",
+                serde_json::json!({ "type": "preset", "vertical": "top" }),
+            ),
+            (
+                "a preset in the wrong case",
+                serde_json::json!({ "type": "Preset", "vertical": "top", "marginPercent": 5.0 }),
+            ),
+        ] {
+            let sample = measure_one_band(&runner, &black_top, position, white.clone()).await;
+            assert!(
+                sample.band_luminance < 0.2,
+                "{label} draws along the top, so the dark top band is what must be \
+                 measured, got {}",
+                sample.band_luminance
+            );
+            assert!(
+                CaptionContrastRule::fault_for(
+                    &sample,
+                    DEFAULT_MIN_CONTRAST,
+                    DEFAULT_MAX_BAND_STDDEV
+                )
+                .is_none(),
+                "{label}: white words on the black band read fine"
+            );
+        }
+
+        // The same shapes over the inverse frame are the failing case, which is
+        // what proves the band moved rather than merely widened.
+        let white_top = temp.path().join("white-top.mp4");
+        render_fixture(
+            &runner,
+            &white_top,
+            "color=c=white:s=1920x1080:d=2,drawbox=x=0:y=540:w=1920:h=540:color=black:t=fill",
+        )
+        .await;
+
+        let sample = measure_one_band(
+            &runner,
+            &white_top,
+            serde_json::json!({ "type": "preset", "vertical": "top" }),
+            white.clone(),
+        )
+        .await;
+        assert!(
+            sample.band_luminance > 0.8,
+            "white text over a white top band is the failing case, got {}",
+            sample.band_luminance
+        );
+
+        // A bare string names a preset outright, and the renderer returns
+        // before it reads `verticalAlign`, so this cue is drawn - and has to be
+        // measured - along the bottom whatever the style says.
+        let sample = measure_one_band(
+            &runner,
+            &white_top,
+            serde_json::json!("bottom"),
+            serde_json::json!({ "color": "#FFFFFF", "verticalAlign": "top" }),
+        )
+        .await;
+        assert!(
+            sample.band_luminance < 0.2,
+            "a bare string outranks verticalAlign in the renderer, so the dark bottom band \
+             is what must be measured, got {}",
+            sample.band_luminance
+        );
+    }
+
+    /// Feature: Band geometry
+    /// Scenario: should follow every position shape the renderer accepts
+    ///
+    /// The band used to be read back through `serde`, which refuses a bare
+    /// string, a preset with no `marginPercent` - the shape `caption add
+    /// --position-json` writes - and a `"Preset"` in the wrong case. All three
+    /// fell back to the default bottom band while the renderer drew the words
+    /// along the top, so the check measured the wrong half of the picture for
+    /// exactly the captions an agent creates from the command line.
+    #[test]
+    fn should_follow_the_lenient_position_shapes_the_renderer_reads() {
+        let band_for = |position: serde_json::Value, style: serde_json::Value| {
+            let mut clip = caption_clip_with_style("Words", 0.0, 2.0, Some(style));
+            clip.caption_position = Some(position);
+            super::super::rules::caption_band_percent(&clip, 1920, 1080)
+        };
+        let white = serde_json::json!({ "color": "#FFFFFF" });
+
+        for (label, position) in [
+            ("a bare string", serde_json::json!("top")),
+            (
+                "a preset with no margin",
+                serde_json::json!({ "type": "preset", "vertical": "top" }),
+            ),
+            (
+                "a preset in the wrong case",
+                serde_json::json!({ "type": "Preset", "vertical": "top", "marginPercent": 5.0 }),
+            ),
+        ] {
+            let (top, bottom) = band_for(position, white.clone());
+            assert!(
+                top < 10.0 && bottom < 25.0,
+                "{label} anchors the caption to the top of the frame, got {top}-{bottom}"
+            );
+        }
+
+        // A bare string names a preset outright, and the renderer returns
+        // before it reads `verticalAlign`, so the string wins.
+        let (top, bottom) = band_for(
+            serde_json::json!("bottom"),
+            serde_json::json!({ "color": "#FFFFFF", "verticalAlign": "top" }),
+        );
+        assert!(
+            top > 75.0 && bottom <= 100.0,
+            "a bare string outranks verticalAlign in the renderer, got {top}-{bottom}"
+        );
+    }
+
+    /// Feature: Band geometry
+    /// Scenario: should crop around the point a custom caption is pinned to
+    ///
+    /// `xPercent: 0.5` is the middle of the frame to the renderer, which reads
+    /// an axis under 1 as a fraction. Read as a raw percentage it was the left
+    /// edge, and the crop went looking for the words in a corner.
+    #[test]
+    fn should_crop_around_the_centre_for_a_fractional_custom_anchor() {
+        let mut clip = caption_clip_with_style(
+            "Words",
+            0.0,
+            2.0,
+            Some(serde_json::json!({ "color": "#FFFFFF" })),
+        );
+        clip.caption_position =
+            Some(serde_json::json!({ "type": "custom", "xPercent": 0.5, "yPercent": 0.5 }));
+
+        let (left, right) = super::super::rules::caption_span_percent(&clip, 1920, 1080);
+        let centre = (left + right) / 2.0;
+
+        assert!(
+            (centre - 50.0).abs() < 1.0,
+            "a fractional x is the middle of the frame, got {left}-{right}"
+        );
+    }
+
+    /// Feature: Band geometry
+    /// Scenario: should measure a preset caption over the whole wrap box
+    ///
+    /// The glyph estimator has no shaping, so a column cut to its guess reads
+    /// the picture between the words. The renderer is free to fill the box it
+    /// wraps inside, so that box is the floor.
+    #[test]
+    fn should_never_crop_a_preset_caption_narrower_than_its_wrap_box() {
+        let clip = caption_clip("Hi", 0.0, 2.0, Some(bare_white_style()));
+
+        let (left, right) = super::super::rules::caption_span_percent(&clip, 1920, 1080);
+
+        assert!(
+            right - left >= crate::core::captions::CAPTION_WRAP_BOX_WIDTH_PERCENT - 1e-9,
+            "a preset caption is measured across its wrap box, got {left}-{right}"
         );
     }
 

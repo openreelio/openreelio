@@ -859,19 +859,24 @@ the line never reaches cannot decide the verdict. The band follows the style's
 
 A cue counts as already protected — and is never decoded — only where the export
 would actually draw the protection: an `outlineColor` with a non-zero width, or
-a `backgroundColor` that is at least 10% opaque. An `outlineWidth` with no
+a `backgroundColor` that is at least 80% opaque. An `outlineWidth` with no
 colour renders bare, and so does a cue with no style at all, so both are graded
-like any other bare cue. A box faint enough to read through protects nothing;
-and because a painted box replaces the outline in the burn-in, an outline behind
-one is not protection either. A fully transparent `backgroundColor` is no box at
-all, so the outline it would otherwise have replaced stays and counts.
+like any other bare cue. A fainter box is not waved through and not ignored
+either: it is composited over the band before the verdict, so the shot behind it
+still counts for what it shows through. Because a painted box replaces the
+outline in the burn-in, an outline behind one is not protection; a
+`backgroundColor` the renderer rounds away to nothing is no box at all, so the
+outline it would otherwise have replaced stays and counts.
 
 Two numbers decide the verdict. A bare cue whose text sits within `0.35`
 luminance of the picture behind it is reported (`fault: "lowContrast"`), and so
 is one whose band varies by more than `0.2` (`fault: "mixedBackground"`) — a
 band that is half sky and half shadow has a comfortable mean and is still half
-unreadable. Either finding carries `{bandLuminance, bandLuminanceStddev,
-textLuminance, contrast, minContrast, maxBandStddev, fault, hasBox, hasOutline}`
+unreadable. Both are graded after the cue's own box is composited over the band,
+so `bandLuminance` is the picture as measured while `contrast` is what was
+judged, and the two differ by whatever `boxAlpha` hides. Either finding carries
+`{bandLuminance, bandLuminanceStddev, textLuminance, contrast, minContrast,
+maxBandStddev, fault, hasBox, boxAlpha, hasOutline}`
 and an `UpdateCaption` fix applying the `standard-outline` pack — not
 `boxed-contrast`, because an outline survives any background including a mixed
 one.

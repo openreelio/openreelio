@@ -4764,34 +4764,30 @@ impl CaptionVertical {
             VerticalPosition::Bottom => Self::Bottom,
         }
     }
+
+    /// Writes the render-side enum back into the caption model's own.
+    fn to_model(self) -> VerticalPosition {
+        match self {
+            Self::Top => VerticalPosition::Top,
+            Self::Center => VerticalPosition::Center,
+            Self::Bottom => VerticalPosition::Bottom,
+        }
+    }
 }
 
 /// Margin a `verticalAlign` override holds its block off the named edge with,
 /// as a percentage of the canvas height.
-pub(crate) const CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT: f64 = 10.0;
-
-/// Fraction of the canvas height a `verticalAlign` override anchors at.
-///
-/// The same number [`resolve_caption_anchor`] writes into an overridden anchor,
-/// exposed so the QC caption band can place a custom-positioned cue's block
-/// where the renderer puts it rather than where the stored position says.
-pub(crate) fn caption_vertical_align_y(vertical: VerticalPosition) -> f64 {
-    vertical_position_to_y(
-        CaptionVertical::from_model(vertical),
-        CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT,
-    )
-}
+const CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT: f64 = 10.0;
 
 /// Reads the vertical axis a caption style's `verticalAlign` pins the block to.
 ///
 /// Returns `None` when the style names nothing the renderer recognizes, in
 /// which case the stored `caption_position` decides the axis on its own.
 ///
-/// Hoisted out of [`resolve_caption_anchor`] because the QC caption band has to
-/// answer the same question: a band derived from `caption_position` alone
-/// sampled the bottom of the frame for a caption the renderer draws along the
-/// top. One definition is the only way the two cannot drift.
-pub(crate) fn caption_style_vertical_align(style: Option<&Value>) -> Option<VerticalPosition> {
+/// Hoisted out of [`resolve_caption_anchor`] so the override is read in one
+/// place; callers outside this module ask [`caption_anchor_percent`] instead,
+/// which applies it exactly as the burn-in does.
+fn caption_style_vertical_align(style: Option<&Value>) -> Option<VerticalPosition> {
     let raw = style
         .and_then(Value::as_object)
         .and_then(|object| get_json_field(object, &["verticalAlign", "vertical_align"]))
@@ -4946,6 +4942,71 @@ fn caption_anchor_position(anchor: CaptionAnchor, alignment: &str) -> (f64, f64)
             vertical_position_to_y(vertical, margin_percent),
         ),
         CaptionAnchor::Custom { x, y } => (x, y),
+    }
+}
+
+/// Where the renderer ends up drawing a caption, in canvas fractions.
+///
+/// The output of [`caption_anchor_percent`], and the only shape in which the
+/// renderer's anchor resolution leaves this module.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ResolvedCaptionAnchor {
+    /// Horizontal anchor as a fraction of the canvas width
+    pub x: f64,
+    /// Vertical anchor as a fraction of the canvas height
+    pub y: f64,
+    /// Vertical preset the block hangs off, or `None` for an explicit point
+    pub vertical: Option<VerticalPosition>,
+    /// Gap the preset holds between the block's near edge and the canvas edge,
+    /// as a percentage of the canvas height, or `None` for an explicit point
+    pub margin_percent: Option<f64>,
+}
+
+impl ResolvedCaptionAnchor {
+    /// Whether the renderer wraps this caption inside the event margins.
+    ///
+    /// A preset anchor becomes ASS margins, which libass wraps inside; a custom
+    /// one becomes `\pos`, which disables them.
+    pub fn is_preset(&self) -> bool {
+        self.vertical.is_some()
+    }
+}
+
+/// Resolves a stored caption position and style to the anchor the export draws.
+///
+/// The renderer's own resolution, exposed rather than restated: QC has to
+/// measure the band and the column the words are actually drawn in, and a
+/// mirror built on `serde` rejected shapes the renderer accepts - a bare
+/// `"bottom"` string, a `{"type":"preset","vertical":"top"}` with no
+/// `marginPercent` (which `caption add --position-json` writes), a `"Preset"`
+/// spelled in any other case - and so measured the wrong half of the frame for
+/// exactly the captions an agent creates from the command line.
+pub(crate) fn caption_anchor_percent(
+    position: Option<&Value>,
+    style: Option<&Value>,
+    alignment: &str,
+) -> ResolvedCaptionAnchor {
+    let anchor = resolve_caption_anchor(position, style);
+    let (x, y) = caption_anchor_position(anchor, alignment);
+
+    match anchor {
+        CaptionAnchor::Preset {
+            vertical,
+            margin_percent,
+        } => ResolvedCaptionAnchor {
+            x,
+            y,
+            vertical: Some(vertical.to_model()),
+            // The normalized margin, because that is the one the y above was
+            // built from; the raw number can be non-finite or out of range.
+            margin_percent: Some(normalized_caption_margin_percent(margin_percent)),
+        },
+        CaptionAnchor::Custom { .. } => ResolvedCaptionAnchor {
+            x,
+            y,
+            vertical: None,
+            margin_percent: None,
+        },
     }
 }
 
@@ -8656,6 +8717,106 @@ mod tests {
         // A custom position keeps the coordinates its author chose.
         let (x, y) = caption_anchor_position(CaptionAnchor::Custom { x: 0.8, y: 0.9 }, "left");
         assert!((x - 0.8).abs() < 1e-9 && (y - 0.9).abs() < 1e-9);
+    }
+
+    /// Feature: Caption anchoring
+    /// Scenario: should resolve every position shape the burn-in accepts
+    ///
+    /// The shapes here are the ones a `serde` mirror refuses and the renderer
+    /// draws anyway - a bare string, a preset with no margin (which
+    /// `caption add --position-json` writes), a `"Preset"` in the wrong case,
+    /// and a custom anchor naming only an x. QC measures the band and the
+    /// column from this helper precisely so it cannot judge one of them against
+    /// a part of the frame the words are nowhere near.
+    #[test]
+    fn caption_anchor_percent_reads_every_shape_the_renderer_accepts() {
+        let top_margin = CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT / 100.0;
+
+        // A bare string names a preset, at the default margin.
+        let bare_string = caption_anchor_percent(Some(&serde_json::json!("top")), None, "center");
+        assert_eq!(bare_string.vertical, Some(VerticalPosition::Top));
+        assert_eq!(
+            bare_string.margin_percent,
+            Some(CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT)
+        );
+        assert!(
+            (bare_string.y - CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT / 100.0).abs() < 1e-9,
+            "got {}",
+            bare_string.y
+        );
+
+        // A preset object with no `marginPercent` takes the same default.
+        let no_margin = caption_anchor_percent(
+            Some(&serde_json::json!({ "type": "preset", "vertical": "top" })),
+            None,
+            "center",
+        );
+        assert_eq!(no_margin.vertical, Some(VerticalPosition::Top));
+        assert_eq!(
+            no_margin.margin_percent,
+            Some(CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT)
+        );
+
+        // And the type is matched without regard to case.
+        let shouted = caption_anchor_percent(
+            Some(
+                &serde_json::json!({ "type": "Preset", "vertical": "top", "marginPercent": 12.0 }),
+            ),
+            None,
+            "center",
+        );
+        assert_eq!(shouted.vertical, Some(VerticalPosition::Top));
+        assert_eq!(shouted.margin_percent, Some(12.0));
+        assert!((shouted.y - 0.12).abs() < 1e-9, "got {}", shouted.y);
+
+        // The style's `verticalAlign` moves a positionless caption to the top.
+        let aligned = caption_anchor_percent(
+            None,
+            Some(&serde_json::json!({ "verticalAlign": "top" })),
+            "center",
+        );
+        assert_eq!(aligned.vertical, Some(VerticalPosition::Top));
+        assert!((aligned.y - top_margin).abs() < 1e-9, "got {}", aligned.y);
+
+        // But a position that names a preset outright wins: that path returns
+        // before the override is read, so a `"bottom"` string stays at the
+        // bottom however the style is aligned.
+        let string_wins = caption_anchor_percent(
+            Some(&serde_json::json!("bottom")),
+            Some(&serde_json::json!({ "verticalAlign": "top" })),
+            "center",
+        );
+        assert_eq!(string_wins.vertical, Some(VerticalPosition::Bottom));
+        assert!(
+            string_wins.y > 0.9,
+            "a bare string outranks verticalAlign, got {}",
+            string_wins.y
+        );
+
+        // A custom anchor naming only an x keeps it, normalized, and is not a
+        // preset - the burn-in places it with `\pos` and it wraps nowhere.
+        let custom = caption_anchor_percent(
+            Some(&serde_json::json!({ "type": "custom", "xPercent": 0.5 })),
+            None,
+            "center",
+        );
+        assert!(!custom.is_preset());
+        assert_eq!(custom.vertical, None);
+        assert_eq!(custom.margin_percent, None);
+        assert!((custom.x - 0.5).abs() < 1e-9, "got {}", custom.x);
+        assert!(
+            (custom.y - CAPTION_CUSTOM_DEFAULT_Y_PERCENT / 100.0).abs() < 1e-9,
+            "got {}",
+            custom.y
+        );
+
+        // A percentage-shaped x means the same point as its fraction.
+        let percent_x = caption_anchor_percent(
+            Some(&serde_json::json!({ "type": "custom", "xPercent": 50.0 })),
+            None,
+            "center",
+        );
+        assert!((percent_x.x - 0.5).abs() < 1e-9, "got {}", percent_x.x);
     }
 
     #[test]

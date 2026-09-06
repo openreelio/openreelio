@@ -15,9 +15,7 @@ use crate::core::captions::{
     CAPTION_SIDE_MARGIN_PERCENT, CAPTION_WRAP_BOX_WIDTH_PERCENT,
 };
 use crate::core::project::ProjectState;
-use crate::core::render::export::{
-    caption_style_vertical_align, caption_vertical_align_y, CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT,
-};
+use crate::core::render::export::caption_anchor_percent;
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::CoreResult;
 
@@ -1789,51 +1787,74 @@ const MIN_CAPTION_BAND_HEIGHT_PERCENT: f64 = 3.0;
 /// line has to read over.
 const MIN_CAPTION_SPAN_WIDTH_PERCENT: f64 = 10.0;
 
+/// Widening applied to the estimated text width before it is cropped.
+///
+/// The estimator has no shaping: it multiplies a character count by half an em,
+/// which underestimates wide glyphs, tracking and any script whose advance is
+/// not half its size. A crop narrower than the words measures the picture
+/// between them, so the column is deliberately generous - the cost of sampling
+/// a little more than the line is a slightly softer verdict, while the cost of
+/// sampling less than the line is grading the wrong pixels.
+const CAPTION_SPAN_SAFETY_FACTOR: f64 = 1.5;
+
+/// The alignment spelling the render path's anchor helpers take.
+fn alignment_key(alignment: &TextAlignment) -> &'static str {
+    match alignment {
+        TextAlignment::Left => "left",
+        TextAlignment::Right => "right",
+        TextAlignment::Center => "center",
+    }
+}
+
 /// Returns the column a caption's text block occupies, as `(left, right)`
 /// percentages of canvas width.
 ///
 /// The companion of [`caption_band_percent`], built from the same block
-/// estimate. Measuring the whole frame width instead let a bright strip in a
-/// corner the words never reach decide that the cue sat over a mixed
-/// background, so the contrast pass samples only the column the line is drawn
-/// in. Widened to [`MIN_CAPTION_SPAN_WIDTH_PERCENT`] and clamped to the frame,
-/// so it is always a crop FFmpeg can take.
+/// estimate and the same resolved anchor. Measuring the whole frame width
+/// instead let a bright strip in a corner the words never reach decide that the
+/// cue sat over a mixed background, so the contrast pass samples only the
+/// column the line is drawn in.
+///
+/// A preset caption's column is never narrower than the box libass wraps it
+/// inside ([`CAPTION_WRAP_BOX_WIDTH_PERCENT`]): the renderer is free to use all
+/// of it, so anything less is a guess at where the glyphs stopped. Everything
+/// else is widened by [`CAPTION_SPAN_SAFETY_FACTOR`] first. The result is
+/// widened again to [`MIN_CAPTION_SPAN_WIDTH_PERCENT`] and clamped to the
+/// frame, so it is always a crop FFmpeg can take.
 pub(crate) fn caption_span_percent(
     clip: &Clip,
     canvas_width: u32,
     canvas_height: u32,
 ) -> (f64, f64) {
-    let position = clip
-        .caption_position
-        .as_ref()
-        .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok())
-        .unwrap_or_default();
     let alignment = CaptionSafeAreaRule::alignment(clip.caption_style.as_ref());
+    let anchor = caption_anchor_percent(
+        clip.caption_position.as_ref(),
+        clip.caption_style.as_ref(),
+        alignment_key(&alignment),
+    );
 
-    let (left, right) = match &position {
-        CaptionPosition::Preset { .. } => {
-            let (box_width, _) = CaptionSafeAreaRule::estimate_text_box_percent(
-                clip,
-                canvas_width,
-                canvas_height,
-                CAPTION_WRAP_BOX_WIDTH_PERCENT,
-            );
-            CaptionSafeAreaRule::horizontal_span(
-                CaptionSafeAreaRule::preset_anchor_x_percent(&alignment),
-                box_width,
-                &alignment,
-            )
-        }
-        CaptionPosition::Custom(custom) => {
-            let (box_width, _) = CaptionSafeAreaRule::estimate_text_box_percent(
-                clip,
-                canvas_width,
-                canvas_height,
-                100.0,
-            );
-            CaptionSafeAreaRule::horizontal_span(custom.x_percent, box_width, &alignment)
-        }
+    let wrap_box_width_percent = if anchor.is_preset() {
+        CAPTION_WRAP_BOX_WIDTH_PERCENT
+    } else {
+        100.0
     };
+    let (box_width, _) = CaptionSafeAreaRule::estimate_text_box_percent(
+        clip,
+        canvas_width,
+        canvas_height,
+        wrap_box_width_percent,
+    );
+
+    let width = if anchor.is_preset() {
+        (box_width * CAPTION_SPAN_SAFETY_FACTOR).clamp(
+            CAPTION_WRAP_BOX_WIDTH_PERCENT,
+            CaptionSafeAreaRule::MAX_TEXT_BOX_WIDTH_PERCENT,
+        )
+    } else {
+        box_width * CAPTION_SPAN_SAFETY_FACTOR
+    };
+
+    let (left, right) = CaptionSafeAreaRule::horizontal_span(anchor.x * 100.0, width, &alignment);
 
     let (left, right) = if left.is_finite() && right.is_finite() && right > left {
         (left, right)
@@ -1865,62 +1886,49 @@ pub(crate) fn caption_span_percent(
 /// clear a caption the other one measured somewhere else. The span is widened
 /// to [`MIN_CAPTION_BAND_HEIGHT_PERCENT`] and clamped to the frame, so it is
 /// always a crop FFmpeg can take.
+///
+/// Where the caption sits is asked of the renderer itself, through
+/// [`caption_anchor_percent`], rather than mirrored here: a mirror built on
+/// `serde` refused a bare `"bottom"`, a preset with no `marginPercent` and a
+/// `"Preset"` in the wrong case, all of which the burn-in accepts, and so
+/// measured the default bottom band for captions drawn along the top.
 pub(crate) fn caption_band_percent(
     clip: &Clip,
     canvas_width: u32,
     canvas_height: u32,
 ) -> (f64, f64) {
-    let stored = clip
-        .caption_position
-        .as_ref()
-        .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok());
+    let alignment = CaptionSafeAreaRule::alignment(clip.caption_style.as_ref());
+    let anchor = caption_anchor_percent(
+        clip.caption_position.as_ref(),
+        clip.caption_style.as_ref(),
+        alignment_key(&alignment),
+    );
 
-    // `resolve_caption_anchor` lets the style's `verticalAlign` override the
-    // vertical axis of whatever the stored position said, so a band read from
-    // the position alone sampled the bottom of the frame for a caption the
-    // renderer draws along the top. The one exception is a position that names
-    // a preset outright: that path returns before the override is read, and the
-    // mirror has to keep the exception or it drifts the other way.
-    let explicit_preset = matches!(stored, Some(CaptionPosition::Preset { .. }));
-    let position = stored.unwrap_or_default();
-    let position = match caption_style_vertical_align(clip.caption_style.as_ref()) {
-        Some(vertical) if !explicit_preset => match position {
-            CaptionPosition::Preset { .. } => CaptionPosition::Preset {
-                vertical,
-                margin_percent: CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT,
-            },
-            CaptionPosition::Custom(custom) => CaptionPosition::Custom(CustomPosition {
-                y_percent: caption_vertical_align_y(vertical) * 100.0,
-                ..custom
-            }),
-        },
-        _ => position,
+    // A preset caption wraps inside the ASS event margins; a custom one is
+    // placed with `\pos`, which has none, so it wraps only at the frame edge.
+    // The wrap width decides the line count, and so the block height.
+    let wrap_box_width_percent = if anchor.is_preset() {
+        CAPTION_WRAP_BOX_WIDTH_PERCENT
+    } else {
+        100.0
     };
+    let (_, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
+        clip,
+        canvas_width,
+        canvas_height,
+        wrap_box_width_percent,
+    );
 
-    let (top, bottom) = match &position {
-        CaptionPosition::Preset {
-            vertical,
-            margin_percent,
-        } => {
-            let (_, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
-                clip,
-                canvas_width,
-                canvas_height,
-                CAPTION_WRAP_BOX_WIDTH_PERCENT,
-            );
-            CaptionSafeAreaRule::preset_vertical_span(vertical, *margin_percent, box_height)
+    let (top, bottom) = match (anchor.vertical.as_ref(), anchor.margin_percent) {
+        // A preset margin is a gap to the block's near edge, so the block hangs
+        // off the edge the margin names.
+        (Some(vertical), Some(margin_percent)) => {
+            CaptionSafeAreaRule::preset_vertical_span(vertical, margin_percent, box_height)
         }
-        CaptionPosition::Custom(custom) => {
-            let (_, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
-                clip,
-                canvas_width,
-                canvas_height,
-                100.0,
-            );
-            (
-                custom.y_percent - box_height / 2.0,
-                custom.y_percent + box_height / 2.0,
-            )
+        // A custom anchor names a point the block is centred on.
+        _ => {
+            let center = anchor.y * 100.0;
+            (center - box_height / 2.0, center + box_height / 2.0)
         }
     };
 
