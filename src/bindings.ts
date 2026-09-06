@@ -4133,11 +4133,20 @@ interpolation?: KeyframeInterpolation }
  */
 export type AudioProfile = { 
 /**
- * Version of the loudness/peak measurement that produced this profile.
+ * Version of the pass whose verdict this profile has been reconciled with.
  * 
- * Profiles cached by an older measurement are dropped on load rather than
- * trusted; see [`AUDIO_MEASUREMENT_VERSION`]. Legacy bundles carry no
- * field and deserialize as version 0.
+ * Usually the pass that measured it. But a pass that looks at this media
+ * and settles that it cannot be measured stamps its own version on the
+ * profile it retained, without touching a number — see
+ * `remeasure::settle_audio_measurement_version` — because "measured by" is
+ * not the question the version answers. The question is whether the pass
+ * that would run now is the one that already had its say.
+ * 
+ * A profile carrying a version below [`AUDIO_MEASUREMENT_VERSION`] is not
+ * dropped; its loudness is treated as missing (see
+ * [`AudioProfile::has_current_loudness`]) and re-measured, whatever the
+ * last pass concluded. Legacy bundles carry no field and deserialize as
+ * version 0.
  */
 measurementVersion?: number; 
 /**

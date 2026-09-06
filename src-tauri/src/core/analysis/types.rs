@@ -72,11 +72,20 @@ impl SilenceRegion {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProfile {
-    /// Version of the loudness/peak measurement that produced this profile.
+    /// Version of the pass whose verdict this profile has been reconciled with.
     ///
-    /// Profiles cached by an older measurement are dropped on load rather than
-    /// trusted; see [`AUDIO_MEASUREMENT_VERSION`]. Legacy bundles carry no
-    /// field and deserialize as version 0.
+    /// Usually the pass that measured it. But a pass that looks at this media
+    /// and settles that it cannot be measured stamps its own version on the
+    /// profile it retained, without touching a number — see
+    /// `remeasure::settle_audio_measurement_version` — because "measured by" is
+    /// not the question the version answers. The question is whether the pass
+    /// that would run now is the one that already had its say.
+    ///
+    /// A profile carrying a version below [`AUDIO_MEASUREMENT_VERSION`] is not
+    /// dropped; its loudness is treated as missing (see
+    /// [`AudioProfile::has_current_loudness`]) and re-measured, whatever the
+    /// last pass concluded. Legacy bundles carry no field and deserialize as
+    /// version 0.
     #[serde(default)]
     pub measurement_version: u32,
     /// Estimated beats per minute (null if no clear rhythm detected)
@@ -1002,6 +1011,8 @@ fn legacy_analysis_schema_version() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::analysis::remeasure::audio_pass_bundle_error;
+    use crate::core::CoreError;
 
     // -------------------------------------------------------------------------
     // SilenceRegion Tests
@@ -1447,8 +1458,15 @@ mod tests {
         previous.shots = Some(vec![ShotResult::new(0.0, 60.0, 1.0)]);
 
         // The fresh run asked for both jobs; audio failed, shots was not run.
+        // The error is written the way the pipeline writes one, so this fixture
+        // cannot drift from the vocabulary the re-measure gate reads back.
         let mut fresh = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
-        fresh.add_error("audio", "Audio analysis failed (exit 1)".to_string());
+        fresh.add_error(
+            "audio",
+            audio_pass_bundle_error(&CoreError::Internal(
+                "FFmpeg exited 1: Error during demuxing: Input/output error".to_string(),
+            )),
+        );
 
         fresh.backfill_missing_from(&previous);
 

@@ -125,13 +125,14 @@ fn audio_error_is_settled(error: &str) -> bool {
 /// buy one more pass, which then rewrites the error with the prefix it deserves.
 ///
 /// Whole-pass failures are the exception, and knowingly so: earlier builds
-/// recorded them as the bare [`CoreError`] text, with no prefix at all, so this
-/// gate reads them as settled and never retries them on the strength of the
-/// error alone. That is the safe direction — an unrecognised message buys no
-/// decodes — and it is not permanent either: such a bundle is still re-measured
-/// once its profile turns out to carry a superseded
-/// [`AUDIO_MEASUREMENT_VERSION`], which is the same escape hatch every other
-/// settled verdict has.
+/// recorded them as the bare [`CoreError`] text, with no prefix at all. Such a
+/// message is neither retryable nor settled — it belongs to no vocabulary this
+/// module writes — so it buys no decodes here, and it does not earn the
+/// version stamp that [`settle_audio_measurement_version`] gives a real settled
+/// verdict either. That is the safe direction, and it is not permanent: such a
+/// bundle is still re-measured once its profile turns out to carry a superseded
+/// [`AUDIO_MEASUREMENT_VERSION`], which is the same escape hatch every settled
+/// verdict has.
 pub fn loudness_remeasure_wanted(bundle: &AnalysisBundle) -> bool {
     if !bundle.needs_loudness_measurement() {
         return false;
@@ -272,10 +273,10 @@ mod tests {
     ///   Then no pass is queued
     ///
     /// This is also the shape of a whole-pass failure written by a build from
-    /// before the prefixes existed: unprefixed, and therefore never retried on
-    /// the strength of the message. That is the safe direction — an
-    /// unrecognised message buys no decodes — and such a bundle is still picked
-    /// up by the superseded-version escape hatch when a fix bumps
+    /// before the prefixes existed: unprefixed, so it is neither retryable nor
+    /// settled. It buys no decodes on the strength of the message — the safe
+    /// direction — and it earns no version stamp either, so such a bundle is
+    /// still picked up by the superseded-version escape hatch when a fix bumps
     /// [`AUDIO_MEASUREMENT_VERSION`].
     #[test]
     fn should_not_remeasure_loudness_when_the_bundle_records_an_audio_failure() {
@@ -283,6 +284,10 @@ mod tests {
         bundle.add_error("audio", "FFmpeg is not installed".to_string());
 
         assert!(!loudness_remeasure_wanted(&bundle));
+        assert!(
+            !settle_audio_measurement_version(&mut bundle),
+            "a message in neither vocabulary is not a settled verdict to stamp"
+        );
     }
 
     /// Feature: the vocabulary of a recorded `audio` failure

@@ -7,6 +7,7 @@
 //! spectral centroid, and silence region detection.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use uuid::Uuid;
@@ -70,7 +71,7 @@ const ANALYSIS_TIMEOUT_MARKER: &str = "Audio analysis timed out";
 /// Wording only, like [`ANALYSIS_TIMEOUT_MARKER`].
 const FFMPEG_SPAWN_FAILURE_MARKER: &str = "Failed to run FFmpeg";
 
-/// Diagnostic shapes FFmpeg prints when the filter a pass asked for is missing.
+/// Diagnostic shape FFmpeg prints when the filter a pass asked for is missing.
 ///
 /// Matched against raw FFmpeg stderr, at the point of capture — never against a
 /// message that has already had that stderr formatted into it.
@@ -82,7 +83,18 @@ const FFMPEG_SPAWN_FAILURE_MARKER: &str = "Failed to run FFmpeg";
 /// filter. A real diagnostic is emitted by the filter graph, so it carries that
 /// context's `[AVFilterGraph @ 0x…] ` prefix and quotes the filter name:
 /// `[AVFilterGraph @ 0x1] No such filter: 'ebur128'`.
-const MISSING_FILTER_MARKERS: [&str; 2] = ["] No such filter: '", "] Unknown filter '"];
+///
+/// This is the only shape a *pass* can hit. FFmpeg also has an
+/// `Unknown filter '<name>'.` message, but the only caller is the `-h filter=`
+/// help path, which prints it unprefixed and exits 0 — no filter graph is ever
+/// built there, so a pass can never see it.
+const MISSING_FILTER_MARKER: &str = "] No such filter: '";
+
+/// Words shared by every FFmpeg diagnostic for "this output has no streams".
+///
+/// The sentence they belong to is what actually classifies the line; see
+/// [`line_reports_no_audio_stream`].
+const NO_AUDIO_STREAM_MARKER: &str = "does not contain any stream";
 
 /// VAD frame size in milliseconds.
 const VAD_FRAME_MS: usize = 30;
@@ -310,10 +322,28 @@ impl AudioProfiler {
         &self,
         video_path: &Path,
     ) -> Result<LoudnessMeasurement, LoudnessPassFailure> {
-        let capture = self
+        if let Some(latched) =
+            latched_missing_loudness_filter(loudness_filter_latch(), &self.ffmpeg_path)
+        {
+            return Err(LoudnessPassFailure::Pass(latched));
+        }
+
+        let capture = match self
             .run_ffmpeg_filter(video_path, &loudness_filter_chain())
             .await
-            .map_err(LoudnessPassFailure::Pass)?;
+        {
+            Ok(capture) => capture,
+            Err(failure) => {
+                if let FilterPassFailure::MissingFilter { stderr_tail } = &failure {
+                    latch_missing_loudness_filter(
+                        loudness_filter_latch(),
+                        &self.ffmpeg_path,
+                        stderr_tail,
+                    );
+                }
+                return Err(LoudnessPassFailure::Pass(failure));
+            }
+        };
         measure_loudness(&capture.stderr).map_err(LoudnessPassFailure::Meter)
     }
 
@@ -458,13 +488,18 @@ impl AudioProfiler {
             other => FilterPassFailure::NotRun(other.to_string()),
         })?;
 
-        // Check for no-audio-stream condition before checking exit status,
-        // because FFmpeg may exit non-zero when there is no audio stream.
-        if has_no_audio_indicator(&capture.stderr) {
-            return Err(FilterPassFailure::NoAudioStream);
-        }
-
+        // Every cause below is a *failed* pass, and only a failed pass is read
+        // for one. A pass that exits 0 measured the file: FFmpeg refuses an
+        // output with no streams before it writes anything (exit 127 on the
+        // bundled 9.0.1), so a successful capture cannot be a missing audio
+        // stream — while its text routinely quotes the input path, and a file
+        // under `b-roll no audio/` used to talk a clean pass into reporting
+        // silence it never measured.
         if !capture.success {
+            if has_no_audio_indicator(&capture.stderr) {
+                return Err(FilterPassFailure::NoAudioStream);
+            }
+
             let stderr_tail = capture.stderr_tail(STDERR_TAIL_SIZE);
             // Decided here, over raw FFmpeg stderr, because this is the last
             // place the two are still separable: once the tail is formatted
@@ -497,23 +532,122 @@ impl AudioProfiler {
 // Parsing Helpers (testable without FFmpeg)
 // =============================================================================
 
-/// Checks whether an FFmpeg error indicates no audio stream in the input.
+/// Checks whether FFmpeg output says the input carried no audio stream.
+///
+/// Only ever asked of a *failed* pass — `AudioProfiler::run_ffmpeg_filter`
+/// checks the exit status first, and `map_audio_extraction_error` only sees an
+/// error — and one line at a time, against the whole diagnostic sentence rather
+/// than the words in it.
 fn has_no_audio_indicator(stderr: &str) -> bool {
-    stderr.contains("does not contain any stream")
-        || stderr.contains("Output file does not contain any stream")
-        || (stderr.contains("no audio") && stderr.contains("stream"))
+    stderr.lines().any(line_reports_no_audio_stream)
+}
+
+/// Whether one FFmpeg stderr line is the "this output has no streams" refusal.
+///
+/// An audio pass over a video-only input reaches it by construction: `-vn`
+/// drops the video and the audio filter has nothing to read, so the muxer is
+/// handed an output with no streams and refuses it. FFmpeg 9 prints
+/// `[out#0/null @ 0x…] Output file does not contain any stream`; builds before
+/// the context prefix printed `Output file #0 does not contain any stream`.
+///
+/// Both open the sentence with `Output file`, and the echoed input path never
+/// does — it arrives as `Error opening input file <path>.` — which is what
+/// keeps a file *named* after the diagnostic from claiming it. The old matcher
+/// took the bare words over the whole capture, so `b-roll no audio/clip.wav`
+/// came back as digital silence it had never been measured for.
+fn line_reports_no_audio_stream(line: &str) -> bool {
+    let Some((head, _)) = line.split_once(NO_AUDIO_STREAM_MARKER) else {
+        return false;
+    };
+
+    // Strip the logging context, but only where FFmpeg itself puts one: a `] `
+    // anywhere else in the line belongs to the message, quite possibly to a
+    // path inside it.
+    let sentence = match head.strip_prefix('[') {
+        Some(after_open) => match after_open.split_once("] ") {
+            Some((_, sentence)) => sentence,
+            None => return false,
+        },
+        None => head,
+    };
+
+    sentence.starts_with("Output file")
 }
 
 /// Checks whether FFmpeg stderr says the requested filter is not in this build.
 ///
 /// One line at a time, against the whole diagnostic shape: see
-/// [`MISSING_FILTER_MARKERS`] for why the bare words are not enough.
+/// [`MISSING_FILTER_MARKER`] for why the bare words are not enough.
 fn has_missing_filter_indicator(stderr: &str) -> bool {
-    stderr.lines().any(|line| {
-        MISSING_FILTER_MARKERS
-            .iter()
-            .any(|marker| line.contains(marker))
+    stderr
+        .lines()
+        .any(|line| line.contains(MISSING_FILTER_MARKER))
+}
+
+// =============================================================================
+// Missing-Filter Latch
+// =============================================================================
+
+/// One binary's recorded refusal to build the loudness filter chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MissingLoudnessFilter {
+    /// The FFmpeg binary that reported it. Another binary is not covered.
+    ffmpeg_path: PathBuf,
+    /// The stderr tail of that refusal, replayed so the message never changes.
+    stderr_tail: String,
+}
+
+/// The process-wide latch backing [`loudness_filter_latch`].
+static LOUDNESS_FILTER_LATCH: OnceLock<Mutex<Option<MissingLoudnessFilter>>> = OnceLock::new();
+
+/// Returns the latch recording which FFmpeg binary has no loudness filter.
+///
+/// A missing filter stays classified transient, because which filters exist is
+/// a property of the FFmpeg install and an install changes between launches.
+/// Within one launch it does not: without this latch every asset paid for its
+/// own full decode to be told the same thing by the same binary, and a library
+/// import turned one missing filter into one wasted decode per asset.
+///
+/// Keyed on the resolved binary path, so a build swapped in mid-launch — the
+/// user pointing `OPENREELIO_FFMPEG_PATH` somewhere else, a managed download
+/// finishing — is tried on its own merits. A binary replaced *in place* keeps
+/// the latch until the next launch, which is the same bound the transient
+/// classification already promised.
+fn loudness_filter_latch() -> &'static Mutex<Option<MissingLoudnessFilter>> {
+    LOUDNESS_FILTER_LATCH.get_or_init(|| Mutex::new(None))
+}
+
+/// Replays the recorded refusal when `ffmpeg_path` is the binary that gave it.
+///
+/// A poisoned latch answers `None`: paying for a decode is the safe direction
+/// when the record cannot be read.
+fn latched_missing_loudness_filter(
+    latch: &Mutex<Option<MissingLoudnessFilter>>,
+    ffmpeg_path: &Path,
+) -> Option<FilterPassFailure> {
+    let latched = latch.lock().ok()?;
+    let recorded = latched.as_ref()?;
+
+    (recorded.ffmpeg_path.as_path() == ffmpeg_path).then(|| FilterPassFailure::MissingFilter {
+        stderr_tail: recorded.stderr_tail.clone(),
     })
+}
+
+/// Records that `ffmpeg_path` could not build the loudness filter chain.
+///
+/// Replaces any earlier record: only the binary a pass just ran against is
+/// worth short-circuiting, and the previous one may well be gone.
+fn latch_missing_loudness_filter(
+    latch: &Mutex<Option<MissingLoudnessFilter>>,
+    ffmpeg_path: &Path,
+    stderr_tail: &str,
+) {
+    if let Ok(mut latched) = latch.lock() {
+        *latched = Some(MissingLoudnessFilter {
+            ffmpeg_path: ffmpeg_path.to_path_buf(),
+            stderr_tail: stderr_tail.to_string(),
+        });
+    }
 }
 
 fn map_audio_extraction_error(
@@ -712,8 +846,13 @@ impl FilterPassFailure {
     /// A missing filter is transient too, and deliberately so: which filters
     /// exist is a property of the FFmpeg install, and that can change between
     /// launches — a bundled binary replaced by an update, a system FFmpeg the
-    /// user just installed. The caller's once-per-session set bounds what the
-    /// optimism costs to one decode per launch.
+    /// user just installed.
+    ///
+    /// On its own that optimism costs one decode per asset per launch, which a
+    /// library import multiplies by the whole library. [`loudness_filter_latch`]
+    /// is what bounds it to one: the first refusal records the binary that gave
+    /// it, and every later loudness pass against that same binary replays the
+    /// recorded failure without decoding anything.
     pub(crate) fn kind(&self) -> LoudnessFailureKind {
         match self {
             Self::NoAudioStream => LoudnessFailureKind::Unmeasurable,
@@ -1151,14 +1290,57 @@ mod tests {
         "Error opening input files: Invalid data found when processing input\n",
     );
 
-    /// Verbatim stderr of the bundled FFmpeg 9.0.1 asked for a filter it lacks.
+    /// Stderr of the bundled FFmpeg 9.0.1 asked for a filter it lacks.
+    ///
+    /// Captured from a real pass over the 4 s stereo sine fixture — only the
+    /// temporary fixture path is substituted, because that one is per-machine.
     const MISSING_FILTER_STDERR: &str = concat!(
-        "Input #0, wav, from 'tone.wav':\n",
-        "  Duration: 00:00:02.00, bitrate: 1536 kb/s\n",
-        "  Stream #0:0: Audio: pcm_s16le, 48000 Hz, stereo, s16, 1536 kb/s\n",
-        "[AVFilterGraph @ 0x1] No such filter: 'nosuchfilter123'\n",
+        "[aist#0:0/pcm_s16le @ 0000020e8d557400] Guessed Channel Layout: stereo\n",
+        "Input #0, wav, from 'C:/fixtures/sine_stereo.wav':\n",
+        "  Metadata:\n",
+        "    encoder         : Lavf63.1.101\n",
+        "  Duration: 00:00:04.00, bitrate: 1536 kb/s\n",
+        "  Stream #0:0: Audio: pcm_s16le ([1][0][0][0] / 0x0001), 48000 Hz, stereo, s16, \
+         1536 kb/s\n",
+        "[AVFilterGraph @ 0000020e8f0e0cc0] No such filter: 'nosuchfilter123'\n",
         "Error opening output file -.\n",
         "Error opening output files: Filter not found\n",
+    );
+
+    /// Stderr of the bundled FFmpeg 9.0.1 running the silence pass over a
+    /// video-only input, whose path is substituted as above.
+    ///
+    /// The pass adds `-vn`, so the audio filter has nothing to read and the
+    /// muxer refuses an output with no streams. FFmpeg exits 127.
+    const VIDEO_ONLY_INPUT_STDERR: &str = concat!(
+        "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'C:/fixtures/videoonly.mp4':\n",
+        "  Duration: 00:00:02.00, start: 0.000000, bitrate: 50 kb/s\n",
+        "  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), \
+         yuv420p(progressive), 320x240 [SAR 1:1 DAR 4:3], 45 kb/s, 25 fps\n",
+        "Output #0, null, to 'pipe:':\n",
+        "[out#0/null @ 0000024133acec80] Output file does not contain any stream\n",
+        "Error opening output file -.\n",
+        "Error opening output files: Invalid argument\n",
+    );
+
+    /// Stderr of a clean silence pass over an audible file under `b-roll no audio/`.
+    ///
+    /// Captured the same way. Both ingredients of the old matcher are here — the
+    /// words `no audio` in the echoed path, and the lowercase `stream` that the
+    /// summary line's `other streams:0KiB` supplies on every single pass — over
+    /// a run that exited 0 having measured the file perfectly.
+    const AUDIBLE_INPUT_UNDER_A_TRAP_PATH_STDERR: &str = concat!(
+        "[aist#0:0/pcm_s16le @ 000001693be067c0] Guessed Channel Layout: stereo\n",
+        "Input #0, wav, from 'C:/fixtures/b-roll no audio/clip.wav':\n",
+        "  Duration: 00:00:04.00, bitrate: 1536 kb/s\n",
+        "  Stream #0:0: Audio: pcm_s16le ([1][0][0][0] / 0x0001), 48000 Hz, stereo, s16, \
+         1536 kb/s\n",
+        "Stream mapping:\n",
+        "  Stream #0:0 -> #0:0 (pcm_s16le (native) -> pcm_s16le (native))\n",
+        "Output #0, null, to 'pipe:':\n",
+        "  Stream #0:0: Audio: pcm_s16le, 48000 Hz, stereo, s16, 1536 kb/s\n",
+        "[out#0/null @ 000001693bdbe080] video:0KiB audio:750KiB subtitle:0KiB \
+         other streams:0KiB global headers:0KiB muxing overhead: unknown\n",
     );
 
     /// Feature: loudness failure classification
@@ -1740,24 +1922,56 @@ lavfi.aspectralstats.1.centroid=2800.0
     // No-Audio Detection Tests
     // -------------------------------------------------------------------------
 
+    /// Feature: no-audio-stream detection
+    /// Scenario: the muxer refuses an output the audio pass left empty
+    ///   Given the stderr of a silence pass over a video-only input
+    ///   When it is read for a no-audio verdict
+    ///   Then it is one, in the FFmpeg 9 spelling and the older one alike
     #[test]
     fn should_detect_no_audio_stream_indicator() {
+        assert!(has_no_audio_indicator(VIDEO_ONLY_INPUT_STDERR));
+        // The spelling of builds from before the context prefix.
         assert!(has_no_audio_indicator(
-            "Output file does not contain any stream"
-        ));
-        assert!(has_no_audio_indicator(
-            "Error: file does not contain any stream matching the input"
+            "Output file #0 does not contain any stream"
         ));
         assert!(!has_no_audio_indicator("Normal processing output"));
     }
 
+    /// Feature: no-audio-stream detection
+    /// Scenario: an audible file lives under a directory named `b-roll no audio`
+    ///   Given the stderr of a pass that measured that file and exited 0
+    ///   When it is read for a no-audio verdict
+    ///   Then it is not one
+    ///   And the echoed path cannot claim the diagnostic on a failed pass either
+    ///
+    /// The old matcher took `"no audio"` and `"stream"` anywhere in the capture,
+    /// and checked before the exit status, so every asset under such a folder
+    /// was cached as [`AudioProfile::silent`] — marked measured, with no error
+    /// recorded — while its audio played fine.
+    #[test]
+    fn should_not_read_a_no_audio_verdict_out_of_the_echoed_input_path() {
+        assert!(!has_no_audio_indicator(
+            AUDIBLE_INPUT_UNDER_A_TRAP_PATH_STDERR
+        ));
+        // Even on a failed pass, the sentence FFmpeg opens with is what decides:
+        // an echoed path arrives under `Error opening input file`.
+        assert!(!has_no_audio_indicator(
+            "Error opening input file C:/b-roll/does not contain any stream.mp4."
+        ));
+        assert!(!has_no_audio_indicator(
+            "[in#0 @ 0x1] Error opening input: a codec that does not contain any stream"
+        ));
+        // The shape must be found on one line, not assembled across two.
+        assert!(!has_no_audio_indicator(
+            "[out#0/null @ 0x1] Output file\ndoes not contain any stream"
+        ));
+    }
+
     #[test]
     fn should_detect_a_missing_filter_indicator() {
+        assert!(has_missing_filter_indicator(MISSING_FILTER_STDERR));
         assert!(has_missing_filter_indicator(
             "[AVFilterGraph @ 0x1] No such filter: 'ebur128'"
-        ));
-        assert!(has_missing_filter_indicator(
-            "[AVFilterGraph @ 0x1] Unknown filter 'aspectralstats'"
         ));
         assert!(!has_missing_filter_indicator(
             "Error during demuxing: Input/output error"
@@ -1767,13 +1981,53 @@ lavfi.aspectralstats.1.centroid=2800.0
         assert!(!has_missing_filter_indicator(
             "Error opening input file No such filter.mp4."
         ));
-        assert!(!has_missing_filter_indicator(
-            "[in#0 @ 0x1] Error opening input: Unknown filter is not a codec"
-        ));
+        // The one other spelling FFmpeg has is printed by `-h filter=<name>`,
+        // which builds no graph and exits 0, so a pass can never capture it.
+        assert!(!has_missing_filter_indicator("Unknown filter 'ebur128'."));
         // The shape must be found on one line, not assembled across two.
         assert!(!has_missing_filter_indicator(
             "[in#0 @ 0x1] Error opening input file a]\nNo such filter: 'x'"
         ));
+    }
+
+    /// Feature: missing-filter short circuit
+    /// Scenario: a second asset is profiled by the binary that already refused
+    ///   Given a latch holding one binary's missing-filter refusal
+    ///   When another pass asks about that same binary
+    ///   Then the recorded failure comes back verbatim, with no decode
+    ///   And a different binary is not covered by it
+    ///
+    /// The refusal stays classified transient — an install changes between
+    /// launches — but within one launch it does not, and without the latch a
+    /// library import paid for a full decode per asset to hear it again.
+    #[test]
+    fn should_replay_a_missing_filter_refusal_for_the_binary_that_gave_it() {
+        let latch = Mutex::new(None);
+        let bundled = Path::new("/opt/openreelio/ffmpeg");
+        let system = Path::new("/usr/bin/ffmpeg");
+
+        assert!(latched_missing_loudness_filter(&latch, bundled).is_none());
+
+        let tail = "[AVFilterGraph @ 0x1] No such filter: 'ebur128'";
+        latch_missing_loudness_filter(&latch, bundled, tail);
+
+        assert_eq!(
+            latched_missing_loudness_filter(&latch, bundled),
+            Some(FilterPassFailure::MissingFilter {
+                stderr_tail: tail.to_string(),
+            }),
+            "the short circuit must report exactly what the pass reported"
+        );
+        assert!(
+            latched_missing_loudness_filter(&latch, system).is_none(),
+            "which filters exist is a property of one binary, not of the machine"
+        );
+
+        // A binary swapped in mid-launch replaces the record rather than
+        // adding to it: only the one a pass just ran against is worth replaying.
+        latch_missing_loudness_filter(&latch, system, tail);
+        assert!(latched_missing_loudness_filter(&latch, bundled).is_none());
+        assert!(latched_missing_loudness_filter(&latch, system).is_some());
     }
 
     // -------------------------------------------------------------------------
@@ -1836,6 +2090,9 @@ lavfi.aspectralstats.1.centroid=2800.0
     /// Length of the synthesized fixtures, in seconds.
     const FIXTURE_DURATION_SEC: f64 = 4.0;
 
+    /// Length of the video-only fixture, in seconds.
+    const VIDEO_ONLY_FIXTURE_SEC: f64 = 2.0;
+
     /// Tolerance on a measured peak, in dB.
     const PEAK_TOLERANCE_DB: f64 = 0.5;
 
@@ -1874,6 +2131,28 @@ lavfi.aspectralstats.1.centroid=2800.0
         run_ffmpeg(
             ffmpeg,
             &["-f", "lavfi", "-i", source.as_str(), "-c:a", "pcm_s16le"],
+            path,
+        )
+    }
+
+    /// Writes a short H.264 clip with no audio stream at all to `path`.
+    ///
+    /// The one input the audio passes genuinely cannot measure, and the only
+    /// way to provoke FFmpeg's own "no streams" refusal rather than a
+    /// hand-written spelling of it.
+    fn write_video_only_fixture(ffmpeg: &Path, path: &Path) -> bool {
+        run_ffmpeg(
+            ffmpeg,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
             path,
         )
     }
@@ -2239,5 +2518,99 @@ lavfi.aspectralstats.1.centroid=2800.0
             matches!(failure, FilterPassFailure::MissingFilter { .. }),
             "the filter graph's own diagnostic must be recognised, got {failure:?}"
         );
+    }
+
+    /// Feature: no-audio-stream detection
+    /// Scenario: an audible file sits in a folder named after the verdict
+    ///   Given a real audible clip at `b-roll no audio/clip.wav`
+    ///   And a real file that carries video and no audio stream at all
+    ///   When each is profiled by a real FFmpeg
+    ///   Then the audible clip is measured, with its loudness numbers
+    ///   And only the video-only file is reported as having no audio
+    ///
+    /// This is the regression the pure test above asserts over captured
+    /// transcripts. The matcher took `"no audio"` and `"stream"` anywhere in
+    /// the capture and ran before the exit status, so a clean pass over an
+    /// audible file — whose stderr echoes the input path and always ends with
+    /// `other streams:0KiB` — was cached as silence, marked measured, with no
+    /// error to say otherwise.
+    #[tokio::test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    async fn should_read_a_no_audio_verdict_from_the_diagnostic_and_not_from_the_path() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let profiler = AudioProfiler::new(ffmpeg.clone());
+        let silence_filter =
+            format!("silencedetect=n={SILENCE_THRESHOLD_DB}:d={SILENCE_MIN_DURATION}");
+
+        // An audible clip whose *folder* carries the words of the verdict.
+        let trap_dir = dir.path().join("b-roll no audio");
+        std::fs::create_dir_all(&trap_dir).expect("create the trap directory");
+        let audible = trap_dir.join("clip.wav");
+        if !write_stereo_sine_fixture(&ffmpeg, &audible) {
+            skip_without_ffmpeg("ffmpeg could not synthesize the stereo sine fixture");
+            return;
+        }
+
+        let capture = profiler
+            .run_ffmpeg_filter(&audible, &silence_filter)
+            .await
+            .expect("an audible file must pass the silence filter");
+        assert!(
+            !has_no_audio_indicator(&capture.stderr),
+            "a clean pass must not read as no audio: {}",
+            capture.stderr
+        );
+
+        let analysis = profiler
+            .analyze(&audible, FIXTURE_DURATION_SEC)
+            .await
+            .expect("the profiler must measure an audible clip");
+        assert!(
+            analysis.loudness_error.is_none(),
+            "an audible clip must not record a loudness failure: {:?}",
+            analysis.loudness_error
+        );
+        assert!(analysis.profile.loudness_measured);
+        assert!(
+            !analysis.profile.loudness_profile.is_empty(),
+            "the silent profile has no curve; a measured one must"
+        );
+        assert!(
+            (analysis.profile.peak_db - FIXTURE_PEAK_DBFS).abs() <= PEAK_TOLERANCE_DB,
+            "peak {} dB is further than {PEAK_TOLERANCE_DB} dB from the synthesized \
+             {FIXTURE_PEAK_DBFS} dBFS",
+            analysis.profile.peak_db
+        );
+
+        // A file that really has no audio stream, so FFmpeg prints its own
+        // refusal rather than a hand-written spelling of one.
+        let video_only = dir.path().join("videoonly.mp4");
+        if !write_video_only_fixture(&ffmpeg, &video_only) {
+            skip_without_ffmpeg("ffmpeg could not synthesize the video-only fixture");
+            return;
+        }
+
+        let failure = profiler
+            .run_ffmpeg_filter(&video_only, &silence_filter)
+            .await
+            .expect_err("an input with no audio stream must fail the pass");
+        assert_eq!(
+            failure,
+            FilterPassFailure::NoAudioStream,
+            "FFmpeg's own no-streams refusal must be recognised"
+        );
+
+        let analysis = profiler
+            .analyze(&video_only, VIDEO_ONLY_FIXTURE_SEC)
+            .await
+            .expect("a video-only input yields the silent profile, not an error");
+        assert!(
+            analysis.profile.loudness_profile.is_empty(),
+            "there was nothing to measure, so there is no curve"
+        );
+        assert_eq!(analysis.profile.peak_db, SILENCE_FLOOR_DB);
     }
 }
