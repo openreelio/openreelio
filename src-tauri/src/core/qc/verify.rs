@@ -45,9 +45,9 @@
 
 use super::{
     crossref_black_ranges_with_gaps, measure_rendered_file_detailed, sample_caption_bands,
-    CaptionSampleOptions, MeasureOptions, MeasuredWindow, MeasurementReport, QCContext, QCEngine,
-    QCEngineConfig, QCReport, QCSeverityFilter, RuleStatus, Severity, ViolationFix,
-    CAPTION_CONTRAST_CHECK_ID,
+    CaptionSampleOptions, ContrastThresholds, MeasureOptions, MeasuredWindow, MeasurementReport,
+    QCContext, QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleStatus, Severity,
+    ViolationFix, CAPTION_CONTRAST_CHECK_ID,
 };
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::project::ProjectState;
@@ -417,9 +417,20 @@ impl VerifyPlan {
             return None;
         }
 
+        // The pass decides which cues never need a decode, and it can only do
+        // that against the thresholds the rule will grade the rest with: a run
+        // that raised `min_contrast` must not have boxes waved through against
+        // the default and then be told everything passed.
+        let thresholds = self
+            .engine
+            .get_rule_by_check_id(CAPTION_CONTRAST_CHECK_ID)
+            .map(|rule| ContrastThresholds::from_config(&self.config.get_rule_config(rule.name())))
+            .unwrap_or_default();
+
         Some(CaptionSampleOptions {
             run_timeout: remaining,
             file_duration_sec: Some(file_duration_sec),
+            thresholds,
             ..CaptionSampleOptions::default()
         })
     }

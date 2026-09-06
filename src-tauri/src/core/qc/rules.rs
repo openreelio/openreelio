@@ -1519,6 +1519,23 @@ impl QCRule for AudioClippingRule {
 // CaptionSafeAreaRule - Ensures captions are in safe area
 // ============================================================================
 
+/// Code point ranges drawn on a narrow, roughly half-em body.
+///
+/// Latin with its supplements, the IPA and modifier blocks that go with it,
+/// Greek, Cyrillic, and the general punctuation and currency signs those
+/// scripts are set with. Everything outside them — Hangul, Han, Kana, the
+/// fullwidth forms, and the scripts this list does not know — is charged a full
+/// em by [`CaptionSafeAreaRule::glyph_advance_factor`], which is the safe way
+/// to be wrong about a script nobody measured.
+const NARROW_SCRIPT_RANGES: [(u32, u32); 6] = [
+    (0x0000, 0x02FF), // ASCII, Latin-1, Latin Extended-A/B, IPA, modifiers
+    (0x0370, 0x03FF), // Greek and Coptic
+    (0x0400, 0x052F), // Cyrillic and Cyrillic Supplement
+    (0x1E00, 0x1FFF), // Latin Extended Additional, Greek Extended
+    (0x2000, 0x206F), // General punctuation
+    (0x20A0, 0x20BF), // Currency symbols
+];
+
 /// Rule that ensures captions remain within the title-safe area
 ///
 /// Works purely from timeline structure: caption clips carry their position and
@@ -1562,7 +1579,8 @@ impl CaptionSafeAreaRule {
     ///
     /// Core has no text shaping, so rendered text width can only be
     /// approximated; half an em is the usual figure for mixed-case Latin and is
-    /// intentionally coarse.
+    /// intentionally coarse. It is only right for the scripts that are drawn on
+    /// a narrow body — see [`CaptionSafeAreaRule::glyph_advance_factor`].
     const GLYPH_ADVANCE_FACTOR: f64 = 0.5;
 
     /// Maximum estimated text-box width as a percentage of canvas width
@@ -1600,12 +1618,60 @@ impl CaptionSafeAreaRule {
             .unwrap_or(default_size)
     }
 
+    /// Reads the extra advance, in pixels, the style puts between glyphs.
+    ///
+    /// Read under both spellings and clamped exactly as the render path clamps
+    /// it before writing the ASS `\fsp`, so a letter-spaced style widens the
+    /// estimate by what it will actually add rather than by nothing at all.
+    fn letter_spacing_px(style: Option<&serde_json::Value>) -> f64 {
+        let Some(value) = style else {
+            return 0.0;
+        };
+
+        value
+            .get("letterSpacing")
+            .or_else(|| value.get("letter_spacing"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|spacing| spacing.is_finite())
+            .unwrap_or(0.0)
+            .clamp(-100.0, 200.0)
+            .round()
+    }
+
+    /// Advance of one character as a fraction of the font size.
+    ///
+    /// Half an em is the figure for the scripts that are set on a narrow body;
+    /// it is wrong by a factor of two for the ones that are not. Hangul, Han,
+    /// Kana and the fullwidth forms are drawn on a full-em square, so a Korean
+    /// line estimated at half an em came out half as wide as libass drew it —
+    /// which understated the safe-area breach and, worse, handed the contrast
+    /// pass a column the words ran straight out of, so the band it measured was
+    /// not the band the words sat on. Anything outside the narrow ranges is
+    /// therefore charged a whole em: that overstates a handful of narrow
+    /// scripts, which costs a wider crop, and understates none of the wide
+    /// ones, which would cost a wrong answer.
+    fn glyph_advance_factor(character: char) -> f64 {
+        let code = u32::from(character);
+        let narrow = NARROW_SCRIPT_RANGES
+            .iter()
+            .any(|(first, last)| code >= *first && code <= *last);
+
+        if narrow {
+            Self::GLYPH_ADVANCE_FACTOR
+        } else {
+            1.0
+        }
+    }
+
     /// Returns the estimated text box size as (width, height) percentages.
     ///
     /// Both axes scale with the font size and the canvas, because that is what
     /// the renderer does: a caption is burned in at an absolute size, so the
     /// same text occupies twice the width on a 1080-wide vertical canvas that
-    /// it does on a 1920-wide landscape one.
+    /// it does on a 1920-wide landscape one. The width also folds in the
+    /// style's letter spacing and the script each character is drawn in (see
+    /// [`Self::glyph_advance_factor`]), because a line the estimate undershoots
+    /// is a breach nobody reports and a crop that measures the wrong pixels.
     ///
     /// `wrap_box_width_percent` is how wide the renderer lets the text run
     /// before breaking it: [`CAPTION_WRAP_BOX_WIDTH_PERCENT`] for a preset
@@ -1622,13 +1688,23 @@ impl CaptionSafeAreaRule {
         wrap_box_width_percent: f64,
     ) -> (f64, f64) {
         let label = clip.label.as_deref().unwrap_or_default();
-        let char_count = label.chars().count() as f64;
 
         let font_size = Self::font_size_px(clip.caption_style.as_ref());
+        let letter_spacing = Self::letter_spacing_px(clip.caption_style.as_ref());
+
+        // Per character, because the advance is not one number: a line that
+        // mixes scripts is as wide as the sum of what each glyph takes, and the
+        // style's own tracking is added to every one of them.
+        let advance_px: f64 = label
+            .chars()
+            .map(|character| font_size * Self::glyph_advance_factor(character) + letter_spacing)
+            .sum();
 
         let canvas_width = if canvas_width > 0 { canvas_width } else { 1 };
-        let unwrapped_width_percent =
-            char_count * font_size * Self::GLYPH_ADVANCE_FACTOR / f64::from(canvas_width) * 100.0;
+        // Negative tracking can pull the sum below zero on a short line, and a
+        // negative width is not a box; the renderer draws nothing narrower than
+        // nothing either.
+        let unwrapped_width_percent = (advance_px / f64::from(canvas_width) * 100.0).max(0.0);
 
         let (width_percent, line_count) = if label.chars().any(char::is_whitespace) {
             let bounded = unwrapped_width_percent.min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);

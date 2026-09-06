@@ -53,7 +53,15 @@
 //!   the caption layer's own opacity, which is the style's `opacity` (or the
 //!   alpha of its text colour) times the clip's. A 90 %-opaque box on a clip
 //!   faded to a tenth paints at nine percent, so the same factors are folded
-//!   into the box alpha here before anything is decided from it.
+//!   into the box alpha here before anything is decided from it. The *glyphs*
+//!   carry the same factor — `drawtext` puts it on `fontcolor`, the ASS path on
+//!   `PrimaryColour` — so the words the viewer reads are a blend of the text
+//!   colour and the band behind them, and the separation actually drawn is the
+//!   layer opacity times the one the two colours imply. Every contrast this
+//!   module quotes is scaled by it, on the measured side
+//!   ([`CaptionBandSample::contrast`]) and in [`box_guarantees_legibility`]
+//!   alike: a box that clears the floor for opaque words does not clear it for
+//!   words drawn at six tenths.
 //! * **Text colour** — the renderers fall back to `#FFFFFF`, not to
 //!   [`CaptionStyle::default`](crate::core::captions::CaptionStyle::default), when the blob names no readable colour.
 //!
@@ -95,11 +103,11 @@
 //! # Coverage
 //!
 //! Not every candidate cue can be measured: a decode can fail, the run can hit
-//! its deadline, the per-run frame cap can bite, and a cue can lie past the end
-//! of a file shorter than the window that was declared for it. Those counts are
-//! carried in [`CaptionSampleCoverage`] and reported as an informational
-//! finding, because "we measured none of them" must never reach an agent as
-//! `passed`.
+//! its deadline, the per-run frame cap can bite, a cue can lie past the end of
+//! a file shorter than the window that was declared for it, and a cue faded out
+//! of the frame draws no glyphs to measure. Those counts are carried in
+//! [`CaptionSampleCoverage`] and reported as an informational finding, because
+//! "we measured none of them" must never reach an agent as `passed`.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -239,6 +247,21 @@ pub struct CaptionBandSample {
     /// Defaulted on read the same way, and meaningless where no box is painted.
     #[serde(default)]
     pub box_luminance: f64,
+    /// Opacity the cue's glyphs are drawn at, 0–1
+    ///
+    /// Both renderers put the caption layer's opacity on the text colour
+    /// itself, so this is how much of the text colour reaches the picture - see
+    /// [`CaptionBandSample::contrast`]. Defaulted to fully opaque on read,
+    /// because a report written before the glyphs' own alpha was measured
+    /// graded the colours undiluted and must keep reading the way it was
+    /// written.
+    #[serde(default = "opaque_layer")]
+    pub layer_opacity: f64,
+}
+
+/// Layer opacity assumed for a report that carries none.
+fn opaque_layer() -> f64 {
+    1.0
 }
 
 impl CaptionBandSample {
@@ -262,8 +285,16 @@ impl CaptionBandSample {
     }
 
     /// Separation between the text and what sits behind it, 0–1.
+    ///
+    /// The glyphs are painted at [`layer_opacity`](Self::layer_opacity) over
+    /// the band, so what the viewer reads is that much of the text colour over
+    /// the rest of the picture and the separation on the screen is that
+    /// fraction of the one the two colours imply. A caption faded to a third is
+    /// a third as readable as its palette suggests, and grading it on the
+    /// palette alone reported white-on-white cues as comfortable.
     pub fn contrast(&self) -> f64 {
-        (self.text_luminance - self.effective_band_luminance()).abs()
+        self.layer_opacity.clamp(0.0, 1.0)
+            * (self.text_luminance - self.effective_band_luminance()).abs()
     }
 }
 
@@ -276,6 +307,10 @@ impl CaptionBandSample {
 #[serde(rename_all = "camelCase")]
 pub struct CaptionSampleCoverage {
     /// Unprotected cues the declared window holds
+    ///
+    /// Includes the cues faded out of the frame: they are cues the report has
+    /// to account for, and dropping them from the total made a run that graded
+    /// none of them look like a run that graded all of them.
     pub cues: usize,
     /// Cues whose band was measured
     pub sampled: usize,
@@ -287,6 +322,8 @@ pub struct CaptionSampleCoverage {
     pub over_cap: usize,
     /// Cues dropped because the pass ran out of time
     pub timed_out: usize,
+    /// Cues whose layer is faded out, so no glyphs reach the picture
+    pub faded_out: usize,
 }
 
 impl CaptionSampleCoverage {
@@ -302,6 +339,7 @@ impl CaptionSampleCoverage {
             (self.beyond_file, "beyond the file"),
             (self.over_cap, "over the frame cap"),
             (self.timed_out, "out of time"),
+            (self.faded_out, "faded out"),
         ]
         .into_iter()
         .filter(|(count, _)| *count > 0)
@@ -327,6 +365,52 @@ pub struct CaptionBandSampling {
     pub notes: Vec<String>,
 }
 
+/// The numbers a caption band is graded against.
+///
+/// The rule reads them from its [`RuleConfig`], and the sampling pass has to
+/// grade against the same pair: a box is waved through without a decode only
+/// when it cannot fail *this run's* thresholds, so a caller who raised
+/// `min_contrast` would otherwise have cues skipped against the default and
+/// never see the finding they asked for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContrastThresholds {
+    /// Smallest separation, 0–1, a cue may show and still read
+    pub min_contrast: f64,
+    /// Largest band spread, 0–1, a cue may sit over and still read
+    pub max_band_stddev: f64,
+}
+
+impl Default for ContrastThresholds {
+    fn default() -> Self {
+        Self {
+            min_contrast: DEFAULT_MIN_CONTRAST,
+            max_band_stddev: DEFAULT_MAX_BAND_STDDEV,
+        }
+    }
+}
+
+impl ContrastThresholds {
+    /// Resolves the thresholds one rule configuration asks for.
+    ///
+    /// A missing or non-finite parameter falls back to the default and a
+    /// negative one is read as its magnitude, which is how the rule has always
+    /// read them.
+    pub fn from_config(config: &RuleConfig) -> Self {
+        let resolve = |key: &str, fallback: f64| {
+            config
+                .get_param::<f64>(key)
+                .filter(|value| value.is_finite())
+                .unwrap_or(fallback)
+                .abs()
+        };
+
+        Self {
+            min_contrast: resolve("min_contrast", DEFAULT_MIN_CONTRAST),
+            max_band_stddev: resolve("max_band_stddev", DEFAULT_MAX_BAND_STDDEV),
+        }
+    }
+}
+
 /// How the sampling pass is bounded.
 #[derive(Debug, Clone)]
 pub struct CaptionSampleOptions {
@@ -349,6 +433,12 @@ pub struct CaptionSampleOptions {
     /// end returns the last frame rather than nothing. A cue past this point is
     /// reported as unmeasurable instead of graded against the wrong shot.
     pub file_duration_sec: Option<f64>,
+    /// Thresholds the run grades against
+    ///
+    /// The pass decides which cues never need a decode, and that decision is
+    /// only sound against the thresholds the rule will grade the rest with, so
+    /// the caller resolves them once and hands them to both.
+    pub thresholds: ContrastThresholds,
 }
 
 impl Default for CaptionSampleOptions {
@@ -359,6 +449,7 @@ impl Default for CaptionSampleOptions {
             timeout: SAMPLE_TIMEOUT,
             run_timeout: SAMPLE_RUN_TIMEOUT,
             file_duration_sec: None,
+            thresholds: ContrastThresholds::default(),
         }
     }
 }
@@ -382,11 +473,26 @@ const MAX_POSSIBLE_BAND_STDDEV: f64 = 0.5;
 /// so the band the box leaves lies in `[alpha * box, alpha * box + (1 - alpha)]`
 /// and its surviving spread is at most `(1 - alpha) * `
 /// [`MAX_POSSIBLE_BAND_STDDEV`]. A box is protection only when the *whole* of
-/// that interval clears [`DEFAULT_MIN_CONTRAST`] and that spread clears
-/// [`DEFAULT_MAX_BAND_STDDEV`] — which is why an opaque box is not enough by
-/// itself: white text on a ninety-percent *white* box is inside the interval,
-/// reads as nothing over a dark shot, and is measured like any other cue.
-fn box_guarantees_legibility(text_luminance: f64, box_alpha: f64, box_luminance: f64) -> bool {
+/// that interval clears [`ContrastThresholds::min_contrast`] and that spread
+/// clears [`ContrastThresholds::max_band_stddev`] — which is why an opaque box
+/// is not enough by itself: white text on a ninety-percent *white* box is
+/// inside the interval, reads as nothing over a dark shot, and is measured like
+/// any other cue.
+///
+/// `layer_opacity` is what the glyphs themselves are drawn at, and it scales
+/// the separation the same way it scales the measured one: the words only ever
+/// reach the picture at that fraction of their colour, so a box that would
+/// guarantee an opaque caption guarantees six tenths of that for a caption
+/// drawn at six tenths. At an opacity of zero nothing is guaranteed and nothing
+/// needs to be - [`CaptionPaint::draws_text`] takes those cues out of the pass
+/// before this is asked.
+fn box_guarantees_legibility(
+    text_luminance: f64,
+    box_alpha: f64,
+    box_luminance: f64,
+    layer_opacity: f64,
+    thresholds: ContrastThresholds,
+) -> bool {
     let alpha = box_alpha.clamp(0.0, 1.0);
     let lowest = alpha * box_luminance.clamp(0.0, 1.0);
     let highest = lowest + (1.0 - alpha);
@@ -401,8 +507,8 @@ fn box_guarantees_legibility(text_luminance: f64, box_alpha: f64, box_luminance:
         0.0
     };
 
-    separation >= DEFAULT_MIN_CONTRAST
-        && (1.0 - alpha) * MAX_POSSIBLE_BAND_STDDEV <= DEFAULT_MAX_BAND_STDDEV
+    separation * layer_opacity.clamp(0.0, 1.0) >= thresholds.min_contrast
+        && (1.0 - alpha) * MAX_POSSIBLE_BAND_STDDEV <= thresholds.max_band_stddev
 }
 
 /// What a cue's style says about the words themselves.
@@ -432,29 +538,34 @@ impl CaptionPaint {
     ///
     /// The gate the ASS path keys `BorderStyle: 3` off, and the one `drawtext`
     /// keys `box=1` off, so it is what both renderers can be asserted against.
-    /// Both quantise the alpha before they draw - `AssColor` to an inverted
-    /// byte, `drawtext` to two decimals - so a box under half a step of alpha
-    /// is written out and paints nothing, and this mirrors that rounding rather
-    /// than asking whether the alpha is merely non-zero.
+    /// See [`paints_at`] for the rounding.
     fn paints_box(&self) -> bool {
-        ((1.0 - self.box_alpha) * 255.0).round() < 255.0
+        paints_at(self.box_alpha)
     }
 
     /// Whether a box that settles the question on its own is painted.
     ///
     /// Alpha alone never answers this: see [`box_guarantees_legibility`].
-    fn protects_with_box(&self) -> bool {
+    fn protects_with_box(&self, thresholds: ContrastThresholds) -> bool {
         self.paints_box()
-            && box_guarantees_legibility(self.text_luminance, self.box_alpha, self.box_luminance)
+            && box_guarantees_legibility(
+                self.text_luminance,
+                self.box_alpha,
+                self.box_luminance,
+                self.layer_opacity,
+                thresholds,
+            )
     }
 
     /// Whether the glyphs reach the picture at all.
     ///
     /// A caption layer faded to nothing draws nothing, and a cue nobody can see
     /// is not a legibility defect - it is a different one, and reporting it here
-    /// would be reporting the contrast of pixels that were never drawn.
+    /// would be reporting the contrast of pixels that were never drawn. Graded
+    /// at the same quantisation as the box (see [`paints_at`]), because the
+    /// glyphs' alpha is written through the same rounding.
     fn draws_text(&self) -> bool {
-        self.layer_opacity > 0.0
+        paints_at(self.layer_opacity)
     }
 
     /// Whether the outline the style asks for actually reaches the picture.
@@ -468,9 +579,20 @@ impl CaptionPaint {
     }
 
     /// Whether the style already protects the words from their background.
-    fn is_mitigated(&self) -> bool {
-        self.protects_with_box() || self.draws_outline()
+    fn is_mitigated(&self, thresholds: ContrastThresholds) -> bool {
+        self.protects_with_box(thresholds) || self.draws_outline()
     }
+}
+
+/// Whether an alpha survives the rounding both renderers write it through.
+///
+/// `AssColor` quantises to an inverted byte and `drawtext` to two decimals, so
+/// anything under half a step of alpha is written out and paints nothing. The
+/// byte is the finer of the two and is the one every decoration is asked
+/// against here, so the box, the stroke and the glyphs all answer the same
+/// question rather than three different ones.
+fn paints_at(alpha: f64) -> bool {
+    ((1.0 - alpha) * 255.0).round() < 255.0
 }
 
 /// Luminance of a colour the renderer resolved, on gamma-encoded RGB, 0–1.
@@ -635,7 +757,8 @@ fn caption_paint(style: Option<&serde_json::Value>, clip_opacity: f32) -> Captio
     // no `outlineColor`, no stroke, whatever `outlineWidth` says. The width
     // then defaults to the renderer's own 2 and is rounded the same way, so a
     // sub-half-pixel width reads as the nothing it renders as, and the stroke's
-    // own alpha is scaled by the layer opacity the same way the box's is.
+    // own alpha is scaled by the layer opacity and quantised the same way the
+    // box's is.
     let strokes_glyphs = style_field(style, &["outlineColor", "outline_color"])
         .and_then(parse_paint_colour)
         .is_some_and(|colour| {
@@ -644,7 +767,7 @@ fn caption_paint(style: Option<&serde_json::Value>, clip_opacity: f32) -> Captio
                 .unwrap_or(2.0)
                 .clamp(0.0, 100.0)
                 .round();
-            colour.is_visible() && colour.alpha * layer_opacity > 0.0 && width > 0.0
+            colour.is_visible() && paints_at(colour.alpha * layer_opacity) && width > 0.0
         });
 
     CaptionPaint {
@@ -676,29 +799,49 @@ struct CaptionCue {
     paint: CaptionPaint,
 }
 
+/// The cues one window offers a sampling pass, sorted and counted.
+#[derive(Debug, Default)]
+struct CandidateCues {
+    /// Cues whose bands are worth decoding, earliest first
+    cues: Vec<CaptionCue>,
+    /// Cues inside the window whose layer is faded out entirely
+    ///
+    /// Nothing of them reaches the picture, so there is nothing to measure -
+    /// but they are still cues the report has to account for, which is why they
+    /// are counted here instead of dropped.
+    faded_out: usize,
+}
+
 /// Returns the caption cues a file covering `window` could be asked about.
 ///
-/// Cues with no text are not cues, and cues the style already protects - or
-/// fades away to nothing - are excluded here rather than after decoding: the
-/// style is the answer in both cases, and paying for a frame to confirm it
-/// would make the check cost scale with the captions that are already fine.
+/// Cues with no text are not cues, and cues the style already protects are
+/// excluded here rather than after decoding: the style is the answer, and
+/// paying for a frame to confirm it would make the check cost scale with the
+/// captions that are already fine. A cue faded out of the frame is not measured
+/// either, for the same reason - the style answers it - but it is counted in
+/// [`CandidateCues::faded_out`] and reaches the report as coverage, because a
+/// caption nobody can see is a cue this pass did not grade rather than one it
+/// graded clean.
 fn sampling_candidates(
     sequence: &Sequence,
     window: (f64, f64),
     canvas_width: u32,
     canvas_height: u32,
-) -> Vec<CaptionCue> {
+    thresholds: ContrastThresholds,
+) -> CandidateCues {
     let (window_start, window_end) = window;
-    let mut cues: Vec<CaptionCue> = Vec::new();
+    let mut candidates = CandidateCues::default();
+    let cues = &mut candidates.cues;
 
     for track in sequence.tracks.iter().filter(|track| track.is_caption()) {
         for clip in &track.clips {
             let Some(cue) = caption_cue(track, clip, canvas_width, canvas_height) else {
                 continue;
             };
-            // A cue the renderer already protects, and one it fades out of the
-            // frame entirely, are both answered without a decode.
-            if cue.paint.is_mitigated() || !cue.paint.draws_text() {
+            // A cue the renderer already protects is answered without a decode.
+            // A faded one is answered too, but it is counted rather than
+            // dropped, so the mitigation test is asked only of cues that draw.
+            if cue.paint.draws_text() && cue.paint.is_mitigated(thresholds) {
                 continue;
             }
             if cue.start_sec >= window_end || cue.end_sec <= window_start {
@@ -710,6 +853,10 @@ fn sampling_candidates(
             let overlap_start = cue.start_sec.max(window_start);
             let overlap_end = cue.end_sec.min(window_end);
             if overlap_end <= overlap_start {
+                continue;
+            }
+            if !cue.paint.draws_text() {
+                candidates.faded_out += 1;
                 continue;
             }
             cues.push(CaptionCue {
@@ -724,7 +871,7 @@ fn sampling_candidates(
             .partial_cmp(&right.midpoint_sec)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    cues
+    candidates
 }
 
 /// Builds a cue from a caption clip, or `None` when there is nothing to read.
@@ -822,10 +969,19 @@ pub async fn sample_caption_bands(
     let canvas_width = sequence.format.canvas.width;
     let canvas_height = sequence.format.canvas.height;
 
-    let candidates = sampling_candidates(sequence, window, canvas_width, canvas_height);
+    let CandidateCues { cues, faded_out } = sampling_candidates(
+        sequence,
+        window,
+        canvas_width,
+        canvas_height,
+        options.thresholds,
+    );
     let mut sampling = CaptionBandSampling {
         coverage: CaptionSampleCoverage {
-            cues: candidates.len(),
+            // Faded cues are cues the pass did not grade, so they count toward
+            // the total and toward what went unmeasured.
+            cues: cues.len() + faded_out,
+            faded_out,
             ..CaptionSampleCoverage::default()
         },
         ..CaptionBandSampling::default()
@@ -834,11 +990,12 @@ pub async fn sample_caption_bands(
     // A file shorter than the window it was declared for cannot answer for the
     // cues past its end, and saying so is the only honest answer available.
     let decodable_end = decodable_end_sec(window, options.file_duration_sec);
-    let reachable: Vec<CaptionCue> = candidates
+    let drawn_count = cues.len();
+    let reachable: Vec<CaptionCue> = cues
         .into_iter()
         .filter(|cue| cue.midpoint_sec <= decodable_end)
         .collect();
-    sampling.coverage.beyond_file = sampling.coverage.cues - reachable.len();
+    sampling.coverage.beyond_file = drawn_count - reachable.len();
     if sampling.coverage.beyond_file > 0 {
         sampling.notes.push(format!(
             "caption.contrast could not decode {} caption cue(s) that lie past the end of the \
@@ -904,6 +1061,7 @@ pub async fn sample_caption_bands(
                     0.0
                 },
                 box_luminance: cue.paint.box_luminance,
+                layer_opacity: cue.paint.layer_opacity,
             }),
             Err(error) => {
                 sampling.coverage.decode_failures += 1;
@@ -1212,12 +1370,20 @@ impl CaptionContrastRule {
                     unmeasured, coverage.cues, reasons
                 ),
             )
-            .with_details(
+            .with_details(format!(
                 "Those cues are neither legible nor illegible as far as this report is \
                  concerned. Re-render the window they fall in, or raise the run's timeout, and \
-                 verify again."
-                    .to_string(),
-            )
+                 verify again.{}",
+                if coverage.faded_out > 0 {
+                    format!(
+                        " {} of them are faded out of the frame entirely, which no re-render \
+                         changes: raise the caption's opacity if the words are meant to be seen.",
+                        coverage.faded_out
+                    )
+                } else {
+                    String::new()
+                }
+            ))
             .with_metric("measured", coverage.sampled > 0)
             .with_metric("cueCount", coverage.cues)
             .with_metric("sampledCount", coverage.sampled)
@@ -1225,7 +1391,8 @@ impl CaptionContrastRule {
             .with_metric("decodeFailures", coverage.decode_failures)
             .with_metric("beyondFile", coverage.beyond_file)
             .with_metric("overFrameCap", coverage.over_cap)
-            .with_metric("timedOut", coverage.timed_out),
+            .with_metric("timedOut", coverage.timed_out)
+            .with_metric("fadedOut", coverage.faded_out),
         )
     }
 }
@@ -1269,16 +1436,12 @@ impl QCRule for CaptionContrastRule {
             return Ok(Vec::new());
         };
 
-        let min_contrast = config
-            .get_param::<f64>("min_contrast")
-            .filter(|value| value.is_finite())
-            .unwrap_or(DEFAULT_MIN_CONTRAST)
-            .abs();
-        let max_stddev = config
-            .get_param::<f64>("max_band_stddev")
-            .filter(|value| value.is_finite())
-            .unwrap_or(DEFAULT_MAX_BAND_STDDEV)
-            .abs();
+        // The same resolution the sampling pass ran before it decided which
+        // cues never needed a decode, so both halves grade one pair of numbers.
+        let ContrastThresholds {
+            min_contrast,
+            max_band_stddev: max_stddev,
+        } = ContrastThresholds::from_config(config);
         let severity = config.severity_override.unwrap_or(self.default_severity());
 
         let mut violations = Vec::new();
@@ -1329,11 +1492,24 @@ impl QCRule for CaptionContrastRule {
                 String::new()
             };
 
+            // And what the layer's own opacity did to them: the glyphs are
+            // painted at it, so the separation that reached the picture is that
+            // fraction of the one the two colours below imply.
+            let faded = if sample.layer_opacity < 1.0 {
+                format!(
+                    " The caption layer is drawn at {:.0}% opacity, so the words reach the \
+                     picture at that fraction of their colour.",
+                    sample.layer_opacity * 100.0
+                )
+            } else {
+                String::new()
+            };
+
             let details = match fault {
                 ContrastFault::LowContrast => format!(
                     "Measured at {:.2}s: the band the words occupy averages {:.2} luminance \
-                     (spread {:.2}) and the text is {:.2}.{blended} Give the cue an outline so \
-                     it reads over any background.",
+                     (spread {:.2}) and the text is {:.2}.{blended}{faded} Give the cue an \
+                     outline so it reads over any background.",
                     sample.sampled_at_sec,
                     sample.band_luminance,
                     sample.band_luminance_stddev,
@@ -1342,8 +1518,8 @@ impl QCRule for CaptionContrastRule {
                 ContrastFault::MixedBackground => format!(
                     "Measured at {:.2}s: the band the words occupy averages {:.2} luminance but \
                      varies by {:.2} across its width, so text at {:.2} clears part of it and \
-                     disappears into the rest.{blended} Give the cue an outline so it reads over \
-                     any background.",
+                     disappears into the rest.{blended}{faded} Give the cue an outline so it \
+                     reads over any background.",
                     sample.sampled_at_sec,
                     sample.band_luminance,
                     sample.band_luminance_stddev,
@@ -1386,6 +1562,18 @@ impl QCRule for CaptionContrastRule {
             if sample.has_box {
                 violation =
                     violation.with_metric("boxAlpha", (sample.box_alpha * 1000.0).round() / 1000.0);
+            }
+
+            // `layerOpacity` is the fraction of their colour the glyphs were
+            // drawn at, and `contrast` is already scaled by it. It is reported
+            // only where it is not 1.0, so a reader who sees it knows the
+            // reported contrast is smaller than `textLuminance` and
+            // `bandLuminance` alone would suggest.
+            if sample.layer_opacity < 1.0 {
+                violation = violation.with_metric(
+                    "layerOpacity",
+                    (sample.layer_opacity * 1000.0).round() / 1000.0,
+                );
             }
 
             violations.push(
@@ -1468,6 +1656,11 @@ mod tests {
         caption_paint(style, 1.0)
     }
 
+    /// The thresholds a run grades against when the caller configures none.
+    fn thresholds_default() -> ContrastThresholds {
+        ContrastThresholds::default()
+    }
+
     fn caption_clip(text: &str, start_sec: f64, end_sec: f64, style: Option<CaptionStyle>) -> Clip {
         caption_clip_with_style(
             text,
@@ -1512,6 +1705,7 @@ mod tests {
             has_outline: false,
             box_alpha: 0.0,
             box_luminance: 0.0,
+            layer_opacity: 1.0,
         }
     }
 
@@ -1740,20 +1934,20 @@ mod tests {
     #[test]
     fn should_read_mitigation_the_way_the_renderer_draws_it() {
         let boxed = serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 230 } });
-        assert!(paint_of(Some(&boxed)).protects_with_box());
+        assert!(paint_of(Some(&boxed)).protects_with_box(ContrastThresholds::default()));
 
         // A box the picture shows too much of is measured, not waved past: at
         // half alpha the spread that survives can still be a mixed background.
         let translucent =
             serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 128 } });
         assert!(paint_of(Some(&translucent)).paints_box());
-        assert!(!paint_of(Some(&translucent)).is_mitigated());
+        assert!(!paint_of(Some(&translucent)).is_mitigated(ContrastThresholds::default()));
 
         // A box the viewer cannot see is not a box, and it does not take the
         // outline with it either: the ASS path keeps `BorderStyle: 1`.
         let clear_box =
             serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 0 } });
-        assert!(!paint_of(Some(&clear_box)).is_mitigated());
+        assert!(!paint_of(Some(&clear_box)).is_mitigated(ContrastThresholds::default()));
         let clear_box_outlined = serde_json::json!({
             "backgroundColor": "#00000000",
             "outlineColor": "#000000",
@@ -1773,14 +1967,14 @@ mod tests {
             "outlineWidth": 4,
         });
         assert!(
-            !paint_of(Some(&wash)).is_mitigated(),
+            !paint_of(Some(&wash)).is_mitigated(ContrastThresholds::default()),
             "a box below the protection floor hides nothing and hides the stroke"
         );
 
         // An outline width with no colour renders no outline at all.
         let width_only = serde_json::json!({ "outlineWidth": 4 });
         assert!(
-            !paint_of(Some(&width_only)).is_mitigated(),
+            !paint_of(Some(&width_only)).is_mitigated(ContrastThresholds::default()),
             "the renderer keys the stroke off outlineColor"
         );
 
@@ -1790,15 +1984,15 @@ mod tests {
 
         // An explicit zero width turns it off again.
         let zeroed = serde_json::json!({ "outlineColor": "#000000", "outlineWidth": 0 });
-        assert!(!paint_of(Some(&zeroed)).is_mitigated());
+        assert!(!paint_of(Some(&zeroed)).is_mitigated(ContrastThresholds::default()));
 
         // A partial blob that says nothing about either decoration renders
         // bare, whatever `CaptionStyle::default` would have carried.
         let partial = serde_json::json!({ "fontSize": 64 });
-        assert!(!paint_of(Some(&partial)).is_mitigated());
+        assert!(!paint_of(Some(&partial)).is_mitigated(ContrastThresholds::default()));
 
         // And no style at all is the barest case of the lot.
-        assert!(!paint_of(None).is_mitigated());
+        assert!(!paint_of(None).is_mitigated(ContrastThresholds::default()));
     }
 
     /// Feature: Caption legibility
@@ -1821,7 +2015,7 @@ mod tests {
         // A tenth of a black box over white leaves the band at 0.9, which white
         // text cannot be read against.
         assert!(
-            !paint_of(Some(&black_box_at(0.1))).is_mitigated(),
+            !paint_of(Some(&black_box_at(0.1))).is_mitigated(ContrastThresholds::default()),
             "a box this faint must still be measured"
         );
         assert_eq!(
@@ -1836,7 +2030,7 @@ mod tests {
         // Once the black box is opaque enough that no picture can reach either
         // limit, it decides the question by itself and the cue is never decoded.
         assert!(
-            paint_of(Some(&black_box_at(0.8))).is_mitigated(),
+            paint_of(Some(&black_box_at(0.8))).is_mitigated(ContrastThresholds::default()),
             "a box this opaque protects white words whatever is behind it"
         );
         assert_eq!(
@@ -1850,7 +2044,7 @@ mod tests {
 
         // Half a black box brings a white band to 0.5, which white text clears.
         assert!(
-            !paint_of(Some(&black_box_at(0.5))).is_mitigated(),
+            !paint_of(Some(&black_box_at(0.5))).is_mitigated(ContrastThresholds::default()),
             "a half-opaque box is measured, not waved through"
         );
         assert_eq!(
@@ -1896,7 +2090,7 @@ mod tests {
         let white_box = boxed(255, 255, 255, 0.9);
         assert!(paint_of(Some(&white_box)).paints_box());
         assert!(
-            !paint_of(Some(&white_box)).is_mitigated(),
+            !paint_of(Some(&white_box)).is_mitigated(ContrastThresholds::default()),
             "a box the same tone as the words protects nothing"
         );
 
@@ -1912,9 +2106,152 @@ mod tests {
         // The same alpha in black is protection, because no picture can lift
         // the band it leaves anywhere near white.
         assert!(
-            paint_of(Some(&boxed(0, 0, 0, 0.9))).is_mitigated(),
+            paint_of(Some(&boxed(0, 0, 0, 0.9))).is_mitigated(ContrastThresholds::default()),
             "a black box this opaque settles the question by itself"
         );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should grade the glyphs at the opacity they are drawn at
+    ///
+    /// The box and the stroke already carried the layer's opacity; the words
+    /// did not. So a grey box that guarantees an opaque caption its separation
+    /// bought a *faded* one the same free pass, and the cue it waved through
+    /// was drawn at a fraction of the contrast the colours promised.
+    #[test]
+    fn should_fold_the_layer_opacity_into_the_glyphs() {
+        let faded_box = serde_json::json!({
+            "color": "#FFFFFF",
+            "opacity": 0.6,
+            "backgroundColor": "#696969",
+        });
+        let paint = paint_of(Some(&faded_box));
+        assert!(paint.paints_box());
+        assert!(
+            !paint.is_mitigated(thresholds_default()),
+            "a box is worth only what the glyphs drawn over it can show"
+        );
+
+        // Over a white shot the box leaves the band at 0.65, and white words
+        // drawn at six tenths separate from it by 0.21 - not the 0.35 the two
+        // colours on their own would suggest.
+        let mut boxed = boxed_sample(1.0, 1.0, paint.box_alpha);
+        boxed.box_luminance = paint.box_luminance;
+        boxed.layer_opacity = paint.layer_opacity;
+        assert!(
+            (boxed.contrast() - 0.212).abs() < 0.01,
+            "the drawn separation is the layer opacity times the colours', got {}",
+            boxed.contrast()
+        );
+        assert_eq!(
+            CaptionContrastRule::fault_for(&boxed, DEFAULT_MIN_CONTRAST, DEFAULT_MAX_BAND_STDDEV),
+            Some(ContrastFault::LowContrast)
+        );
+
+        // And a bare caption faded to a third over a dark band is graded on the
+        // third that reaches the picture, not on the whole palette.
+        let mut bare = sample(0.1, 1.0);
+        bare.layer_opacity = 0.3;
+        assert!(
+            (bare.contrast() - 0.27).abs() < 1e-9,
+            "0.3 of a 0.9 separation is 0.27, got {}",
+            bare.contrast()
+        );
+        assert_eq!(
+            CaptionContrastRule::fault_for(&bare, DEFAULT_MIN_CONTRAST, DEFAULT_MAX_BAND_STDDEV),
+            Some(ContrastFault::LowContrast),
+            "a caption this faint is unreadable however bold its colours are"
+        );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should skip a box only against the thresholds this run grades
+    ///
+    /// The skip is a claim that the cue cannot fail, and it is only true of the
+    /// numbers the rule is about to grade with. Deciding it against the
+    /// defaults let a run that asked for a stricter floor never decode the very
+    /// cues that floor exists to catch.
+    #[test]
+    fn should_honour_the_configured_thresholds_when_skipping_a_box() {
+        // White words on a mid-grey box at 80%: the darkest band it can leave
+        // is 0.6, so the separation it guarantees is 0.4.
+        let style = serde_json::json!({
+            "color": "#FFFFFF",
+            "backgroundColor": { "r": 128, "g": 128, "b": 128, "a": 204 },
+        });
+        let paint = paint_of(Some(&style));
+        assert!(
+            paint.is_mitigated(ContrastThresholds::default()),
+            "0.4 clears the default floor of {DEFAULT_MIN_CONTRAST}"
+        );
+
+        let strict = ContrastThresholds {
+            min_contrast: 0.6,
+            ..ContrastThresholds::default()
+        };
+        assert!(
+            !paint.is_mitigated(strict),
+            "0.4 does not clear a floor of 0.6, so the cue has to be measured"
+        );
+
+        // And the sampling pass honours the same pair, so the cue reaches the
+        // decode queue rather than being dropped before it.
+        let sequence = sequence_with_captions(vec![caption_clip_with_style(
+            "Boxed",
+            1.0,
+            3.0,
+            Some(style),
+        )]);
+        assert!(
+            sampling_candidates(&sequence, (0.0, 10.0), 1920, 1080, thresholds_default())
+                .cues
+                .is_empty(),
+            "the default run skips it"
+        );
+        assert_eq!(
+            sampling_candidates(&sequence, (0.0, 10.0), 1920, 1080, strict)
+                .cues
+                .len(),
+            1,
+            "the stricter run measures it"
+        );
+    }
+
+    /// Feature: Coverage
+    /// Scenario: should account for cues that are faded out of the frame
+    #[test]
+    fn should_count_a_faded_cue_as_unmeasured_rather_than_dropping_it() {
+        let faded = caption_clip_with_style(
+            "Invisible",
+            1.0,
+            3.0,
+            Some(serde_json::json!({ "color": "#FFFFFF", "opacity": 0.0 })),
+        );
+        let sequence = sequence_with_captions(vec![
+            faded,
+            caption_clip("Visible", 4.0, 6.0, Some(bare_white_style())),
+        ]);
+
+        let candidates =
+            sampling_candidates(&sequence, (0.0, 10.0), 1920, 1080, thresholds_default());
+
+        assert_eq!(candidates.cues.len(), 1, "only the visible cue is decoded");
+        assert_eq!(candidates.faded_out, 1, "the faded one is still counted");
+
+        let coverage = CaptionSampleCoverage {
+            cues: 2,
+            sampled: 1,
+            faded_out: 1,
+            ..CaptionSampleCoverage::default()
+        };
+        assert_eq!(coverage.unmeasured(), 1);
+        assert_eq!(coverage.reasons().as_deref(), Some("1 faded out"));
+
+        let violation = CaptionContrastRule::new()
+            .coverage_violation(coverage)
+            .expect("a cue nobody measured is reported");
+        assert_eq!(violation.metrics["cueCount"], 2);
+        assert_eq!(violation.metrics["fadedOut"], 1);
     }
 
     /// Feature: Caption legibility
@@ -1934,7 +2271,7 @@ mod tests {
 
             assert!(paint.paints_box(), "{pack_id} paints a box");
             assert!(
-                paint.is_mitigated(),
+                paint.is_mitigated(ContrastThresholds::default()),
                 "{pack_id} cannot fail whatever is behind it, so it must not be decoded"
             );
         }
@@ -2208,6 +2545,21 @@ mod tests {
                 ass_row_draws_a_box(&style_row),
                 "{label}: the check and the ASS path disagree about the box ({style_row})"
             );
+
+            // And at what alpha, on this path too: libass composites the box
+            // over the picture exactly as the grading does, so a byte's worth
+            // of drift here is a verdict about a band nobody rendered.
+            if paint.paints_box() {
+                let painted = ass_box_alpha(&style_row).unwrap_or_else(|| {
+                    panic!("{label}: a painted box has a border colour ({style_row})")
+                });
+                assert!(
+                    (paint.box_alpha - painted).abs() < 1.0 / 255.0,
+                    "{label}: the check says the box paints at {:.4} and libass at {painted:.4} \
+                     ({style_row})",
+                    paint.box_alpha
+                );
+            }
         }
     }
 
@@ -2237,8 +2589,26 @@ mod tests {
 
     /// Whether an `&HAABBGGRR` colour paints anything; `0xFF` alpha is invisible.
     fn ass_colour_is_visible(raw: &str) -> bool {
+        ass_alpha(raw).is_some_and(|alpha| alpha > 0.0)
+    }
+
+    /// Opacity an `&HAABBGGRR` colour paints at, 0–1.
+    ///
+    /// ASS states transparency rather than opacity, so `AA` is inverted: `00`
+    /// is opaque and `FF` draws nothing.
+    fn ass_alpha(raw: &str) -> Option<f64> {
         let hex = raw.trim().trim_start_matches("&H");
-        u8::from_str_radix(hex.get(0..2).unwrap_or("FF"), 16).is_ok_and(|alpha| alpha != 255)
+        let transparency = u8::from_str_radix(hex.get(0..2)?, 16).ok()?;
+        Some(1.0 - f64::from(transparency) / 255.0)
+    }
+
+    /// Alpha libass paints the style row's background box at.
+    ///
+    /// `BorderStyle: 3` draws the box in `OutlineColour`, so that is the column
+    /// the alpha comes out of - the same one the stroke uses when no box
+    /// replaces it.
+    fn ass_box_alpha(row: &str) -> Option<f64> {
+        ass_alpha(ass_style_column(row, ASS_BORDER_COLOUR_COLUMN))
     }
 
     /// `OutlineColour`, the column libass draws both the stroke and the box in.
@@ -2320,9 +2690,10 @@ mod tests {
             caption_clip("After the window", 40.0, 42.0, Some(bare_white_style())),
         ]);
 
-        let cues = sampling_candidates(&sequence, (10.0, 20.0), 1920, 1080);
+        let candidates =
+            sampling_candidates(&sequence, (10.0, 20.0), 1920, 1080, thresholds_default());
 
-        let labels: Vec<f64> = cues.iter().map(|cue| cue.midpoint_sec).collect();
+        let labels: Vec<f64> = candidates.cues.iter().map(|cue| cue.midpoint_sec).collect();
         assert_eq!(labels, vec![13.0], "only the bare cue inside the window");
     }
 
@@ -2337,7 +2708,8 @@ mod tests {
             Some(bare_white_style()),
         )]);
 
-        let cues = sampling_candidates(&sequence, (10.0, 20.0), 1920, 1080);
+        let cues =
+            sampling_candidates(&sequence, (10.0, 20.0), 1920, 1080, thresholds_default()).cues;
 
         assert_eq!(cues.len(), 1);
         assert!(
@@ -2986,6 +3358,80 @@ mod tests {
         assert!(
             (right - left - wrap_box).abs() < 1e-9,
             "a full-width preset caption is measured across its wrap box, got {left}-{right}"
+        );
+    }
+
+    /// Feature: Band geometry
+    /// Scenario: should cover a line the estimator has no shaping for
+    ///
+    /// The crop is only an answer about the words if the words are inside it.
+    /// A half-em advance is the Latin figure: Hangul is drawn on a full-em
+    /// square and tracking adds its pixels to every glyph, so both lines came
+    /// out at half the width the renderer draws and the pass graded a column
+    /// the ends of the line ran clean out of.
+    #[test]
+    fn should_crop_wide_enough_for_text_the_estimator_underestimates() {
+        const FONT_SIZE: f64 = 48.0;
+        const CANVAS_WIDTH: f64 = 1920.0;
+
+        /// Percentage of the canvas a line covers at a given advance per glyph.
+        fn line_width_percent(label: &str, spacing_px: f64) -> f64 {
+            let drawn: f64 = label
+                .chars()
+                .map(|character| {
+                    let advance = if character.is_ascii() {
+                        FONT_SIZE / 2.0
+                    } else {
+                        FONT_SIZE
+                    };
+                    advance + spacing_px
+                })
+                .sum();
+            drawn / CANVAS_WIDTH * 100.0
+        }
+
+        /// Asserts the measured column contains the centred line it is for.
+        fn assert_column_covers(clip: &Clip, line_percent: f64, what: &str) {
+            let (left, right) = super::super::rules::caption_span_percent(clip, 1920, 1080);
+            assert!(
+                left <= 50.0 - line_percent / 2.0 + 1e-9
+                    && right >= 50.0 + line_percent / 2.0 - 1e-9,
+                "{what}: the {line_percent:.1}% line runs outside the {left:.1}-{right:.1} column"
+            );
+        }
+
+        // Twenty-five characters of Korean: the spaces are half an em and the
+        // syllables a whole one, so the line is well past half the frame.
+        let korean_label = "자막 대비 검사를 위한 한국어 자막 문장입니다";
+        assert_eq!(korean_label.chars().count(), 25);
+        let korean = caption_clip_with_style(
+            korean_label,
+            0.0,
+            2.0,
+            Some(serde_json::json!({ "color": "#FFFFFF", "fontSize": FONT_SIZE })),
+        );
+        assert_column_covers(
+            &korean,
+            line_width_percent(korean_label, 0.0),
+            "a Hangul caption",
+        );
+
+        // And Latin tracked out by 30px a glyph, which more than doubles it.
+        let tracked_label = "Tracked out caption";
+        let tracked = caption_clip_with_style(
+            tracked_label,
+            0.0,
+            2.0,
+            Some(serde_json::json!({
+                "color": "#FFFFFF",
+                "fontSize": FONT_SIZE,
+                "letterSpacing": 30,
+            })),
+        );
+        assert_column_covers(
+            &tracked,
+            line_width_percent(tracked_label, 30.0),
+            "a letter-spaced caption",
         );
     }
 
