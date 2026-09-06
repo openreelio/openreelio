@@ -16,8 +16,8 @@ use crate::core::captions::{
     CAPTION_WRAP_BOX_WIDTH_PERCENT,
 };
 use crate::core::project::ProjectState;
-use crate::core::render::export::caption_anchor_percent;
-use crate::core::timeline::{Clip, Sequence, Track};
+use crate::core::render::export::{ass_play_resolution, caption_anchor_percent};
+use crate::core::timeline::{Canvas, Clip, Sequence, Track};
 use crate::core::CoreResult;
 
 /// Configuration for QC rules
@@ -1520,20 +1520,13 @@ impl QCRule for AudioClippingRule {
 // CaptionSafeAreaRule - Ensures captions are in safe area
 // ============================================================================
 
-/// Height, in pixels, of the space caption sizes are authored in.
-///
-/// The export pins every ASS script's `PlayResY` to 1080 and writes `fontSize`
-/// and `\fsp` into that space unscaled, and the preview scales the same style
-/// by `canvasHeight / 1080`. A caption's size is therefore a fraction of the
-/// frame rather than a count of output pixels, and an estimate that divides by
-/// the canvas is wrong by the ratio between the two.
-const ASS_SCRIPT_HEIGHT_PX: f64 = 1080.0;
-
 /// Code point ranges drawn on a full-em square.
 ///
-/// The scripts that really are set on a full em: Hangul, Han, Kana, the CJK
-/// symbols and fullwidth forms they are punctuated with, and emoji. Everything
-/// else is charged the half-em default by
+/// The scripts that really are set on a full em: Hangul, Han — the
+/// supplementary-plane extensions included, which a caption quoting a rare
+/// ideograph reaches — Kana, Bopomofo, the radicals, the CJK symbols,
+/// enclosed and compatibility forms and fullwidth forms they are punctuated
+/// with, and emoji. Everything else is charged the half-em default by
 /// [`CaptionSafeAreaRule::glyph_advance_factor`].
 ///
 /// Listing the wide scripts rather than the narrow ones is the polarity that
@@ -1543,17 +1536,22 @@ const ASS_SCRIPT_HEIGHT_PX: f64 = 1080.0;
 /// came out twice as wide as libass draws them. That is not a safe direction to
 /// be wrong in: it hands the contrast pass a column wider than the words, so
 /// the band it measures takes in picture the caption never covered.
-const WIDE_SCRIPT_RANGES: [(u32, u32); 10] = [
+const WIDE_SCRIPT_RANGES: [(u32, u32); 15] = [
     (0x1100, 0x11FF),   // Hangul Jamo
+    (0x2E80, 0x2FFF),   // CJK radicals, Kangxi radicals, ideographic description
     (0x3000, 0x303F),   // CJK symbols and punctuation
     (0x3040, 0x30FF),   // Hiragana and Katakana
+    (0x3100, 0x312F),   // Bopomofo
     (0x3130, 0x318F),   // Hangul compatibility Jamo
+    (0x3190, 0x33FF),   // Kanbun, CJK strokes, enclosed CJK, CJK compatibility
     (0x3400, 0x4DBF),   // CJK Unified Ideographs Extension A
     (0x4E00, 0x9FFF),   // CJK Unified Ideographs
     (0xAC00, 0xD7AF),   // Hangul syllables
     (0xF900, 0xFAFF),   // CJK compatibility ideographs
     (0xFF00, 0xFF60),   // Fullwidth forms
+    (0xFFE0, 0xFFE6),   // Fullwidth currency and bar signs
     (0x1F300, 0x1FAFF), // Emoji and pictographs
+    (0x20000, 0x2FA1F), // CJK Unified Ideographs Extensions B-G and supplement
 ];
 
 /// Code point ranges that advance the pen by nothing at all.
@@ -1626,8 +1624,33 @@ impl CaptionSafeAreaRule {
     /// Line height as a multiple of the font size (typographic default)
     const LINE_HEIGHT_FACTOR: f64 = 1.2;
 
-    /// Reads the caption font size in pixels from the clip's style JSON.
-    fn font_size_px(style: Option<&serde_json::Value>) -> f64 {
+    /// Reads the size, in script pixels, the caption's glyphs are drawn at.
+    ///
+    /// The style's `fontSize` is only half the answer:
+    /// `apply_text_transform_overrides` (`core::render::export`) folds the
+    /// clip's own transform scale into the size it hands the renderer, as the
+    /// mean of the two axes, so a caption scaled to 200 % really is drawn twice
+    /// as large. Reading the style alone measured the unscaled block and
+    /// reported a scaled caption as sitting safely inside a band it overruns.
+    /// Mirrored here clamp for clamp with that seam.
+    fn font_size_px(clip: &Clip) -> f64 {
+        let authored = Self::authored_font_size_px(clip.caption_style.as_ref());
+
+        let axis = |value: f64| {
+            if value.is_finite() {
+                value.abs().clamp(0.01, 100.0)
+            } else {
+                1.0
+            }
+        };
+        let scale = ((axis(clip.transform.scale.x) + axis(clip.transform.scale.y)) / 2.0)
+            .clamp(0.01, 100.0);
+
+        (authored * scale).clamp(1.0, 500.0)
+    }
+
+    /// Reads the caption font size the style JSON asks for, before any scale.
+    fn authored_font_size_px(style: Option<&serde_json::Value>) -> f64 {
         let default_size = f64::from(CaptionStyle::default().font_size);
 
         let Some(value) = style else {
@@ -1709,10 +1732,22 @@ impl CaptionSafeAreaRule {
     /// by the canvas instead reported a 4K caption at half the size the
     /// renderer draws it, and a vertical one at well under a third.
     ///
+    /// That is the ASS path, which is the one that renders wherever libass is
+    /// present. The `drawtext` fallback the export drops to when it is not
+    /// writes `fontsize` in *output pixels* and never scales it, so on that
+    /// path a caption really does shrink relative to the frame as the frame
+    /// grows, and this estimate is out by `canvasHeight / 1080`: too wide
+    /// above 1080p, too narrow below it. The estimate is deliberately sized
+    /// for the ASS path only, because that is what a caption is normally
+    /// burned in by; a project that renders through the fallback at anything
+    /// other than a 1080-tall frame is measured against a block the fallback
+    /// does not draw.
+    ///
     /// What does move the fraction is the aspect ratio, because only the height
-    /// is pinned: the script is `1080 × canvasWidth / canvasHeight` wide, so the
-    /// same line covers over three times the width of a 9:16 frame that it does
-    /// of a 16:9 one. The width also folds in the
+    /// is pinned: the script is `1080 × canvasWidth / canvasHeight` wide, then
+    /// rounded to an even number the way [`ass_play_resolution`] rounds the
+    /// `PlayResX` it writes, so the same line covers over three times the width
+    /// of a 9:16 frame that it does of a 16:9 one. The width also folds in the
     /// style's letter spacing and the script each character is drawn in (see
     /// [`Self::glyph_advance_factor`]), because a line the estimate undershoots
     /// is a breach nobody reports and a crop that measures the wrong pixels.
@@ -1733,7 +1768,7 @@ impl CaptionSafeAreaRule {
     ) -> (f64, f64) {
         let label = clip.label.as_deref().unwrap_or_default();
 
-        let font_size = Self::font_size_px(clip.caption_style.as_ref());
+        let font_size = Self::font_size_px(clip);
         let letter_spacing = Self::letter_spacing_px(clip.caption_style.as_ref());
 
         // Per character, because the advance is not one number: a line that
@@ -1753,11 +1788,14 @@ impl CaptionSafeAreaRule {
             })
             .sum();
 
-        // The script the renderer authors in, not the frame it is scaled onto.
-        let canvas_width = if canvas_width > 0 { canvas_width } else { 1 };
-        let canvas_height = if canvas_height > 0 { canvas_height } else { 1 };
-        let script_width =
-            ASS_SCRIPT_HEIGHT_PX * f64::from(canvas_width) / f64::from(canvas_height);
+        // The script the renderer authors in, not the frame it is scaled onto,
+        // and read from the export's own `PlayRes` writer rather than
+        // recomputed: it rounds the width to an even number so the script never
+        // lands on a half pixel, and falls back to 16:9 for a canvas with a
+        // zero side, both of which move the fraction a glyph covers.
+        let (script_width, script_height) =
+            ass_play_resolution(&Canvas::new(canvas_width, canvas_height));
+        let script_width = f64::from(script_width);
         // Negative tracking can pull the sum below zero on a short line, and a
         // negative width is not a box; the renderer draws nothing narrower than
         // nothing either.
@@ -1776,7 +1814,7 @@ impl CaptionSafeAreaRule {
         };
 
         let height_percent =
-            line_count * font_size * Self::LINE_HEIGHT_FACTOR / ASS_SCRIPT_HEIGHT_PX * 100.0;
+            line_count * font_size * Self::LINE_HEIGHT_FACTOR / f64::from(script_height) * 100.0;
 
         (width_percent, height_percent)
     }
@@ -2217,7 +2255,7 @@ impl QCRule for CaptionSafeAreaRule {
                                     right,
                                     top,
                                     bottom,
-                                    Self::font_size_px(clip.caption_style.as_ref()),
+                                    Self::font_size_px(clip),
                                     context.canvas_width,
                                     context.canvas_height,
                                     action_safe_margin,
@@ -3615,10 +3653,12 @@ mod tests {
         );
 
         // Only the height is pinned, so a 9:16 script is 1080 * 1080 / 1920 =
-        // 607.5 wide, and half an em of a 48px font is 24 of those.
+        // 607.5 wide - which the export rounds to an even 608, because a
+        // `PlayRes` never lands on a half pixel. Half an em of a 48px font is
+        // 24 of those.
         let (vertical_width, vertical_height) =
             estimated_box_percent("M", serde_json::json!({ "fontSize": 48 }), 1080, 1920);
-        let expected_width = 24.0 / 607.5 * 100.0;
+        let expected_width = 24.0 / 608.0 * 100.0;
         assert!(
             (vertical_width - expected_width).abs() < 1e-9,
             "one glyph covers {expected_width:.4}% of a vertical frame, got {vertical_width}"
@@ -3642,6 +3682,13 @@ mod tests {
             ),
             ("Han", "\u{6771}\u{4eac}\u{90fd}\u{5343}\u{8449}"),
             ("Hiragana", "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}"),
+            // The blocks the first list left out. A won sign, a squared unit
+            // and a parenthesised ideograph are all drawn on the same full-em
+            // square as the syllables around them, and every one of them turns
+            // up in ordinary Korean and Japanese captions.
+            ("Fullwidth won sign", "\u{ffe6}\u{ffe6}\u{ffe6}"),
+            ("Squared CJK unit", "\u{338f}\u{338f}\u{338f}"),
+            ("Parenthesised ideograph", "\u{321c}\u{321c}\u{321c}"),
         ];
         for (script, sample) in wide {
             let latin = estimated_width_percent(&"M".repeat(sample.chars().count()));
@@ -3671,6 +3718,54 @@ mod tests {
                  {measured} vs {latin}"
             );
         }
+    }
+
+    #[test]
+    fn test_caption_safe_area_rule_should_size_the_estimate_at_the_clip_transform_scale() {
+        // The export folds the clip's transform scale into the font size it
+        // hands the renderer, so a caption scaled up really is drawn larger.
+        // Measuring the authored size instead reported a scaled block sitting
+        // safely inside a band it overruns.
+        let scaled = |scale_x: f64, scale_y: f64| {
+            let sequence =
+                sequence_with_caption("Words", None, Some(serde_json::json!({ "fontSize": 48 })));
+            let mut clip = sequence.tracks[0].clips[0].clone();
+            clip.transform.scale.x = scale_x;
+            clip.transform.scale.y = scale_y;
+            CaptionSafeAreaRule::estimate_text_box_percent(
+                &clip,
+                1920,
+                1080,
+                CAPTION_WRAP_BOX_WIDTH_PERCENT,
+            )
+        };
+
+        let unscaled = scaled(1.0, 1.0);
+        let doubled = scaled(2.0, 2.0);
+        assert!(
+            (doubled.0 - unscaled.0 * 2.0).abs() < 1e-9
+                && (doubled.1 - unscaled.1 * 2.0).abs() < 1e-9,
+            "a caption at 200% covers twice the block: {doubled:?} vs {unscaled:?}"
+        );
+
+        // The renderer takes the mean of the two axes, not one of them, so an
+        // anisotropic scale lands between the two.
+        let anisotropic = scaled(2.0, 1.0);
+        assert!(
+            (anisotropic.0 - unscaled.0 * 1.5).abs() < 1e-9,
+            "the mean of 2.0 and 1.0 is 1.5, got {}",
+            anisotropic.0
+        );
+
+        // A transform nobody set, and one that is not a number at all, both
+        // leave the authored size alone rather than collapsing the block.
+        let unset = scaled(f64::NAN, f64::NAN);
+        assert!(
+            (unset.0 - unscaled.0).abs() < 1e-9,
+            "an unreadable scale is no scale: {} vs {}",
+            unset.0,
+            unscaled.0
+        );
     }
 
     #[test]

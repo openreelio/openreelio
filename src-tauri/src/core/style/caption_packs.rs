@@ -13,7 +13,13 @@
 //! - deserialize back into a typed [`CaptionStyle`] after JSON round-trip,
 //! - produce zero `CaptionSafeAreaRule` violations on both a 1920x1080 and a
 //!   1080x1920 canvas — the rule measures the text block against the canvas, so
-//!   the two runs are two different measurements rather than one repeated, and
+//!   the two runs are two different measurements rather than one repeated. The
+//!   guarantee is about the pack, not about any text put in it: a wrapping
+//!   subtitle pack holds a full sentence on either canvas, while a
+//!   [`CaptionPosition::Custom`] plate is placed with `\pos` and so wraps only
+//!   at the frame edge, which a sentence-length line runs past. Each pack is
+//!   therefore measured with the kind of text it is for, and
+//!   `caption.safe_area` is what answers the question for real text, and
 //! - reach the export `drawtext` filter with the typography it advertises.
 //!
 //! Most packs anchor with [`CaptionPosition::Preset`] at a margin at or above

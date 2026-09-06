@@ -5744,7 +5744,11 @@ fn round_to_even(value: f64) -> u32 {
 }
 
 /// Returns the `PlayResX`/`PlayResY` an ASS script for this canvas is authored in.
-fn ass_play_resolution(canvas: &Canvas) -> (u32, u32) {
+///
+/// Shared with `core::qc::rules`, whose caption size estimate has to measure in
+/// the same space the script is written in: a width derived any other way is a
+/// safe-area verdict about a block libass never laid out.
+pub(crate) fn ass_play_resolution(canvas: &Canvas) -> (u32, u32) {
     let aspect = if canvas.is_valid() {
         canvas.aspect_ratio()
     } else {

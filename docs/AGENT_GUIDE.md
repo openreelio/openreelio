@@ -858,10 +858,10 @@ the line never reaches cannot decide the verdict. The band follows the style's
 `verticalAlign` as well as `captionPosition`, because the renderer does.
 
 A cue counts as already protected — and is never decoded — only where the export
-would actually draw the protection: an `outlineColor` with a non-zero width the
-layer opacity still leaves reaching the picture at `minContrast` or better, or a
-`backgroundColor` whose own colour and alpha put *every* picture the shot could
-be clear of the text. A box is not protection because it is a box: white words
+would actually draw the protection: an `outlineColor` with a non-zero width
+whose colour stands `minContrast` or more clear of the text colour at the alpha
+it is really painted at, or a `backgroundColor` whose own colour and alpha put
+*every* picture the shot could be clear of the text. A box is not protection because it is a box: white words
 on a 90%-opaque white box are as unreadable as white words on a white wall, so
 that cue is decoded and reported, while the same alpha in black is
 waved through. An `outlineWidth` with no colour renders bare, and so does a cue
@@ -875,9 +875,11 @@ Every alpha here is the one the renderer paints with, layer opacity included: a
 style `opacity` and the clip's own opacity scale the box, the outline *and* the
 glyphs, so a faded caption separates from its background by that fraction of
 what its colours imply and a box that would protect an opaque cue does not
-protect a faded one. Nor does an outline: a stroke drawn below `minContrast` of
-its colour is graded like any other bare cue rather than waved through
-unmeasured. A caption faded out entirely is not decoded at all; it is counted as
+protect a faded one. Nor does an outline, and an outline is graded on its colour
+too: a stroke whose alpha times the layer opacity times its distance from the
+text colour comes in under `minContrast` is graded like any other bare cue
+rather than waved through unmeasured, so a white stroke around white words and a
+`#00000033` stroke are both measured. A caption faded out entirely is not decoded at all; it is counted as
 unmeasured instead, with a `fadedOut` reason.
 
 Two numbers decide the verdict. A bare cue whose text sits within `0.35`
@@ -895,10 +897,10 @@ background including a mixed one. `hasBox: true` on a violation is normal and
 not a contradiction: whether a cue is protected is decided by the box's colour
 and alpha together,
 never by the presence of a box. `hasOutline` is the one flag that cannot appear
-on a violation, because it is only set where the stroke reaches the picture at
-`minContrast` or better, and a stroke that does reads over anything; a stroke on
-a caption faded below that floor leaves the flag `false` and the cue graded like
-any other bare one. `boxAlpha` is the alpha the box is actually painted at — the
+on a violation, because it is only set where the stroke separates the words from
+itself by `minContrast` or better at the alpha it is painted at, and a stroke
+that does reads over anything; a stroke too faint, or too close to the text's own
+colour, leaves the flag `false` and the cue graded like any other bare one. `boxAlpha` is the alpha the box is actually painted at — the
 style's box alpha times the layer opacity —
 and it is absent, rather than `0`, where no box is painted. `layerOpacity` is
 the opacity the glyphs themselves are drawn at; `contrast` is already scaled by
@@ -1063,8 +1065,9 @@ draw zero `caption.safe_area` violations on both 1920x1080 and 1080x1920 — the
 same check `verify` runs, measuring the text block against each canvas rather
 than only comparing margins. The guarantee is about the pack, not about any text
 you put in it: a wrapping subtitle pack holds a full sentence on either canvas,
-while `broadcast-lower` is a fixed-anchor plate the renderer never wraps, so a
-sentence-length line in one still runs off a vertical frame. Run `verify` after
+while `broadcast-lower` is a fixed-anchor plate that wraps only at the frame
+edge and is anchored at x=10 %, so a sentence-length line in one still runs off
+a vertical frame. Run `verify` after
 styling and read what it says rather than assuming the pack covers it.
 
 ```bash

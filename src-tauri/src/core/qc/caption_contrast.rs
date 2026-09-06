@@ -39,7 +39,10 @@
 //!   `if let Some(outline_color) = …` — with `outline_width` defaulting to 2
 //!   only once the colour is there. A style carrying `outlineWidth` and no
 //!   colour therefore renders bare, and so does a style with no `caption_style`
-//!   at all.
+//!   at all. Whether the stroke that *is* drawn counts as protection is a
+//!   second question, answered from its colour and alpha rather than from its
+//!   existence — see [`CaptionPaint::outline_protects`] — because a stroke in
+//!   the text's own colour, or one washed out by its alpha, separates nothing.
 //! * **Box** — same shape for `backgroundColor`/`background_color`. A box the
 //!   renderer quantises away — both paths round the alpha before they draw, so
 //!   anything under half a step of it paints nothing — selects no box at all,
@@ -231,10 +234,12 @@ pub struct CaptionBandSample {
     /// Whether the renderer strokes the cue's glyphs solidly enough to protect
     /// them
     ///
-    /// A stroke that reaches the picture at the run's contrast floor or better
-    /// *is* protection, so a sample carrying one is never graded. A stroke on a
-    /// caption faded below that floor is not, and such a cue is measured like
-    /// any other bare one.
+    /// A stroke whose colour separates it from the text by the run's contrast
+    /// floor or better, at the alpha it is actually painted at, *is*
+    /// protection, so a sample carrying one is never graded. A stroke that is
+    /// too faint or too close to the text colour is not, and such a cue is
+    /// measured like any other bare one — see
+    /// [`CaptionPaint::outline_protects`].
     pub has_outline: bool,
     /// Alpha of that background box, 0–1; `0.0` where none is painted
     ///
@@ -536,6 +541,15 @@ struct CaptionPaint {
     /// Whether the renderer draws a stroke around the glyphs that reaches the
     /// picture, layer opacity included
     strokes_glyphs: bool,
+    /// Luminance of that stroke's colour, 0–1; meaningless where none is drawn
+    outline_luminance: f64,
+    /// Alpha the style names for that stroke, 0–1; `0.0` where none is drawn
+    ///
+    /// The style's own alpha *before* [`CaptionPaint::layer_opacity`], unlike
+    /// [`CaptionPaint::box_alpha`], because the stroke is only ever asked about
+    /// through [`CaptionPaint::outline_protects`], which folds the layer in
+    /// itself.
+    outline_alpha: f64,
     /// Opacity the whole caption layer is drawn at, 0–1
     ///
     /// `effective_text_layer_opacity` of the style's opacity and the clip's, so
@@ -591,19 +605,25 @@ impl CaptionPaint {
 
     /// Whether the stroke that is drawn also settles the question.
     ///
-    /// The outline is painted at the layer's opacity like every other
-    /// decoration, so a caption faded to a twentieth carries a stroke that
-    /// reaches the picture with a twentieth of its colour - which separates
-    /// nothing. Treating the stroke as protection regardless of opacity meant
-    /// exactly those cues were never decoded and never reported: not graded
-    /// clean, not counted as faded out, simply absent from the report.
+    /// A stroke separates the glyphs from the picture by standing between the
+    /// two, so what it is worth is the separation between the *text* and the
+    /// *stroke*, scaled by how much of the stroke reaches the picture. Both
+    /// halves matter and neither is enough on its own: a white stroke around
+    /// white words at full opacity separates nothing, and a black stroke drawn
+    /// at a fifth of an alpha carries a fifth of its blackness. Gating on the
+    /// layer opacity alone waved both through — the cue was never decoded and
+    /// never reported: not graded clean, not counted as faded out, simply
+    /// absent from the report.
     ///
-    /// The floor is the run's own `min_contrast`, because that is the smallest
-    /// separation this rule accepts anywhere, and an outline drawn at an
-    /// opacity below it cannot carry more than that much of its colour to the
-    /// picture whatever the colours are.
+    /// Graded against the run's own `min_contrast`, the same floor
+    /// [`box_guarantees_legibility`] and the measured grading use, so a stroke
+    /// is protection exactly where the separation it draws would have cleared
+    /// the check had it been measured.
     fn outline_protects(&self, thresholds: ContrastThresholds) -> bool {
-        self.draws_outline() && self.layer_opacity.clamp(0.0, 1.0) >= thresholds.min_contrast
+        let painted_alpha = (self.outline_alpha * self.layer_opacity).clamp(0.0, 1.0);
+        let separation = (self.text_luminance - self.outline_luminance).abs();
+
+        self.draws_outline() && painted_alpha * separation >= thresholds.min_contrast
     }
 
     /// Whether the style already protects the words from their background.
@@ -753,6 +773,8 @@ fn caption_paint(style: Option<&serde_json::Value>, clip_opacity: f32) -> Captio
             box_alpha: 0.0,
             box_luminance: 0.0,
             strokes_glyphs: false,
+            outline_luminance: 0.0,
+            outline_alpha: 0.0,
             layer_opacity: effective_text_layer_opacity(1.0, clip_opacity),
         };
     };
@@ -791,23 +813,27 @@ fn caption_paint(style: Option<&serde_json::Value>, clip_opacity: f32) -> Captio
     // then defaults to the renderer's own 2 and is rounded the same way, so a
     // sub-half-pixel width reads as the nothing it renders as, and the stroke's
     // own alpha is scaled by the layer opacity and quantised the same way the
-    // box's is.
-    let strokes_glyphs = style_field(style, &["outlineColor", "outline_color"])
-        .and_then(parse_paint_colour)
-        .is_some_and(|colour| {
-            let width = style_field(style, &["outlineWidth", "outline_width"])
-                .and_then(json_number)
-                .unwrap_or(2.0)
-                .clamp(0.0, 100.0)
-                .round();
-            colour.is_visible() && paints_at(colour.alpha * layer_opacity) && width > 0.0
-        });
+    // box's is. Colour and alpha are carried rather than collapsed to a flag,
+    // for the same reason the box's are: a stroke is protection only where it
+    // separates the words from itself, which needs both.
+    let outline =
+        style_field(style, &["outlineColor", "outline_color"]).and_then(parse_paint_colour);
+    let strokes_glyphs = outline.is_some_and(|colour| {
+        let width = style_field(style, &["outlineWidth", "outline_width"])
+            .and_then(json_number)
+            .unwrap_or(2.0)
+            .clamp(0.0, 100.0)
+            .round();
+        colour.is_visible() && paints_at(colour.alpha * layer_opacity) && width > 0.0
+    });
 
     CaptionPaint {
         text_luminance,
         box_alpha,
         box_luminance,
         strokes_glyphs,
+        outline_luminance: outline.map(|colour| colour.luminance).unwrap_or(0.0),
+        outline_alpha: outline.map(|colour| colour.alpha).unwrap_or(0.0),
         layer_opacity,
     }
 }
@@ -1354,11 +1380,12 @@ impl CaptionContrastRule {
 
     /// Grades one sample, or `None` when the cue reads fine.
     ///
-    /// An outline the viewer can see settles the question, because it separates
-    /// the glyphs from anything - which is why the flag on the sample is
-    /// written by [`CaptionPaint::outline_protects`] rather than by the
-    /// presence of a stroke, so a stroke on a caption faded below the contrast
-    /// floor does not short-circuit the grading here. A box does not settle it
+    /// An outline the viewer can see, in a colour the words stand out against,
+    /// settles the question, because it separates the glyphs from anything -
+    /// which is why the flag on the sample is written by
+    /// [`CaptionPaint::outline_protects`] rather than by the presence of a
+    /// stroke, so a stroke drawn too faintly or in the text's own colour does
+    /// not short-circuit the grading here. A box does not settle it
     /// by being a box: it is composited over the measured band, and the diluted
     /// picture is what the words are graded against, so a wash that genuinely
     /// rescues a white-on-white cue clears the check and one that only looks
@@ -2255,6 +2282,66 @@ mod tests {
     }
 
     /// Feature: Caption legibility
+    /// Scenario: should grade a stroke that separates the words from nothing
+    ///
+    /// Protection was decided from the layer opacity alone, so a white stroke
+    /// around white words - and a stroke washed out by its own alpha - counted
+    /// as protection at full opacity and the cue disappeared from the report
+    /// entirely: not graded clean, not counted as faded out, absent.
+    #[test]
+    fn should_grade_an_outline_that_cannot_separate_the_words() {
+        // A stroke the same tone as the glyphs draws an edge nobody can see.
+        let same_colour = paint_of(Some(&serde_json::json!({
+            "color": "#FFFFFF",
+            "outlineColor": "#FFFFFF",
+            "outlineWidth": 4,
+        })));
+        assert!(
+            same_colour.draws_outline(),
+            "the renderer still writes the stroke; what changed is what it separates"
+        );
+        assert!(
+            !same_colour.is_mitigated(thresholds_default()),
+            "a white stroke around white words separates nothing"
+        );
+
+        // And the cue is graded, over a white wall, like any other bare one.
+        let mut graded = sample(1.0, 1.0);
+        graded.has_outline = same_colour.outline_protects(thresholds_default());
+        assert!(!graded.has_outline);
+        assert_eq!(
+            CaptionContrastRule::fault_for(&graded, DEFAULT_MIN_CONTRAST, DEFAULT_MAX_BAND_STDDEV),
+            Some(ContrastFault::LowContrast),
+            "white words on a white wall are unreadable however they are stroked"
+        );
+
+        // A black stroke at a fifth of an alpha carries a fifth of its
+        // blackness to the picture, which is under the run's floor.
+        let washed_out = paint_of(Some(&serde_json::json!({
+            "color": "#FFFFFF",
+            "outlineColor": "#00000033",
+            "outlineWidth": 4,
+        })));
+        assert!(washed_out.draws_outline());
+        assert!(
+            !washed_out.is_mitigated(thresholds_default()),
+            "0.2 of a full separation does not clear a floor of {DEFAULT_MIN_CONTRAST}"
+        );
+
+        // The same stroke opaque is exactly what the check exists to wave
+        // through, so the gate must not have become one that never passes.
+        let opaque = paint_of(Some(&serde_json::json!({
+            "color": "#FFFFFF",
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+        })));
+        assert!(
+            opaque.outline_protects(thresholds_default()),
+            "an opaque black stroke around white words reads over anything"
+        );
+    }
+
+    /// Feature: Caption legibility
     /// Scenario: should skip a box only against the thresholds this run grades
     ///
     /// The skip is a claim that the cue cannot fail, and it is only true of the
@@ -2499,6 +2586,25 @@ mod tests {
             (
                 "fully transparent outline",
                 Some(serde_json::json!({ "outlineColor": "#00000000", "outlineWidth": 4 })),
+            ),
+            // Both renderers draw these; neither of them protects anything, so
+            // the mirror has to keep saying "drawn" while the grading says
+            // "measure it".
+            (
+                "an outline in the text's own colour",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "outlineColor": "#FFFFFF",
+                    "outlineWidth": 4,
+                })),
+            ),
+            (
+                "a translucent outline",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "outlineColor": "#00000033",
+                    "outlineWidth": 4,
+                })),
             ),
             (
                 "snake_case outline",

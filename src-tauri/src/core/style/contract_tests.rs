@@ -217,8 +217,9 @@ async fn every_caption_pack_passes_the_safe_area_rule_on_both_canvases() {
 
             assert!(
                 violations.is_empty(),
-                "pack '{}' must be safe at {label}, got: {}",
+                "pack '{}' must be safe at {label} with {:?}, got: {}",
                 pack.id,
+                caption_text_for(pack.id),
                 violations.join("; ")
             );
         }
