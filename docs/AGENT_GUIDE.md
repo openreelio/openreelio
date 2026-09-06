@@ -118,10 +118,13 @@ Requirements a `required` list cannot state appear as `allOf` groups:
 - An **optional field with more than one spelling** carries the same rule as a
   `not` over the pairs — `TrimClip`'s `newSourceIn`/`newStart`. Send one or
   neither.
-- An **either/or a parse step enforces** is an `anyOf`, where both together are
-  fine and the explicit fields win: `AddTextClip` wants `textData` or a
-  `preset`, `AddEffect` an `effectType` or a `recipe`. Without a preset the
-  `textData` branch also spells out the complete object the parser then needs.
+- An **either/or a parse step enforces** is an `anyOf`: `AddTextClip` wants
+  `textData` or a `preset`, `AddEffect` an `effectType` or a `recipe`. Both
+  together are fine only when they agree — an explicit `textData` merges over
+  its preset key by key, while a recipe beside a different `effectType` is
+  refused. Each branch also excludes an explicit `null`, which is the absent
+  field written out. Without a preset the `textData` branch spells out the
+  complete object the parser then needs.
 - `RippleDelete` is the one `anyOf` over spellings, because its parser really
   does read `clipIds` and `clipId` as two properties: a non-empty `clipIds`
   wins, and an empty one falls back to `clipId`.

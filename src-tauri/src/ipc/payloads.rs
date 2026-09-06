@@ -948,12 +948,20 @@ pub struct DeleteCaptionPayload {
 /// baseline parameters; anything in `params` overrides the recipe key by key.
 /// `CommandPayload::parse` performs that resolution, so a payload that reaches
 /// command construction always carries an explicit effect type.
+///
+/// The two together are fine only when they agree: a recipe beside a different
+/// `effectType` is refused rather than silently preferring one of them.
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddEffectPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub clip_id: ClipId,
+    /// The effect to add, unless a `recipe` supplies one.
+    ///
+    /// The two together are fine only when they agree; a recipe beside a
+    /// different `effectType` is refused, because the pair expresses
+    /// contradictory intent rather than an override.
     #[serde(default)]
     pub effect_type: Option<EffectType>,
     /// Curated transition recipe id, resolved into `effectType` + `params`.
@@ -4965,6 +4973,13 @@ pub struct SamplePayload {
     /// The same shape as [`scan_field_aliases`], one level up: an attribute
     /// wrapped by rustfmt is accumulated until its brackets balance, and the
     /// variant that follows owns whatever it declared.
+    ///
+    /// The `#[serde(alias)]` attributes are not the whole story: the enum
+    /// carries `rename_all = "camelCase"`, so the lowerCamel spelling of every
+    /// variant is a command type whether or not anybody wrote it out as an
+    /// alias. Scanning it too keeps a future variant inside the checks the
+    /// table drives instead of leaving its camelCase name a command the schema
+    /// lookup answers "not supported" about.
     fn scan_variant_aliases(source: &str) -> Vec<(String, String)> {
         let mut pairs: Vec<(String, String)> = Vec::new();
         let Some(body) = source.split("pub enum CommandPayload {").nth(1) else {
@@ -4999,13 +5014,22 @@ pub struct SamplePayload {
                 .strip_suffix("),")
                 .and_then(|rest| rest.split('(').next())
             else {
+                // A unit variant carries no payload, so this scan would walk
+                // straight past it and the table would silently stop covering
+                // a command. Say so rather than drift.
+                if let Some(unit) = trimmed
+                    .strip_suffix(',')
+                    .filter(|name| is_variant_name(name))
+                {
+                    panic!(
+                        "`{unit}` is a CommandPayload variant carrying no payload; this scan reads \
+                         only variants written as `Variant(Payload),`, so teach it that shape \
+                         before adding one"
+                    );
+                }
                 continue;
             };
-            let is_variant = variant.starts_with(|character: char| character.is_ascii_uppercase())
-                && variant
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric());
-            if !is_variant {
+            if !is_variant_name(variant) {
                 continue;
             }
             for alias in aliases.drain(..) {
@@ -5013,9 +5037,75 @@ pub struct SamplePayload {
                     pairs.push((alias, variant.to_string()));
                 }
             }
+            let camel = to_lower_camel_case(variant);
+            if camel != variant {
+                pairs.push((camel, variant.to_string()));
+            }
         }
 
+        // The camelCase spelling is usually written out as an alias as well,
+        // and one command type twice is still one entry in the table.
+        pairs.sort();
+        pairs.dedup();
         pairs
+    }
+
+    /// Whether a name reads as a `CommandPayload` variant rather than a comment
+    /// or an attribute the scan walked over.
+    fn is_variant_name(name: &str) -> bool {
+        name.starts_with(|character: char| character.is_ascii_uppercase())
+            && name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+    }
+
+    /// The spelling `rename_all = "camelCase"` gives a PascalCase variant name.
+    ///
+    /// serde lowercases the leading character and leaves the rest alone, so
+    /// `SetClipSpeed` is `setClipSpeed` on the wire.
+    fn to_lower_camel_case(variant: &str) -> String {
+        let mut characters = variant.chars();
+        match characters.next() {
+            Some(first) => first.to_ascii_lowercase().to_string() + characters.as_str(),
+            None => String::new(),
+        }
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a variant's camelCase spelling is scanned without an alias
+    ///
+    /// The enum's `rename_all = "camelCase"` makes it a command type on its
+    /// own, so a variant added without writing that spelling out by hand is
+    /// still a name the schema lookup has to answer — and the scan has to see
+    /// it, or the table it drives silently stops covering the command.
+    #[test]
+    fn the_variant_scanner_should_read_the_camel_case_spelling_of_every_variant() {
+        let snippet = "\
+pub enum CommandPayload {
+    #[serde(alias = \"AddTrack\")]
+    CreateTrack(CreateTrackPayload),
+
+    SplitClip(SplitClipPayload),
+}
+";
+
+        assert_eq!(
+            scan_variant_aliases(snippet),
+            vec![
+                ("AddTrack".to_string(), "CreateTrack".to_string()),
+                ("createTrack".to_string(), "CreateTrack".to_string()),
+                ("splitClip".to_string(), "SplitClip".to_string()),
+            ],
+            "the camelCase spelling counts whether or not an alias declares it"
+        );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a variant this scan cannot read is named rather than skipped
+    #[test]
+    #[should_panic(expected = "carrying no payload")]
+    fn the_variant_scanner_should_refuse_a_unit_variant_rather_than_walk_past_it() {
+        scan_variant_aliases("pub enum CommandPayload {\n    Undo,\n}\n");
     }
 
     /// Feature: derived command payload schemas
@@ -5257,6 +5347,66 @@ pub struct SamplePayload {
              missing requirement in the schema rather than only in the parse error: \
              {divergences:#?}"
         );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: an explicit null does not take an either/or branch
+    ///
+    /// The bug this replaces: every branch of an either/or group was a bare
+    /// `required`, and each of these properties is nullable — so
+    /// `{"effectType": null}` satisfied the schema while the parser read it as
+    /// the absent field it is. `required` says nothing about the value either,
+    /// so a `textData` whose `style` was the string `"nope"` passed a nested
+    /// `required` that can only apply to an object.
+    #[test]
+    fn an_either_or_branch_should_refuse_a_null_or_a_non_object_in_both_places() {
+        let effect = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_v1",
+            "clipId": "clip_1"
+        });
+        let text = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_v1",
+            "timelineIn": 5.0,
+            "duration": 3.0
+        });
+
+        let with = |base: &Value, name: &str, value: Value| {
+            let mut payload = base.clone();
+            payload[name] = value;
+            payload
+        };
+
+        let cases: Vec<(&str, Value)> = vec![
+            ("AddEffect", with(&effect, "effectType", Value::Null)),
+            ("AddEffect", with(&effect, "recipe", Value::Null)),
+            ("AddTextClip", with(&text, "preset", Value::Null)),
+            ("AddTextClip", with(&text, "textData", Value::Null)),
+            (
+                "AddTextClip",
+                with(
+                    &text,
+                    "textData",
+                    serde_json::json!({
+                        "content": "Hello World",
+                        "style": "nope",
+                        "position": { "x": 0.5, "y": 0.5 }
+                    }),
+                ),
+            ),
+        ];
+
+        for (command_type, payload) in cases {
+            let schema = command_payload_schema(command_type)
+                .unwrap_or_else(|| panic!("{command_type} has a schema"));
+            check_against_schema(&schema, &payload).expect_err(&format!(
+                "{command_type}'s schema must refuse what its parser refuses: {payload}"
+            ));
+            CommandPayload::parse(command_type.to_string(), payload.clone()).expect_err(&format!(
+                "{command_type} must refuse this payload for the guard to mean anything: {payload}"
+            ));
+        }
     }
 
     /// Feature: derived command payload schemas

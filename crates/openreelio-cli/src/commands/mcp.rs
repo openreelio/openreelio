@@ -723,7 +723,7 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.command.schema",
             "OpenReelio command schema",
-            "Read the command schema, text/caption workflows, and payload conventions available to external agents. Without arguments this lists the command names and the workflow hints. Pass commandType (one name or a list of at most ten) to get the JSON Schema of those payloads — field names, types, which are required, enums, and the alternative spellings each field accepts — and read it before composing a payload rather than guessing one and reading the parse error. Any spelling the parser takes works ('changeClipSpeed', 'freezeFrame', 'addTrack'), answered with the canonical command's schema and its canonicalType. A required field with more than one spelling is a 'oneOf' over them: send exactly one, because two spellings of one field are a duplicate-field parse error.",
+            "Read the command schema, text/caption workflows, and payload conventions available to external agents. Without arguments this lists the command names and the workflow hints. Pass commandType (one name or a list of at most ten) to get the JSON Schema of those payloads — field names, types, which are required, enums, and the alternative spellings each field accepts — and read it before composing a payload rather than guessing one and reading the parse error. Any spelling the parser takes works ('changeClipSpeed', 'freezeFrame', 'addTrack'), answered with the canonical command's schema and its canonicalType; two spellings of one command in the same list are answered once, so ask for ten distinct commands rather than ten spellings. A required field with more than one spelling is a 'oneOf' over them: send exactly one, because two spellings of one field are a duplicate-field parse error.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1922,24 +1922,29 @@ fn read_command_schema(arguments: Value) -> Result<Value, ToolError> {
         return Ok(build_command_schema());
     }
 
-    // The same name twice is one lookup, and it should not spend two of the
-    // ten. The core lookup trims each name before resolving it, so the same
-    // name with a stray space around it has to be trimmed here too or it
-    // survives the dedup and spends a slot on a schema already fetched.
+    // The cap is counted on the list as it was sent, because that is the list
+    // the tool advertises a `maxItems` for: a validator reading the schema
+    // refuses an eleventh entry whatever it spells, and a handler that counted
+    // something else would accept requests the advertised schema forbids.
+    if requested.len() > MAX_COMMAND_SCHEMA_TYPES {
+        return Err(ToolError::InvalidArguments(format!(
+            "commandType names {} commands; at most {MAX_COMMAND_SCHEMA_TYPES} may be requested at once. \
+             Ask for the ones you are about to compose, not the whole surface.",
+            requested.len()
+        )));
+    }
+
+    // The same name twice is one lookup. The core lookup trims each name before
+    // resolving it, so the same name with a stray space around it has to be
+    // trimmed here too or it survives the dedup and fetches a schema twice.
+    // Two different spellings of one command are collapsed there rather than
+    // here, since only the core knows which spellings mean the same command.
     let mut deduped: Vec<String> = Vec::with_capacity(requested.len());
     for command_type in requested {
         let command_type = command_type.trim().to_string();
         if !deduped.contains(&command_type) {
             deduped.push(command_type);
         }
-    }
-
-    if deduped.len() > MAX_COMMAND_SCHEMA_TYPES {
-        return Err(ToolError::InvalidArguments(format!(
-            "commandType names {} commands; at most {MAX_COMMAND_SCHEMA_TYPES} may be requested at once. \
-             Ask for the ones you are about to compose, not the whole surface.",
-            deduped.len()
-        )));
     }
 
     openreelio_core::ipc::command_payload_schemas(&deduped).map_err(ToolError::InvalidArguments)
@@ -3705,23 +3710,43 @@ mod tests {
     }
 
     /// Feature: derived command payload schemas over MCP
-    /// Scenario: padding around a name does not spend one of the ten
+    /// Scenario: one command asked for several ways is answered once
     ///
-    /// The bug this replaces: the cap was counted before the names were
-    /// trimmed, so `"SplitClip"` and `" SplitClip"` were two of the ten and
-    /// then one schema — an agent assembling a list by hand could be refused
-    /// for asking twice for the same thing.
+    /// Padding is trimmed and an alternative spelling resolves to the same
+    /// command, so a list an agent assembled by hand does not pay for the same
+    /// schema twice. The cap itself counts the entries as sent, which is what
+    /// the advertised `maxItems` promises.
     #[test]
-    fn should_count_one_padded_name_and_its_twin_once_against_the_cap() {
-        let requested: Vec<Value> = ["SplitClip", " SplitClip", "SplitClip\n"]
+    fn should_answer_one_command_asked_for_several_ways_once() {
+        let requested: Vec<Value> = ["SplitClip", " SplitClip", "SplitClip\n", "splitClip"]
             .iter()
             .map(|name| Value::String((*name).to_string()))
             .collect();
         let result = read_command_schema(serde_json::json!({ "commandType": requested }))
-            .expect("one name three ways is one lookup");
+            .expect("one name four ways is one lookup");
 
         assert_eq!(result["count"].as_u64(), Some(1));
         assert_eq!(result["schemas"][0]["schema"]["title"], "SplitClip");
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: the cap counts the entries the caller sent
+    ///
+    /// The bug this replaces: the cap was counted after the list was deduped,
+    /// so an eleven-entry array carrying one repeat was accepted — while the
+    /// `maxItems` the tool advertises refuses it, and an agent validating its
+    /// own arguments against that schema would never have sent it.
+    #[test]
+    fn should_count_a_repeat_against_the_advertised_cap() {
+        let mut requested: Vec<Value> = CommandPayload::SUPPORTED_COMMAND_TYPES
+            .iter()
+            .take(MAX_COMMAND_SCHEMA_TYPES)
+            .map(|name| Value::String((*name).to_string()))
+            .collect();
+        requested.push(requested[0].clone());
+
+        read_command_schema(serde_json::json!({ "commandType": requested }))
+            .expect_err("eleven entries is past the maxItems the tool advertises");
     }
 
     /// The advertised cap and the enforced one are the same number.

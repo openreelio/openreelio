@@ -3202,8 +3202,19 @@ export type AddAudioKeyframePayload = { sequenceId: string; trackId: string; cli
  * baseline parameters; anything in `params` overrides the recipe key by key.
  * `CommandPayload::parse` performs that resolution, so a payload that reaches
  * command construction always carries an explicit effect type.
+ * 
+ * The two together are fine only when they agree: a recipe beside a different
+ * `effectType` is refused rather than silently preferring one of them.
  */
-export type AddEffectPayload = { sequenceId: string; trackId: string; clipId: string; effectType?: EffectType | null; 
+export type AddEffectPayload = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * The effect to add, unless a `recipe` supplies one.
+ * 
+ * The two together are fine only when they agree; a recipe beside a
+ * different `effectType` is refused, because the pair expresses
+ * contradictory intent rather than an override.
+ */
+effectType?: EffectType | null; 
 /**
  * Curated transition recipe id, resolved into `effectType` + `params`.
  */

@@ -512,9 +512,16 @@ pub(crate) const WIRE_ONLY_PROPERTIES: &[WireOnlyProperty] = &[
 /// Neither shows up in `required`, so a schema derived from the struct alone
 /// accepts a payload `command validate` refuses.
 ///
-/// Each entry becomes an `anyOf` over its branches, which is the honest
-/// reading: sending both is fine, and the explicit fields win over the preset
-/// key by key.
+/// Each entry becomes an `anyOf` over its branches. Sending both is fine only
+/// when the two agree: `AddTextClip` merges an explicit `textData` over its
+/// `preset` key by key, while `AddEffect` refuses a `recipe` beside an
+/// `effectType` the recipe does not apply, because the two express
+/// contradictory intent rather than an override.
+///
+/// A branch requires its property to carry a value: every one of these
+/// properties is nullable, so `required` alone would call
+/// `{"effectType": null}` a satisfied branch while the parser reads it as the
+/// absent field it is.
 pub(crate) struct EitherOrRequirement {
     /// Rust type whose parsing enforces it.
     pub owner: &'static str,
@@ -580,34 +587,45 @@ pub(crate) const PAYLOAD_EITHER_OR_REQUIREMENTS: &[EitherOrRequirement] = &[
 
 impl EitherOrRequirement {
     /// The `anyOf` group this requirement states.
+    ///
+    /// Every branch pairs `required` with a `not: {"type": "null"}` on the
+    /// property it takes: the properties are all nullable, so `required` on its
+    /// own is satisfied by an explicit `null` the parser then reads as the
+    /// missing field it is. A branch that descends into the value also states
+    /// `"type": "object"` beside the `required` it imposes, because `required`
+    /// says nothing at all about a value that is not an object —
+    /// `{"style": "nope"}` would otherwise pass a check the parser fails.
     fn group(&self) -> Value {
         let branches: Vec<Value> = self
             .branches
             .iter()
             .map(|branch| {
-                let mut option = json!({ "required": [branch.property] });
-
                 let mut value = serde_json::Map::new();
+                value.insert("not".to_string(), json!({ "type": "null" }));
+
                 if !branch.value_requires.is_empty() {
+                    value.insert("type".to_string(), json!("object"));
                     value.insert("required".to_string(), json!(branch.value_requires));
                 }
                 if !branch.nested_requires.is_empty() {
+                    value.insert("type".to_string(), json!("object"));
                     let nested: serde_json::Map<String, Value> = branch
                         .nested_requires
                         .iter()
-                        .map(|(name, names)| ((*name).to_string(), json!({ "required": names })))
+                        .map(|(name, names)| {
+                            (
+                                (*name).to_string(),
+                                json!({ "type": "object", "required": names }),
+                            )
+                        })
                         .collect();
                     value.insert("properties".to_string(), Value::Object(nested));
                 }
 
-                if let (false, Some(option)) = (value.is_empty(), option.as_object_mut()) {
-                    option.insert(
-                        "properties".to_string(),
-                        json!({ branch.property: Value::Object(value) }),
-                    );
-                }
-
-                option
+                json!({
+                    "required": [branch.property],
+                    "properties": { branch.property: Value::Object(value) },
+                })
             })
             .collect();
 
@@ -980,6 +998,12 @@ pub fn unsupported_command_type_error(command_type: &str) -> String {
 /// suggested creating a caption to an agent trying to delete one — the opposite
 /// operation, in a sentence that reads like an answer. Several names in list
 /// order is the honest reply.
+///
+/// Every alternative spelling in [`PAYLOAD_VARIANT_ALIASES`] is scored beside
+/// the canonical list, because an agent that lowercased `addTrack` meant a real
+/// command and measuring only against `CreateTrack` put it out of reach. The
+/// suggestion is always the canonical name the spelling resolves to: naming
+/// `addTrack` back would answer a synonym instead of the command.
 pub fn closest_command_types(command_type: &str) -> Vec<&'static str> {
     let candidate = command_type.trim();
     if candidate.is_empty() {
@@ -987,42 +1011,59 @@ pub fn closest_command_types(command_type: &str) -> Vec<&'static str> {
     }
 
     let supported = super::CommandPayload::SUPPORTED_COMMAND_TYPES;
+    let spellings = || {
+        supported.iter().copied().chain(
+            PAYLOAD_VARIANT_ALIASES
+                .iter()
+                .map(|(spelling, _)| *spelling),
+        )
+    };
 
-    if let Some(matched) = supported
-        .iter()
-        .find(|supported| supported.eq_ignore_ascii_case(candidate))
+    if let Some(matched) = spellings()
+        .find(|spelling| spelling.eq_ignore_ascii_case(candidate))
+        .and_then(canonical_command_type)
     {
         return vec![matched];
     }
 
+    // One entry per command, keeping the spelling that came closest: several
+    // spellings of one command are one suggestion, and the shortest of them is
+    // what the tolerance below is measured against.
     let lowered = candidate.to_ascii_lowercase();
-    let scored: Vec<(&'static str, usize)> = supported
-        .iter()
-        .map(|supported| {
-            (
-                *supported,
-                edit_distance(&lowered, &supported.to_ascii_lowercase()),
-            )
-        })
-        .collect();
+    let mut scored: Vec<(&'static str, &'static str, usize)> = Vec::new();
+    for spelling in spellings() {
+        let Some(canonical) = canonical_command_type(spelling) else {
+            continue;
+        };
+        let distance = edit_distance(&lowered, &spelling.to_ascii_lowercase());
+        match scored.iter_mut().find(|(seen, ..)| *seen == canonical) {
+            Some(entry) if distance < entry.2 => *entry = (canonical, spelling, distance),
+            Some(_) => {}
+            None => scored.push((canonical, spelling, distance)),
+        }
+    }
 
-    let Some(best) = scored.iter().map(|(_, distance)| *distance).min() else {
+    let Some(best) = scored.iter().map(|(_, _, distance)| *distance).min() else {
         return Vec::new();
     };
 
-    let tied: Vec<&'static str> = scored
+    let tied: Vec<(&'static str, &'static str)> = scored
         .iter()
-        .filter(|(_, distance)| *distance == best)
-        .map(|(name, _)| *name)
+        .filter(|(_, _, distance)| *distance == best)
+        .map(|(canonical, spelling, _)| (*canonical, *spelling))
         .collect();
 
-    // The tolerance is measured against the shortest tied name, which is the
-    // strictest of them: a five-edit hop is a guess even when one candidate
+    // The tolerance is measured against the shortest tied spelling, which is
+    // the strictest of them: a five-edit hop is a guess even when one candidate
     // happens to be long.
-    let shortest = tied.iter().map(|name| name.len()).min().unwrap_or(0);
+    let shortest = tied
+        .iter()
+        .map(|(_, spelling)| spelling.len())
+        .min()
+        .unwrap_or(0);
     let tolerance = (shortest / 3).max(2);
     if best <= tolerance {
-        tied
+        tied.into_iter().map(|(canonical, _)| canonical).collect()
     } else {
         Vec::new()
     }
@@ -1090,10 +1131,17 @@ fn check_object_against(
         .cloned()
         .unwrap_or_default();
 
+    // A required property is one `schemars` derived from a field that is not an
+    // `Option`, so an explicit `null` is refused by the parser exactly as an
+    // absent property is; the guard reads the two the same way.
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
         for name in required.iter().filter_map(Value::as_str) {
-            if !payload.contains_key(name) {
-                return Err(format!("missing required property '{name}'"));
+            match payload.get(name) {
+                None => return Err(format!("missing required property '{name}'")),
+                Some(Value::Null) => {
+                    return Err(format!("required property '{name}' is null"));
+                }
+                Some(_) => {}
             }
         }
     }
@@ -1172,15 +1220,22 @@ fn check_requirement_group(
 
 /// Whether a payload matches one branch of a requirement group.
 ///
-/// A branch states `required`, the `minItems` of a property it requires, and
-/// the `allOf`/`anyOf` nesting the exclusivity constraints are built from.
+/// A branch states `required`, the constraints it puts on a property it
+/// requires, and the `allOf`/`anyOf` nesting the exclusivity constraints are
+/// built from.
+///
+/// A property whose value is an explicit `null` does not satisfy `required`
+/// here. That is stricter than JSON Schema reads the keyword alone, and it is
+/// what every group the derived schemas state means: each pairs its `required`
+/// with a `not: {"type": "null"}` on the same property, because the parser
+/// reads a null as the absent field it is.
 #[cfg(test)]
 fn satisfies_branch(payload: &serde_json::Map<String, Value>, branch: &Value) -> bool {
     if let Some(names) = branch.get("required").and_then(Value::as_array) {
         if !names
             .iter()
             .filter_map(Value::as_str)
-            .all(|name| payload.contains_key(name))
+            .all(|name| payload.get(name).is_some_and(|value| !value.is_null()))
         {
             return false;
         }
@@ -1191,20 +1246,8 @@ fn satisfies_branch(payload: &serde_json::Map<String, Value>, branch: &Value) ->
             let Some(value) = payload.get(name) else {
                 continue;
             };
-            if let Some(minimum) = constraints.get("minItems").and_then(Value::as_u64) {
-                let length = value.as_array().map_or(0, |entries| entries.len() as u64);
-                if length < minimum {
-                    return false;
-                }
-            }
-            // A branch may also constrain the shape of the value it requires,
-            // as `AddTextClip`'s preset-less branch demands a complete
-            // `textData`. That is the same check one level down.
-            if constraints.get("required").is_some() || constraints.get("properties").is_some() {
-                match value.as_object() {
-                    Some(value) if satisfies_branch(value, constraints) => {}
-                    _ => return false,
-                }
+            if !satisfies_constraints(value, constraints) {
+                return false;
             }
         }
     }
@@ -1228,6 +1271,62 @@ fn satisfies_branch(payload: &serde_json::Map<String, Value>, branch: &Value) ->
     }
 
     true
+}
+
+/// Whether one value matches the constraints a requirement branch puts on it.
+///
+/// The vocabulary is the one the derived groups use and no more: `type`, the
+/// `not` that excludes an explicit `null`, the `minItems` a stand-in property
+/// requires of the list it substitutes for, and the `required`/`properties`
+/// nesting that is the same check one level down — `AddTextClip`'s preset-less
+/// branch demands a complete `textData`.
+#[cfg(test)]
+fn satisfies_constraints(value: &Value, constraints: &Value) -> bool {
+    if let Some(declared) = constraints.get("type").and_then(Value::as_str) {
+        if !value_is(declared, value) {
+            return false;
+        }
+    }
+
+    if let Some(excluded) = constraints.get("not") {
+        if satisfies_constraints(value, excluded) {
+            return false;
+        }
+    }
+
+    if let Some(minimum) = constraints.get("minItems").and_then(Value::as_u64) {
+        let length = value.as_array().map_or(0, |entries| entries.len() as u64);
+        if length < minimum {
+            return false;
+        }
+    }
+
+    if constraints.get("required").is_some() || constraints.get("properties").is_some() {
+        return match value.as_object() {
+            Some(object) => satisfies_branch(object, constraints),
+            None => false,
+        };
+    }
+
+    true
+}
+
+/// Whether a value is of the JSON type a schema declares.
+///
+/// A keyword this shallow guard does not model answers `true`: it is here to
+/// catch a payload the parser refuses, not to reject one it accepts.
+#[cfg(test)]
+fn value_is(declared: &str, value: &Value) -> bool {
+    match declared {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "boolean" => value.is_boolean(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "number" => value.is_number(),
+        "null" => value.is_null(),
+        _ => true,
+    }
 }
 
 /// Resolves a property's single local `$ref`, directly or through an `allOf`.
@@ -1286,18 +1385,7 @@ fn check_declared_type(
         _ => return Ok(()),
     };
 
-    let matches = match declared {
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        "string" => value.is_string(),
-        "boolean" => value.is_boolean(),
-        "integer" => value.is_i64() || value.is_u64(),
-        "number" => value.is_number(),
-        "null" => value.is_null(),
-        _ => true,
-    };
-
-    if matches {
+    if value_is(declared, value) {
         Ok(())
     } else {
         Err(format!("expected {declared}, got {value}"))
@@ -1391,6 +1479,76 @@ mod tests {
 
         let error = unsupported_command_type_error("SetOpacity");
         assert!(error.contains("Did you mean 'SetClipOpacity'?"), "{error}");
+    }
+
+    /// Feature: suggesting the command an agent meant
+    /// Scenario: the caller lowercased an alternative spelling
+    ///
+    /// The bug this replaces: only the canonical names were scored, so
+    /// `addtrack` — one case slip away from the `addTrack` the parser takes —
+    /// was measured against `CreateTrack` alone and answered with nothing.
+    #[test]
+    fn should_answer_an_alias_spelling_with_the_canonical_command() {
+        assert_eq!(closest_command_types("addtrack"), vec!["CreateTrack"]);
+        assert_eq!(
+            closest_command_types("freezeframe"),
+            vec!["CreateFreezeFrame"]
+        );
+        assert_eq!(
+            closest_command_types("changeclipspeed"),
+            vec!["SetClipSpeed"]
+        );
+        assert_eq!(closest_command_types("liftedit"), vec!["Lift"]);
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: three spellings of one field are one at a time
+    ///
+    /// `at_most_one` builds a `not` over every pair, and a group of three has
+    /// three of them. All three spellings at once has to be refused as surely
+    /// as any two, or a payload serde reads as two duplicate fields would pass
+    /// the schema that describes it.
+    #[test]
+    fn should_forbid_every_pair_of_three_spellings_of_one_field() {
+        let group = SpellingGroup {
+            canonical: "captionId".to_string(),
+            spellings: vec![
+                "captionId".to_string(),
+                "clipId".to_string(),
+                "id".to_string(),
+            ],
+            exclusive: true,
+            canonical_constraints: None,
+        }
+        .at_most_one()
+        .expect("an exclusive group forbids its pairs");
+
+        let payload = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| ((*name).to_string(), json!("x")))
+                .collect::<serde_json::Map<String, Value>>()
+        };
+
+        check_requirement_group(&payload(&["captionId", "clipId", "id"]), &group)
+            .expect_err("all three spellings at once is three duplicate fields");
+
+        for one in ["captionId", "clipId", "id"] {
+            check_requirement_group(&payload(&[one]), &group).unwrap_or_else(|error| {
+                panic!("`{one}` alone is what the field asks for: {error}")
+            });
+        }
+
+        for pair in [
+            ["captionId", "clipId"],
+            ["captionId", "id"],
+            ["clipId", "id"],
+        ] {
+            check_requirement_group(&payload(&pair), &group).expect_err(&format!(
+                "`{}` and `{}` are the same field twice",
+                pair[0], pair[1]
+            ));
+        }
     }
 
     #[test]
