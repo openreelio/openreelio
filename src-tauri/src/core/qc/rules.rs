@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::caption_contrast::json_number;
 use super::caption_group::{group_caption_findings, CaptionFinding, CaptionGroup};
 use super::context::QCContext;
 use super::violation::{merged_span_duration_sec, QCViolation, Severity, ViolationFix};
@@ -1519,21 +1520,50 @@ impl QCRule for AudioClippingRule {
 // CaptionSafeAreaRule - Ensures captions are in safe area
 // ============================================================================
 
-/// Code point ranges drawn on a narrow, roughly half-em body.
+/// Height, in pixels, of the space caption sizes are authored in.
 ///
-/// Latin with its supplements, the IPA and modifier blocks that go with it,
-/// Greek, Cyrillic, and the general punctuation and currency signs those
-/// scripts are set with. Everything outside them — Hangul, Han, Kana, the
-/// fullwidth forms, and the scripts this list does not know — is charged a full
-/// em by [`CaptionSafeAreaRule::glyph_advance_factor`], which is the safe way
-/// to be wrong about a script nobody measured.
-const NARROW_SCRIPT_RANGES: [(u32, u32); 6] = [
-    (0x0000, 0x02FF), // ASCII, Latin-1, Latin Extended-A/B, IPA, modifiers
-    (0x0370, 0x03FF), // Greek and Coptic
-    (0x0400, 0x052F), // Cyrillic and Cyrillic Supplement
-    (0x1E00, 0x1FFF), // Latin Extended Additional, Greek Extended
-    (0x2000, 0x206F), // General punctuation
-    (0x20A0, 0x20BF), // Currency symbols
+/// The export pins every ASS script's `PlayResY` to 1080 and writes `fontSize`
+/// and `\fsp` into that space unscaled, and the preview scales the same style
+/// by `canvasHeight / 1080`. A caption's size is therefore a fraction of the
+/// frame rather than a count of output pixels, and an estimate that divides by
+/// the canvas is wrong by the ratio between the two.
+const ASS_SCRIPT_HEIGHT_PX: f64 = 1080.0;
+
+/// Code point ranges drawn on a full-em square.
+///
+/// The scripts that really are set on a full em: Hangul, Han, Kana, the CJK
+/// symbols and fullwidth forms they are punctuated with, and emoji. Everything
+/// else is charged the half-em default by
+/// [`CaptionSafeAreaRule::glyph_advance_factor`].
+///
+/// Listing the wide scripts rather than the narrow ones is the polarity that
+/// matches reality. The inverse list could only ever name the scripts somebody
+/// had enumerated, so Arabic, Hebrew, Devanagari, Thai and every other script
+/// outside it — all of them set on a narrow body — were charged a full em and
+/// came out twice as wide as libass draws them. That is not a safe direction to
+/// be wrong in: it hands the contrast pass a column wider than the words, so
+/// the band it measures takes in picture the caption never covered.
+const WIDE_SCRIPT_RANGES: [(u32, u32); 10] = [
+    (0x1100, 0x11FF),   // Hangul Jamo
+    (0x3000, 0x303F),   // CJK symbols and punctuation
+    (0x3040, 0x30FF),   // Hiragana and Katakana
+    (0x3130, 0x318F),   // Hangul compatibility Jamo
+    (0x3400, 0x4DBF),   // CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),   // CJK Unified Ideographs
+    (0xAC00, 0xD7AF),   // Hangul syllables
+    (0xF900, 0xFAFF),   // CJK compatibility ideographs
+    (0xFF00, 0xFF60),   // Fullwidth forms
+    (0x1F300, 0x1FAFF), // Emoji and pictographs
+];
+
+/// Code point ranges that advance the pen by nothing at all.
+///
+/// Combining marks are drawn on top of the glyph before them, so an NFD-
+/// decomposed line — "e" plus a combining acute rather than "é" — is exactly as
+/// wide as its NFC form. Charging them an advance made the same words wider
+/// depending on which normalisation the caption was stored in.
+const ZERO_ADVANCE_RANGES: [(u32, u32); 1] = [
+    (0x0300, 0x036F), // Combining diacritical marks
 ];
 
 /// Rule that ensures captions remain within the title-safe area
@@ -1609,20 +1639,22 @@ impl CaptionSafeAreaRule {
         }
 
         // Partial style blobs are common (only the edited fields are stored),
-        // so fall back to reading the single field this rule needs.
+        // so fall back to reading the single field this rule needs - through
+        // the reader the renderer uses, which takes `"48"` as readily as `48`.
         value
             .get("fontSize")
             .or_else(|| value.get("font_size"))
-            .and_then(serde_json::Value::as_f64)
-            .filter(|size| size.is_finite() && *size > 0.0)
+            .and_then(json_number)
+            .filter(|size| *size > 0.0)
             .unwrap_or(default_size)
     }
 
     /// Reads the extra advance, in pixels, the style puts between glyphs.
     ///
-    /// Read under both spellings and clamped exactly as the render path clamps
-    /// it before writing the ASS `\fsp`, so a letter-spaced style widens the
-    /// estimate by what it will actually add rather than by nothing at all.
+    /// Read under both spellings, through the renderer's own string-tolerant
+    /// number reader, and clamped exactly as the render path clamps it before
+    /// writing the ASS `\fsp`, so a letter-spaced style widens the estimate by
+    /// what it will actually add rather than by nothing at all.
     fn letter_spacing_px(style: Option<&serde_json::Value>) -> f64 {
         let Some(value) = style else {
             return 0.0;
@@ -1631,8 +1663,7 @@ impl CaptionSafeAreaRule {
         value
             .get("letterSpacing")
             .or_else(|| value.get("letter_spacing"))
-            .and_then(serde_json::Value::as_f64)
-            .filter(|spacing| spacing.is_finite())
+            .and_then(json_number)
             .unwrap_or(0.0)
             .clamp(-100.0, 200.0)
             .round()
@@ -1640,35 +1671,48 @@ impl CaptionSafeAreaRule {
 
     /// Advance of one character as a fraction of the font size.
     ///
-    /// Half an em is the figure for the scripts that are set on a narrow body;
-    /// it is wrong by a factor of two for the ones that are not. Hangul, Han,
-    /// Kana and the fullwidth forms are drawn on a full-em square, so a Korean
-    /// line estimated at half an em came out half as wide as libass drew it —
-    /// which understated the safe-area breach and, worse, handed the contrast
-    /// pass a column the words ran straight out of, so the band it measured was
-    /// not the band the words sat on. Anything outside the narrow ranges is
-    /// therefore charged a whole em: that overstates a handful of narrow
-    /// scripts, which costs a wider crop, and understates none of the wide
-    /// ones, which would cost a wrong answer.
+    /// Half an em is the figure for the scripts that are set on a narrow body,
+    /// which is nearly all of them, and it is wrong by a factor of two for the
+    /// ones that are not. Hangul, Han, Kana, the fullwidth forms and emoji are
+    /// drawn on a full-em square, so a Korean line estimated at half an em came
+    /// out half as wide as libass drew it — which understated the safe-area
+    /// breach and, worse, handed the contrast pass a column the words ran
+    /// straight out of, so the band it measured was not the band the words sat
+    /// on. Those ranges are therefore charged a whole em (see
+    /// [`WIDE_SCRIPT_RANGES`]) and combining marks nothing at all (see
+    /// [`ZERO_ADVANCE_RANGES`]).
     fn glyph_advance_factor(character: char) -> f64 {
         let code = u32::from(character);
-        let narrow = NARROW_SCRIPT_RANGES
-            .iter()
-            .any(|(first, last)| code >= *first && code <= *last);
+        let in_ranges = |ranges: &[(u32, u32)]| {
+            ranges
+                .iter()
+                .any(|(first, last)| code >= *first && code <= *last)
+        };
 
-        if narrow {
-            Self::GLYPH_ADVANCE_FACTOR
-        } else {
+        if in_ranges(&ZERO_ADVANCE_RANGES) {
+            0.0
+        } else if in_ranges(&WIDE_SCRIPT_RANGES) {
             1.0
+        } else {
+            Self::GLYPH_ADVANCE_FACTOR
         }
     }
 
     /// Returns the estimated text box size as (width, height) percentages.
     ///
-    /// Both axes scale with the font size and the canvas, because that is what
-    /// the renderer does: a caption is burned in at an absolute size, so the
-    /// same text occupies twice the width on a 1080-wide vertical canvas that
-    /// it does on a 1920-wide landscape one. The width also folds in the
+    /// Both axes are measured in the space the renderer authors in, not in
+    /// output pixels. The export pins the ASS script to a 1080-tall `PlayRes`
+    /// and writes `fontSize` and `\fsp` into it unscaled, and the preview reads
+    /// the same style as `fontSize * canvasHeight / 1080`, so a font size is a
+    /// fraction of the *frame* and not a count of pixels: `fontSize: 48` covers
+    /// the same tenth of the picture on a 4K export as on a 1080p one. Dividing
+    /// by the canvas instead reported a 4K caption at half the size the
+    /// renderer draws it, and a vertical one at well under a third.
+    ///
+    /// What does move the fraction is the aspect ratio, because only the height
+    /// is pinned: the script is `1080 × canvasWidth / canvasHeight` wide, so the
+    /// same line covers over three times the width of a 9:16 frame that it does
+    /// of a 16:9 one. The width also folds in the
     /// style's letter spacing and the script each character is drawn in (see
     /// [`Self::glyph_advance_factor`]), because a line the estimate undershoots
     /// is a breach nobody reports and a crop that measures the wrong pixels.
@@ -1697,14 +1741,27 @@ impl CaptionSafeAreaRule {
         // style's own tracking is added to every one of them.
         let advance_px: f64 = label
             .chars()
-            .map(|character| font_size * Self::glyph_advance_factor(character) + letter_spacing)
+            .map(|character| {
+                let factor = Self::glyph_advance_factor(character);
+                if factor <= 0.0 {
+                    // Tracking is added to a glyph's advance, and a combining
+                    // mark has none: it is drawn over the glyph it follows.
+                    0.0
+                } else {
+                    font_size * factor + letter_spacing
+                }
+            })
             .sum();
 
+        // The script the renderer authors in, not the frame it is scaled onto.
         let canvas_width = if canvas_width > 0 { canvas_width } else { 1 };
+        let canvas_height = if canvas_height > 0 { canvas_height } else { 1 };
+        let script_width =
+            ASS_SCRIPT_HEIGHT_PX * f64::from(canvas_width) / f64::from(canvas_height);
         // Negative tracking can pull the sum below zero on a short line, and a
         // negative width is not a box; the renderer draws nothing narrower than
         // nothing either.
-        let unwrapped_width_percent = (advance_px / f64::from(canvas_width) * 100.0).max(0.0);
+        let unwrapped_width_percent = (advance_px / script_width * 100.0).max(0.0);
 
         let (width_percent, line_count) = if label.chars().any(char::is_whitespace) {
             let bounded = unwrapped_width_percent.min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
@@ -1718,9 +1775,8 @@ impl CaptionSafeAreaRule {
             (unwrapped_width_percent, 1.0)
         };
 
-        let canvas_height = if canvas_height > 0 { canvas_height } else { 1 };
         let height_percent =
-            line_count * font_size * Self::LINE_HEIGHT_FACTOR / f64::from(canvas_height) * 100.0;
+            line_count * font_size * Self::LINE_HEIGHT_FACTOR / ASS_SCRIPT_HEIGHT_PX * 100.0;
 
         (width_percent, height_percent)
     }
@@ -1853,9 +1909,10 @@ pub(super) const MIN_CAPTION_SPAN_WIDTH_PERCENT: f64 = 10.0;
 
 /// Widening applied to the estimated text width before it is cropped.
 ///
-/// The estimator has no shaping: it multiplies a character count by half an em,
-/// which underestimates wide glyphs, tracking and any script whose advance is
-/// not half its size. A crop narrower than the words measures the picture
+/// The estimator has no shaping: it charges each character a fixed fraction of
+/// the font size, so it is still wrong by whatever a real shaper would have
+/// done with kerning, ligatures and the scripts whose advance is neither half
+/// an em nor a whole one. A crop narrower than the words measures the picture
 /// between them, so the column is deliberately generous - the cost of sampling
 /// a little more than the line is a slightly softer verdict, while the cost of
 /// sampling less than the line is grading the wrong pixels.
@@ -3516,6 +3573,179 @@ mod tests {
             "the breach must be reported on the horizontal axis: {cue}"
         );
     }
+    /// The estimated `(width, height)` of one caption, in percent of the frame.
+    ///
+    /// Every label passed here is unbroken, so the estimate takes its unwrapped
+    /// branch and the number under test is the advance itself rather than the
+    /// wrap box the advance is folded into.
+    fn estimated_box_percent(
+        label: &str,
+        style: serde_json::Value,
+        canvas_width: u32,
+        canvas_height: u32,
+    ) -> (f64, f64) {
+        let sequence = sequence_with_caption(label, None, Some(style));
+        CaptionSafeAreaRule::estimate_text_box_percent(
+            &sequence.tracks[0].clips[0],
+            canvas_width,
+            canvas_height,
+            CAPTION_WRAP_BOX_WIDTH_PERCENT,
+        )
+    }
+
+    /// The estimated width of a 48px caption on a 1080p landscape frame.
+    fn estimated_width_percent(label: &str) -> f64 {
+        estimated_box_percent(label, serde_json::json!({ "fontSize": 48 }), 1920, 1080).0
+    }
+
+    #[test]
+    fn test_caption_safe_area_rule_should_size_the_estimate_in_the_ass_script_space() {
+        // The export pins every ASS script to a 1080-tall PlayRes and writes
+        // `fontSize` into it unscaled, so a font size is a fraction of the
+        // frame and not a count of output pixels. Dividing by the canvas
+        // instead reported the same caption at half the size on a 4K export as
+        // on a 1080p one, and at well under a third on a vertical frame.
+        let landscape =
+            estimated_box_percent("M", serde_json::json!({ "fontSize": 48 }), 1920, 1080);
+        let uhd = estimated_box_percent("M", serde_json::json!({ "fontSize": 48 }), 3840, 2160);
+        assert!(
+            (landscape.0 - uhd.0).abs() < 1e-9 && (landscape.1 - uhd.1).abs() < 1e-9,
+            "a 4K export draws the same caption over the same fraction of the frame: \
+             {landscape:?} vs {uhd:?}"
+        );
+
+        // Only the height is pinned, so a 9:16 script is 1080 * 1080 / 1920 =
+        // 607.5 wide, and half an em of a 48px font is 24 of those.
+        let (vertical_width, vertical_height) =
+            estimated_box_percent("M", serde_json::json!({ "fontSize": 48 }), 1080, 1920);
+        let expected_width = 24.0 / 607.5 * 100.0;
+        assert!(
+            (vertical_width - expected_width).abs() < 1e-9,
+            "one glyph covers {expected_width:.4}% of a vertical frame, got {vertical_width}"
+        );
+        assert!(
+            (vertical_height - landscape.1).abs() < 1e-9,
+            "the height is pinned, so it does not move with the aspect ratio: \
+             {vertical_height} vs {}",
+            landscape.1
+        );
+    }
+
+    #[test]
+    fn test_caption_safe_area_rule_should_charge_a_full_em_only_to_the_wide_scripts() {
+        // Hangul, Han and Kana really are set on a full-em square, so the same
+        // number of them is twice as wide as Latin.
+        let wide = [
+            (
+                "Hangul syllables",
+                "\u{c11c}\u{c6b8}\u{c785}\u{b2c8}\u{b2e4}",
+            ),
+            ("Han", "\u{6771}\u{4eac}\u{90fd}\u{5343}\u{8449}"),
+            ("Hiragana", "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}"),
+        ];
+        for (script, sample) in wide {
+            let latin = estimated_width_percent(&"M".repeat(sample.chars().count()));
+            let measured = estimated_width_percent(sample);
+            assert!(
+                (measured - latin * 2.0).abs() < 1e-9,
+                "{script} is set on a full em, so it is twice as wide as the same \
+                 count of Latin: {measured} vs {latin}"
+            );
+        }
+
+        // Every other script is set on a narrow body, and charging the default
+        // to the ones nobody enumerated is what keeps these from being
+        // estimated at twice the width libass draws them: a column wider than
+        // the words hands the contrast pass picture the caption never covered.
+        let narrow = [
+            ("Arabic", "\u{645}\u{631}\u{62d}\u{628}\u{627}"),
+            ("Hebrew", "\u{5e9}\u{5dc}\u{5d5}\u{5de}\u{5d9}"),
+            ("Thai", "\u{e01}\u{e02}\u{e04}\u{e07}\u{e08}"),
+        ];
+        for (script, sample) in narrow {
+            let latin = estimated_width_percent(&"M".repeat(sample.chars().count()));
+            let measured = estimated_width_percent(sample);
+            assert!(
+                (measured - latin).abs() < 1e-9,
+                "{script} is set on a narrow body, so it is estimated like Latin: \
+                 {measured} vs {latin}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_caption_safe_area_rule_should_give_a_combining_mark_no_advance_of_its_own() {
+        // A combining mark is drawn over the glyph before it, so "cafe" plus a
+        // combining acute is exactly as wide as "cafe" with a precomposed one.
+        // Charging the mark an advance made the estimate depend on which
+        // normalisation the caption happened to be stored in.
+        let composed = estimated_width_percent("caf\u{e9}");
+        let decomposed = estimated_width_percent("cafe\u{301}");
+        assert!(
+            (composed - decomposed).abs() < 1e-9,
+            "NFC and NFD spell the same width: {composed} vs {decomposed}"
+        );
+
+        // Nor is the style's tracking charged to it: there is no advance for
+        // the tracking to be added to.
+        let tracked = |label: &str| {
+            estimated_box_percent(
+                label,
+                serde_json::json!({ "fontSize": 48, "letterSpacing": 20 }),
+                1920,
+                1080,
+            )
+            .0
+        };
+        assert!(
+            (tracked("caf\u{e9}") - tracked("cafe\u{301}")).abs() < 1e-9,
+            "tracking follows the glyphs, not the code points"
+        );
+    }
+
+    #[test]
+    fn test_caption_safe_area_rule_should_widen_the_estimate_by_the_style_tracking() {
+        // `letterSpacing` is written into the ASS `\fsp`, so it is width the
+        // renderer really adds to every glyph.
+        let plain = estimated_box_percent(
+            "Words",
+            serde_json::json!({ "fontSize": 48, "letterSpacing": 0 }),
+            1920,
+            1080,
+        )
+        .0;
+        let tracked = estimated_box_percent(
+            "Words",
+            serde_json::json!({ "fontSize": 48, "letterSpacing": 20 }),
+            1920,
+            1080,
+        )
+        .0;
+        assert!(
+            tracked > plain,
+            "tracking widens a line: {tracked} vs {plain}"
+        );
+        assert!(
+            (tracked - plain - 5.0 * 20.0 / 1920.0 * 100.0).abs() < 1e-9,
+            "five glyphs at twenty pixels each, in a 1920-wide script: {tracked} vs {plain}"
+        );
+
+        // Stored blobs carry these as strings often enough that the renderer
+        // reads both spellings, so the estimate has to read both too or it
+        // predicts a burn-in nobody produces.
+        let as_strings = estimated_box_percent(
+            "Words",
+            serde_json::json!({ "fontSize": "48", "letterSpacing": "20" }),
+            1920,
+            1080,
+        )
+        .0;
+        assert!(
+            (as_strings - tracked).abs() < 1e-9,
+            "a quoted number is the same number: {as_strings} vs {tracked}"
+        );
+    }
+
     #[tokio::test]
     async fn test_caption_safe_area_rule_should_measure_a_left_aligned_custom_anchor_from_its_edge()
     {

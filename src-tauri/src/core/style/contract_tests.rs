@@ -6,8 +6,9 @@
 //! * every caption pack survives the real command path — payload with
 //!   `stylePack` through [`CommandPayload::parse`], execute, and back out of the
 //!   clip as typed [`CaptionStyle`] — and then draws zero `CaptionSafeAreaRule`
-//!   violations on both a 1920x1080 and a 1080x1920 canvas, with a negative
-//!   control proving the rule can still fail;
+//!   violations on both a 1920x1080 and a 1080x1920 canvas, each pack measured
+//!   with the kind of text it is for (see [`caption_text_for`]), with a
+//!   negative control proving the rule can still fail;
 //! * every caption pack's own typography reaches the `drawtext` filter through
 //!   the render seam, so a pack cannot be legible on paper and generic in the
 //!   export;
@@ -41,6 +42,11 @@ use crate::ipc::CommandPayload;
 
 /// Caption text long enough to exercise the safe-area width estimate.
 const CAPTION_TEXT: &str = "The quick brown fox jumps over the lazy dog";
+
+/// The text a custom-anchored plate is measured with.
+///
+/// See [`caption_text_for`] for why it is not the long line.
+const NAME_PLATE_TEXT: &str = "Dr. Jane Doe";
 
 /// Builds a project holding one empty caption track and one video clip track.
 fn project_with_caption_track(format: SequenceFormat) -> (ProjectState, String, String, String) {
@@ -113,6 +119,29 @@ async fn safe_area_violations(state: &ProjectState, sequence_id: &str) -> Vec<St
         .collect()
 }
 
+/// The caption text a pack is measured with.
+///
+/// A preset pack wraps inside the event margins the renderer writes for it, so
+/// the long line is what exercises its line count and the width estimate that
+/// derives it. A custom-anchored plate is given no wrap box at all - `\pos`
+/// zeroes those margins - and a forty-three character sentence does not fit
+/// across a 1080-wide frame at the size a name plate is set in, from any
+/// anchor: at 40px it is over 1500 output pixels of glyphs. That is arithmetic
+/// about the sentence rather than a defect in the plate, so the plate is
+/// measured with the kind of text it carries.
+fn caption_text_for(pack_id: &str) -> &'static str {
+    let plate = CAPTION_PACKS
+        .iter()
+        .find(|pack| pack.id == pack_id)
+        .is_some_and(|pack| matches!(pack.position(), CaptionPosition::Custom(_)));
+
+    if plate {
+        NAME_PLATE_TEXT
+    } else {
+        CAPTION_TEXT
+    }
+}
+
 /// Creates one caption styled by `pack_id` and returns the resulting clip state.
 fn create_caption_with_pack(format: SequenceFormat, pack_id: &str) -> (ProjectState, String, Clip) {
     create_caption_with_pack_and_style(format, pack_id, None)
@@ -129,7 +158,7 @@ fn create_caption_with_pack_and_style(
     let mut payload = json!({
         "sequenceId": sequence_id,
         "trackId": caption_track_id,
-        "text": CAPTION_TEXT,
+        "text": caption_text_for(pack_id),
         "startSec": 1.0,
         "endSec": 4.0,
         "stylePack": pack_id,

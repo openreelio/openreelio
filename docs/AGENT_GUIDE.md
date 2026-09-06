@@ -858,11 +858,12 @@ the line never reaches cannot decide the verdict. The band follows the style's
 `verticalAlign` as well as `captionPosition`, because the renderer does.
 
 A cue counts as already protected — and is never decoded — only where the export
-would actually draw the protection: an `outlineColor` with a non-zero width, or
-a `backgroundColor` whose own colour and alpha put *every* picture the shot
-could be clear of the text. A box is not protection because it is a box: white
-words on a 90%-opaque white box are as unreadable as white words on a white
-wall, so that cue is decoded and reported, while the same alpha in black is
+would actually draw the protection: an `outlineColor` with a non-zero width the
+layer opacity still leaves reaching the picture at `minContrast` or better, or a
+`backgroundColor` whose own colour and alpha put *every* picture the shot could
+be clear of the text. A box is not protection because it is a box: white words
+on a 90%-opaque white box are as unreadable as white words on a white wall, so
+that cue is decoded and reported, while the same alpha in black is
 waved through. An `outlineWidth` with no colour renders bare, and so does a cue
 with no style at all, so both are graded like any other bare cue. Every other
 box is neither waved through nor ignored: it is composited over the band before
@@ -874,8 +875,10 @@ Every alpha here is the one the renderer paints with, layer opacity included: a
 style `opacity` and the clip's own opacity scale the box, the outline *and* the
 glyphs, so a faded caption separates from its background by that fraction of
 what its colours imply and a box that would protect an opaque cue does not
-protect a faded one. A caption faded out entirely is not decoded at all; it is
-counted as unmeasured instead, with a `fadedOut` reason.
+protect a faded one. Nor does an outline: a stroke drawn below `minContrast` of
+its colour is graded like any other bare cue rather than waved through
+unmeasured. A caption faded out entirely is not decoded at all; it is counted as
+unmeasured instead, with a `fadedOut` reason.
 
 Two numbers decide the verdict. A bare cue whose text sits within `0.35`
 luminance of the picture behind it is reported (`fault: "lowContrast"`), and so
@@ -887,12 +890,16 @@ judged, and the two differ by whatever `boxAlpha` hides. Either finding carries
 `{bandLuminance, bandLuminanceStddev, textLuminance, contrast, minContrast,
 maxBandStddev, fault, hasBox, hasOutline}`, plus `boxAlpha` on a cue that
 carries a box and `layerOpacity` on a cue drawn at less than full opacity, and an `UpdateCaption` fix applying the `standard-outline` pack —
-not `boxed-contrast`, because an outline survives any background including a
-mixed one. `hasBox: true` on a violation is normal and not a contradiction:
-whether a cue is protected is decided by the box's colour and alpha together,
+not `boxed-contrast`, because an outline drawn at full opacity survives any
+background including a mixed one. `hasBox: true` on a violation is normal and
+not a contradiction: whether a cue is protected is decided by the box's colour
+and alpha together,
 never by the presence of a box. `hasOutline` is the one flag that cannot appear
-on a violation, because an outline reads over anything. `boxAlpha` is the alpha
-the box is actually painted at — the style's box alpha times the layer opacity —
+on a violation, because it is only set where the stroke reaches the picture at
+`minContrast` or better, and a stroke that does reads over anything; a stroke on
+a caption faded below that floor leaves the flag `false` and the cue graded like
+any other bare one. `boxAlpha` is the alpha the box is actually painted at — the
+style's box alpha times the layer opacity —
 and it is absent, rather than `0`, where no box is painted. `layerOpacity` is
 the opacity the glyphs themselves are drawn at; `contrast` is already scaled by
 it, which is why it can be smaller than `textLuminance` and `bandLuminance`
@@ -1054,7 +1061,11 @@ Packs are the quality floor — reach for free-form styling only when a pack
 cannot express the brief. Each pairs typography with an anchor and is verified to
 draw zero `caption.safe_area` violations on both 1920x1080 and 1080x1920 — the
 same check `verify` runs, measuring the text block against each canvas rather
-than only comparing margins.
+than only comparing margins. The guarantee is about the pack, not about any text
+you put in it: a wrapping subtitle pack holds a full sentence on either canvas,
+while `broadcast-lower` is a fixed-anchor plate the renderer never wraps, so a
+sentence-length line in one still runs off a vertical frame. Run `verify` after
+styling and read what it says rather than assuming the pack covers it.
 
 ```bash
 openreelio-cli packs list --kind caption

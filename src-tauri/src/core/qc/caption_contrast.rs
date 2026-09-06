@@ -228,9 +228,13 @@ pub struct CaptionBandSample {
     /// reported cues: what settles the question is
     /// [`box_guarantees_legibility`], which asks what the box is made of.
     pub has_box: bool,
-    /// Whether the renderer strokes the cue's glyphs
+    /// Whether the renderer strokes the cue's glyphs solidly enough to protect
+    /// them
     ///
-    /// An outline *is* protection, so a sample carrying one is never graded.
+    /// A stroke that reaches the picture at the run's contrast floor or better
+    /// *is* protection, so a sample carrying one is never graded. A stroke on a
+    /// caption faded below that floor is not, and such a cue is measured like
+    /// any other bare one.
     pub has_outline: bool,
     /// Alpha of that background box, 0–1; `0.0` where none is painted
     ///
@@ -372,6 +376,12 @@ pub struct CaptionBandSampling {
 /// when it cannot fail *this run's* thresholds, so a caller who raised
 /// `min_contrast` would otherwise have cues skipped against the default and
 /// never see the finding they asked for.
+///
+/// No shipped surface sets either parameter yet: `verify` builds its rule
+/// configuration without them, so every run on that path grades against
+/// [`ContrastThresholds::default`]. [`ContrastThresholds::from_config`] is what
+/// a surface that starts offering them would come through, and the pass is
+/// already written to follow whatever it returns.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContrastThresholds {
     /// Smallest separation, 0–1, a cue may show and still read
@@ -572,15 +582,33 @@ impl CaptionPaint {
     ///
     /// `BorderStyle: 3` replaces the outline with the box, so on the ASS path -
     /// the one that renders wherever libass is present - a painted box takes
-    /// the stroke away with it. An outline is therefore only protection where
-    /// no box is painted at all.
+    /// the stroke away with it. A stroke therefore only exists where no box is
+    /// painted at all; whether the stroke that does exist is *protection* is a
+    /// second question, asked by [`CaptionPaint::outline_protects`].
     fn draws_outline(&self) -> bool {
         self.strokes_glyphs && !self.paints_box()
     }
 
+    /// Whether the stroke that is drawn also settles the question.
+    ///
+    /// The outline is painted at the layer's opacity like every other
+    /// decoration, so a caption faded to a twentieth carries a stroke that
+    /// reaches the picture with a twentieth of its colour - which separates
+    /// nothing. Treating the stroke as protection regardless of opacity meant
+    /// exactly those cues were never decoded and never reported: not graded
+    /// clean, not counted as faded out, simply absent from the report.
+    ///
+    /// The floor is the run's own `min_contrast`, because that is the smallest
+    /// separation this rule accepts anywhere, and an outline drawn at an
+    /// opacity below it cannot carry more than that much of its colour to the
+    /// picture whatever the colours are.
+    fn outline_protects(&self, thresholds: ContrastThresholds) -> bool {
+        self.draws_outline() && self.layer_opacity.clamp(0.0, 1.0) >= thresholds.min_contrast
+    }
+
     /// Whether the style already protects the words from their background.
     fn is_mitigated(&self, thresholds: ContrastThresholds) -> bool {
-        self.protects_with_box(thresholds) || self.draws_outline()
+        self.protects_with_box(thresholds) || self.outline_protects(thresholds)
     }
 }
 
@@ -680,7 +708,12 @@ fn parse_hex_paint_colour(raw: &str) -> Option<PaintColour> {
 }
 
 /// Reads a number the way the export pipeline's `parse_json_number` does.
-fn json_number(value: &serde_json::Value) -> Option<f64> {
+///
+/// Stored style blobs carry numbers as strings often enough that the renderer
+/// reads both, so every check that has to predict the renderer reads both too -
+/// which is why this is shared with the safe-area rule rather than each rule
+/// reaching for `as_f64` and disagreeing with the burn-in over `"48"`.
+pub(crate) fn json_number(value: &serde_json::Value) -> Option<f64> {
     let parsed = match value {
         serde_json::Value::Number(number) => number.as_f64(),
         serde_json::Value::String(raw) => raw.trim().parse::<f64>().ok(),
@@ -1054,7 +1087,7 @@ pub async fn sample_caption_bands(
                 band_luminance_stddev: stddev,
                 text_luminance: cue.paint.text_luminance,
                 has_box: cue.paint.paints_box(),
-                has_outline: cue.paint.draws_outline(),
+                has_outline: cue.paint.outline_protects(options.thresholds),
                 box_alpha: if cue.paint.paints_box() {
                     cue.paint.box_alpha
                 } else {
@@ -1321,16 +1354,19 @@ impl CaptionContrastRule {
 
     /// Grades one sample, or `None` when the cue reads fine.
     ///
-    /// An outline settles the question, because it separates the glyphs from
-    /// anything. A box does not settle it by being a box: it is composited over
-    /// the measured band, and the diluted picture is what the words are graded
-    /// against, so a wash that genuinely rescues a white-on-white cue clears the
-    /// check and one that only looks like a box does not. Nothing is
-    /// short-circuited on the box here, because a box that *could* have been
-    /// short-circuited - see [`box_guarantees_legibility`], which is what keeps
-    /// those cues from being decoded at all - clears the measured grading too,
-    /// by construction: the measured band lies inside the interval that rule
-    /// quantified over.
+    /// An outline the viewer can see settles the question, because it separates
+    /// the glyphs from anything - which is why the flag on the sample is
+    /// written by [`CaptionPaint::outline_protects`] rather than by the
+    /// presence of a stroke, so a stroke on a caption faded below the contrast
+    /// floor does not short-circuit the grading here. A box does not settle it
+    /// by being a box: it is composited over the measured band, and the diluted
+    /// picture is what the words are graded against, so a wash that genuinely
+    /// rescues a white-on-white cue clears the check and one that only looks
+    /// like a box does not. Nothing is short-circuited on the box here, because
+    /// a box that *could* have been short-circuited - see
+    /// [`box_guarantees_legibility`], which is what keeps those cues from being
+    /// decoded at all - clears the measured grading too, by construction: the
+    /// measured band lies inside the interval that rule quantified over.
     fn fault_for(
         sample: &CaptionBandSample,
         min_contrast: f64,
@@ -2165,6 +2201,60 @@ mod tests {
     }
 
     /// Feature: Caption legibility
+    /// Scenario: should grade a stroke the viewer cannot see
+    ///
+    /// The stroke was treated as protection whatever opacity it was painted at,
+    /// so a caption faded to a twentieth carried one that reached the picture
+    /// with a twentieth of its colour and was never decoded at all - not graded
+    /// clean, not counted as faded out, simply missing from the report.
+    #[test]
+    fn should_grade_an_outline_drawn_below_the_contrast_floor() {
+        let outlined = serde_json::json!({
+            "color": "#FFFFFF",
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+        });
+
+        // At full opacity the stroke separates the glyphs from anything, so the
+        // cue is never decoded and the flag says so.
+        let opaque = caption_paint(Some(&outlined), 1.0);
+        assert!(opaque.draws_outline());
+        assert!(
+            opaque.is_mitigated(thresholds_default()),
+            "a stroke the viewer can see settles the question"
+        );
+        assert!(opaque.outline_protects(thresholds_default()));
+
+        // Faded to a twentieth it is still a stroke, and still no protection:
+        // the picture only ever receives a twentieth of its colour.
+        let faded = caption_paint(Some(&outlined), 0.05);
+        assert!(
+            faded.draws_outline(),
+            "the renderer still writes the stroke; what changed is what it shows"
+        );
+        assert!(
+            !faded.is_mitigated(thresholds_default()),
+            "a stroke drawn below the run's floor cannot carry that much separation"
+        );
+        assert!(
+            faded.draws_text(),
+            "and the words do reach the picture, so this is a cue to measure              rather than one to count as faded out"
+        );
+
+        // The flag the sample carries is written by the same gate, so the
+        // grading is not short-circuited a second time on the way out.
+        let mut graded = sample(0.0, 1.0);
+        graded.layer_opacity = faded.layer_opacity;
+        graded.has_outline = faded.outline_protects(thresholds_default());
+        assert!(!graded.has_outline);
+        assert_eq!(
+            CaptionContrastRule::fault_for(&graded, DEFAULT_MIN_CONTRAST, DEFAULT_MAX_BAND_STDDEV),
+            Some(ContrastFault::LowContrast),
+            "white words at a twentieth over black separate by 0.05, not by 1.0"
+        );
+    }
+
+    /// Feature: Caption legibility
     /// Scenario: should skip a box only against the thresholds this run grades
     ///
     /// The skip is a claim that the cue cannot fail, and it is only true of the
@@ -2560,6 +2650,20 @@ mod tests {
                     paint.box_alpha
                 );
             }
+
+            // And the glyphs' own opacity, which is not an incidental
+            // number: the measured contrast is scaled by it and the
+            // outline mitigation is gated on it, so a byte's drift here is
+            // a verdict reached about words nobody rendered.
+            let glyph_alpha = ass_alpha(ass_style_column(&style_row, ASS_PRIMARY_COLOUR_COLUMN))
+                .unwrap_or_else(|| {
+                    panic!("{label}: the style row carries a primary colour ({style_row})")
+                });
+            assert!(
+                (paint.layer_opacity - glyph_alpha).abs() < 1.0 / 255.0,
+                "{label}: the check says the glyphs paint at {:.4} and libass at \n                 {glyph_alpha:.4} ({style_row})",
+                paint.layer_opacity
+            );
         }
     }
 
@@ -2611,6 +2715,8 @@ mod tests {
         ass_alpha(ass_style_column(row, ASS_BORDER_COLOUR_COLUMN))
     }
 
+    /// `PrimaryColour`, the column libass draws the glyphs themselves in.
+    const ASS_PRIMARY_COLOUR_COLUMN: usize = 3;
     /// `OutlineColour`, the column libass draws both the stroke and the box in.
     const ASS_BORDER_COLOUR_COLUMN: usize = 5;
     /// `BorderStyle`: 1 strokes the glyphs, 3 replaces the stroke with a box.
