@@ -35,6 +35,7 @@
 
 use schemars::JsonSchema;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// Declares the backend command surface once.
 ///
@@ -308,16 +309,23 @@ pub fn payload_schema<T: JsonSchema>(command_type: &str) -> Value {
 
         declare_wire_spellings(object, &type_name);
 
+        // The shapes run before the sweep below rather than after it, because a
+        // shape brings definitions of its own into the document: one injected
+        // afterwards would be the single place in the schema where a spelling
+        // the parser accepts is never declared.
+        let injected = declare_property_shapes(object, &type_name);
+
         if let Some(Value::Object(definitions)) = object.get_mut("definitions") {
             for (name, definition) in definitions.iter_mut() {
                 let name = name.clone();
                 if let Value::Object(definition) = definition {
-                    declare_wire_spellings(definition, &name);
+                    // A definition a shape renamed is still that Rust type's
+                    // rendering, and the wire tables are keyed by the type.
+                    let owner = injected.get(&name).cloned().unwrap_or(name);
+                    declare_wire_spellings(definition, &owner);
                 }
             }
         }
-
-        declare_property_shapes(object, &type_name);
 
         object.insert("title".to_string(), Value::String(command_type.to_string()));
 
@@ -459,7 +467,8 @@ pub(crate) const PAYLOAD_FIELD_ALIASES: &[(&str, &str, &[&str])] = &[
     ("DeleteCaptionPayload", "captionId", &["clipId"]),
     ("AddEffectPayload", "params", &["parameters"]),
     // Declared on the private wire shape inside `AddTextClipPayload`'s hand
-    // written `Deserialize`, which the source guard cannot reach.
+    // written `Deserialize`; the source guard reads that shape's aliases and
+    // attributes them to the payload the impl is for.
     ("AddTextClipPayload", "timelineIn", &["timelineStart"]),
 ];
 
@@ -586,9 +595,32 @@ pub(crate) struct EitherOrBranch {
     /// The property whose presence takes this branch.
     pub property: &'static str,
     /// Properties the value must then carry itself.
+    ///
+    /// This is the `required` list of the type the value is parsed into; the
+    /// guard in [`super::payloads`] derives it and fails on any difference.
     pub value_requires: &'static [&'static str],
-    /// Properties each named sub-object of the value must then carry.
-    pub nested_requires: &'static [(&'static str, &'static [&'static str])],
+    /// What each member of the value that has requirements of its own needs.
+    pub nested_requires: &'static [NestedRequirement],
+}
+
+/// One member of a branch's value that the type it is parsed into constrains.
+///
+/// A member described by a `$ref` carries the target definition's own
+/// `required` list, and a shape drops every one of those on the way in — so
+/// without this the full-object branch would stop demanding what the parser
+/// demands the moment the shape was stated.
+pub(crate) struct NestedRequirement {
+    /// The member, in the spelling the parser reads.
+    pub member: &'static str,
+    /// The JSON types the member may have.
+    ///
+    /// `required` says nothing at all about a value that is not an object, so
+    /// the types are stated beside it — and a nullable member keeps `null` in
+    /// the list, because the parser reads an explicit `null` there as the
+    /// absent optional it is.
+    pub types: &'static [&'static str],
+    /// Properties the member must carry when it is an object.
+    pub requires: &'static [&'static str],
 }
 
 impl EitherOrBranch {
@@ -611,8 +643,26 @@ pub(crate) const PAYLOAD_EITHER_OR_REQUIREMENTS: &[EitherOrRequirement] = &[
                 property: "textData",
                 value_requires: &["content", "style", "position"],
                 nested_requires: &[
-                    ("style", &["fontFamily", "fontSize", "color"]),
-                    ("position", &["x", "y"]),
+                    NestedRequirement {
+                        member: "style",
+                        types: &["object"],
+                        requires: &["fontFamily", "fontSize", "color"],
+                    },
+                    NestedRequirement {
+                        member: "position",
+                        types: &["object"],
+                        requires: &["x", "y"],
+                    },
+                    NestedRequirement {
+                        member: "shadow",
+                        types: &["object", "null"],
+                        requires: &["color", "offsetX", "offsetY"],
+                    },
+                    NestedRequirement {
+                        member: "outline",
+                        types: &["object", "null"],
+                        requires: &["color", "width"],
+                    },
                 ],
             },
             EitherOrBranch::present("preset"),
@@ -699,10 +749,10 @@ impl EitherOrRequirement {
                     let nested: serde_json::Map<String, Value> = branch
                         .nested_requires
                         .iter()
-                        .map(|(name, names)| {
+                        .map(|nested| {
                             (
-                                (*name).to_string(),
-                                json!({ "type": "object", "required": names }),
+                                nested.member.to_string(),
+                                json!({ "type": nested.types, "required": nested.requires }),
                             )
                         })
                         .collect();
@@ -900,7 +950,15 @@ fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name
 /// those members point at have to reach the same document, or every `$ref` the
 /// shape carries would dangle and a reader would be left with a member name and
 /// no shape at all.
-fn declare_property_shapes(object: &mut serde_json::Map<String, Value>, root_type: &str) {
+///
+/// Returns the definitions the shapes renamed on the way in, as `(name in the
+/// document, the Rust type it is a rendering of)`.
+fn declare_property_shapes(
+    object: &mut serde_json::Map<String, Value>,
+    root_type: &str,
+) -> BTreeMap<String, String> {
+    let mut injected: BTreeMap<String, String> = BTreeMap::new();
+
     // `None` is the schema's own root type; the rest are its definitions.
     let mut owners: Vec<Option<String>> = vec![None];
     if let Some(definitions) = object.get("definitions").and_then(Value::as_object) {
@@ -913,13 +971,21 @@ fn declare_property_shapes(object: &mut serde_json::Map<String, Value>, root_typ
             .iter()
             .filter(|shape| shape.owner == type_name)
         {
-            let derived = (shape.members)();
-            merge_definitions(object, derived.get("definitions"));
+            // Every `required` list the derivation states is dropped on the
+            // way in — the root one, and the one each definition a member
+            // points at carries: with a preset every member is optional, and
+            // the members that are required without one are already demanded by
+            // the either/or branch that says so. A definition that kept its own
+            // list would refuse the partial override the preset exists for,
+            // which is what `{"style": {"fontSize": 40}}` was refused by.
+            let mut derived = (shape.members)();
+            injected.extend(state_as_partial(&mut derived));
 
-            // The `required` list the derivation states is dropped on the way
-            // in: with a preset every member is optional, and the members that
-            // are required without one are already demanded by the either/or
-            // branch that says so.
+            let conflicts = merge_definitions(object, derived.get("definitions"));
+            if !conflicts.is_empty() {
+                report_definition_conflicts(&type_name, shape.property, &conflicts);
+            }
+
             let members = derived
                 .get("properties")
                 .and_then(Value::as_object)
@@ -931,6 +997,8 @@ fn declare_property_shapes(object: &mut serde_json::Map<String, Value>, root_typ
             }
         }
     }
+
+    injected
 }
 
 /// The subschema of one property of the root type or of one definition.
@@ -951,25 +1019,224 @@ fn shaped_property_mut<'a>(
 
 /// Adds the definitions a derived shape's members point at.
 ///
-/// An entry already in the document is left alone: both copies are `schemars`'
-/// rendering of the same Rust type, so the one that is there is the one that
-/// would be written.
-fn merge_definitions(object: &mut serde_json::Map<String, Value>, extra: Option<&Value>) {
+/// An entry already in the document under the *same* body is left alone: both
+/// copies are `schemars`' rendering of the same Rust type, so the one that is
+/// there is the one that would be written.
+///
+/// A name already there under a different body is a collision no merge can
+/// resolve: one `$ref` target cannot describe two Rust types, and whichever
+/// copy loses leaves its own referrers pointing at the other type's members. So
+/// the colliding names are returned rather than swallowed, and
+/// [`report_definition_conflicts`] refuses them.
+#[must_use]
+fn merge_definitions(
+    object: &mut serde_json::Map<String, Value>,
+    extra: Option<&Value>,
+) -> Vec<String> {
+    let mut conflicts: Vec<String> = Vec::new();
     let Some(extra) = extra.and_then(Value::as_object) else {
-        return;
+        return conflicts;
     };
     let Some(definitions) = object
         .entry("definitions")
         .or_insert_with(|| json!({}))
         .as_object_mut()
     else {
-        return;
+        return conflicts;
     };
 
     for (name, definition) in extra {
-        definitions
-            .entry(name.clone())
-            .or_insert_with(|| definition.clone());
+        match definitions.get(name) {
+            Some(present) if present == definition => {}
+            Some(_) => conflicts.push(name.clone()),
+            None => {
+                definitions.insert(name.clone(), definition.clone());
+            }
+        }
+    }
+
+    conflicts
+}
+
+/// What a definition collision reads as, wherever it is reported.
+fn definition_conflict_message(owner: &str, property: &str, names: &[String]) -> String {
+    format!(
+        "{owner}.{property}'s shape carries definitions the schema already declares under a \
+         different body, so one of the two types would be described by the other's members: \
+         {names:?}"
+    )
+}
+
+/// Refuses a definition collision at the loudest point available.
+///
+/// The suite fails on it: a schema that describes one type with another type's
+/// members is worse than no schema at all, and there is no reason to ship one.
+#[cfg(test)]
+fn report_definition_conflicts(owner: &str, property: &str, names: &[String]) {
+    panic!("{}", definition_conflict_message(owner, property, names));
+}
+
+/// Refuses a definition collision at the loudest point available.
+///
+/// Outside the suite the schema listing still has to answer, so the collision
+/// is logged rather than taking the process down with it — never dropped.
+#[cfg(not(test))]
+fn report_definition_conflicts(owner: &str, property: &str, names: &[String]) {
+    tracing::error!("{}", definition_conflict_message(owner, property, names));
+}
+
+/// The schema keywords whose value is one subschema, or a list of them.
+const SUBSCHEMA_KEYWORDS: &[&str] = &[
+    "additionalItems",
+    "additionalProperties",
+    "allOf",
+    "anyOf",
+    "contains",
+    "else",
+    "if",
+    "items",
+    "not",
+    "oneOf",
+    "propertyNames",
+    "then",
+];
+
+/// The schema keywords whose value maps names to subschemas.
+const SUBSCHEMA_MAP_KEYWORDS: &[&str] = &["definitions", "patternProperties", "properties"];
+
+/// The prefix a shape's own copy of a definition goes by.
+const PARTIAL_DEFINITION_PREFIX: &str = "Partial";
+
+/// Rewrites a derived schema into the shape of a partial override of it.
+///
+/// Two things happen and they belong together. Every `required` list is
+/// dropped, because a shape states what a value's members look like and never
+/// which of them a caller has to send. And every definition that strip actually
+/// changed is renamed — along with the `$ref`s pointing at it — because a
+/// definition whose members are all optional is no longer the shape of the type
+/// it was derived from: `#/definitions/TextStyle` cannot mean "all optional"
+/// here and "fontFamily, fontSize and color required" in `UpdateTextClip`, and
+/// the guard in [`super::payloads`] fails the suite when a name means two
+/// shapes.
+///
+/// Returns the renamed definitions as `(name in the document, the Rust type it
+/// is a rendering of)`, so the wire tables — keyed by the Rust type name —
+/// still reach the renamed copy.
+pub(crate) fn state_as_partial(derived: &mut Value) -> BTreeMap<String, String> {
+    let complete = derived
+        .get("definitions")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    strip_required(derived);
+
+    // (name in the document, source type), and its inverse for the rewrite.
+    let mut injected: BTreeMap<String, String> = BTreeMap::new();
+    let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+
+    if let Some(definitions) = derived
+        .get_mut("definitions")
+        .and_then(Value::as_object_mut)
+    {
+        let changed: Vec<String> = definitions
+            .iter()
+            .filter(|(name, partial)| complete.get(name.as_str()) != Some(partial))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        for name in changed {
+            let Some(mut definition) = definitions.remove(&name) else {
+                continue;
+            };
+            note_partial_definition(&mut definition, &name);
+            let partial = format!("{PARTIAL_DEFINITION_PREFIX}{name}");
+            definitions.insert(partial.clone(), definition);
+            injected.insert(partial.clone(), name.clone());
+            renamed.insert(name, partial);
+        }
+    }
+
+    rewrite_references(derived, &renamed);
+
+    injected
+}
+
+/// Says in the definition's own prose why nothing in it is required.
+fn note_partial_definition(definition: &mut Value, source: &str) {
+    let Some(object) = definition.as_object_mut() else {
+        return;
+    };
+    let note = format!(
+        "Every member is optional here: this is what a partial override of a `{source}` may \
+         carry, and a caller who has to send a complete one is told so by the requirement that \
+         needs it."
+    );
+    let description = match object.get("description").and_then(Value::as_str) {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{note}"),
+        _ => note,
+    };
+    object.insert("description".to_string(), Value::String(description));
+}
+
+/// Points every `$ref` at the name its target now goes by.
+fn rewrite_references(value: &mut Value, renamed: &BTreeMap<String, String>) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                if key == "$ref" {
+                    let target = child
+                        .as_str()
+                        .and_then(|reference| reference.strip_prefix("#/definitions/"))
+                        .and_then(|name| renamed.get(name));
+                    if let Some(target) = target {
+                        *child = Value::String(format!("#/definitions/{target}"));
+                    }
+                    continue;
+                }
+                rewrite_references(child, renamed);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_references(item, renamed);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Drops every `required` list a schema states, at any depth.
+///
+/// A property shape states what a value's members look like and never which of
+/// them a caller has to send, so the derivation it is built from is stripped
+/// before any of it reaches the document — the definitions its members point at
+/// included, which is where the lists that refused a partial override were
+/// hiding.
+///
+/// Only the keywords that really hold subschemas are descended into, so a
+/// payload with a property of its own named `required` keeps it.
+fn strip_required(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.remove("required");
+
+    for (keyword, child) in object.iter_mut() {
+        if SUBSCHEMA_KEYWORDS.contains(&keyword.as_str()) {
+            match child {
+                Value::Array(branches) => branches.iter_mut().for_each(strip_required),
+                other => strip_required(other),
+            }
+        } else if SUBSCHEMA_MAP_KEYWORDS.contains(&keyword.as_str()) {
+            for member in child
+                .as_object_mut()
+                .into_iter()
+                .flat_map(|members| members.values_mut())
+            {
+                strip_required(member);
+            }
+        }
     }
 }
 
@@ -2055,6 +2322,124 @@ mod tests {
             declared["properties"]["opacity"],
             json!({ "type": "number" })
         );
+    }
+
+    /// Feature: declaring the shape of a shaped property
+    /// Scenario: two Rust types would be described by one definition name
+    ///
+    /// A `$ref` target names one shape. When a shape carries in a definition
+    /// the document already declares under a different body, one of the two
+    /// types ends up described by the other's members and every referrer of
+    /// the loser silently reads the wrong thing — so the collision is returned
+    /// rather than resolved, and the document is left exactly as it was.
+    #[test]
+    fn merging_definitions_should_refuse_one_name_for_two_shapes() {
+        let mut object = json!({
+            "definitions": {
+                "TextStyle": { "type": "object", "required": ["color"] },
+                "Shared": { "type": "string" }
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+
+        let extra = json!({
+            // Same name, different body: unresolvable.
+            "TextStyle": { "type": "object" },
+            // Same name, same body: already written, nothing to do.
+            "Shared": { "type": "string" },
+            // A name the document does not carry yet: written.
+            "TextOutline": { "type": "object" }
+        });
+
+        let conflicts = merge_definitions(&mut object, Some(&extra));
+
+        assert_eq!(
+            conflicts,
+            vec!["TextStyle".to_string()],
+            "only the name whose body differs is a collision: {object:?}"
+        );
+        assert_eq!(
+            object["definitions"]["TextStyle"],
+            json!({ "type": "object", "required": ["color"] }),
+            "the copy already in the document is the one its referrers read, so it stays"
+        );
+        assert_eq!(
+            object["definitions"]["TextOutline"],
+            json!({ "type": "object" })
+        );
+    }
+
+    /// Feature: declaring the shape of a shaped property
+    /// Scenario: the derivation a shape is built from states what a caller must send
+    ///
+    /// The regression this covers: only the derivation's own `required` list
+    /// was dropped, so the definitions its members point at travelled into the
+    /// document still demanding theirs and draft-07 refused the partial
+    /// override the shape exists to allow. The strip has to reach every depth,
+    /// and a definition it changed can no longer answer to the name of the
+    /// complete type — hence the rename, which is what the returned map is for.
+    #[test]
+    fn stating_a_derivation_as_partial_should_strip_every_requirement_it_reaches() {
+        let mut derived = json!({
+            "type": "object",
+            "required": ["content", "style"],
+            "properties": {
+                "content": { "type": "string" },
+                "style": { "$ref": "#/definitions/TextStyle" },
+                // A property that happens to be named after the keyword.
+                "required": { "type": "array" }
+            },
+            "definitions": {
+                "TextStyle": {
+                    "type": "object",
+                    "required": ["color"],
+                    "properties": {
+                        "color": { "type": "string" },
+                        "shadow": { "$ref": "#/definitions/TextShadow" }
+                    }
+                },
+                "TextShadow": { "type": "object", "required": ["blur"] },
+                "Untouched": { "type": "object", "properties": { "blur": { "type": "number" } } }
+            }
+        });
+
+        let injected = state_as_partial(&mut derived);
+
+        assert!(derived["required"].is_null());
+        assert_eq!(
+            derived["properties"]["required"],
+            json!({ "type": "array" }),
+            "a property named after the keyword is a member, not a demand: {derived}"
+        );
+        assert_eq!(
+            derived["properties"]["style"]["$ref"],
+            json!("#/definitions/PartialTextStyle"),
+            "a member points at the copy that travels, not at the complete type"
+        );
+        assert!(derived["definitions"]["PartialTextStyle"]["required"].is_null());
+        assert_eq!(
+            derived["definitions"]["PartialTextStyle"]["properties"]["shadow"]["$ref"],
+            json!("#/definitions/PartialTextShadow"),
+            "the rewrite follows the refs inside a renamed definition too"
+        );
+        assert!(derived["definitions"]["PartialTextShadow"]["required"].is_null());
+        assert!(
+            derived["definitions"]["Untouched"].is_object(),
+            "a definition the strip did not change keeps the name its type goes by: {derived}"
+        );
+
+        assert_eq!(
+            injected.get("PartialTextStyle").map(String::as_str),
+            Some("TextStyle"),
+            "the wire tables are keyed by the Rust type, so the rename has to be reported back"
+        );
+        assert_eq!(
+            injected.get("PartialTextShadow").map(String::as_str),
+            Some("TextShadow")
+        );
+        assert!(!injected.contains_key("Untouched"));
     }
 
     #[test]

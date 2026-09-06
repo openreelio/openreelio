@@ -4023,8 +4023,9 @@ mod tests {
 
     use crate::ipc::command_schema::{
         all_command_payload_schemas, canonical_command_type, check_against_schema,
-        command_payload_schemas, property, required, PAYLOAD_EITHER_OR_REQUIREMENTS,
-        PAYLOAD_FIELD_ALIASES, PAYLOAD_PROPERTY_SHAPES, PAYLOAD_VARIANT_ALIASES,
+        command_payload_schemas, property, required, state_as_partial,
+        PAYLOAD_EITHER_OR_REQUIREMENTS, PAYLOAD_FIELD_ALIASES, PAYLOAD_PROPERTY_SHAPES,
+        PAYLOAD_VARIANT_ALIASES,
     };
     use serde_json::Value;
 
@@ -4891,6 +4892,56 @@ pub struct SamplePayload {
         );
     }
 
+    /// The alias that reaches an agent through `AddTextClipPayload`'s schema is
+    /// declared on a private wire shape inside its hand written `Deserialize`,
+    /// which is the one place a struct is indented, unexported and named after
+    /// nothing an alias table mentions. Both directions are asserted here — the
+    /// spelling is found, and it is attributed to the payload rather than to
+    /// `Wire` — because a scanner that quietly stopped reading it would turn
+    /// both file-wide alias guards into no-ops against exactly this field.
+    #[test]
+    fn the_alias_scanner_should_read_a_wire_shape_inside_a_deserialize_impl() {
+        let snippet = "\
+impl<'de> Deserialize<'de> for SamplePayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error> {
+        /// The wire shape, where the alias actually lives.
+        #[derive(Deserialize)]
+        #[serde(rename_all = \"camelCase\", deny_unknown_fields)]
+        struct Wire {
+            #[serde(alias = \"timelineStart\")]
+            timeline_in: TimeSec,
+            duration: TimeSec,
+        }
+    }
+}
+";
+
+        let scanned = scan_field_aliases(snippet);
+        assert_eq!(
+            scanned,
+            vec![ScannedField {
+                owner: "SamplePayload".to_string(),
+                canonical: "timelineIn".to_string(),
+                aliases: vec!["timelineStart".to_string()],
+                doc: String::new(),
+            }],
+            "a wire shape's alias belongs to the payload whose `Deserialize` declares it"
+        );
+
+        // The reverse: the payload source really does carry the entry the alias
+        // table claims, so the two file-wide guards are reading it.
+        let live = scan_field_aliases(include_str!("payloads.rs"));
+        assert!(
+            live.iter().any(|field| {
+                field.owner == "AddTextClipPayload"
+                    && field.canonical == "timelineIn"
+                    && field.aliases.iter().any(|alias| alias == "timelineStart")
+            }),
+            "AddTextClipPayload's `timelineStart` is declared on its wire shape and has to be \
+             scanned from there"
+        );
+    }
+
     /// Feature: derived command payload schemas
     /// Scenario: a `commandType` the parser accepts is one the schema answers
     ///
@@ -5481,14 +5532,16 @@ pub enum CommandPayload {
                 if !branch.value_requires.is_empty() {
                     assert_eq!(stated["required"], serde_json::json!(branch.value_requires));
                 }
-                for (name, names) in branch.nested_requires {
-                    let nested = &stated["properties"][name];
+                for requires in branch.nested_requires {
+                    let member = requires.member;
+                    let nested = &stated["properties"][member];
                     assert_eq!(
                         nested["type"],
-                        serde_json::json!("object"),
-                        "{command_type}'s '{property}.{name}' must say it is an object: {nested}"
+                        serde_json::json!(requires.types),
+                        "{command_type}'s '{property}.{member}' must state the types it may \
+                         have: {nested}"
                     );
-                    assert_eq!(nested["required"], serde_json::json!(names));
+                    assert_eq!(nested["required"], serde_json::json!(requires.requires));
                 }
             }
         }
@@ -5582,7 +5635,11 @@ pub enum CommandPayload {
                  {declared}"
             );
 
-            let source = (shape.members)();
+            // Rewritten the way the shape rewrites it: what the property has
+            // to state is the derivation's members, never its demands, and its
+            // `$ref`s point at the copies the shape brought in.
+            let mut source = (shape.members)();
+            state_as_partial(&mut source);
             assert_eq!(
                 declared["properties"], source["properties"],
                 "{command_type}.{property} must state every member of the type it is parsed \
@@ -5595,18 +5652,48 @@ pub enum CommandPayload {
             );
 
             // A member the shape describes through a `$ref` is described by
-            // nothing at all unless the definition travelled with it.
-            for (name, member) in declared["properties"]
+            // nothing at all unless the definition travelled with it — and a
+            // definition that travelled with its own `required` list refuses
+            // the partial override the shape exists to allow. Both are facts
+            // about the artifact rather than the table, and both hold of every
+            // definition the property reaches, so the whole set is walked
+            // rather than the first hop: `TextStyle`, `TextPosition`,
+            // `TextShadow` and `TextOutline` all arrived carrying theirs.
+            let mut pending: Vec<(String, String)> = declared["properties"]
                 .as_object()
                 .into_iter()
                 .flatten()
-                .flat_map(|(name, member)| references(member).map(move |target| (name, target)))
-            {
+                .flat_map(|(name, member)| {
+                    references(member)
+                        .map(move |target| (format!("{property}.{name}"), target.to_string()))
+                })
+                .collect();
+            let mut seen: Vec<String> = Vec::new();
+
+            while let Some((path, target)) = pending.pop() {
+                if seen.contains(&target) {
+                    continue;
+                }
+                seen.push(target.clone());
+
+                let definition = &schema["definitions"][&target];
                 assert!(
-                    schema["definitions"][member].is_object(),
-                    "{command_type}.{property}.{name} points at #/definitions/{member}, which the \
-                     schema does not carry"
+                    definition.is_object(),
+                    "{command_type}.{path} points at #/definitions/{target}, which the schema \
+                     does not carry"
                 );
+                assert!(
+                    definition["required"].is_null(),
+                    "{command_type}.{path} reaches #/definitions/{target}, which still demands \
+                     {}: a shape says what a member looks like and never which member a caller \
+                     has to send, so an override the parser merges onto a preset would be \
+                     refused by the schema",
+                    definition["required"]
+                );
+
+                for nested in referenced_definitions(definition) {
+                    pending.push((format!("{path} -> {target}"), nested));
+                }
             }
         }
     }
@@ -5634,6 +5721,43 @@ pub enum CommandPayload {
                 "{command_type}.{property} states a shape beside a $ref, which draft-07 ignores: \
                  {declared}"
             );
+        }
+    }
+
+    /// Every local definition a subschema points at, at any depth.
+    ///
+    /// [`references`] reads one member's own `$ref`s, which is what a shape
+    /// states; this is what the reader following them ends up with, and the
+    /// two differ by exactly the hops a member's own type takes.
+    fn referenced_definitions(value: &Value) -> Vec<String> {
+        let mut found: Vec<String> = Vec::new();
+        collect_references(value, &mut found);
+        found
+    }
+
+    /// Folds every `#/definitions/...` name under one value into `found`.
+    fn collect_references(value: &Value, found: &mut Vec<String>) {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object {
+                    match (key.as_str(), child.as_str()) {
+                        ("$ref", Some(reference)) => {
+                            if let Some(name) = reference.strip_prefix("#/definitions/") {
+                                if !found.iter().any(|seen| seen == name) {
+                                    found.push(name.to_string());
+                                }
+                            }
+                        }
+                        _ => collect_references(child, found),
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect_references(item, found);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5689,6 +5813,164 @@ pub enum CommandPayload {
             .expect("a partial override of the preset's style stays valid");
         CommandPayload::parse("AddTextClip".to_string(), accepted)
             .expect("the parser merges a partial style override onto the preset");
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a partial override of any text layer is valid in both places
+    ///
+    /// The regression this covers: the shape dropped `TextClipData`'s own
+    /// `required` list, but the definitions its members point at travelled into
+    /// the document still carrying theirs — so draft-07 refused
+    /// `{"style": {"fontSize": 40}}`, the idiom `docs/AGENT_GUIDE.md`
+    /// documents, while the parser merged it onto the preset without a word.
+    /// Each fragment is checked against the no-preset branch too, where there
+    /// is nothing to merge onto and both places must go on refusing it.
+    #[test]
+    fn a_partial_override_of_a_text_layer_should_be_valid_in_both_places() {
+        let schema = command_payload_schema("AddTextClip").expect("AddTextClip has a schema");
+        let payload = |preset: Option<&str>, text_data: &Value| {
+            let mut payload = serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_v1",
+                "timelineIn": 5.0,
+                "duration": 3.0,
+                "textData": text_data.clone()
+            });
+            if let Some(preset) = preset {
+                payload["preset"] = Value::String(preset.to_string());
+            }
+            payload
+        };
+
+        let overrides = [
+            serde_json::json!({ "style": { "fontSize": 40 } }),
+            serde_json::json!({ "style": { "bold": false } }),
+            serde_json::json!({ "position": { "y": 0.85 } }),
+            serde_json::json!({ "shadow": { "blur": 4 } }),
+            serde_json::json!({ "outline": { "width": 2 } }),
+        ];
+
+        for text_data in &overrides {
+            let accepted = payload(Some("quote"), text_data);
+            if let Err(error) = check_against_schema(&schema, &accepted) {
+                panic!(
+                    "the schema must accept what the preset merge accepts: {error} — {accepted}"
+                );
+            }
+            if let Err(error) = CommandPayload::parse("AddTextClip".to_string(), accepted.clone()) {
+                panic!("the parser must accept this for the guard to mean anything: {error} — {accepted}");
+            }
+
+            let refused = payload(None, text_data);
+            check_against_schema(&schema, &refused).expect_err(&format!(
+                "without a preset there is nothing to merge onto, so a partial override stays \
+                 refused: {refused}"
+            ));
+            CommandPayload::parse("AddTextClip".to_string(), refused.clone()).expect_err(&format!(
+                "the parser must refuse this for the guard to mean anything: {refused}"
+            ));
+        }
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a branch demands exactly what the type it parses into demands
+    ///
+    /// `value_requires` and `nested_requires` are the one place the either/or
+    /// table restates something a Rust type already says, and they exist only
+    /// because a shape strips the derivation's `required` lists on the way in.
+    /// They are derived again here so the two cannot drift: `shadow` and
+    /// `outline` went unlisted, so the full-object branch quietly stopped
+    /// demanding what the parser demands the moment the shape landed.
+    #[test]
+    fn an_either_or_branch_should_demand_what_the_type_it_parses_into_demands() {
+        let sorted = |names: &[&str]| {
+            let mut names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+            names.sort();
+            names
+        };
+        let demanded = |schema: &Value| -> Vec<String> {
+            let mut names: Vec<String> = schema["required"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            names.sort();
+            names
+        };
+
+        for requirement in PAYLOAD_EITHER_OR_REQUIREMENTS {
+            for branch in requirement.branches {
+                let owner = requirement.owner;
+                let property = branch.property;
+                let Some(shape) = PAYLOAD_PROPERTY_SHAPES
+                    .iter()
+                    .find(|shape| shape.owner == owner && shape.property == property)
+                else {
+                    assert!(
+                        branch.value_requires.is_empty() && branch.nested_requires.is_empty(),
+                        "{owner}.{property} demands members of a value no shape describes, so \
+                         nothing checks the list against the type that reads it"
+                    );
+                    continue;
+                };
+
+                let source = (shape.members)();
+                assert_eq!(
+                    sorted(branch.value_requires),
+                    demanded(&source),
+                    "{owner}.{property}'s branch must demand what the type it is parsed into \
+                     demands, no more and no less"
+                );
+
+                let mut expected: Vec<(String, Vec<String>)> = Vec::new();
+                for (name, member) in source["properties"].as_object().into_iter().flatten() {
+                    for target in references(member) {
+                        let required = demanded(&source["definitions"][target]);
+                        if !required.is_empty() {
+                            expected.push((name.clone(), required));
+                        }
+                    }
+                }
+                expected.sort();
+
+                let mut stated: Vec<(String, Vec<String>)> = branch
+                    .nested_requires
+                    .iter()
+                    .map(|requires| (requires.member.to_string(), sorted(requires.requires)))
+                    .collect();
+                stated.sort();
+
+                assert_eq!(
+                    stated, expected,
+                    "{owner}.{property}'s branch must carry one entry per member whose own type \
+                     demands something — a shape strips those lists, and an unlisted member is a \
+                     demand the schema stops making"
+                );
+
+                for requires in branch.nested_requires {
+                    let member = &source["properties"][requires.member];
+                    let nullable = ["anyOf", "oneOf"]
+                        .into_iter()
+                        .filter_map(|keyword| member[keyword].as_array())
+                        .flatten()
+                        .any(|option| option["type"] == serde_json::json!("null"));
+                    let types: &[&str] = if nullable {
+                        &["object", "null"]
+                    } else {
+                        &["object"]
+                    };
+                    assert_eq!(
+                        requires.types, types,
+                        "{owner}.{property}.{} must state the types the type it is parsed into \
+                         allows: a nullable member the parser reads `null` on as the absent \
+                         optional it is cannot be constrained to objects",
+                        requires.member
+                    );
+                }
+            }
+        }
     }
 
     /// Feature: derived command payload schemas
