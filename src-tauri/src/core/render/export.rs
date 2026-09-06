@@ -4566,7 +4566,18 @@ pub fn is_text_clip(clip: &Clip) -> bool {
     clip.asset_id.starts_with(TEXT_ASSET_PREFIX)
 }
 
-fn effective_text_layer_opacity(text_opacity: f64, clip_opacity: f32) -> f64 {
+/// Opacity a text or caption layer is actually drawn at.
+///
+/// The style's own opacity times the clip's, which is what every alpha the
+/// layer paints - the glyphs, the outline, the shadow, the background box - is
+/// scaled by on both render paths. Exposed to the crate because the QC contrast
+/// pass has to know how opaque a caption's box really is before it decides the
+/// box settles anything, and a second copy of this arithmetic is how the check
+/// and the renderer drift apart.
+///
+/// Two equal opacities are taken as one setting expressed twice rather than as
+/// a fade applied twice, so a clip and its style both at 50 % render at 50 %.
+pub(crate) fn effective_text_layer_opacity(text_opacity: f64, clip_opacity: f32) -> f64 {
     let clip_opacity = if clip_opacity.is_finite() {
         (clip_opacity as f64).clamp(0.0, 1.0)
     } else {
@@ -8817,6 +8828,28 @@ mod tests {
             "center",
         );
         assert!((percent_x.x - 0.5).abs() < 1e-9, "got {}", percent_x.x);
+
+        // `verticalAlign` overrides only the vertical axis of a custom anchor:
+        // the point keeps the x its author chose, and it stays a custom anchor,
+        // so the burn-in still places it with `\pos` and wraps it nowhere.
+        let realigned_custom = caption_anchor_percent(
+            Some(&serde_json::json!({ "type": "custom", "xPercent": 20.0, "yPercent": 80.0 })),
+            Some(&serde_json::json!({ "verticalAlign": "top" })),
+            "center",
+        );
+        assert!(!realigned_custom.is_preset());
+        assert_eq!(realigned_custom.vertical, None);
+        assert_eq!(realigned_custom.margin_percent, None);
+        assert!(
+            (realigned_custom.x - 0.2).abs() < 1e-9,
+            "the override must leave x alone, got {}",
+            realigned_custom.x
+        );
+        assert!(
+            (realigned_custom.y - top_margin).abs() < 1e-9,
+            "the override moves the point up the frame, got {}",
+            realigned_custom.y
+        );
     }
 
     #[test]

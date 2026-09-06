@@ -12,7 +12,7 @@ use super::context::QCContext;
 use super::violation::{merged_span_duration_sec, QCViolation, Severity, ViolationFix};
 use crate::core::captions::{
     CaptionPosition, CaptionStyle, CustomPosition, TextAlignment, VerticalPosition,
-    CAPTION_SIDE_MARGIN_PERCENT, CAPTION_WRAP_BOX_WIDTH_PERCENT,
+    CAPTION_WRAP_BOX_WIDTH_PERCENT,
 };
 use crate::core::project::ProjectState;
 use crate::core::render::export::caption_anchor_percent;
@@ -1522,9 +1522,10 @@ impl QCRule for AudioClippingRule {
 /// Rule that ensures captions remain within the title-safe area
 ///
 /// Works purely from timeline structure: caption clips carry their position and
-/// style as untyped JSON, which is deserialized defensively so a legacy or
-/// partially written blob degrades to the caption defaults instead of failing
-/// the whole check.
+/// style as untyped JSON, and where the words end up is asked of the renderer
+/// through [`caption_anchor_percent`] rather than parsed here, so a legacy or
+/// partially written blob is measured where the burn-in actually draws it
+/// instead of falling back to a default the file never used.
 ///
 /// Both anchoring modes are measured against the canvas rather than merely
 /// compared to a margin, because the margin alone does not say where the block
@@ -1715,19 +1716,6 @@ impl CaptionSafeAreaRule {
         }
     }
 
-    /// Returns the horizontal anchor a preset caption uses for `alignment`.
-    ///
-    /// Mirrors `caption_preset_anchor_x` on the render side: a left- or
-    /// right-aligned preset caption sits on its side margin rather than in the
-    /// middle of the frame.
-    fn preset_anchor_x_percent(alignment: &TextAlignment) -> f64 {
-        match alignment {
-            TextAlignment::Left => CAPTION_SIDE_MARGIN_PERCENT,
-            TextAlignment::Right => 100.0 - CAPTION_SIDE_MARGIN_PERCENT,
-            TextAlignment::Center => 50.0,
-        }
-    }
-
     /// Centers a box of `size_percent` inside the safe band, without panicking
     /// when the box is wider than the band itself.
     fn clamp_center(center_percent: f64, size_percent: f64, margin_percent: f64) -> f64 {
@@ -1785,7 +1773,7 @@ const MIN_CAPTION_BAND_HEIGHT_PERCENT: f64 = 3.0;
 /// would otherwise crop to a column narrower than the glyphs themselves, whose
 /// statistics say more about one letter's background than about the picture the
 /// line has to read over.
-const MIN_CAPTION_SPAN_WIDTH_PERCENT: f64 = 10.0;
+pub(super) const MIN_CAPTION_SPAN_WIDTH_PERCENT: f64 = 10.0;
 
 /// Widening applied to the estimated text width before it is cropped.
 ///
@@ -1815,12 +1803,17 @@ fn alignment_key(alignment: &TextAlignment) -> &'static str {
 /// cue sat over a mixed background, so the contrast pass samples only the
 /// column the line is drawn in.
 ///
-/// A preset caption's column is never narrower than the box libass wraps it
-/// inside ([`CAPTION_WRAP_BOX_WIDTH_PERCENT`]): the renderer is free to use all
-/// of it, so anything less is a guess at where the glyphs stopped. Everything
-/// else is widened by [`CAPTION_SPAN_SAFETY_FACTOR`] first. The result is
-/// widened again to [`MIN_CAPTION_SPAN_WIDTH_PERCENT`] and clamped to the
-/// frame, so it is always a crop FFmpeg can take.
+/// Every estimate is widened by [`CAPTION_SPAN_SAFETY_FACTOR`] first, because
+/// the estimator has no shaping. A preset caption's column is then capped at
+/// the box libass wraps it inside ([`CAPTION_WRAP_BOX_WIDTH_PERCENT`]), which
+/// is the widest the renderer can draw it; a custom one wraps only at the frame
+/// edge and is capped there by the clamp below. Flooring a preset caption at
+/// the wrap box instead - which is what this did - handed every preset cue the
+/// same 10–90 column and threw the crop away: a one-word cue was measured
+/// across four fifths of the frame, which is the bright-corner bug the column
+/// exists to avoid. The result is widened to
+/// [`MIN_CAPTION_SPAN_WIDTH_PERCENT`] and clamped to the frame, so it is always
+/// a crop FFmpeg can take.
 pub(crate) fn caption_span_percent(
     clip: &Clip,
     canvas_width: u32,
@@ -1845,13 +1838,14 @@ pub(crate) fn caption_span_percent(
         wrap_box_width_percent,
     );
 
+    let widened = box_width * CAPTION_SPAN_SAFETY_FACTOR;
     let width = if anchor.is_preset() {
-        (box_width * CAPTION_SPAN_SAFETY_FACTOR).clamp(
+        widened.clamp(
+            MIN_CAPTION_SPAN_WIDTH_PERCENT,
             CAPTION_WRAP_BOX_WIDTH_PERCENT,
-            CaptionSafeAreaRule::MAX_TEXT_BOX_WIDTH_PERCENT,
         )
     } else {
-        box_width * CAPTION_SPAN_SAFETY_FACTOR
+        widened
     };
 
     let (left, right) = CaptionSafeAreaRule::horizontal_span(anchor.x * 100.0, width, &alignment);
@@ -1880,12 +1874,9 @@ pub(crate) fn caption_span_percent(
 /// Returns the horizontal band a caption occupies, as `(top, bottom)`
 /// percentages of canvas height.
 ///
-/// Shares [`CaptionSafeAreaRule`]'s block estimate rather than restating it, so
-/// the band the contrast check samples is the same block the safe-area check
-/// grades: two different guesses at where a caption sits would let one rule
-/// clear a caption the other one measured somewhere else. The span is widened
-/// to [`MIN_CAPTION_BAND_HEIGHT_PERCENT`] and clamped to the frame, so it is
-/// always a crop FFmpeg can take.
+/// Shares [`CaptionSafeAreaRule`]'s block estimate rather than restating it.
+/// The span is widened to [`MIN_CAPTION_BAND_HEIGHT_PERCENT`] and clamped to
+/// the frame, so it is always a crop FFmpeg can take.
 ///
 /// Where the caption sits is asked of the renderer itself, through
 /// [`caption_anchor_percent`], rather than mirrored here: a mirror built on
@@ -1996,25 +1987,33 @@ impl QCRule for CaptionSafeAreaRule {
             let mut title_safe: Vec<CaptionFinding> = Vec::new();
 
             for clip in &track.clips {
-                // A missing or unreadable position renders with the caption
-                // default, so the check follows the same fallback.
-                let position = clip
-                    .caption_position
-                    .as_ref()
-                    .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok())
-                    .unwrap_or_default();
+                // Where the renderer draws the caption, not where `serde` can
+                // parse it: the burn-in accepts a bare `"bottom"`, a preset
+                // with no `marginPercent` and a fractional custom axis, and a
+                // mirror built on `serde` either refuses those or reads them as
+                // a different point entirely - which is how a centred caption
+                // came to be reported as anchored off the left edge. The
+                // contrast rule resolves the same way, so the two rules cannot
+                // disagree about where a caption sits.
+                let alignment = Self::alignment(clip.caption_style.as_ref());
+                let anchor = caption_anchor_percent(
+                    clip.caption_position.as_ref(),
+                    clip.caption_style.as_ref(),
+                    alignment_key(&alignment),
+                );
+                let anchor_x_percent = anchor.x * 100.0;
 
-                let (band, reason, message, details, suggested_position) = match &position {
-                    CaptionPosition::Preset {
-                        vertical,
-                        margin_percent,
-                    } => {
+                let (band, reason, message, details, suggested_position) = match (
+                    anchor.vertical.clone(),
+                    anchor.margin_percent,
+                ) {
+                    (Some(vertical), Some(margin_percent)) => {
                         // The middle row sits mid-canvas, where an edge margin
                         // has no meaning; it is still measured below for a
                         // block tall enough to reach an edge on its own.
-                        let margin_is_meaningful = *vertical != VerticalPosition::Center;
+                        let margin_is_meaningful = vertical != VerticalPosition::Center;
 
-                        if margin_is_meaningful && *margin_percent < action_safe_margin {
+                        if margin_is_meaningful && margin_percent < action_safe_margin {
                             (
                                 SafeAreaBand::ActionSafe,
                                 "action_safe_margin",
@@ -2028,7 +2027,7 @@ impl QCRule for CaptionSafeAreaRule {
                                     margin_percent: title_safe_margin,
                                 },
                             )
-                        } else if margin_is_meaningful && *margin_percent < title_safe_margin {
+                        } else if margin_is_meaningful && margin_percent < title_safe_margin {
                             (
                                 SafeAreaBand::TitleSafe,
                                 "title_safe_margin",
@@ -2061,14 +2060,10 @@ impl QCRule for CaptionSafeAreaRule {
                                 context.canvas_height,
                                 CAPTION_WRAP_BOX_WIDTH_PERCENT,
                             );
-                            let alignment = Self::alignment(clip.caption_style.as_ref());
-                            let (left, right) = Self::horizontal_span(
-                                Self::preset_anchor_x_percent(&alignment),
-                                box_width,
-                                &alignment,
-                            );
+                            let (left, right) =
+                                Self::horizontal_span(anchor_x_percent, box_width, &alignment);
                             let (top, bottom) =
-                                Self::preset_vertical_span(vertical, *margin_percent, box_height);
+                                Self::preset_vertical_span(&vertical, margin_percent, box_height);
                             let upper_bound = 100.0 - action_safe_margin;
 
                             if left >= action_safe_margin
@@ -2106,7 +2101,7 @@ impl QCRule for CaptionSafeAreaRule {
                             )
                         }
                     }
-                    CaptionPosition::Custom(custom) => {
+                    _ => {
                         // A custom caption is positioned with `\pos`, which
                         // disables the event margins, so libass wraps it only
                         // where it meets the frame edge.
@@ -2116,12 +2111,12 @@ impl QCRule for CaptionSafeAreaRule {
                             context.canvas_height,
                             100.0,
                         );
-                        let alignment = Self::alignment(clip.caption_style.as_ref());
+                        let anchor_y_percent = anchor.y * 100.0;
 
                         let (left, right) =
-                            Self::horizontal_span(custom.x_percent, box_width, &alignment);
-                        let top = custom.y_percent - box_height / 2.0;
-                        let bottom = custom.y_percent + box_height / 2.0;
+                            Self::horizontal_span(anchor_x_percent, box_width, &alignment);
+                        let top = anchor_y_percent - box_height / 2.0;
+                        let bottom = anchor_y_percent + box_height / 2.0;
 
                         let upper_bound = 100.0 - action_safe_margin;
                         if left >= action_safe_margin
@@ -2154,7 +2149,7 @@ impl QCRule for CaptionSafeAreaRule {
                             CaptionPosition::Custom(CustomPosition {
                                 x_percent: fixed_x,
                                 y_percent: Self::clamp_center(
-                                    custom.y_percent,
+                                    anchor_y_percent,
                                     box_height,
                                     action_safe_margin,
                                 ),
@@ -3129,6 +3124,77 @@ mod tests {
         let fix = violations[0].suggested_fix.as_ref().expect("fix suggested");
         assert_eq!(fix.commands[0]["type"], "UpdateCaption");
         assert_eq!(fix.commands[0]["position"]["type"], "custom");
+    }
+
+    /// Feature: Caption safe area
+    /// Scenario: should read a fractional custom anchor as the renderer does
+    ///
+    /// `xPercent: 0.5` is the middle of the frame to the burn-in, which reads an
+    /// axis under 1 as a fraction. Read through `serde` as a raw percentage it
+    /// was half a percent from the left edge, and this rule reported a centred
+    /// caption as anchored off the frame - and offered to "fix" it by moving it.
+    #[tokio::test]
+    async fn should_read_a_fractional_custom_anchor_where_the_renderer_draws_it() {
+        let sequence = sequence_with_caption(
+            "Centred",
+            Some(serde_json::json!({
+                "type": "custom",
+                "xPercent": 0.5,
+                "yPercent": 0.5
+            })),
+            None,
+        );
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(
+            violations.is_empty(),
+            "a caption pinned to the middle of the frame is inside every band: {:?}",
+            violations
+                .iter()
+                .map(|violation| violation.details.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Feature: Caption safe area
+    /// Scenario: should still measure a custom anchor that names only one axis
+    ///
+    /// `{"type":"custom","xPercent":95}` is a caption the burn-in draws hard
+    /// against the right edge. `serde` refuses it for want of a `yPercent`, so
+    /// the rule silently graded the bottom preset default instead and passed a
+    /// caption that runs off the side of the frame.
+    #[tokio::test]
+    async fn should_measure_a_custom_anchor_missing_an_axis() {
+        let sequence = sequence_with_caption(
+            "Hard against the right edge",
+            Some(serde_json::json!({ "type": "custom", "xPercent": 95 })),
+            None,
+        );
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(first_cue(&violations[0])["reason"], "custom_anchor");
+        assert_eq!(
+            violations[0]
+                .suggested_fix
+                .as_ref()
+                .expect("fix suggested")
+                .commands[0]["position"]["type"],
+            "custom",
+            "the repair has to be expressed in the anchoring the renderer reads"
+        );
     }
 
     #[tokio::test]

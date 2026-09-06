@@ -136,14 +136,19 @@ structural check can answer. For each caption cue the file covers it decodes one
 frame at the cue's midpoint, measures the luminance of the band the words occupy
 and compares it with the text colour. A cue is "already protected" - and never
 decoded - only when the export would actually draw the protection: an
-`outlineColor` with a non-zero width, or a `backgroundColor` that is at least
-80% opaque. An `outlineWidth` with no colour renders bare, and so does a cue
-with no style at all, so those are graded like any other bare cue. A fainter box
-is measured rather than trusted: it is composited over the band first, so it is
-worth exactly as much as it hides. A painted box replaces the outline in the
-burn-in, so an outline behind one is not protection either; a `backgroundColor`
-the renderer rounds away to nothing is no box at all and leaves the outline
-standing.
+`outlineColor` with a non-zero width, or a `backgroundColor` whose colour and
+alpha together put every picture the shot could be clear of the text. Alpha
+alone decides nothing: white words on a 90%-opaque *white* box are decoded and
+reported, while the same alpha in black is waved through. An `outlineWidth` with
+no colour renders bare, and so does a cue with no style at all, so those are
+graded like any other bare cue. Every other box is measured rather than trusted:
+it is composited over the band first, so it is worth exactly as much as it
+hides. Layer opacity counts throughout - a style `opacity` and the clip's own
+opacity scale the box and the outline the way they do in the render, and a
+caption faded out entirely is not decoded. A painted box replaces the outline
+in the burn-in, so an outline behind one is not protection either; a
+`backgroundColor` the renderer rounds away to nothing is no box at all and
+leaves the outline standing.
 The measured rectangle follows the words on both axes - the band from
 `captionPosition` and the style's `verticalAlign`, the column from the text
 block - so a bright strip the line never reaches cannot decide the verdict.
@@ -153,11 +158,15 @@ reported (`fault: "lowContrast"`), and so is one whose band varies by more than
 `0.2` (`fault: "mixedBackground"`) - a band that is half sky and half shadow has
 a comfortable mean and is still half unreadable. Either way the finding carries
 `{bandLuminance, bandLuminanceStddev, textLuminance, contrast, minContrast,
-maxBandStddev, fault, hasBox, boxAlpha, hasOutline}` - `bandLuminance` is the
-picture as measured, `contrast` is what was judged once `boxAlpha` of the cue's
-own box was composited over it - and an `UpdateCaption` fix applying
-the `standard-outline` pack - not `boxed-contrast`, because an outline survives
-any background including a mixed one.
+maxBandStddev, fault, hasBox, hasOutline}`, plus `boxAlpha` on a cue that
+carries a box, and an `UpdateCaption` fix applying the `standard-outline` pack -
+not `boxed-contrast`, because an outline survives any background including a
+mixed one. `bandLuminance` is the picture as measured, `contrast` is what was
+judged once `boxAlpha` of the cue's own box was composited over it, and
+`boxAlpha` is the alpha the box is actually painted at, layer opacity included.
+`hasBox: true` on a violation is expected rather than a contradiction:
+protection is decided by the box's colour and alpha together, never by the box
+alone; `hasOutline` is the one flag that cannot appear on a violation.
 
 The pass is bounded: at most 60 frames per run (spread evenly across the file),
 whatever is left of `--timeout-sec` after the probe pass - the flag is one budget

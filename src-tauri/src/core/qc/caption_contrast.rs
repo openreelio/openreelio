@@ -10,10 +10,11 @@
 //! rendered file covers, it decodes one frame at the cue's midpoint, measures
 //! the luminance of the band the cue occupies, and compares it with the
 //! luminance of the text itself. A cue whose style already carries an outline,
-//! or a background box at [`MIN_PROTECTING_BOX_ALPHA`] or above, is never
-//! decoded: the mitigation settles the question before a pixel is read, and
-//! skipping it keeps the pass cheap on the ordinary project where every caption
-//! is outlined. A fainter box is measured like any other cue, with the box
+//! or a background box that cannot fail whatever the picture behind it turns
+//! out to be (see [`box_guarantees_legibility`]), is never decoded: the
+//! mitigation settles the question before a pixel is read, and skipping it
+//! keeps the pass cheap on the ordinary project where every caption is
+//! outlined. Every other box is measured like any other cue, with the box
 //! composited over the band it covers.
 //!
 //! # Two halves
@@ -44,9 +45,15 @@
 //!   anything under half a step of it paints nothing — selects no box at all,
 //!   and the ASS path keeps `BorderStyle: 1` and the outline it would otherwise
 //!   have replaced. Where a box *is* painted it takes the stroke's place, so an
-//!   outline behind a box is not protection; and only a box at
-//!   [`MIN_PROTECTING_BOX_ALPHA`] or above lets the cue go unmeasured, since a
-//!   wash the footage reads through decides nothing on its own.
+//!   outline behind a box is not protection; and only a box whose own colour
+//!   and alpha put every possible reading of the band clear of the text lets
+//!   the cue go unmeasured, since a wash the footage reads through - or an
+//!   opaque box the same tone as the words - decides nothing on its own.
+//! * **Layer opacity** — both renderers multiply every decoration's alpha by
+//!   the caption layer's own opacity, which is the style's `opacity` (or the
+//!   alpha of its text colour) times the clip's. A 90 %-opaque box on a clip
+//!   faded to a tenth paints at nine percent, so the same factors are folded
+//!   into the box alpha here before anything is decided from it.
 //! * **Text colour** — the renderers fall back to `#FFFFFF`, not to
 //!   [`CaptionStyle::default`](crate::core::captions::CaptionStyle::default), when the blob names no readable colour.
 //!
@@ -108,6 +115,7 @@ use super::violation::{QCViolation, Severity, ViolationFix};
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::process::configure_tokio_command;
 use crate::core::project::ProjectState;
+use crate::core::render::export::effective_text_layer_opacity;
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::{CoreError, CoreResult};
 
@@ -119,6 +127,16 @@ pub const CAPTION_CONTRAST_CHECK_ID: &str = "caption.contrast";
 /// Below this the words and the picture behind them read as one tone. It is a
 /// difference on the gamma-encoded scale described in the module docs, not a
 /// WCAG contrast ratio.
+///
+/// # Known limitation
+///
+/// The two scales disagree about how demanding this is, and this one is the
+/// more forgiving. A 0.35 separation is about a 2.4:1 WCAG contrast ratio for
+/// white text on the darkest band that still clears it, and about 3.0:1 for
+/// black text on the lightest one - both short of the 4.5:1 WCAG asks of body
+/// text. So a cue this check passes is legible rather than accessible, and the
+/// number is deliberately left where it is: it exists to catch captions the
+/// picture swallows, not to grade a project against WCAG.
 pub const DEFAULT_MIN_CONTRAST: f64 = 0.35;
 
 /// Largest luminance spread, on 0–1, a band may have and still be one tone.
@@ -197,16 +215,28 @@ pub struct CaptionBandSample {
     /// Luminance of the cue's effective text colour, 0–1
     pub text_luminance: f64,
     /// Whether the renderer paints a background box behind the cue at all
+    ///
+    /// A box is not protection on its own, so this is `true` on plenty of
+    /// reported cues: what settles the question is
+    /// [`box_guarantees_legibility`], which asks what the box is made of.
     pub has_box: bool,
     /// Whether the renderer strokes the cue's glyphs
+    ///
+    /// An outline *is* protection, so a sample carrying one is never graded.
     pub has_outline: bool,
     /// Alpha of that background box, 0–1; `0.0` where none is painted
     ///
-    /// Defaulted on read so a report written before the box was measured still
-    /// deserializes, as a cue with no box - which is what it recorded.
+    /// Defaulted on read because reports written before the box was measured
+    /// carry no such field. That default is a lie for a cue those reports
+    /// recorded as `hasBox`, and a deliberately conservative one: the box is
+    /// left out of the blend, so the cue is graded against the undiluted
+    /// picture and can only be reported more readily than a fresh measurement
+    /// would report it.
     #[serde(default)]
     pub box_alpha: f64,
     /// Luminance of that background box's colour, 0–1
+    ///
+    /// Defaulted on read the same way, and meaningless where no box is painted.
     #[serde(default)]
     pub box_luminance: f64,
 }
@@ -215,9 +245,9 @@ impl CaptionBandSample {
     /// Luminance the words are actually read against, 0–1.
     ///
     /// A translucent box does not remove the picture, it dilutes it: the viewer
-    /// sees `alpha` of the box over `1 - alpha` of the shot. A box opaque
-    /// enough to settle the question on its own is never measured at all (see
-    /// [`MIN_PROTECTING_BOX_ALPHA`]), so this is what the faint ones do.
+    /// sees `alpha` of the box over `1 - alpha` of the shot. A box that settles
+    /// the question on its own is never measured at all (see
+    /// [`box_guarantees_legibility`]), so this is what the rest of them do.
     pub fn effective_band_luminance(&self) -> f64 {
         let alpha = self.box_alpha.clamp(0.0, 1.0);
         alpha * self.box_luminance + (1.0 - alpha) * self.band_luminance
@@ -337,29 +367,64 @@ impl Default for CaptionSampleOptions {
 // Style reading
 // =============================================================================
 
-/// Faintest background box that lets a cue go unmeasured, on alpha 0–1.
+/// Largest luminance spread a band of values on 0–1 can possibly have.
 ///
-/// Skipping a cue is a claim that the picture behind the words cannot matter,
-/// and only a box that is very nearly opaque earns it: at 0.8 the footage
-/// contributes a fifth of what the text is read against, which no ordinary
-/// shot can turn into a contrast failure. Everything below is still a box and
-/// still helps, so it is measured with the box blended over the band rather
-/// than waved through - a half-opaque black wash under white text is the
-/// difference between legible and not, and the check can only know which by
-/// looking.
-const MIN_PROTECTING_BOX_ALPHA: f64 = 0.8;
+/// Half the picture at black and half at white; nothing in an eight-bit frame
+/// beats it. It is the worst case a box has to survive to be waved through
+/// without a decode.
+const MAX_POSSIBLE_BAND_STDDEV: f64 = 0.5;
+
+/// Whether a box settles the cue's legibility whatever the picture behind it is.
+///
+/// Skipping a cue is a claim that the shot cannot matter, and only the box's own
+/// arithmetic can earn it. The viewer reads the words against
+/// `alpha * box + (1 - alpha) * picture`, and the picture is somewhere on 0–1,
+/// so the band the box leaves lies in `[alpha * box, alpha * box + (1 - alpha)]`
+/// and its surviving spread is at most `(1 - alpha) * `
+/// [`MAX_POSSIBLE_BAND_STDDEV`]. A box is protection only when the *whole* of
+/// that interval clears [`DEFAULT_MIN_CONTRAST`] and that spread clears
+/// [`DEFAULT_MAX_BAND_STDDEV`] — which is why an opaque box is not enough by
+/// itself: white text on a ninety-percent *white* box is inside the interval,
+/// reads as nothing over a dark shot, and is measured like any other cue.
+fn box_guarantees_legibility(text_luminance: f64, box_alpha: f64, box_luminance: f64) -> bool {
+    let alpha = box_alpha.clamp(0.0, 1.0);
+    let lowest = alpha * box_luminance.clamp(0.0, 1.0);
+    let highest = lowest + (1.0 - alpha);
+
+    // Distance from the text to the nearest band the picture could produce;
+    // zero whenever some picture makes the two the same tone.
+    let separation = if text_luminance < lowest {
+        lowest - text_luminance
+    } else if text_luminance > highest {
+        text_luminance - highest
+    } else {
+        0.0
+    };
+
+    separation >= DEFAULT_MIN_CONTRAST
+        && (1.0 - alpha) * MAX_POSSIBLE_BAND_STDDEV <= DEFAULT_MAX_BAND_STDDEV
+}
 
 /// What a cue's style says about the words themselves.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CaptionPaint {
     /// Luminance of the text colour, 0–1
     text_luminance: f64,
-    /// Alpha of the background box the renderer would paint, `0.0` for none
+    /// Alpha the background box actually paints at, `0.0` for none
+    ///
+    /// The style's own box alpha times [`CaptionPaint::layer_opacity`], because
+    /// that is the product both renderers hand to the box colour.
     box_alpha: f64,
     /// Luminance of that box's colour, 0–1; meaningless where none is painted
     box_luminance: f64,
-    /// Whether the style asks for a stroke around the glyphs
+    /// Whether the renderer draws a stroke around the glyphs that reaches the
+    /// picture, layer opacity included
     strokes_glyphs: bool,
+    /// Opacity the whole caption layer is drawn at, 0–1
+    ///
+    /// `effective_text_layer_opacity` of the style's opacity and the clip's, so
+    /// a caption faded out of the frame is known to draw nothing at all.
+    layer_opacity: f64,
 }
 
 impl CaptionPaint {
@@ -375,9 +440,21 @@ impl CaptionPaint {
         ((1.0 - self.box_alpha) * 255.0).round() < 255.0
     }
 
-    /// Whether a box opaque enough to settle the question on its own is painted.
+    /// Whether a box that settles the question on its own is painted.
+    ///
+    /// Alpha alone never answers this: see [`box_guarantees_legibility`].
     fn protects_with_box(&self) -> bool {
-        self.paints_box() && self.box_alpha >= MIN_PROTECTING_BOX_ALPHA
+        self.paints_box()
+            && box_guarantees_legibility(self.text_luminance, self.box_alpha, self.box_luminance)
+    }
+
+    /// Whether the glyphs reach the picture at all.
+    ///
+    /// A caption layer faded to nothing draws nothing, and a cue nobody can see
+    /// is not a legibility defect - it is a different one, and reporting it here
+    /// would be reporting the contrast of pixels that were never drawn.
+    fn draws_text(&self) -> bool {
+        self.layer_opacity > 0.0
     }
 
     /// Whether the outline the style asks for actually reaches the picture.
@@ -506,25 +583,40 @@ fn style_field<'a>(
 /// box too faint to hide anything all come back bare. A fully transparent box
 /// is bare *and* leaves the outline standing, which is what the ASS path does
 /// with it.
-fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
-    let bare = CaptionPaint {
-        text_luminance: DEFAULT_TEXT_LUMINANCE,
-        box_alpha: 0.0,
-        box_luminance: 0.0,
-        strokes_glyphs: false,
-    };
-
+///
+/// `clip_opacity` is the caption clip's own opacity, which both renderers fold
+/// into every alpha the layer paints with, so it decides the box and the stroke
+/// here too.
+fn caption_paint(style: Option<&serde_json::Value>, clip_opacity: f32) -> CaptionPaint {
     // `build_caption_text_effect` reads `clip.caption_style.as_object()`; a
     // missing or non-object blob sets no style param at all, and the renderers
-    // then draw white text with no decoration whatsoever.
+    // then draw white text with no decoration whatsoever - at the clip's own
+    // opacity, which applies whether or not there is a style blob to read.
     let Some(style) = style.and_then(serde_json::Value::as_object) else {
-        return bare;
+        return CaptionPaint {
+            text_luminance: DEFAULT_TEXT_LUMINANCE,
+            box_alpha: 0.0,
+            box_luminance: 0.0,
+            strokes_glyphs: false,
+            layer_opacity: effective_text_layer_opacity(1.0, clip_opacity),
+        };
     };
 
-    let text_luminance = style_field(style, &["color"])
-        .and_then(parse_paint_colour)
+    let text_colour = style_field(style, &["color"]).and_then(parse_paint_colour);
+    let text_luminance = text_colour
         .map(|colour| colour.luminance)
         .unwrap_or(DEFAULT_TEXT_LUMINANCE);
+
+    // `build_caption_text_effect` takes the layer's opacity from the style's
+    // own `opacity`, falling back to the alpha of the text colour, and then
+    // folds the clip's opacity into it. Every decoration's alpha is multiplied
+    // by the result on both render paths.
+    let text_opacity = style_field(style, &["opacity"])
+        .and_then(json_number)
+        .map(|opacity| opacity.clamp(0.0, 1.0))
+        .or_else(|| text_colour.map(|colour| colour.alpha))
+        .unwrap_or(1.0);
+    let layer_opacity = effective_text_layer_opacity(text_opacity, clip_opacity);
 
     // A box the renderer cannot paint is not a box: the ASS path leaves
     // `BorderStyle: 1` and the outline in place for a fully transparent
@@ -534,13 +626,16 @@ fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
     // it is composited over the measured band, which needs both.
     let background =
         style_field(style, &["backgroundColor", "background_color"]).and_then(parse_paint_colour);
-    let box_alpha = background.map(|colour| colour.alpha).unwrap_or(0.0);
+    let box_alpha = background
+        .map(|colour| colour.alpha * layer_opacity)
+        .unwrap_or(0.0);
     let box_luminance = background.map(|colour| colour.luminance).unwrap_or(0.0);
 
     // The outline is keyed off the colour, exactly as both renderers key it:
     // no `outlineColor`, no stroke, whatever `outlineWidth` says. The width
     // then defaults to the renderer's own 2 and is rounded the same way, so a
-    // sub-half-pixel width reads as the nothing it renders as.
+    // sub-half-pixel width reads as the nothing it renders as, and the stroke's
+    // own alpha is scaled by the layer opacity the same way the box's is.
     let strokes_glyphs = style_field(style, &["outlineColor", "outline_color"])
         .and_then(parse_paint_colour)
         .is_some_and(|colour| {
@@ -549,7 +644,7 @@ fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
                 .unwrap_or(2.0)
                 .clamp(0.0, 100.0)
                 .round();
-            colour.is_visible() && width > 0.0
+            colour.is_visible() && colour.alpha * layer_opacity > 0.0 && width > 0.0
         });
 
     CaptionPaint {
@@ -557,6 +652,7 @@ fn caption_paint(style: Option<&serde_json::Value>) -> CaptionPaint {
         box_alpha,
         box_luminance,
         strokes_glyphs,
+        layer_opacity,
     }
 }
 
@@ -582,10 +678,10 @@ struct CaptionCue {
 
 /// Returns the caption cues a file covering `window` could be asked about.
 ///
-/// Cues with no text are not cues, and cues the style already protects are
-/// excluded here rather than after decoding: the mitigation is the answer, and
-/// paying for a frame to confirm it would make the check cost scale with the
-/// captions that are already fine.
+/// Cues with no text are not cues, and cues the style already protects - or
+/// fades away to nothing - are excluded here rather than after decoding: the
+/// style is the answer in both cases, and paying for a frame to confirm it
+/// would make the check cost scale with the captions that are already fine.
 fn sampling_candidates(
     sequence: &Sequence,
     window: (f64, f64),
@@ -600,7 +696,9 @@ fn sampling_candidates(
             let Some(cue) = caption_cue(track, clip, canvas_width, canvas_height) else {
                 continue;
             };
-            if cue.paint.is_mitigated() {
+            // A cue the renderer already protects, and one it fades out of the
+            // frame entirely, are both answered without a decode.
+            if cue.paint.is_mitigated() || !cue.paint.draws_text() {
                 continue;
             }
             if cue.start_sec >= window_end || cue.end_sec <= window_start {
@@ -655,7 +753,7 @@ fn caption_cue(
         midpoint_sec: (start_sec + end_sec) / 2.0,
         band_percent: super::rules::caption_band_percent(clip, canvas_width, canvas_height),
         span_percent: super::rules::caption_span_percent(clip, canvas_width, canvas_height),
-        paint: caption_paint(clip.caption_style.as_ref()),
+        paint: caption_paint(clip.caption_style.as_ref(), clip.opacity),
     })
 }
 
@@ -1066,17 +1164,21 @@ impl CaptionContrastRule {
     /// Grades one sample, or `None` when the cue reads fine.
     ///
     /// An outline settles the question, because it separates the glyphs from
-    /// anything, and so does a box at or above [`MIN_PROTECTING_BOX_ALPHA`]. A
-    /// fainter box does not: it is composited over the band, and the diluted
-    /// picture is what the words are graded against, so a wash that genuinely
-    /// rescues a white-on-white cue clears the check and one that only looks
-    /// like a box does not.
+    /// anything. A box does not settle it by being a box: it is composited over
+    /// the measured band, and the diluted picture is what the words are graded
+    /// against, so a wash that genuinely rescues a white-on-white cue clears the
+    /// check and one that only looks like a box does not. Nothing is
+    /// short-circuited on the box here, because a box that *could* have been
+    /// short-circuited - see [`box_guarantees_legibility`], which is what keeps
+    /// those cues from being decoded at all - clears the measured grading too,
+    /// by construction: the measured band lies inside the interval that rule
+    /// quantified over.
     fn fault_for(
         sample: &CaptionBandSample,
         min_contrast: f64,
         max_stddev: f64,
     ) -> Option<ContrastFault> {
-        if sample.has_outline || sample.box_alpha >= MIN_PROTECTING_BOX_ALPHA {
+        if sample.has_outline {
             return None;
         }
         let contrast = sample.contrast();
@@ -1249,36 +1351,45 @@ impl QCRule for CaptionContrastRule {
                 ),
             };
 
+            let mut violation = QCViolation::new(self.name(), severity, message)
+                .with_location(sample.start_sec, sample.end_sec)
+                .with_entities(vec![sample.clip_id.clone()])
+                .with_details(details)
+                .with_metric(
+                    "bandLuminance",
+                    (sample.band_luminance * 1000.0).round() / 1000.0,
+                )
+                .with_metric(
+                    "bandLuminanceStddev",
+                    (sample.band_luminance_stddev * 1000.0).round() / 1000.0,
+                )
+                .with_metric(
+                    "textLuminance",
+                    (sample.text_luminance * 1000.0).round() / 1000.0,
+                )
+                .with_metric("contrast", (sample.contrast() * 1000.0).round() / 1000.0)
+                .with_metric("minContrast", min_contrast)
+                .with_metric("maxBandStddev", max_stddev)
+                .with_metric(
+                    "fault",
+                    match fault {
+                        ContrastFault::LowContrast => "lowContrast",
+                        ContrastFault::MixedBackground => "mixedBackground",
+                    },
+                )
+                .with_metric("hasBox", sample.has_box)
+                .with_metric("hasOutline", sample.has_outline);
+
+            // `boxAlpha` is the alpha of a box that exists; on a cue with no box
+            // the number would be a measurement of nothing, and a reader would
+            // have to know that `0.0` and "absent" mean the same thing here.
+            if sample.has_box {
+                violation =
+                    violation.with_metric("boxAlpha", (sample.box_alpha * 1000.0).round() / 1000.0);
+            }
+
             violations.push(
-                QCViolation::new(self.name(), severity, message)
-                    .with_location(sample.start_sec, sample.end_sec)
-                    .with_entities(vec![sample.clip_id.clone()])
-                    .with_details(details)
-                    .with_metric(
-                        "bandLuminance",
-                        (sample.band_luminance * 1000.0).round() / 1000.0,
-                    )
-                    .with_metric(
-                        "bandLuminanceStddev",
-                        (sample.band_luminance_stddev * 1000.0).round() / 1000.0,
-                    )
-                    .with_metric(
-                        "textLuminance",
-                        (sample.text_luminance * 1000.0).round() / 1000.0,
-                    )
-                    .with_metric("contrast", (sample.contrast() * 1000.0).round() / 1000.0)
-                    .with_metric("minContrast", min_contrast)
-                    .with_metric("maxBandStddev", max_stddev)
-                    .with_metric(
-                        "fault",
-                        match fault {
-                            ContrastFault::LowContrast => "lowContrast",
-                            ContrastFault::MixedBackground => "mixedBackground",
-                        },
-                    )
-                    .with_metric("hasBox", sample.has_box)
-                    .with_metric("hasOutline", sample.has_outline)
-                    .with_metric("boxAlpha", (sample.box_alpha * 1000.0).round() / 1000.0)
+                violation
                     .with_metric("trackId", sample.track_id.clone())
                     .with_fix(
                         ViolationFix::new(
@@ -1350,6 +1461,11 @@ mod tests {
         clip.label = Some(text.to_string());
         clip.caption_style = style;
         clip
+    }
+
+    /// The paint a style renders as on a clip at full opacity.
+    fn paint_of(style: Option<&serde_json::Value>) -> CaptionPaint {
+        caption_paint(style, 1.0)
     }
 
     fn caption_clip(text: &str, start_sec: f64, end_sec: f64, style: Option<CaptionStyle>) -> Clip {
@@ -1624,26 +1740,27 @@ mod tests {
     #[test]
     fn should_read_mitigation_the_way_the_renderer_draws_it() {
         let boxed = serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 230 } });
-        assert!(caption_paint(Some(&boxed)).protects_with_box());
+        assert!(paint_of(Some(&boxed)).protects_with_box());
 
-        // A box the picture still shows through is measured, not waved past.
+        // A box the picture shows too much of is measured, not waved past: at
+        // half alpha the spread that survives can still be a mixed background.
         let translucent =
-            serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 180 } });
-        assert!(caption_paint(Some(&translucent)).paints_box());
-        assert!(!caption_paint(Some(&translucent)).is_mitigated());
+            serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 128 } });
+        assert!(paint_of(Some(&translucent)).paints_box());
+        assert!(!paint_of(Some(&translucent)).is_mitigated());
 
         // A box the viewer cannot see is not a box, and it does not take the
         // outline with it either: the ASS path keeps `BorderStyle: 1`.
         let clear_box =
             serde_json::json!({ "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 0 } });
-        assert!(!caption_paint(Some(&clear_box)).is_mitigated());
+        assert!(!paint_of(Some(&clear_box)).is_mitigated());
         let clear_box_outlined = serde_json::json!({
             "backgroundColor": "#00000000",
             "outlineColor": "#000000",
             "outlineWidth": 4,
         });
         assert!(
-            caption_paint(Some(&clear_box_outlined)).draws_outline(),
+            paint_of(Some(&clear_box_outlined)).draws_outline(),
             "an unpaintable box leaves the outline standing"
         );
 
@@ -1656,32 +1773,32 @@ mod tests {
             "outlineWidth": 4,
         });
         assert!(
-            !caption_paint(Some(&wash)).is_mitigated(),
+            !paint_of(Some(&wash)).is_mitigated(),
             "a box below the protection floor hides nothing and hides the stroke"
         );
 
         // An outline width with no colour renders no outline at all.
         let width_only = serde_json::json!({ "outlineWidth": 4 });
         assert!(
-            !caption_paint(Some(&width_only)).is_mitigated(),
+            !paint_of(Some(&width_only)).is_mitigated(),
             "the renderer keys the stroke off outlineColor"
         );
 
         // A colour with no width renders the renderer's own default of 2px.
         let colour_only = serde_json::json!({ "outlineColor": "#000000" });
-        assert!(caption_paint(Some(&colour_only)).draws_outline());
+        assert!(paint_of(Some(&colour_only)).draws_outline());
 
         // An explicit zero width turns it off again.
         let zeroed = serde_json::json!({ "outlineColor": "#000000", "outlineWidth": 0 });
-        assert!(!caption_paint(Some(&zeroed)).is_mitigated());
+        assert!(!paint_of(Some(&zeroed)).is_mitigated());
 
         // A partial blob that says nothing about either decoration renders
         // bare, whatever `CaptionStyle::default` would have carried.
         let partial = serde_json::json!({ "fontSize": 64 });
-        assert!(!caption_paint(Some(&partial)).is_mitigated());
+        assert!(!paint_of(Some(&partial)).is_mitigated());
 
         // And no style at all is the barest case of the lot.
-        assert!(!caption_paint(None).is_mitigated());
+        assert!(!paint_of(None).is_mitigated());
     }
 
     /// Feature: Caption legibility
@@ -1704,7 +1821,7 @@ mod tests {
         // A tenth of a black box over white leaves the band at 0.9, which white
         // text cannot be read against.
         assert!(
-            !caption_paint(Some(&black_box_at(0.1))).is_mitigated(),
+            !paint_of(Some(&black_box_at(0.1))).is_mitigated(),
             "a box this faint must still be measured"
         );
         assert_eq!(
@@ -1716,15 +1833,15 @@ mod tests {
             Some(ContrastFault::LowContrast)
         );
 
-        // At the floor the box decides the question by itself, and the cue is
-        // never decoded in the first place.
+        // Once the black box is opaque enough that no picture can reach either
+        // limit, it decides the question by itself and the cue is never decoded.
         assert!(
-            caption_paint(Some(&black_box_at(MIN_PROTECTING_BOX_ALPHA))).is_mitigated(),
-            "a box at the floor protects the words"
+            paint_of(Some(&black_box_at(0.8))).is_mitigated(),
+            "a box this opaque protects white words whatever is behind it"
         );
         assert_eq!(
             CaptionContrastRule::fault_for(
-                &boxed_sample(1.0, 1.0, MIN_PROTECTING_BOX_ALPHA),
+                &boxed_sample(1.0, 1.0, 0.8),
                 DEFAULT_MIN_CONTRAST,
                 DEFAULT_MAX_BAND_STDDEV
             ),
@@ -1733,7 +1850,7 @@ mod tests {
 
         // Half a black box brings a white band to 0.5, which white text clears.
         assert!(
-            !caption_paint(Some(&black_box_at(0.5))).is_mitigated(),
+            !paint_of(Some(&black_box_at(0.5))).is_mitigated(),
             "a half-opaque box is measured, not waved through"
         );
         assert_eq!(
@@ -1754,6 +1871,73 @@ mod tests {
             None,
             "half the picture is half the spread"
         );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should decide a box on its colour, not only on its alpha
+    ///
+    /// A ninety-percent box used to buy any cue a free pass, whatever the box
+    /// was made of. White words on a nearly-white box are exactly as unreadable
+    /// as white words on a white wall, and the check declined to decode the
+    /// frame that would have said so.
+    #[test]
+    fn should_measure_a_box_the_text_disappears_into() {
+        let boxed = |red: u8, green: u8, blue: u8, alpha: f64| {
+            serde_json::json!({
+                "color": "#FFFFFF",
+                "backgroundColor": {
+                    "r": red, "g": green, "b": blue, "a": (alpha * 255.0).round(),
+                },
+            })
+        };
+
+        // White text on a ninety-percent *white* box: the band it leaves is
+        // 0.9 at the darkest, and white words cannot be read against that.
+        let white_box = boxed(255, 255, 255, 0.9);
+        assert!(paint_of(Some(&white_box)).paints_box());
+        assert!(
+            !paint_of(Some(&white_box)).is_mitigated(),
+            "a box the same tone as the words protects nothing"
+        );
+
+        // And over a dark shot the decode it now earns reports the cue.
+        let mut sample = boxed_sample(0.0, 1.0, 0.9);
+        sample.box_luminance = 1.0;
+        assert_eq!(
+            CaptionContrastRule::fault_for(&sample, DEFAULT_MIN_CONTRAST, DEFAULT_MAX_BAND_STDDEV),
+            Some(ContrastFault::LowContrast),
+            "white on a white box over black is the case this exists to catch"
+        );
+
+        // The same alpha in black is protection, because no picture can lift
+        // the band it leaves anywhere near white.
+        assert!(
+            paint_of(Some(&boxed(0, 0, 0, 0.9))).is_mitigated(),
+            "a black box this opaque settles the question by itself"
+        );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should never decode a cue a curated boxed pack already settles
+    ///
+    /// Both boxed packs put white text on a black box opaque enough that no
+    /// picture can reach the contrast or the spread limit, so a project styled
+    /// with them costs this check no decodes at all.
+    #[test]
+    fn should_skip_the_curated_boxed_packs_without_decoding() {
+        for pack_id in ["boxed-contrast", "broadcast-lower"] {
+            let style = crate::core::style::resolve_caption_pack(pack_id)
+                .unwrap_or_else(|error| panic!("{pack_id} resolves: {error}"))
+                .style();
+            let style = serde_json::to_value(style).expect("a caption style serialises");
+            let paint = paint_of(Some(&style));
+
+            assert!(paint.paints_box(), "{pack_id} paints a box");
+            assert!(
+                paint.is_mitigated(),
+                "{pack_id} cannot fail whatever is behind it, so it must not be decoded"
+            );
+        }
     }
 
     /// Feature: Caption legibility
@@ -1787,7 +1971,7 @@ mod tests {
     /// Scenario: should read the text colour a cue is drawn in
     #[test]
     fn should_read_text_luminance_from_the_style_colour() {
-        let white = caption_paint(Some(
+        let white = paint_of(Some(
             &serde_json::to_value(bare_white_style()).expect("style serialises"),
         ));
         assert!((white.text_luminance - 1.0).abs() < 1e-9);
@@ -1796,18 +1980,18 @@ mod tests {
             color: Color::black(),
             ..bare_white_style()
         };
-        let black = caption_paint(Some(
+        let black = paint_of(Some(
             &serde_json::to_value(black_text).expect("style serialises"),
         ));
         assert!(black.text_luminance < 1e-9);
 
         // Hex strings reach the renderer too, and mean the same thing there.
-        let hex = caption_paint(Some(&serde_json::json!({ "color": "#000000FF" })));
+        let hex = paint_of(Some(&serde_json::json!({ "color": "#000000FF" })));
         assert!(hex.text_luminance < 1e-9);
 
         // A blob naming no colour renders white, which is the renderer's
         // fallback and not the caption model's default.
-        assert!((caption_paint(None).text_luminance - 1.0).abs() < 1e-9);
+        assert!((paint_of(None).text_luminance - 1.0).abs() < 1e-9);
     }
 
     /// Feature: Style reading
@@ -1903,11 +2087,80 @@ mod tests {
             ),
         ];
 
-        for (label, style) in fixtures {
-            let clip = caption_clip_with_style("Words", 0.0, 2.0, style);
+        // Both renderers scale every decoration's alpha by the layer opacity,
+        // which is the style's own opacity folded together with the clip's, so
+        // these fixtures carry a clip opacity of their own.
+        let faded_fixtures = [
+            (
+                "an opaque box under a style opacity of 0.3",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "opacity": 0.3,
+                    "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 255 },
+                })),
+                1.0_f32,
+            ),
+            (
+                "an opaque box on a clip faded to 0.4",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 255 },
+                })),
+                0.4_f32,
+            ),
+            (
+                "an outline at a style opacity of 0.3 on a clip faded to 0.4",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "opacity": 0.3,
+                    "outlineColor": "#000000",
+                    "outlineWidth": 4,
+                })),
+                0.4_f32,
+            ),
+            // Equal opacities are one setting expressed twice, not a fade
+            // applied twice; the renderer says so and so must the check.
+            (
+                "a box whose style and clip opacities match",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "opacity": 0.4,
+                    "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 255 },
+                })),
+                0.4_f32,
+            ),
+            (
+                "a boxed and outlined caption faded out entirely",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "opacity": 0.0,
+                    "outlineColor": "#000000",
+                    "outlineWidth": 4,
+                    "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 255 },
+                })),
+                1.0_f32,
+            ),
+            (
+                "an outlined caption on a clip faded out entirely",
+                Some(serde_json::json!({
+                    "color": "#FFFFFF",
+                    "outlineColor": "#000000",
+                    "outlineWidth": 4,
+                })),
+                0.0_f32,
+            ),
+        ];
+
+        for (label, style, clip_opacity) in fixtures
+            .into_iter()
+            .map(|(label, style)| (label, style, 1.0_f32))
+            .chain(faded_fixtures)
+        {
+            let mut clip = caption_clip_with_style("Words", 0.0, 2.0, style);
+            clip.opacity = clip_opacity;
             let filter = build_caption_drawtext_with_enable(&clip)
                 .unwrap_or_else(|| panic!("{label}: a caption with text renders"));
-            let paint = caption_paint(clip.caption_style.as_ref());
+            let paint = caption_paint(clip.caption_style.as_ref(), clip.opacity);
 
             // `drawtext` draws the stroke and the box independently, so the
             // question there is what the style asks for.
@@ -1921,6 +2174,26 @@ mod tests {
                 drawtext_draws_a_box(&filter),
                 "{label}: the check and the drawtext path disagree about the box ({filter})"
             );
+            assert_eq!(
+                paint.draws_text(),
+                drawtext_param(&filter, "fontcolor").is_some_and(ffmpeg_colour_is_visible),
+                "{label}: the check and the drawtext path disagree about whether the glyphs \
+                 reach the picture ({filter})"
+            );
+
+            // Not only *that* a box is painted but at what alpha: the grading
+            // blends the box over the band, so a box measured at the wrong
+            // opacity is a verdict reached about the wrong picture.
+            if paint.paints_box() {
+                let painted = drawtext_box_alpha(&filter)
+                    .unwrap_or_else(|| panic!("{label}: a painted box has a boxcolor ({filter})"));
+                assert!(
+                    (paint.box_alpha - painted).abs() < 0.01,
+                    "{label}: the check says the box paints at {:.4} and drawtext at {painted} \
+                     ({filter})",
+                    paint.box_alpha
+                );
+            }
 
             // libass draws one or the other, so the question there is what
             // survives - which is the question the grading actually asks.
@@ -2022,6 +2295,18 @@ mod tests {
     fn drawtext_draws_a_box(filter: &str) -> bool {
         drawtext_param(filter, "box") == Some("1")
             && drawtext_param(filter, "boxcolor").is_some_and(ffmpeg_colour_is_visible)
+    }
+
+    /// Alpha the `drawtext` filter's box paints at, or `None` where it has none.
+    ///
+    /// `hex_to_ffmpeg_color` drops the `@alpha` suffix at full opacity, so a
+    /// bare colour is an opaque box rather than a missing one.
+    fn drawtext_box_alpha(filter: &str) -> Option<f64> {
+        let colour = drawtext_param(filter, "boxcolor")?;
+        match colour.split_once('@') {
+            Some((_, alpha)) => alpha.parse::<f64>().ok(),
+            None => Some(1.0),
+        }
     }
 
     /// Feature: Cue selection
@@ -2315,6 +2600,10 @@ mod tests {
     /// Cropping the full frame width let a bright strip at the far edge - a
     /// window, a lit sign - decide that a centred caption sat over a mixed
     /// background. The strip is outside the words entirely.
+    ///
+    /// It is a whole sixth of the frame, which is wide enough to fail this test
+    /// if the column ever collapses back to the wrap box: the part of it inside
+    /// a 10-90 crop is enough white to push the spread past the limit.
     #[tokio::test]
     #[ignore = "needs a real FFmpeg binary"]
     async fn should_ignore_a_bright_strip_the_caption_never_reaches() {
@@ -2324,12 +2613,12 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let file = temp.path().join("strip.mp4");
 
-        // A dark 1920x1080 frame with a white strip down its rightmost eighth,
+        // A dark 1920x1080 frame with a white strip down its rightmost sixth,
         // which no centred caption's text block reaches.
         render_fixture(
             &runner,
             &file,
-            "color=c=#202020:s=1920x1080:d=2,drawbox=x=1680:y=0:w=240:h=1080:color=white:t=fill",
+            "color=c=#202020:s=1920x1080:d=2,drawbox=x=1600:y=0:w=320:h=1080:color=white:t=fill",
         )
         .await;
 
@@ -2659,20 +2948,44 @@ mod tests {
     }
 
     /// Feature: Band geometry
-    /// Scenario: should measure a preset caption over the whole wrap box
+    /// Scenario: should crop a preset caption to the column it can occupy
     ///
-    /// The glyph estimator has no shaping, so a column cut to its guess reads
-    /// the picture between the words. The renderer is free to fill the box it
-    /// wraps inside, so that box is the floor.
+    /// The wrap box is the ceiling, not the floor. Flooring at it gave every
+    /// preset cue the same 10–90 column whatever it said, which is the crop
+    /// this pass exists to avoid: a short cue was graded across four fifths of
+    /// the frame, bright corners and all. A long one still gets the whole box.
     #[test]
-    fn should_never_crop_a_preset_caption_narrower_than_its_wrap_box() {
-        let clip = caption_clip("Hi", 0.0, 2.0, Some(bare_white_style()));
+    fn should_crop_a_preset_caption_to_the_column_it_can_reach() {
+        let wrap_box = crate::core::captions::CAPTION_WRAP_BOX_WIDTH_PERCENT;
 
-        let (left, right) = super::super::rules::caption_span_percent(&clip, 1920, 1080);
-
+        let short = caption_clip("Hi", 0.0, 2.0, Some(bare_white_style()));
+        let (left, right) = super::super::rules::caption_span_percent(&short, 1920, 1080);
         assert!(
-            right - left >= crate::core::captions::CAPTION_WRAP_BOX_WIDTH_PERCENT - 1e-9,
-            "a preset caption is measured across its wrap box, got {left}-{right}"
+            right - left < wrap_box,
+            "a two-character cue must not be measured across the whole wrap box, got \
+             {left}-{right}"
+        );
+        assert!(
+            ((left + right) / 2.0 - 50.0).abs() < 1e-9,
+            "a centred preset caption's column stays centred, got {left}-{right}"
+        );
+        assert!(
+            right - left >= super::super::rules::MIN_CAPTION_SPAN_WIDTH_PERCENT - 1e-9,
+            "the column is never narrower than the floor, got {left}-{right}"
+        );
+
+        // A caption long enough to fill the box is still measured across it and
+        // no wider, because that is as far as the renderer can draw it.
+        let long = caption_clip(
+            "A caption long enough to run the full width of the wrap box it is drawn inside",
+            0.0,
+            2.0,
+            Some(bare_white_style()),
+        );
+        let (left, right) = super::super::rules::caption_span_percent(&long, 1920, 1080);
+        assert!(
+            (right - left - wrap_box).abs() < 1e-9,
+            "a full-width preset caption is measured across its wrap box, got {left}-{right}"
         );
     }
 

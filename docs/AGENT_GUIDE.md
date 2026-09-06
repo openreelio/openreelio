@@ -859,14 +859,20 @@ the line never reaches cannot decide the verdict. The band follows the style's
 
 A cue counts as already protected — and is never decoded — only where the export
 would actually draw the protection: an `outlineColor` with a non-zero width, or
-a `backgroundColor` that is at least 80% opaque. An `outlineWidth` with no
-colour renders bare, and so does a cue with no style at all, so both are graded
-like any other bare cue. A fainter box is not waved through and not ignored
-either: it is composited over the band before the verdict, so the shot behind it
-still counts for what it shows through. Because a painted box replaces the
-outline in the burn-in, an outline behind one is not protection; a
-`backgroundColor` the renderer rounds away to nothing is no box at all, so the
-outline it would otherwise have replaced stays and counts.
+a `backgroundColor` whose own colour and alpha put *every* picture the shot
+could be clear of the text. A box is not protection because it is a box: white
+words on a 90%-opaque white box are as unreadable as white words on a white
+wall, so that cue is decoded and reported, while the same alpha in black is
+waved through. An `outlineWidth` with no colour renders bare, and so does a cue
+with no style at all, so both are graded like any other bare cue. Every other
+box is neither waved through nor ignored: it is composited over the band before
+the verdict, so the shot behind it still counts for what it shows through.
+Because a painted box replaces the outline in the burn-in, an outline behind one
+is not protection; a `backgroundColor` the renderer rounds away to nothing is no
+box at all, so the outline it would otherwise have replaced stays and counts.
+Every alpha here is the one the renderer paints with, layer opacity included: a
+style `opacity` and the clip's own opacity both scale the box and the outline,
+and a caption faded out entirely is not decoded at all.
 
 Two numbers decide the verdict. A bare cue whose text sits within `0.35`
 luminance of the picture behind it is reported (`fault: "lowContrast"`), and so
@@ -876,10 +882,15 @@ unreadable. Both are graded after the cue's own box is composited over the band,
 so `bandLuminance` is the picture as measured while `contrast` is what was
 judged, and the two differ by whatever `boxAlpha` hides. Either finding carries
 `{bandLuminance, bandLuminanceStddev, textLuminance, contrast, minContrast,
-maxBandStddev, fault, hasBox, boxAlpha, hasOutline}`
-and an `UpdateCaption` fix applying the `standard-outline` pack — not
-`boxed-contrast`, because an outline survives any background including a mixed
-one.
+maxBandStddev, fault, hasBox, hasOutline}`, plus `boxAlpha` on a cue that
+carries a box, and an `UpdateCaption` fix applying the `standard-outline` pack —
+not `boxed-contrast`, because an outline survives any background including a
+mixed one. `hasBox: true` on a violation is normal and not a contradiction:
+whether a cue is protected is decided by the box's colour and alpha together,
+never by the presence of a box. `hasOutline` is the one flag that cannot appear
+on a violation, because an outline reads over anything. `boxAlpha` is the alpha
+the box is actually painted at — the style's box alpha times the layer opacity —
+and it is absent, rather than `0`, where no box is painted.
 
 The pass is bounded: at most 60 frames per run (spread evenly across the file),
 whatever is left of `--timeout-sec` after the probe pass — the flag is one budget
