@@ -35,7 +35,7 @@
 
 use schemars::JsonSchema;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Declares the backend command surface once.
 ///
@@ -1086,23 +1086,46 @@ fn report_definition_conflicts(owner: &str, property: &str, names: &[String]) {
 }
 
 /// The schema keywords whose value is one subschema, or a list of them.
-const SUBSCHEMA_KEYWORDS: &[&str] = &[
+///
+/// `anyOf` and `oneOf` are absent on purpose: their branches are descended into
+/// selectively, by [`is_nullability_branch`], because a branch can be carrying
+/// the only thing that tells it apart from its neighbours.
+pub(crate) const SUBSCHEMA_KEYWORDS: &[&str] = &[
     "additionalItems",
     "additionalProperties",
     "allOf",
-    "anyOf",
     "contains",
     "else",
     "if",
     "items",
     "not",
-    "oneOf",
     "propertyNames",
     "then",
 ];
 
+/// The keywords whose value is a list of alternative subschemas.
+pub(crate) const BRANCH_KEYWORDS: &[&str] = &["anyOf", "oneOf"];
+
 /// The schema keywords whose value maps names to subschemas.
-const SUBSCHEMA_MAP_KEYWORDS: &[&str] = &["definitions", "patternProperties", "properties"];
+pub(crate) const SUBSCHEMA_MAP_KEYWORDS: &[&str] =
+    &["definitions", "patternProperties", "properties"];
+
+/// Whether an alternative is one of the two branches an `Option<T>` renders as.
+///
+/// `schemars` writes an optional value as a two-branch group — the `$ref` (or
+/// bare shape) of `T` beside `{"type": "null"}` — and an externally tagged enum
+/// as one branch per variant, where the variant's own `required` list is the
+/// only thing naming it: `KeyframeInterpolation` comes out as `oneOf` over
+/// `{"enum": ["linear"]}` and `{"required": ["bezier"], ...}`. Dropping the
+/// second kind's list leaves branches a reader cannot tell apart, which is a
+/// worse schema than one that demands a member, so only the first kind is
+/// descended into.
+pub(crate) fn is_nullability_branch(branch: &Value) -> bool {
+    let Some(object) = branch.as_object() else {
+        return false;
+    };
+    object.contains_key("$ref") || object.get("type").and_then(Value::as_str) == Some("null")
+}
 
 /// The prefix a shape's own copy of a definition goes by.
 const PARTIAL_DEFINITION_PREFIX: &str = "Partial";
@@ -1139,11 +1162,34 @@ pub(crate) fn state_as_partial(derived: &mut Value) -> BTreeMap<String, String> 
         .get_mut("definitions")
         .and_then(Value::as_object_mut)
     {
-        let changed: Vec<String> = definitions
+        let mut changed: BTreeSet<String> = definitions
             .iter()
             .filter(|(name, partial)| complete.get(name.as_str()) != Some(partial))
             .map(|(name, _)| name.clone())
             .collect();
+
+        // A definition the strip left untouched is still not the complete type
+        // once it points at one that was renamed: `rewrite_references` repoints
+        // its `$ref` at the partial copy, so keeping the complete name would
+        // leave one name standing for two different bodies across documents.
+        // Its own referrers inherit the same problem, so the set is grown to a
+        // fixpoint rather than in a single pass.
+        loop {
+            let referring: Vec<String> = definitions
+                .iter()
+                .filter(|(name, _)| !changed.contains(name.as_str()))
+                .filter(|(_, body)| {
+                    referenced_definitions(body)
+                        .iter()
+                        .any(|target| changed.contains(target))
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            if referring.is_empty() {
+                break;
+            }
+            changed.extend(referring);
+        }
 
         for name in changed {
             let Some(mut definition) = definitions.remove(&name) else {
@@ -1177,6 +1223,37 @@ fn note_partial_definition(definition: &mut Value, source: &str) {
         _ => note,
     };
     object.insert("description".to_string(), Value::String(description));
+}
+
+/// Every local definition a subschema points at, at any depth.
+fn referenced_definitions(value: &Value) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    collect_definition_references(value, &mut found);
+    found
+}
+
+/// Folds every `#/definitions/...` name under one value into `found`.
+fn collect_definition_references(value: &Value, found: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                match (key.as_str(), child.as_str()) {
+                    ("$ref", Some(reference)) => {
+                        if let Some(name) = reference.strip_prefix("#/definitions/") {
+                            found.insert(name.to_string());
+                        }
+                    }
+                    _ => collect_definition_references(child, found),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_definition_references(item, found);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Points every `$ref` at the name its target now goes by.
@@ -1215,7 +1292,11 @@ fn rewrite_references(value: &mut Value, renamed: &BTreeMap<String, String>) {
 /// hiding.
 ///
 /// Only the keywords that really hold subschemas are descended into, so a
-/// payload with a property of its own named `required` keeps it.
+/// payload with a property of its own named `required` keeps it. An
+/// either/or group is descended into one branch at a time, and only through
+/// the branches [`is_nullability_branch`] recognises: a variant branch's
+/// `required` list is the only thing naming the variant, so stripping it would
+/// leave the group unreadable rather than permissive.
 fn strip_required(value: &mut Value) {
     let Some(object) = value.as_object_mut() else {
         return;
@@ -1223,7 +1304,13 @@ fn strip_required(value: &mut Value) {
     object.remove("required");
 
     for (keyword, child) in object.iter_mut() {
-        if SUBSCHEMA_KEYWORDS.contains(&keyword.as_str()) {
+        if BRANCH_KEYWORDS.contains(&keyword.as_str()) {
+            for branch in child.as_array_mut().into_iter().flatten() {
+                if is_nullability_branch(branch) {
+                    strip_required(branch);
+                }
+            }
+        } else if SUBSCHEMA_KEYWORDS.contains(&keyword.as_str()) {
             match child {
                 Value::Array(branches) => branches.iter_mut().for_each(strip_required),
                 other => strip_required(other),
@@ -2439,6 +2526,126 @@ mod tests {
             injected.get("PartialTextShadow").map(String::as_str),
             Some("TextShadow")
         );
+        assert!(!injected.contains_key("Untouched"));
+    }
+
+    /// Feature: declaring the shape of a shaped property
+    /// Scenario: an either/or group keeps the list that tells its branches apart
+    ///
+    /// An externally tagged enum with a struct variant renders as a `oneOf`
+    /// whose branches are distinguished by `required` and nothing else, so a
+    /// strip that reached into it would leave a group every value matches —
+    /// unreadable rather than permissive. Only the branches an `Option<T>`
+    /// renders as are descended into.
+    #[test]
+    fn stating_a_derivation_as_partial_should_keep_a_variant_group_readable() {
+        let mut derived = json!({
+            "type": "object",
+            "required": ["interpolation"],
+            "properties": {
+                // How `KeyframeInterpolation` comes out: a bare variant beside
+                // a struct variant whose name lives only in `required`.
+                "interpolation": {
+                    "oneOf": [
+                        { "type": "string", "enum": ["linear"] },
+                        {
+                            "type": "object",
+                            "required": ["bezier"],
+                            "properties": { "bezier": { "type": "array" } },
+                            "additionalProperties": false
+                        }
+                    ]
+                },
+                // How an `Option<T>` comes out, with a demand of its own to
+                // prove the branch really is descended into.
+                "style": {
+                    "anyOf": [
+                        { "$ref": "#/definitions/TextStyle", "required": ["color"] },
+                        { "type": "null" }
+                    ]
+                }
+            },
+            "definitions": {
+                "TextStyle": {
+                    "type": "object",
+                    "required": ["color"],
+                    "properties": { "color": { "type": "string" } }
+                }
+            }
+        });
+
+        state_as_partial(&mut derived);
+
+        assert!(derived["required"].is_null());
+        assert_eq!(
+            derived["properties"]["interpolation"]["oneOf"][1]["required"],
+            json!(["bezier"]),
+            "a variant branch's discriminator is not a demand on the caller and has to \
+             survive: {derived}"
+        );
+        assert!(
+            derived["properties"]["style"]["anyOf"][0]["required"].is_null(),
+            "an `Option<T>` branch carries a demand like any other subschema: {derived}"
+        );
+        assert!(derived["definitions"]["PartialTextStyle"]["required"].is_null());
+    }
+
+    /// Feature: declaring the shape of a shaped property
+    /// Scenario: a definition that reaches a renamed one is renamed with it
+    ///
+    /// The bug this covers: the rename walked the definitions once, so a
+    /// definition the strip itself did not change kept the name of the complete
+    /// type while `rewrite_references` repointed its `$ref` at the partial
+    /// copy. `#/definitions/A` then meant one body here and another everywhere
+    /// else — the very collision the rename exists to avoid, one hop further
+    /// out. Referrers of a referrer count too, so the set is grown to a
+    /// fixpoint.
+    #[test]
+    fn stating_a_derivation_as_partial_should_rename_every_definition_reaching_a_renamed_one() {
+        let mut derived = json!({
+            "type": "object",
+            "properties": { "a": { "$ref": "#/definitions/A" } },
+            "definitions": {
+                // Neither A nor B demands anything of its own; only C does,
+                // two hops down.
+                "A": { "type": "object", "properties": { "b": { "$ref": "#/definitions/B" } } },
+                "B": { "type": "object", "properties": { "c": { "$ref": "#/definitions/C" } } },
+                "C": {
+                    "type": "object",
+                    "required": ["value"],
+                    "properties": { "value": { "type": "string" } }
+                },
+                "Untouched": { "type": "object", "properties": { "n": { "type": "number" } } }
+            }
+        });
+
+        let injected = state_as_partial(&mut derived);
+
+        assert_eq!(
+            derived["properties"]["a"]["$ref"],
+            json!("#/definitions/PartialA"),
+            "the referrer of a referrer of a stripped definition is a partial too: {derived}"
+        );
+        assert_eq!(
+            derived["definitions"]["PartialA"]["properties"]["b"]["$ref"],
+            json!("#/definitions/PartialB")
+        );
+        assert_eq!(
+            derived["definitions"]["PartialB"]["properties"]["c"]["$ref"],
+            json!("#/definitions/PartialC")
+        );
+        assert!(
+            derived["definitions"]["A"].is_null() && derived["definitions"]["B"].is_null(),
+            "no complete name may be left standing for a body that is no longer complete: \
+             {derived}"
+        );
+        assert!(
+            derived["definitions"]["Untouched"].is_object(),
+            "a definition that reaches nothing renamed keeps the name its type goes by: \
+             {derived}"
+        );
+        assert_eq!(injected.get("PartialA").map(String::as_str), Some("A"));
+        assert_eq!(injected.get("PartialB").map(String::as_str), Some("B"));
         assert!(!injected.contains_key("Untouched"));
     }
 

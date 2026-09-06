@@ -4023,9 +4023,10 @@ mod tests {
 
     use crate::ipc::command_schema::{
         all_command_payload_schemas, canonical_command_type, check_against_schema,
-        command_payload_schemas, property, required, state_as_partial,
-        PAYLOAD_EITHER_OR_REQUIREMENTS, PAYLOAD_FIELD_ALIASES, PAYLOAD_PROPERTY_SHAPES,
-        PAYLOAD_VARIANT_ALIASES,
+        command_payload_schemas, is_nullability_branch, property, required, state_as_partial,
+        BRANCH_KEYWORDS, PAYLOAD_EITHER_OR_REQUIREMENTS, PAYLOAD_FIELD_ALIASES,
+        PAYLOAD_PROPERTY_SHAPES, PAYLOAD_VARIANT_ALIASES, SUBSCHEMA_KEYWORDS,
+        SUBSCHEMA_MAP_KEYWORDS,
     };
     use serde_json::Value;
 
@@ -4940,6 +4941,17 @@ impl<'de> Deserialize<'de> for SamplePayload {
             "AddTextClipPayload's `timelineStart` is declared on its wire shape and has to be \
              scanned from there"
         );
+
+        // Both fixtures above are Rust-source-shaped and start at column 0 in
+        // the very file the file-wide guards scan. The only thing keeping them
+        // out of the live table is that their quotes are escaped, so the
+        // scanner never sees an `alias = "` — load-bearing punctuation, stated
+        // here so an editor who unescapes it fails this test rather than
+        // teaching the alias guards about a payload that does not exist.
+        assert!(
+            live.iter().all(|field| field.owner != "SamplePayload"),
+            "the scanner fixtures must stay inert in the file they live in"
+        );
     }
 
     /// Feature: derived command payload schemas
@@ -5682,13 +5694,18 @@ pub enum CommandPayload {
                     "{command_type}.{path} points at #/definitions/{target}, which the schema \
                      does not carry"
                 );
+
+                // A demand nested inside the definition refuses the override
+                // just as flatly as one on its face, so the whole body is
+                // walked rather than its top level.
+                let mut demands: Vec<String> = Vec::new();
+                demanded_paths(definition, &target, &mut demands);
                 assert!(
-                    definition["required"].is_null(),
-                    "{command_type}.{path} reaches #/definitions/{target}, which still demands \
-                     {}: a shape says what a member looks like and never which member a caller \
-                     has to send, so an override the parser merges onto a preset would be \
-                     refused by the schema",
-                    definition["required"]
+                    demands.is_empty(),
+                    "{command_type}.{path} reaches #/definitions/{target}, which still demands a \
+                     member at {demands:?}: a shape says what a member looks like and never \
+                     which member a caller has to send, so an override the parser merges onto a \
+                     preset would be refused by the schema"
                 );
 
                 for nested in referenced_definitions(definition) {
@@ -5721,6 +5738,47 @@ pub enum CommandPayload {
                 "{command_type}.{property} states a shape beside a $ref, which draft-07 ignores: \
                  {declared}"
             );
+        }
+    }
+
+    /// Every place under a subschema that still demands a member, by path.
+    ///
+    /// The traversal mirrors the strip in
+    /// [`state_as_partial`](crate::ipc::command_schema::state_as_partial)
+    /// keyword for keyword, which is what makes it an answer about the
+    /// artifact: a property of a payload's own that happens to be named
+    /// `required` is a member and not a demand, and the branches of an
+    /// either/or group that names its variants through `required` are exempt
+    /// because the strip deliberately leaves them alone.
+    fn demanded_paths(value: &Value, path: &str, found: &mut Vec<String>) {
+        let Some(object) = value.as_object() else {
+            return;
+        };
+        if object.contains_key("required") {
+            found.push(path.to_string());
+        }
+
+        for (keyword, child) in object {
+            if BRANCH_KEYWORDS.contains(&keyword.as_str()) {
+                for (index, branch) in child.as_array().into_iter().flatten().enumerate() {
+                    if is_nullability_branch(branch) {
+                        demanded_paths(branch, &format!("{path}.{keyword}[{index}]"), found);
+                    }
+                }
+            } else if SUBSCHEMA_KEYWORDS.contains(&keyword.as_str()) {
+                match child {
+                    Value::Array(branches) => {
+                        for (index, branch) in branches.iter().enumerate() {
+                            demanded_paths(branch, &format!("{path}.{keyword}[{index}]"), found);
+                        }
+                    }
+                    other => demanded_paths(other, &format!("{path}.{keyword}"), found),
+                }
+            } else if SUBSCHEMA_MAP_KEYWORDS.contains(&keyword.as_str()) {
+                for (name, member) in child.as_object().into_iter().flatten() {
+                    demanded_paths(member, &format!("{path}.{keyword}.{name}"), found);
+                }
+            }
         }
     }
 
