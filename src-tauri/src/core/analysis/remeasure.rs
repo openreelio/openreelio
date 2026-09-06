@@ -36,6 +36,22 @@ pub const LOUDNESS_FAILURE_PREFIX: &str = "Loudness measurement failed: ";
 /// the gate leaves it alone.
 pub const LOUDNESS_UNMEASURABLE_PREFIX: &str = "Loudness could not be measured: ";
 
+/// Error prefix for a whole audio pass that never reached a verdict.
+///
+/// The counterpart of [`LOUDNESS_FAILURE_PREFIX`] one level up: nothing was
+/// produced at all — not the silence regions, not the speech regions, not the
+/// numbers — for a reason that says nothing about the media. It is a separate
+/// word from the loudness pair because it describes a different loss, and an
+/// agent reading `"Loudness measurement failed"` over a run that produced no
+/// regions either was being told to trust regions this run never wrote.
+pub const AUDIO_PASS_FAILURE_PREFIX: &str = "Audio analysis failed: ";
+
+/// Error prefix for a whole audio pass that ran and settled the question.
+///
+/// The media has no audio stream, or the pass looked and could not analyse it.
+/// Repeating the decode reaches the same verdict, so the gate leaves it alone.
+pub const AUDIO_PASS_UNMEASURABLE_PREFIX: &str = "Audio could not be analysed: ";
+
 /// Renders a loudness failure as the message recorded against the `audio` job.
 ///
 /// Every writer of that error goes through here, so a bundle can never carry a
@@ -52,13 +68,30 @@ pub fn loudness_bundle_error(failure: &LoudnessFailure) -> String {
 /// Renders a whole audio pass that failed as the message recorded against the job.
 ///
 /// The loudness-only path classifies at the meter; a pass that failed outright
-/// never got that far, so its [`CoreError`] is classified instead. It goes
-/// through the same prefixes because the gate reads one vocabulary: a whole
-/// pass lost to the analysis timeout is as retryable as a meter lost to it, and
-/// recording the bare error text made it look like a verdict and stranded the
-/// asset's cached profile without numbers.
+/// never got that far, so its [`CoreError`] is classified instead. The verdict
+/// is the same question — could a later pass still succeed — so the gate reads
+/// both vocabularies, but the wording is the pass's own: this run produced
+/// nothing, and recording the bare error text made it look like a verdict and
+/// stranded the asset's cached profile without numbers.
 pub fn audio_pass_bundle_error(error: &CoreError) -> String {
-    loudness_bundle_error(&LoudnessFailure::from_error(error))
+    let failure = LoudnessFailure::from_error(error);
+    let prefix = match failure.kind {
+        LoudnessFailureKind::Transient => AUDIO_PASS_FAILURE_PREFIX,
+        LoudnessFailureKind::Unmeasurable => AUDIO_PASS_UNMEASURABLE_PREFIX,
+    };
+
+    format!("{}{}", prefix, failure.message)
+}
+
+/// Whether a recorded `audio` error marks a failure that could still clear.
+fn audio_error_is_retryable(error: &str) -> bool {
+    error.starts_with(LOUDNESS_FAILURE_PREFIX) || error.starts_with(AUDIO_PASS_FAILURE_PREFIX)
+}
+
+/// Whether a recorded `audio` error marks a verdict the pass reached by looking.
+fn audio_error_is_settled(error: &str) -> bool {
+    error.starts_with(LOUDNESS_UNMEASURABLE_PREFIX)
+        || error.starts_with(AUDIO_PASS_UNMEASURABLE_PREFIX)
 }
 
 /// Decides whether `bundle` should have its audio pass run again for loudness.
@@ -90,6 +123,15 @@ pub fn audio_pass_bundle_error(error: &CoreError) -> String {
 /// unprefixed and would be misread as hopeless. Bundles from those builds do
 /// carry the transient prefix over what may have been a permanent failure; they
 /// buy one more pass, which then rewrites the error with the prefix it deserves.
+///
+/// Whole-pass failures are the exception, and knowingly so: earlier builds
+/// recorded them as the bare [`CoreError`] text, with no prefix at all, so this
+/// gate reads them as settled and never retries them on the strength of the
+/// error alone. That is the safe direction — an unrecognised message buys no
+/// decodes — and it is not permanent either: such a bundle is still re-measured
+/// once its profile turns out to carry a superseded
+/// [`AUDIO_MEASUREMENT_VERSION`], which is the same escape hatch every other
+/// settled verdict has.
 pub fn loudness_remeasure_wanted(bundle: &AnalysisBundle) -> bool {
     if !bundle.needs_loudness_measurement() {
         return false;
@@ -107,7 +149,7 @@ pub fn loudness_remeasure_wanted(bundle: &AnalysisBundle) -> bool {
 
     match bundle.errors.get("audio") {
         None => true,
-        Some(error) => error.starts_with(LOUDNESS_FAILURE_PREFIX),
+        Some(error) => audio_error_is_retryable(error),
     }
 }
 
@@ -117,6 +159,38 @@ fn loudness_measurement_superseded(bundle: &AnalysisBundle) -> bool {
         .audio_profile
         .as_ref()
         .is_some_and(|profile| profile.measurement_version < AUDIO_MEASUREMENT_VERSION)
+}
+
+/// Stamps a retained audio profile with the version of the pass that just refused.
+///
+/// Call it on a merged bundle, after the run's `audio` error has been recorded.
+/// It does nothing unless that error is a settled verdict, and returns `true`
+/// only when a profile's version actually moved.
+///
+/// This is what makes [`loudness_remeasure_wanted`] converge. A bundle cached by
+/// a superseded pass is retried regardless of its recorded error — the refusal
+/// binds the pass that reached it, not the one running now — and an audio-only
+/// run keeps that cached profile when its pass fails. Without this stamp the
+/// retained profile still carried the old version, so the very next read asked
+/// for the pass again, and every launch paid for one more full decode to hear
+/// the same "no audio stream".
+///
+/// Only the version moves. The numbers stay cleared and
+/// [`AudioProfile::loudness_measured`] stays `false`, so
+/// [`AnalysisBundle::needs_loudness_measurement`] still reports the gap and the
+/// recorded error is what decides whether it is worth chasing.
+///
+/// [`AudioProfile::loudness_measured`]: super::types::AudioProfile::loudness_measured
+pub fn settle_audio_measurement_version(bundle: &mut AnalysisBundle) -> bool {
+    let settled = bundle
+        .errors
+        .get("audio")
+        .is_some_and(|error| audio_error_is_settled(error));
+    if !settled {
+        return false;
+    }
+
+    bundle.stamp_audio_measurement_version()
 }
 
 /// Claims this session's single re-measure slot for `bundle`'s asset.
@@ -193,14 +267,64 @@ mod tests {
     /// Feature: automatic loudness re-measurement
     /// Scenario: the bundle already records an audio failure
     ///   Given a cached bundle whose audio job failed outright
+    ///   And an error message carrying none of the prefixes
     ///   When it is read
     ///   Then no pass is queued
+    ///
+    /// This is also the shape of a whole-pass failure written by a build from
+    /// before the prefixes existed: unprefixed, and therefore never retried on
+    /// the strength of the message. That is the safe direction — an
+    /// unrecognised message buys no decodes — and such a bundle is still picked
+    /// up by the superseded-version escape hatch when a fix bumps
+    /// [`AUDIO_MEASUREMENT_VERSION`].
     #[test]
     fn should_not_remeasure_loudness_when_the_bundle_records_an_audio_failure() {
         let mut bundle = bundle_awaiting_loudness("asset_2");
         bundle.add_error("audio", "FFmpeg is not installed".to_string());
 
         assert!(!loudness_remeasure_wanted(&bundle));
+    }
+
+    /// Feature: the vocabulary of a recorded `audio` failure
+    /// Scenario: each kind of failure is rendered for the bundle
+    ///   Given a meter-only failure and a whole-pass failure, of each kind
+    ///   When each is rendered
+    ///   Then the loudness pair names the meter and the pass pair names the pass
+    ///
+    /// A whole-pass failure used to be recorded as "Loudness measurement
+    /// failed", over a run that had produced no silence or speech regions
+    /// either, while the skill reference told agents to trust the regions in
+    /// exactly that case.
+    #[test]
+    fn should_word_a_whole_pass_failure_as_the_pass_and_not_as_the_meter() {
+        assert_eq!(
+            loudness_bundle_error(&LoudnessFailure {
+                message: "Audio analysis timed out after 600s".to_string(),
+                kind: LoudnessFailureKind::Transient,
+            }),
+            "Loudness measurement failed: Audio analysis timed out after 600s"
+        );
+        assert_eq!(
+            loudness_bundle_error(&LoudnessFailure {
+                message: "The pass completed but measured nothing".to_string(),
+                kind: LoudnessFailureKind::Unmeasurable,
+            }),
+            "Loudness could not be measured: The pass completed but measured nothing"
+        );
+        // The whole-pass message is the `CoreError`'s own rendering, which
+        // carries the variant's word for how the verdict crossed that boundary.
+        assert_eq!(
+            audio_pass_bundle_error(&CoreError::Internal(
+                "Audio analysis timed out after 600s".to_string()
+            )),
+            "Audio analysis failed: Internal error: Audio analysis timed out after 600s"
+        );
+        assert_eq!(
+            audio_pass_bundle_error(&CoreError::AnalysisFailed(
+                "No audio stream found in input".to_string()
+            )),
+            "Audio could not be analysed: Analysis failed: No audio stream found in input"
+        );
     }
 
     /// Feature: automatic loudness re-measurement
@@ -359,6 +483,71 @@ mod tests {
         );
 
         assert!(!loudness_remeasure_wanted(&bundle));
+    }
+
+    /// Feature: automatic loudness re-measurement
+    /// Scenario: a pass settles the question over a superseded profile
+    ///   Given a cached bundle whose profile came from a superseded pass
+    ///   And a whole audio pass that then found no audio stream at all
+    ///   When the run's verdict is stamped onto the retained profile
+    ///   Then the next session queues no pass
+    ///
+    /// The superseded-version check outranks the recorded error, which is what
+    /// lets a fix reach the assets it was written for — but nothing withdrew
+    /// the request once a pass had answered it. A legacy profile whose asset
+    /// really has no audio stream asked for the pass on every read, forever,
+    /// and each launch paid for one more full decode to hear the same answer.
+    #[test]
+    fn should_stop_asking_for_a_pass_once_one_has_settled_a_superseded_profile() {
+        let mut bundle = bundle_from_a_superseded_pass("asset_11");
+        assert!(
+            loudness_remeasure_wanted(&bundle),
+            "a superseded profile is worth one pass"
+        );
+
+        bundle.add_error(
+            "audio",
+            audio_pass_bundle_error(&CoreError::AnalysisFailed(
+                "No audio stream found in input".to_string(),
+            )),
+        );
+        assert!(
+            settle_audio_measurement_version(&mut bundle),
+            "the retained profile must be stamped with the pass that just ran"
+        );
+
+        assert!(
+            bundle.needs_loudness_measurement(),
+            "the numbers are still missing and readers must still say so"
+        );
+        assert!(
+            !loudness_remeasure_wanted(&bundle),
+            "but the question has been answered, so no further pass is queued"
+        );
+    }
+
+    /// Feature: automatic loudness re-measurement
+    /// Scenario: the pass that failed could still succeed later
+    ///   Given a cached bundle whose profile came from a superseded pass
+    ///   And a whole audio pass that timed out
+    ///   When the run's verdict is weighed
+    ///   Then the profile keeps its stale version and a pass is still queued
+    ///
+    /// Only a settled verdict withdraws the standing request: a timeout has
+    /// answered nothing, and stamping over it would strand exactly the assets
+    /// the version bump was written for.
+    #[test]
+    fn should_leave_a_superseded_profile_asking_after_a_transient_failure() {
+        let mut bundle = bundle_from_a_superseded_pass("asset_12");
+        bundle.add_error(
+            "audio",
+            audio_pass_bundle_error(&CoreError::Internal(
+                "Audio analysis timed out after 600s".to_string(),
+            )),
+        );
+
+        assert!(!settle_audio_measurement_version(&mut bundle));
+        assert!(loudness_remeasure_wanted(&bundle));
     }
 
     /// Feature: automatic loudness re-measurement

@@ -503,10 +503,12 @@ impl AnalysisJobRunner {
             }
             Ok(None) => None,
             Err(e) => {
-                // Classified like a meter-only failure so the re-measure gate
-                // can read it: a whole pass lost to the analysis timeout is
+                // Classified for the re-measure gate the way a meter-only
+                // failure is — a whole pass lost to the analysis timeout is
                 // worth another try, and an unclassified message reads as a
-                // verdict about the media that nothing ever revisits.
+                // verdict about the media that nothing ever revisits — but
+                // worded as its own loss: this run produced no regions either,
+                // so nothing here invites a reader to trust them.
                 let detail = audio_pass_bundle_error(&e);
                 bundle.add_error("audio", detail.clone());
                 emit_progress("audio", "failed", Some(detail));
@@ -779,6 +781,11 @@ impl AnalysisJobRunner {
                 } else {
                     stored.backfill_missing_from(&previous);
                 }
+                // After the merge, because a profile this run kept rather than
+                // produced is the one whose version has to move: an audio-only
+                // run that settles the question over a legacy profile would
+                // otherwise leave it asking for the pass that just refused it.
+                settle_audio_measurement_version(stored);
                 true
             },
         )?;
@@ -1397,6 +1404,59 @@ mod tests {
         assert!(
             loaded.audio_profile.is_some(),
             "a pipeline save must not overwrite a slot another writer filled"
+        );
+    }
+
+    /// Feature: automatic loudness re-measurement
+    /// Scenario: an audio-only pass settles the question over a legacy profile
+    ///   Given a cached bundle written by a superseded audio pass
+    ///   When an audio-only run fails with no audio stream at all
+    ///   Then the cached regions survive
+    ///   And the next session queues no further pass
+    ///
+    /// The whole loop, through the merge that keeps the profile: the gate lets
+    /// a superseded version outrank the recorded error, so without the stamp
+    /// this retained profile asked for the same pass on every read for the life
+    /// of the project.
+    #[test]
+    fn should_stop_queueing_a_remeasure_after_a_pass_settles_a_legacy_profile() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+        let metadata = VideoMetadata::new(30.0).with_audio(true);
+
+        let mut legacy_profile = AudioProfile::silent(30.0);
+        legacy_profile.measurement_version = AUDIO_MEASUREMENT_VERSION.saturating_sub(1);
+        let mut cached = AnalysisBundle::new("asset_legacy", metadata.clone());
+        cached.audio_profile = Some(legacy_profile);
+        runner
+            .save_bundle(&cached, &AnalysisOptions::default())
+            .unwrap();
+        assert!(
+            loudness_remeasure_wanted(&runner.load_bundle("asset_legacy").unwrap()),
+            "a profile from a superseded pass is worth one re-measurement"
+        );
+
+        // The re-measure runs audio-only and its whole pass finds no audio
+        // stream, so it publishes a bundle with no profile and a settled error.
+        let mut failed_run = AnalysisBundle::new("asset_legacy", metadata);
+        failed_run.add_error(
+            "audio",
+            audio_pass_bundle_error(&CoreError::AnalysisFailed(
+                "No audio stream found in input".to_string(),
+            )),
+        );
+        runner
+            .save_bundle(&failed_run, &AnalysisOptions::audio_only())
+            .unwrap();
+
+        let next_session = runner.load_bundle("asset_legacy").unwrap();
+        assert!(
+            next_session.audio_profile.is_some(),
+            "an audio-only failure must keep the cached regions"
+        );
+        assert!(
+            !loudness_remeasure_wanted(&next_session),
+            "the pass has answered; a further one could only decode to the same answer"
         );
     }
 

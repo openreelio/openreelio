@@ -51,12 +51,17 @@ own FFmpeg passes and are reported whatever the meter did, so the loudness half
 can be missing on its own: `hasLoudnessMeasurement` is `false`, `status` is
 `"partial"` instead of `"ok"`, `loudnessError` says why, and `peakDb`,
 `truePeakDbtp`, `integratedLufs` and `loudnessRangeLu` are `null` rather than
-showing the silence floor as a level. Trust the regions in that case and do not
-read a level from the profile until a later run measures one. An asset with no
-audio stream at all is the opposite case and reports as measured — `status` is
-`"ok"`, `hasLoudnessMeasurement` is `true`, and `peakDb` is the silence floor
-(`-90`) rather than `null` — because there is nothing there to measure and no
-later run would find any.
+showing the silence floor as a level. When only the meter failed — the bundle's
+`audio` error opens with `Loudness measurement failed:` or `Loudness could not be
+measured:` — trust the regions and do not read a level from the profile until a
+later run measures one. When the whole pass failed instead, the error opens with
+`Audio analysis failed:` or `Audio could not be analysed:`: that run produced no
+regions either, so anything the bundle still holds came from an earlier run and
+its age is the caller's problem. An asset with no audio stream at all is the
+opposite case and reports as measured — `status` is `"ok"`,
+`hasLoudnessMeasurement` is `true`, and `peakDb` is the silence floor (`-90`)
+rather than `null` — because there is nothing there to measure and no later run
+would find any.
 
 **`analysis run`** drives the job runner with local-only providers. Transcript is
 off unless `--transcript` is passed and fails fast with a

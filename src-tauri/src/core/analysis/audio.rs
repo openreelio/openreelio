@@ -70,11 +70,19 @@ const ANALYSIS_TIMEOUT_MARKER: &str = "Audio analysis timed out";
 /// Wording only, like [`ANALYSIS_TIMEOUT_MARKER`].
 const FFMPEG_SPAWN_FAILURE_MARKER: &str = "Failed to run FFmpeg";
 
-/// Words FFmpeg prints when the filter a pass asked for is not in this build.
+/// Diagnostic shapes FFmpeg prints when the filter a pass asked for is missing.
 ///
 /// Matched against raw FFmpeg stderr, at the point of capture — never against a
 /// message that has already had that stderr formatted into it.
-const MISSING_FILTER_MARKERS: [&str; 2] = ["No such filter", "Unknown filter"];
+///
+/// The whole diagnostic shape is matched rather than the words, and one line at
+/// a time. Raw stderr always echoes the input path (`Error opening input file
+/// <path>.`), so matching the bare words let a file named
+/// `broken No such filter.mp4` classify its own decode error as a missing
+/// filter. A real diagnostic is emitted by the filter graph, so it carries that
+/// context's `[AVFilterGraph @ 0x…] ` prefix and quotes the filter name:
+/// `[AVFilterGraph @ 0x1] No such filter: 'ebur128'`.
+const MISSING_FILTER_MARKERS: [&str; 2] = ["] No such filter: '", "] Unknown filter '"];
 
 /// VAD frame size in milliseconds.
 const VAD_FRAME_MS: usize = 30;
@@ -497,10 +505,15 @@ fn has_no_audio_indicator(stderr: &str) -> bool {
 }
 
 /// Checks whether FFmpeg stderr says the requested filter is not in this build.
+///
+/// One line at a time, against the whole diagnostic shape: see
+/// [`MISSING_FILTER_MARKERS`] for why the bare words are not enough.
 fn has_missing_filter_indicator(stderr: &str) -> bool {
-    MISSING_FILTER_MARKERS
-        .iter()
-        .any(|marker| stderr.contains(marker))
+    stderr.lines().any(|line| {
+        MISSING_FILTER_MARKERS
+            .iter()
+            .any(|marker| line.contains(marker))
+    })
 }
 
 fn map_audio_extraction_error(
@@ -690,14 +703,21 @@ pub(crate) enum FilterPassFailure {
 impl FilterPassFailure {
     /// Whether a later pass over the same media could still succeed.
     ///
-    /// Only two causes are settled: an input with no audio stream, and an
-    /// FFmpeg build without the filter. Everything else — the watchdog, a
-    /// process that would not start, a non-zero exit carrying a decode or I/O
-    /// error — says nothing about the media that the next pass has to repeat.
+    /// Only one cause is settled: an input with no audio stream, which is a
+    /// property of the file and will read the same way forever. Everything else
+    /// — the watchdog, a process that would not start, a non-zero exit carrying
+    /// a decode or I/O error — says nothing about the media that the next pass
+    /// has to repeat.
+    ///
+    /// A missing filter is transient too, and deliberately so: which filters
+    /// exist is a property of the FFmpeg install, and that can change between
+    /// launches — a bundled binary replaced by an update, a system FFmpeg the
+    /// user just installed. The caller's once-per-session set bounds what the
+    /// optimism costs to one decode per launch.
     pub(crate) fn kind(&self) -> LoudnessFailureKind {
         match self {
-            Self::NoAudioStream | Self::MissingFilter { .. } => LoudnessFailureKind::Unmeasurable,
-            Self::TimedOut | Self::NotRun(_) | Self::Failed { .. } => {
+            Self::NoAudioStream => LoudnessFailureKind::Unmeasurable,
+            Self::TimedOut | Self::NotRun(_) | Self::MissingFilter { .. } | Self::Failed { .. } => {
                 LoudnessFailureKind::Transient
             }
         }
@@ -705,6 +725,13 @@ impl FilterPassFailure {
 }
 
 impl std::fmt::Display for FilterPassFailure {
+    /// Renders the reason on its own, with no verdict of its own in front.
+    ///
+    /// Every recorded form of this message already carries a prefix naming what
+    /// failed — `"Loudness measurement failed: "` for a meter-only failure,
+    /// `"Audio analysis failed: "` for a whole pass; see
+    /// [`crate::core::analysis::remeasure`]. Opening with "Audio analysis
+    /// failed" here as well produced the stutter agents were reading back.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TimedOut => write!(
@@ -715,19 +742,13 @@ impl std::fmt::Display for FilterPassFailure {
             ),
             Self::NotRun(reason) => write!(f, "{}: {}", FFMPEG_SPAWN_FAILURE_MARKER, reason),
             Self::NoAudioStream => write!(f, "No audio stream found in input"),
-            Self::MissingFilter { stderr_tail } => write!(
-                f,
-                "Audio analysis failed: this FFmpeg build has no such filter: {}",
-                stderr_tail
-            ),
+            Self::MissingFilter { stderr_tail } => {
+                write!(f, "This FFmpeg build has no such filter: {}", stderr_tail)
+            }
             Self::Failed {
                 exit_code,
                 stderr_tail,
-            } => write!(
-                f,
-                "Audio analysis failed (exit {}): {}",
-                exit_code, stderr_tail
-            ),
+            } => write!(f, "FFmpeg exited {}: {}", exit_code, stderr_tail),
         }
     }
 }
@@ -786,19 +807,19 @@ impl LoudnessPassFailure {
 pub enum LoudnessFailureKind {
     /// The pass never reached a verdict about the media.
     ///
-    /// It ran out of time, FFmpeg could not be started at all, or the process
-    /// exited non-zero on something — a read error, a killed decoder, a machine
-    /// out of resources — that the next run need not hit. Nothing here is a
-    /// property of the file, so the same asset is worth one more pass once the
-    /// machine or the install has moved on. This is the default: a cause has to
-    /// be recognised as settled before it costs the asset its numbers forever.
+    /// It ran out of time, FFmpeg could not be started at all, the build had no
+    /// such filter, or the process exited non-zero on something — a read error,
+    /// a killed decoder, a machine out of resources — that the next run need not
+    /// hit. Nothing here is a property of the file, so the same asset is worth
+    /// one more pass once the machine or the install has moved on. This is the
+    /// default: a cause has to be recognised as settled before it costs the
+    /// asset its numbers forever.
     Transient,
     /// The pass ran and its output could not be turned into numbers.
     ///
     /// A meter that measured nothing, frame lines carrying no readable
-    /// momentary token, a build without the filter, an input with no audio
-    /// stream: each is a property of this media and this FFmpeg build, and
-    /// paying for the decode again reaches the same verdict.
+    /// momentary token, an input with no audio stream: each is a property of
+    /// this media, and paying for the decode again reaches the same verdict.
     Unmeasurable,
 }
 
@@ -815,9 +836,9 @@ impl LoudnessFailure {
     /// Classifies a failure that has already been flattened into a [`CoreError`].
     ///
     /// The variant carries the verdict, and only the variant: a settled cause —
-    /// output [`measure_loudness`] refused, an FFmpeg build without the filter,
-    /// an input with no audio stream — arrives as [`CoreError::AnalysisFailed`],
-    /// and everything else is transient. Reading the *message* instead is how
+    /// output [`measure_loudness`] refused, an input with no audio stream —
+    /// arrives as [`CoreError::AnalysisFailed`], and everything else is
+    /// transient. Reading the *message* instead is how
     /// the classifier used to default to permanent: a decode that died on
     /// `Input/output error` carried no marker, so it was filed as a verdict
     /// about the media and the asset never got another pass.
@@ -1035,7 +1056,8 @@ mod tests {
     /// Feature: loudness failure classification
     /// Scenario: the pass never reached a verdict about the media
     ///   Given a pass that timed out, whose FFmpeg never ran, whose input was
-    ///   rejected before the spawn, or that died on a read error
+    ///   rejected before the spawn, that asked for a filter this build lacks,
+    ///   or that died on a read error
     ///   When the failure is classified
     ///   Then it is transient
     ///
@@ -1044,12 +1066,19 @@ mod tests {
     /// classifier read the message instead of the cause and defaulted to
     /// permanent, so a decode killed by `Input/output error` cost the asset its
     /// loudness numbers forever.
+    ///
+    /// A missing filter belongs here for the same reason once removed: it is a
+    /// property of the FFmpeg install, not of the media, and an install changes
+    /// between launches.
     #[test]
     fn should_classify_a_pass_that_never_reached_a_verdict_as_transient() {
         let never_reached_a_verdict = [
             FilterPassFailure::TimedOut,
             FilterPassFailure::NotRun("No such file or directory (os error 2)".to_string()),
             FilterPassFailure::NotRun("Input file does not exist: /media/clip.mp4".to_string()),
+            FilterPassFailure::MissingFilter {
+                stderr_tail: "[AVFilterGraph @ 0x1] No such filter: 'ebur128'".to_string(),
+            },
             FilterPassFailure::Failed {
                 exit_code: 1,
                 stderr_tail: "[in#0 @ 0x1] Error during demuxing: Input/output error".to_string(),
@@ -1076,21 +1105,16 @@ mod tests {
 
     /// Feature: loudness failure classification
     /// Scenario: the pass looked at the media and settled the question
-    ///   Given an input with no audio stream, an FFmpeg build without the
-    ///   filter, or output `measure_loudness` refused
+    ///   Given an input with no audio stream, or output `measure_loudness`
+    ///   refused
     ///   When the failure is classified
     ///   Then it is unmeasurable
     ///
-    /// Each is a property of this media and this FFmpeg build, so a retry buys
-    /// a full decode per session that can only reach the same verdict.
+    /// Each is a property of this media, so a retry buys a full decode per
+    /// session that can only reach the same verdict.
     #[test]
     fn should_classify_a_settled_verdict_as_unmeasurable() {
-        let settled = [
-            FilterPassFailure::NoAudioStream,
-            FilterPassFailure::MissingFilter {
-                stderr_tail: "No such filter: 'ebur128'".to_string(),
-            },
-        ];
+        let settled = [FilterPassFailure::NoAudioStream];
 
         for failure in settled {
             let rendered = failure.to_string();
@@ -1112,22 +1136,58 @@ mod tests {
         assert!(!LoudnessFailure::from_error(&measured_nothing).is_transient());
     }
 
-    /// Feature: loudness failure classification
-    /// Scenario: the media path or the stderr quotes the words of a verdict
-    ///   Given a decode that died with a filename containing "No such filter"
-    ///   When the failure is classified
-    ///   Then it is still transient, because the cause is read and not the text
+    /// Verbatim stderr of the bundled FFmpeg 9.0.1 failing to open a broken
+    /// file named `broken No such filter.mp4`.
     ///
-    /// The classifier used to `contains`-match over a message with the stderr
-    /// tail and the media path formatted into it, so a file could talk itself
-    /// out of ever being measured.
+    /// Captured, not written by hand: the point of the test below is that the
+    /// classifier reads what FFmpeg actually prints, and FFmpeg always echoes
+    /// the input path back — which is the whole trap.
+    const BROKEN_INPUT_WITH_A_TRAP_NAME_STDERR: &str = concat!(
+        "[in#0 @ 0x1] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, \
+         misdetection possible!\n",
+        "[in#0 @ 0x1] moov atom not found\n",
+        "[in#0 @ 0x1] Error opening input: Invalid data found when processing input\n",
+        "Error opening input file broken No such filter.mp4.\n",
+        "Error opening input files: Invalid data found when processing input\n",
+    );
+
+    /// Verbatim stderr of the bundled FFmpeg 9.0.1 asked for a filter it lacks.
+    const MISSING_FILTER_STDERR: &str = concat!(
+        "Input #0, wav, from 'tone.wav':\n",
+        "  Duration: 00:00:02.00, bitrate: 1536 kb/s\n",
+        "  Stream #0:0: Audio: pcm_s16le, 48000 Hz, stereo, s16, 1536 kb/s\n",
+        "[AVFilterGraph @ 0x1] No such filter: 'nosuchfilter123'\n",
+        "Error opening output file -.\n",
+        "Error opening output files: Filter not found\n",
+    );
+
+    /// Feature: loudness failure classification
+    /// Scenario: the media path quotes the words of a verdict
+    ///   Given the stderr of a decode that died on a file named
+    ///   `broken No such filter.mp4`
+    ///   When the classifier reads it
+    ///   Then it is not a missing filter, and the failure stays transient
+    ///   And the stderr of a genuinely missing filter still is one
+    ///
+    /// The classifier used to `contains`-match the bare words over the whole
+    /// capture, and FFmpeg echoes the input path on its own line, so a file
+    /// could talk itself out of ever being measured by its name alone.
     #[test]
     fn should_classify_by_cause_and_not_by_words_in_the_message() {
-        let failure = FilterPassFailure::Failed {
-            exit_code: 1,
-            stderr_tail: "Error opening 'No such filter.mp4': Input/output error".to_string(),
-        };
+        assert!(
+            !has_missing_filter_indicator(BROKEN_INPUT_WITH_A_TRAP_NAME_STDERR),
+            "the echoed input path must not read as a missing filter"
+        );
+        assert!(
+            has_missing_filter_indicator(MISSING_FILTER_STDERR),
+            "the filter graph's own diagnostic must still be recognised"
+        );
 
+        // The classification `run_ffmpeg_filter` reaches over that stderr.
+        let failure = FilterPassFailure::Failed {
+            exit_code: 183,
+            stderr_tail: BROKEN_INPUT_WITH_A_TRAP_NAME_STDERR.to_string(),
+        };
         assert_eq!(failure.kind(), LoudnessFailureKind::Transient);
     }
 
@@ -1697,10 +1757,22 @@ lavfi.aspectralstats.1.centroid=2800.0
             "[AVFilterGraph @ 0x1] No such filter: 'ebur128'"
         ));
         assert!(has_missing_filter_indicator(
-            "Unknown filter 'aspectralstats'"
+            "[AVFilterGraph @ 0x1] Unknown filter 'aspectralstats'"
         ));
         assert!(!has_missing_filter_indicator(
             "Error during demuxing: Input/output error"
+        ));
+        // The words on their own are not the diagnostic: an input path or a
+        // caption FFmpeg echoes back carries no filter-graph context.
+        assert!(!has_missing_filter_indicator(
+            "Error opening input file No such filter.mp4."
+        ));
+        assert!(!has_missing_filter_indicator(
+            "[in#0 @ 0x1] Error opening input: Unknown filter is not a codec"
+        ));
+        // The shape must be found on one line, not assembled across two.
+        assert!(!has_missing_filter_indicator(
+            "[in#0 @ 0x1] Error opening input file a]\nNo such filter: 'x'"
         ));
     }
 
@@ -2101,6 +2173,71 @@ lavfi.aspectralstats.1.centroid=2800.0
             ((stereo_lufs - mono_lufs) - MONO_DOWNMIX_PENALTY_LU).abs() <= DOWNMIX_TOLERANCE_LU,
             "the downmix must sit {MONO_DOWNMIX_PENALTY_LU} LU below the stereo source: \
              stereo {stereo_lufs} LUFS against mono {mono_lufs} LUFS"
+        );
+    }
+
+    /// A filter name no FFmpeg build has, for provoking the real diagnostic.
+    const NONEXISTENT_FILTER: &str = "nosuchfilter123";
+
+    /// Feature: loudness failure classification
+    /// Scenario: a broken file is named after the diagnostic it must not claim
+    ///   Given a file named `broken No such filter.mp4` that will not decode
+    ///   And a real FFmpeg asked for a filter it does not have
+    ///   When each pass is classified
+    ///   Then the broken file is an ordinary failure and stays transient
+    ///   And only the missing filter is reported as one
+    ///
+    /// The pure test above asserts the same thing over a captured transcript;
+    /// this one regenerates both transcripts from the FFmpeg actually
+    /// installed, so a build that changes the wording of either diagnostic
+    /// fails here rather than silently reclassifying every unreadable file.
+    #[tokio::test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    async fn should_read_a_missing_filter_from_the_diagnostic_and_not_from_the_path() {
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let profiler = AudioProfiler::new(ffmpeg.clone());
+
+        // A file whose *name* carries the words, and whose contents FFmpeg
+        // cannot open at all.
+        let trap = dir.path().join("broken No such filter.mp4");
+        std::fs::write(&trap, b"this is not a media file").expect("write the broken fixture");
+
+        let failure = profiler
+            .run_ffmpeg_filter(
+                &trap,
+                &format!("silencedetect=n={SILENCE_THRESHOLD_DB}:d={SILENCE_MIN_DURATION}"),
+            )
+            .await
+            .expect_err("an unreadable input must fail the pass");
+
+        assert!(
+            matches!(failure, FilterPassFailure::Failed { .. }),
+            "a file that will not decode is an ordinary failure, got {failure:?}"
+        );
+        assert_eq!(
+            failure.kind(),
+            LoudnessFailureKind::Transient,
+            "a broken file must not cost the asset its numbers because of its name"
+        );
+
+        // The same FFmpeg, asked for a filter it really does not have.
+        let fixture = dir.path().join("sine_stereo.wav");
+        if !write_stereo_sine_fixture(&ffmpeg, &fixture) {
+            skip_without_ffmpeg("ffmpeg could not synthesize the stereo sine fixture");
+            return;
+        }
+
+        let failure = profiler
+            .run_ffmpeg_filter(&fixture, NONEXISTENT_FILTER)
+            .await
+            .expect_err("a filter this build lacks must fail the pass");
+
+        assert!(
+            matches!(failure, FilterPassFailure::MissingFilter { .. }),
+            "the filter graph's own diagnostic must be recognised, got {failure:?}"
         );
     }
 }

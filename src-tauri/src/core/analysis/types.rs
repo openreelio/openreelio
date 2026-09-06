@@ -717,7 +717,10 @@ impl AnalysisBundle {
     /// [`AudioProfile::measurement_version`] deliberately keeps its stale value.
     /// The cleared fields say the numbers are gone; the version says which pass
     /// produced them, and that is what lets a reader report the profile as
-    /// awaiting re-measurement instead of as a silent file.
+    /// awaiting re-measurement instead of as a silent file. It also outranks the
+    /// recorded failure in the re-measure gate, so a stale version is a standing
+    /// request for another pass; [`Self::stamp_audio_measurement_version`] is
+    /// how a pass that has run and settled the question withdraws it.
     pub fn reset_outdated_audio_loudness(&mut self) -> bool {
         let Some(profile) = self.audio_profile.as_mut() else {
             return false;
@@ -727,6 +730,31 @@ impl AnalysisBundle {
         }
 
         profile.clear_loudness_measurement();
+        true
+    }
+
+    /// Stamps the cached audio profile with the current measurement version.
+    ///
+    /// Returns `true` when a profile's version actually moved forward. The
+    /// counterpart to [`Self::reset_outdated_audio_loudness`]: that one says the
+    /// numbers of an older pass are gone, this one says the pass that would
+    /// replace them has now run. Nothing else is touched — the numbers stay
+    /// cleared and [`AudioProfile::loudness_measured`] stays `false`, so
+    /// [`Self::needs_loudness_measurement`] keeps reporting the gap.
+    ///
+    /// Callers go through
+    /// [`crate::core::analysis::remeasure::settle_audio_measurement_version`],
+    /// which applies it only when this run's recorded `audio` error is a settled
+    /// verdict.
+    pub fn stamp_audio_measurement_version(&mut self) -> bool {
+        let Some(profile) = self.audio_profile.as_mut() else {
+            return false;
+        };
+        if profile.measurement_version >= AUDIO_MEASUREMENT_VERSION {
+            return false;
+        }
+
+        profile.measurement_version = AUDIO_MEASUREMENT_VERSION;
         true
     }
 
