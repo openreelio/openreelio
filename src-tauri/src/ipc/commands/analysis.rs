@@ -51,7 +51,9 @@ use crate::core::analysis::{
     plan_semantic_clip_edit as plan_semantic_clip_edit_bundle, SemanticTemporalEditAction,
     SemanticTemporalEditPlan, SemanticTemporalEditPlanOptions,
 };
-use crate::core::analysis::{AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata};
+use crate::core::analysis::{
+    AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata, LOUDNESS_FAILURE_PREFIX,
+};
 use crate::core::commands::AddEffectCommand;
 #[cfg(feature = "ai-providers")]
 use crate::core::credentials::{CredentialType, CredentialVault};
@@ -642,10 +644,21 @@ pub async fn get_analysis_bundle(
 ///
 /// * The bundle is missing loudness numbers it should have
 ///   ([`AnalysisBundle::needs_loudness_measurement`]).
-/// * The bundle records no `audio` failure. A recorded failure is the pipeline
-///   saying it already tried and could not; running it again on every read
-///   would decode the whole asset each time to reach the same conclusion.
+/// * The recorded `audio` failure, if any, is not one that says the whole pass
+///   is hopeless. A pass that produced nothing — no audio stream, a file that
+///   will not decode — is the pipeline saying it already tried, and rerunning
+///   it on every read would decode the asset again to reach the same
+///   conclusion. A pass that produced its regions and only lost the meter is a
+///   different animal: the usual causes (a busy machine hitting the analysis
+///   timeout, an FFmpeg build that came and went) clear on their own, and
+///   refusing forever left the numbers permanently missing. It is marked by
+///   [`LOUDNESS_FAILURE_PREFIX`], which the pipeline writes and nothing else
+///   does.
 /// * No pass has been attempted for this asset in this session.
+///
+/// The session set is what bounds the retry: a transient failure is tried again
+/// on the next launch, not on the next read. It is also cleared when the asset
+/// is relinked, since the new media is a new question.
 async fn should_attempt_loudness_remeasure(
     bundle: &AnalysisBundle,
     attempted: &tokio::sync::Mutex<HashSet<String>>,
@@ -653,7 +666,11 @@ async fn should_attempt_loudness_remeasure(
     if !bundle.needs_loudness_measurement() {
         return false;
     }
-    if bundle.errors.contains_key("audio") {
+    if bundle
+        .errors
+        .get("audio")
+        .is_some_and(|error| !error.starts_with(LOUDNESS_FAILURE_PREFIX))
+    {
         return false;
     }
 
@@ -1576,6 +1593,34 @@ mod tests {
         let attempted = tokio::sync::Mutex::new(HashSet::new());
 
         assert!(!should_attempt_loudness_remeasure(&bundle, &attempted).await);
+    }
+
+    /// Feature: automatic loudness re-measurement
+    /// Scenario: the recorded audio failure is only the meter's
+    ///   Given a cached bundle whose audio pass stored its regions
+    ///   And recorded a loudness-measurement failure over them
+    ///   When it is read twice in one session
+    ///   Then one pass is queued, and only one
+    ///
+    /// The causes of a meter-only failure — the analysis timeout on a busy
+    /// machine, an FFmpeg build that came and went — clear on their own, so
+    /// treating the recorded error as final left the numbers permanently
+    /// missing for an asset that would measure fine on the next try. The
+    /// session set, not the error, is what keeps the retry to one.
+    #[tokio::test]
+    async fn should_retry_a_loudness_only_failure_once_per_session() {
+        let mut bundle = bundle_awaiting_loudness("asset_4");
+        bundle.add_error("audio", format!("{}no readings", LOUDNESS_FAILURE_PREFIX));
+        let attempted = tokio::sync::Mutex::new(HashSet::new());
+
+        assert!(
+            should_attempt_loudness_remeasure(&bundle, &attempted).await,
+            "a meter-only failure is worth one more try"
+        );
+        assert!(
+            !should_attempt_loudness_remeasure(&bundle, &attempted).await,
+            "but only one"
+        );
     }
 
     /// Feature: automatic loudness re-measurement

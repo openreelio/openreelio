@@ -732,11 +732,14 @@ impl AnalysisBundle {
 
     /// Returns `true` when the bundle should have loudness numbers but does not.
     ///
-    /// True for a profile whose measurement is superseded (see
-    /// [`Self::reset_outdated_audio_loudness`]) and for one whose per-second
-    /// profile is empty on an asset that has an audio stream. Both mean the
-    /// same thing to a caller: the regions are usable, the loudness is not, and
-    /// an audio pass has to run before anything reads a level from here.
+    /// The asset has an audio stream and carries a profile that
+    /// [`AudioProfile::has_current_loudness`] rejects: either the meter never
+    /// filled its numbers in ([`AudioProfile::loudness_measured`] is `false`,
+    /// which is also what [`AudioProfile::clear_loudness_measurement`] leaves
+    /// behind) or they came from a superseded pass (see
+    /// [`Self::reset_outdated_audio_loudness`]). Both mean the same thing to a
+    /// caller: the regions are usable, the loudness is not, and an audio pass
+    /// has to run before anything reads a level from here.
     pub fn needs_loudness_measurement(&self) -> bool {
         if !self.metadata.has_audio {
             return false;

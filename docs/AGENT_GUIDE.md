@@ -605,8 +605,8 @@ openreelio-cli analysis report  --path ./demo --id <ASSET_ID>
   including seconds of digital silence, which read `-90`; each entry averages
   only the audible readings of its second, so the meter's 300 ms warm-up and the
   windows around a silence do not drag a second down. A pass that measures
-  nothing reports `loudnessMeasured: false` with the loudness fields nulled
-  rather than publishing `-90 dB` as a level, and `status: partial` — the
+  nothing reports `hasLoudnessMeasurement: false` with the loudness fields
+  nulled rather than publishing `-90 dB` as a level, and `status: partial` — the
   silence and speech regions it did produce are still stored, and
   `analysis run` still exits `0`. `analysis report` says
   `coverage.loudness: false` whenever the numbers are absent or predate the
@@ -616,7 +616,9 @@ openreelio-cli analysis report  --path ./demo --id <ASSET_ID>
   `openreelio-cli transcription install` hint when no Whisper model is present.
   `--progress` streams `{"type":"progress","job","status","detail"}` NDJSON to
   stderr. Per-job failures appear in the `errors` object; the exit is non-zero
-  only if every enabled sub-job failed.
+  only if every enabled sub-job failed *and this run produced nothing* for any
+  of them. A result an earlier run cached does not rescue the exit code, so a
+  run fails or succeeds the same way on a warm cache and a cold one.
 
 Results land in the project's shared analysis bundle (`analysis report` reads it
 back), so the desktop app sees whatever the CLI computed.

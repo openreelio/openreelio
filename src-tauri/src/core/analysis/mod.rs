@@ -47,6 +47,7 @@ pub use clip_perception::*;
 pub use semantic_edit_plan::*;
 pub use types::*;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::annotations::models::{estimate_word_timings, ShotResult, TranscriptSegment};
@@ -58,6 +59,58 @@ use crate::core::indexing::shots::{ShotDetector, ShotDetectorConfig};
 use crate::core::{CoreError, CoreResult};
 
 use audio::{AudioAnalysis, AudioProfiler};
+
+/// Error prefix recorded against the `audio` job when only the meter failed.
+///
+/// The audio pass produced a profile — its silence and speech regions are
+/// stored — and could not put numbers on it. Readers that decide whether to try
+/// the pass again need to tell that apart from an audio job that produced
+/// nothing, and the recorded message is the only thing that survives into the
+/// cached bundle.
+pub const LOUDNESS_FAILURE_PREFIX: &str = "Loudness measurement failed: ";
+
+/// What a single pipeline run produced, before its bundle met the cache.
+///
+/// The bundle returned by [`AnalysisJobRunner::analyze_full_with_outcome`] is
+/// the merged one: slots this run did not fill carry whatever an earlier run
+/// left in the cache. That is what a reader of the asset's analysis wants and
+/// exactly what a caller deciding *this run's* exit status must not use — a
+/// warm cache would otherwise turn a failed run into a successful one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunOutcome {
+    /// Names of the sub-jobs whose result slot this run filled itself.
+    ///
+    /// Uses the same job names as [`AnalysisBundle::errors`], so a caller can
+    /// ask both questions about one job: did it fail, and did it leave anything
+    /// behind. A job can appear in both — the audio pass stores its regions
+    /// when only the loudness meter failed.
+    pub produced: BTreeSet<&'static str>,
+}
+
+impl RunOutcome {
+    /// Reads the produced-job set off a run's own, pre-merge bundle.
+    fn from_run(bundle: &AnalysisBundle) -> Self {
+        let mut produced = BTreeSet::new();
+        for (job, filled) in [
+            ("shots", bundle.shots.is_some()),
+            ("audio", bundle.audio_profile.is_some()),
+            ("transcript", bundle.transcript.is_some()),
+            ("segments", bundle.segments.is_some()),
+            ("visual", bundle.frame_analysis.is_some()),
+            ("contact_sheet", bundle.contact_sheet.is_some()),
+        ] {
+            if filled {
+                produced.insert(job);
+            }
+        }
+        Self { produced }
+    }
+
+    /// Returns whether this run filled `job`'s slot itself.
+    pub fn produced(&self, job: &str) -> bool {
+        self.produced.contains(job)
+    }
+}
 use segmentation::ContentSegmenter;
 use speaker_turns::infer_speaker_turns;
 use visual::VisualAnalyzer;
@@ -320,14 +373,41 @@ impl AnalysisJobRunner {
     /// The returned bundle is the one that was persisted: results this run did
     /// not reproduce are merged back from the cache under the bundle lock, so it
     /// reflects the asset's complete analysis rather than just this run's slots.
+    ///
+    /// Use [`Self::analyze_full_with_outcome`] when the caller has to judge
+    /// *this run* rather than the asset: the merged bundle cannot answer that.
     pub async fn analyze_full_with_metadata<F>(
         &self,
         asset_id: &str,
         asset_path: &str,
         metadata: VideoMetadata,
         options: &AnalysisOptions,
-        mut emit_progress: F,
+        emit_progress: F,
     ) -> CoreResult<AnalysisBundle>
+    where
+        F: FnMut(&str, &str, Option<String>),
+    {
+        self.analyze_full_with_outcome(asset_id, asset_path, metadata, options, emit_progress)
+            .await
+            .map(|(bundle, _)| bundle)
+    }
+
+    /// Runs the pipeline and reports what this run produced beside the bundle.
+    ///
+    /// The bundle is the merged, persisted one, exactly as
+    /// [`Self::analyze_full_with_metadata`] returns it. The [`RunOutcome`] is
+    /// read off this run's own results before the merge, so a caller can tell a
+    /// slot this run filled from one the cache supplied - the difference
+    /// between a partial run and a failed one whose predecessor happened to
+    /// leave something behind.
+    pub async fn analyze_full_with_outcome<F>(
+        &self,
+        asset_id: &str,
+        asset_path: &str,
+        metadata: VideoMetadata,
+        options: &AnalysisOptions,
+        mut emit_progress: F,
+    ) -> CoreResult<(AnalysisBundle, RunOutcome)>
     where
         F: FnMut(&str, &str, Option<String>),
     {
@@ -414,7 +494,7 @@ impl AnalysisJobRunner {
                 bundle.audio_profile = Some(profile.clone());
                 match loudness_error {
                     Some(error) => {
-                        let detail = format!("Loudness measurement failed: {}", error);
+                        let detail = format!("{}{}", LOUDNESS_FAILURE_PREFIX, error);
                         bundle.add_error("audio", detail.clone());
                         emit_progress("audio", "completed", Some(detail));
                     }
@@ -542,6 +622,11 @@ impl AnalysisJobRunner {
             }
         }
 
+        // Read what this run produced before the merge can blur it: after
+        // `save_bundle` a slot filled from the cache is indistinguishable from
+        // one this run measured.
+        let outcome = RunOutcome::from_run(&bundle);
+
         // Save bundle to disk. The write merges with whatever is cached, so a
         // run with only some sub-jobs enabled keeps the results it did not
         // reproduce instead of erasing them.
@@ -556,7 +641,7 @@ impl AnalysisJobRunner {
             ),
         );
 
-        Ok(bundle)
+        Ok((bundle, outcome))
     }
 
     /// Loads a cached analysis bundle from disk.

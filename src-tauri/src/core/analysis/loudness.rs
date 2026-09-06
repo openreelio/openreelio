@@ -197,11 +197,46 @@ pub fn parse_astats_overall(stderr: &str) -> AstatsOverall {
 /// a silent slot that holds its position. Where the silence is genuinely
 /// uninteresting, filter afterwards with [`audible_momentary_readings`].
 pub fn parse_momentary_loudness(stderr: &str) -> Vec<f64> {
-    stderr
-        .lines()
-        .filter(|line| is_ebur128_frame_line(line))
-        .map(momentary_reading)
-        .collect()
+    parse_momentary_series(stderr).readings
+}
+
+/// The momentary series of one meter log, with the lines it could not read.
+///
+/// Separating the two answers the question a total parser cannot: every frame
+/// line yields a reading, so a log of pure garbage and a log of pure silence
+/// produce the same `readings`. Only [`Self::unreadable`] tells them apart.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MomentarySeries {
+    /// One reading per frame line, in order, silent slots included.
+    pub readings: Vec<f64>,
+    /// How many of those readings stand in for a token that could not be read.
+    ///
+    /// Not the same as "silent": the meter's spellings of silence - the
+    /// `-120.7` warm-up sentinel, a value far below the floor, `nan`, `-inf` -
+    /// are all counted as read. This counts only a token that is not a number
+    /// at all, which means the log is not the one this parser was written for.
+    pub unreadable: usize,
+}
+
+/// Parses the momentary series and counts the frame lines it could not read.
+///
+/// Same series as [`parse_momentary_loudness`]; see that function for the
+/// positional contract every reader depends on.
+pub fn parse_momentary_series(stderr: &str) -> MomentarySeries {
+    let mut series = MomentarySeries::default();
+
+    for line in stderr.lines().filter(|line| is_ebur128_frame_line(line)) {
+        match momentary_token(line) {
+            MomentaryToken::Level(value) => series.readings.push(value),
+            MomentaryToken::Silence => series.readings.push(SILENCE_FLOOR_DB),
+            MomentaryToken::Unreadable => {
+                series.readings.push(SILENCE_FLOOR_DB);
+                series.unreadable += 1;
+            }
+        }
+    }
+
+    series
 }
 
 /// Returns only the readings that measured audible content.
@@ -281,30 +316,60 @@ fn is_ebur128_frame_line(line: &str) -> bool {
     line.contains("[Parsed_ebur128") && line.contains(" M:") && !line.contains("Summary")
 }
 
-/// Reads the momentary loudness of one `ebur128` frame line.
+/// What one frame line's momentary token turned out to be.
 ///
-/// Total by construction: every frame line has a reading, and everything the
-/// meter prints for "no signal" collapses to [`SILENCE_FLOOR_DB`]. That covers
-/// the warm-up sentinel (`-120.7`), a digital-silence window (a number far
-/// below the floor, or the literal `nan` or `-inf` depending on the decoder)
-/// and a token this parser cannot read at all. Returning nothing for any of
-/// them would shorten the series and shift every later second.
+/// All three variants occupy a slot in the series - the positional contract
+/// admits no gaps - but they are not the same news about the log.
+enum MomentaryToken {
+    /// A level this parser read and that measured audible content.
+    Level(f64),
+    /// Silence, in one of the spellings the meter uses for it.
+    Silence,
+    /// A token that is not a number at all, so the log is not what we expect.
+    Unreadable,
+}
+
+/// Classifies the momentary token of one `ebur128` frame line.
+///
+/// Total by construction: every frame line yields a variant, and everything the
+/// meter prints for "no signal" is [`MomentaryToken::Silence`]. That covers the
+/// warm-up sentinel (`-120.7`) and a digital-silence window (a number far below
+/// the floor, or the literal `nan` or `-inf` depending on the decoder).
+/// Returning nothing for any of them would shorten the series and shift every
+/// later second.
 ///
 /// [`parse_leading_f64`] keeps rejecting non-finite tokens on purpose: in the
 /// summary block a `nan` integrated loudness means "not measured", and only
 /// here does it mean "silence".
-fn momentary_reading(line: &str) -> f64 {
+fn momentary_token(line: &str) -> MomentaryToken {
     let marker = " M:";
     // Unreachable for a line `is_ebur128_frame_line` accepted; the function is
     // written to be total rather than to trust that the caller checked.
     let Some(position) = line.find(marker) else {
-        return SILENCE_FLOOR_DB;
+        return MomentaryToken::Unreadable;
     };
 
-    match parse_leading_f64(&line[position + marker.len()..]) {
-        Some(value) if is_audible(value) => value,
-        _ => SILENCE_FLOOR_DB,
+    let text = &line[position + marker.len()..];
+    match parse_leading_f64(text) {
+        Some(value) if is_audible(value) => MomentaryToken::Level(value),
+        // A finite number at or below the floor: the warm-up sentinel, or a
+        // digital-silence window read by a decoder that prints a figure.
+        Some(_) => MomentaryToken::Silence,
+        None if is_non_finite_token(text) => MomentaryToken::Silence,
+        None => MomentaryToken::Unreadable,
     }
+}
+
+/// Returns whether the leading token spells a non-finite number.
+///
+/// `parse_leading_f64` rejects these on purpose - in the summary block `nan`
+/// means "not measured" - but a per-frame `nan` or `-inf` is what an mp3 decode
+/// of digital silence prints, so here it is silence rather than a log this
+/// parser cannot read.
+fn is_non_finite_token(text: &str) -> bool {
+    let token = text.split_whitespace().next().unwrap_or("");
+    let magnitude = token.trim_start_matches(['-', '+']).to_ascii_lowercase();
+    matches!(magnitude.as_str(), "nan" | "inf" | "infinity")
 }
 
 /// Parses the first numeric token of `text`, ignoring trailing units.
@@ -312,7 +377,7 @@ fn momentary_reading(line: &str) -> f64 {
 /// Returns `None` for a non-finite token (`nan`, `-inf`) as well as for one
 /// that is not a number at all: in the summary block both mean the value was
 /// not measured. The per-frame path wants "silence" rather than "unmeasured",
-/// so [`momentary_reading`] maps `None` onto the floor itself.
+/// so [`momentary_token`] maps `None` onto silence itself.
 pub(crate) fn parse_leading_f64(text: &str) -> Option<f64> {
     let trimmed = text.trim_start();
     let token: String = trimmed
@@ -503,6 +568,30 @@ mod tests {
             parse_momentary_loudness(non_finite),
             vec![SILENCE_FLOOR_DB, SILENCE_FLOOR_DB, SILENCE_FLOOR_DB, -18.5]
         );
+    }
+
+    /// Feature: momentary loudness parsing
+    /// Scenario: telling an unreadable log apart from a silent one
+    ///   Given frame lines spelling silence as `nan`, `-inf` and `-120.7`
+    ///   And one frame line whose value is not a number at all
+    ///   When the series is parsed
+    ///   Then only the last one counts as unreadable
+    ///
+    /// Every line yields a floor reading either way, so the count is the only
+    /// thing that separates "this file is silent" from "this log is not the one
+    /// the parser was written for" — the distinction `measure_loudness` refuses
+    /// a whole pass on.
+    #[test]
+    fn should_count_only_unreadable_tokens_rather_than_silent_ones() {
+        let log = "[Parsed_ebur128_0 @ 0x1] t: 0.1 M:   nan S: -22.0
+[Parsed_ebur128_0 @ 0x1] t: 0.2 M: -inf S: -22.0
+[Parsed_ebur128_0 @ 0x1] t: 0.3 M: -120.7 S: -22.0
+[Parsed_ebur128_0 @ 0x1] t: 0.4 M: ????? S: -22.0";
+
+        let series = parse_momentary_series(log);
+
+        assert_eq!(series.readings, vec![SILENCE_FLOOR_DB; 4]);
+        assert_eq!(series.unreadable, 1);
     }
 
     /// Feature: momentary loudness parsing

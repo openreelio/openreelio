@@ -220,44 +220,65 @@ impl ContentSegmenter {
     ///
     /// The loudness profile is assumed to have one sample per second, indexed by
     /// the integer part of the time in seconds.
+    ///
+    /// Only the audible seconds of the window are averaged, for the same reason
+    /// [`Self::compute_loudness_stats`] filters the profile it takes its median
+    /// and standard deviation from: a silent second holds the floor sentinel
+    /// rather than a level, and averaging it in makes a piece of music with a
+    /// pause in it read tens of dB quieter than the same music without one.
+    /// A window with no audible second at all is silent, and reads
+    /// `f64::NEG_INFINITY`.
     fn compute_avg_loudness(start_sec: f64, end_sec: f64, loudness_profile: &[f64]) -> f64 {
-        if loudness_profile.is_empty() {
+        let audible = Self::audible_window(start_sec, end_sec, loudness_profile);
+        if audible.is_empty() {
             return f64::NEG_INFINITY;
         }
 
-        let first_idx = start_sec.floor() as usize;
-        let last_idx = (end_sec.ceil() as usize).min(loudness_profile.len());
-
-        if first_idx >= last_idx {
-            return f64::NEG_INFINITY;
-        }
-
-        let slice = &loudness_profile[first_idx..last_idx];
-        let sum: f64 = slice.iter().sum();
-        sum / slice.len() as f64
+        audible.iter().sum::<f64>() / audible.len() as f64
     }
 
     /// Computes the variance of loudness values within a time window.
+    ///
+    /// Taken over the same audible seconds as [`Self::compute_avg_loudness`]:
+    /// the floor sentinel is not a level, and a single silent second among
+    /// audible ones would otherwise dominate the spread it is measured against.
     fn compute_loudness_variance(
         start_sec: f64,
         end_sec: f64,
         loudness_profile: &[f64],
         avg_loudness: f64,
     ) -> f64 {
-        if loudness_profile.is_empty() || avg_loudness.is_infinite() {
+        if !avg_loudness.is_finite() {
             return 0.0;
+        }
+
+        let audible = Self::audible_window(start_sec, end_sec, loudness_profile);
+        if audible.is_empty() {
+            return 0.0;
+        }
+
+        let sum_sq: f64 = audible.iter().map(|v| (v - avg_loudness).powi(2)).sum();
+        sum_sq / audible.len() as f64
+    }
+
+    /// Collects the audible per-second readings covering `[start_sec, end_sec)`.
+    fn audible_window(start_sec: f64, end_sec: f64, loudness_profile: &[f64]) -> Vec<f64> {
+        if loudness_profile.is_empty() || start_sec < 0.0 {
+            return Vec::new();
         }
 
         let first_idx = start_sec.floor() as usize;
         let last_idx = (end_sec.ceil() as usize).min(loudness_profile.len());
 
         if first_idx >= last_idx {
-            return 0.0;
+            return Vec::new();
         }
 
-        let slice = &loudness_profile[first_idx..last_idx];
-        let sum_sq: f64 = slice.iter().map(|v| (v - avg_loudness).powi(2)).sum();
-        sum_sq / slice.len() as f64
+        loudness_profile[first_idx..last_idx]
+            .iter()
+            .copied()
+            .filter(|value| is_audible(*value))
+            .collect()
     }
 
     /// Computes the cut (shot boundary) frequency within a time window.
@@ -634,6 +655,64 @@ mod tests {
 
         assert_eq!(stats.median_db, 0.0);
         assert_eq!(stats.std_dev_db, 0.0);
+    }
+
+    /// Feature: content segmentation
+    /// Scenario: a pause inside an otherwise audible window
+    ///   Given a window of audible seconds
+    ///   And the same seconds with one silent second inserted between them
+    ///   When the window's average loudness and its variance are computed
+    ///   Then both read the same as the window without the pause
+    ///
+    /// A window is classified by how its average sits against the profile's
+    /// median and deviation. Averaging the floor sentinel in dropped a window
+    /// by tens of dB for a single second of silence and inflated its variance
+    /// at the same time, so a phrase of music with a breath in it landed on a
+    /// different segment type from the same phrase without one.
+    #[test]
+    fn should_ignore_a_silent_second_when_measuring_a_window() {
+        let music = vec![-20.0, -18.0, -16.0];
+        let with_pause = vec![-20.0, -18.0, SILENCE_FLOOR_DB, -16.0];
+
+        let music_avg = ContentSegmenter::compute_avg_loudness(0.0, 3.0, &music);
+        let paused_avg = ContentSegmenter::compute_avg_loudness(0.0, 4.0, &with_pause);
+
+        assert!(
+            (music_avg - paused_avg).abs() < 1e-9,
+            "average moved from {music_avg} to {paused_avg} because of one silent second"
+        );
+
+        let music_variance =
+            ContentSegmenter::compute_loudness_variance(0.0, 3.0, &music, music_avg);
+        let paused_variance =
+            ContentSegmenter::compute_loudness_variance(0.0, 4.0, &with_pause, paused_avg);
+
+        assert!(
+            (music_variance - paused_variance).abs() < 1e-9,
+            "variance moved from {music_variance} to {paused_variance}"
+        );
+    }
+
+    /// Feature: content segmentation
+    /// Scenario: a window that is silent all the way through
+    ///   Given a window whose every second is at the silence floor
+    ///   When its average loudness and variance are computed
+    ///   Then the average is negative infinity and the variance is zero
+    ///
+    /// Negative infinity is what an absent measurement already reads as here,
+    /// and it keeps the window below every loudness threshold instead of
+    /// letting `-90` masquerade as a level a comparison can act on.
+    #[test]
+    fn should_report_a_wholly_silent_window_as_unmeasured() {
+        let profile = vec![SILENCE_FLOOR_DB; 4];
+
+        let avg = ContentSegmenter::compute_avg_loudness(0.0, 4.0, &profile);
+
+        assert_eq!(avg, f64::NEG_INFINITY);
+        assert_eq!(
+            ContentSegmenter::compute_loudness_variance(0.0, 4.0, &profile, avg),
+            0.0
+        );
     }
 
     /// Helper: create a simple audio profile with uniform loudness

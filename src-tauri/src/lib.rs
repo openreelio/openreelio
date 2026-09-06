@@ -1254,7 +1254,13 @@ pub struct AppState {
     /// is submitted, so two concurrent reads of one asset queue one pass.
     ///
     /// Runtime-only and never persisted: a session that starts after the media
-    /// was fixed should try once more.
+    /// was fixed should try once more. Relinking an asset clears its entry for
+    /// the same reason — the new media is a new question for the meter.
+    ///
+    /// This set is also what bounds the retry of a *transient* loudness
+    /// failure. A pass that produced its regions and only lost the meter is
+    /// allowed one more attempt per session, so the entry, not the recorded
+    /// error, is what stops the second read from decoding the file again.
     pub loudness_remeasure_attempts: Mutex<std::collections::HashSet<String>>,
 }
 

@@ -14,9 +14,8 @@ use webrtc_vad::{SampleRate as VadSampleRate, Vad, VadMode};
 
 use super::ducking::invert_silence_to_speech;
 use super::loudness::{
-    audible_momentary_readings, loudness_filter_chain, parse_astats_overall,
-    parse_loudness_summary, parse_momentary_loudness, per_second_loudness_profile,
-    MOMENTARY_SAMPLES_PER_SECOND,
+    is_audible, loudness_filter_chain, parse_astats_overall, parse_loudness_summary,
+    parse_momentary_series, per_second_loudness_profile, MOMENTARY_SAMPLES_PER_SECOND,
 };
 use super::types::{
     AudioProfile, SilenceRegion, SpeechRegion, AUDIO_MEASUREMENT_VERSION, SILENCE_FLOOR_DB,
@@ -151,19 +150,15 @@ impl AudioProfiler {
             0.0
         });
 
-        // Onset detection runs over the audible readings: the momentary series
-        // keeps its silence windows so the per-second profile stays addressable
-        // by the second, but a stretch of floor readings is a pair of artificial
-        // jumps rather than a beat.
-        let onset_samples = audible_momentary_readings(&loudness.momentary_lufs);
-        // The per-second fallback is filtered for the same reason: a run of
-        // floor entries between two spoken phrases reads as one huge peak
-        // followed by one huge trough, which is exactly the shape the onset
-        // detector is looking for.
-        let bpm = Self::estimate_bpm_from_samples(&onset_samples, LOUDNESS_SAMPLES_PER_SECOND)
-            .or_else(|| {
-                Self::estimate_bpm(&audible_momentary_readings(&loudness.loudness_profile))
-            });
+        // Onset detection scans the full positional series, silence included:
+        // an index is only a time while every reading holds its slot, and
+        // dropping the silent ones would turn a ten-second pause into an
+        // adjacent pair of samples and invent a beat out of it. The peak test
+        // itself skips the silent readings instead (see
+        // [`Self::estimate_bpm_from_samples`]).
+        let bpm =
+            Self::estimate_bpm_from_samples(&loudness.momentary_lufs, LOUDNESS_SAMPLES_PER_SECOND)
+                .or_else(|| Self::estimate_bpm(&loudness.loudness_profile));
         let speech_regions = match self
             .detect_speech_regions_vad(video_path, duration_sec)
             .await
@@ -329,11 +324,24 @@ impl AudioProfiler {
     /// median inter-onset interval. Returns `None` if fewer than
     /// [`MIN_PEAKS_FOR_BPM`] peaks are detected. The result is clamped
     /// to the 30-300 BPM range.
+    ///
+    /// The profile must be positional - entry `i` covers second `i`, silent
+    /// seconds included - because the interval between two peaks is read off
+    /// their indices.
     pub fn estimate_bpm(loudness_profile: &[f64]) -> Option<f64> {
         Self::estimate_bpm_from_samples(loudness_profile, 1.0)
     }
 
-    /// Estimates beats per minute from a sampled loudness series.
+    /// Estimates beats per minute from a positional, sampled loudness series.
+    ///
+    /// `loudness_samples` keeps its silent slots: index over
+    /// `samples_per_second` is the only thing that makes an inter-onset
+    /// interval a duration, and a filtered series collapses every pause it
+    /// contains. A silent reading is therefore skipped as a *candidate* rather
+    /// than removed (a peak needs an audible value and two audible
+    /// neighbours), so the edge of a silence, which clears
+    /// [`PEAK_THRESHOLD_DB`] by tens of dB against the floor sentinel, cannot
+    /// be mistaken for an onset.
     fn estimate_bpm_from_samples(loudness_samples: &[f64], samples_per_second: f64) -> Option<f64> {
         if loudness_samples.len() < 3
             || samples_per_second <= 0.0
@@ -348,6 +356,10 @@ impl AudioProfiler {
             let current = loudness_samples[i];
             let prev = loudness_samples[i - 1];
             let next = loudness_samples[i + 1];
+
+            if !is_audible(current) || !is_audible(prev) || !is_audible(next) {
+                continue;
+            }
 
             if current - prev > PEAK_THRESHOLD_DB && current - next > PEAK_THRESHOLD_DB {
                 peak_indices.push(i);
@@ -698,13 +710,15 @@ const EMPTY_MEASUREMENT_STDERR_LINES: usize = 3;
 /// # Errors
 ///
 /// Returns [`CoreError::AnalysisFailed`] when the pass exited successfully but
-/// the log carries no momentary readings, no integrated loudness and no peak.
+/// the log carries no momentary readings, no integrated loudness and no peak,
+/// and when every frame line it did carry had an unreadable momentary token.
 /// A pass that measured *nothing* is a broken pass, not a silent file: even
 /// digital silence produces frame lines at the meter's floor. Reporting it as
 /// silence is how the `metadata=1` regression stayed invisible for so long, so
 /// the numbers a caller cannot trust are refused instead of published.
 pub(crate) fn measure_loudness(stderr: &str) -> CoreResult<LoudnessMeasurement> {
-    let momentary_lufs = parse_momentary_loudness(stderr);
+    let series = parse_momentary_series(stderr);
+    let momentary_lufs = series.readings;
     let loudness_profile =
         per_second_loudness_profile(&momentary_lufs, LOUDNESS_SAMPLES_PER_SECOND as usize);
     let summary = parse_loudness_summary(stderr);
@@ -718,6 +732,23 @@ pub(crate) fn measure_loudness(stderr: &str) -> CoreResult<LoudnessMeasurement> 
             "The `{}` pass completed but measured nothing: no momentary readings, \
              no integrated loudness and no peak. First stderr lines: {}",
             loudness_filter_chain(),
+            first_stderr_lines(stderr, EMPTY_MEASUREMENT_STDERR_LINES),
+        )));
+    }
+
+    // A frame line whose momentary token this parser cannot read at all is not
+    // a silent window - the meter has its own spellings for those, and they all
+    // land on the floor sentinel with the slot intact. A handful of unreadable
+    // lines costs their seconds; a run where *every* line was unreadable
+    // produces a profile of pure floor, which reads back as a silent file. That
+    // is the same lie the `metadata=1` regression told, so it is refused here
+    // rather than published, whatever the summary block managed to say.
+    if !momentary_lufs.is_empty() && series.unreadable == momentary_lufs.len() {
+        return Err(CoreError::AnalysisFailed(format!(
+            "The `{}` pass produced {} frame lines and none of them carried a \
+             readable momentary loudness. First stderr lines: {}",
+            loudness_filter_chain(),
+            momentary_lufs.len(),
             first_stderr_lines(stderr, EMPTY_MEASUREMENT_STDERR_LINES),
         )));
     }
@@ -863,6 +894,54 @@ mod tests {
         let bpm = AudioProfiler::estimate_bpm_from_samples(&loudness, LOUDNESS_SAMPLES_PER_SECOND);
         assert!(bpm.is_some());
         assert!((bpm.unwrap() - 120.0).abs() < 1.0);
+    }
+
+    /// Feature: BPM estimation
+    /// Scenario: audible onsets separated by long silences
+    ///   Given a profile whose only audible seconds sit ten seconds apart
+    ///   And digital silence between them
+    ///   When BPM is estimated
+    ///   Then no beat is reported
+    ///
+    /// The onsets are ten seconds apart, so there is no beat here to find. The
+    /// old estimator filtered the silence out before looking, which pulled the
+    /// onsets next to each other and read a steady 30 BPM off a file that has
+    /// one noise every ten seconds.
+    #[test]
+    fn should_not_invent_a_beat_from_onsets_separated_by_silence() {
+        let mut loudness = vec![SILENCE_FLOOR_DB; 100];
+        for (onset, second) in (0..100).step_by(10).enumerate() {
+            loudness[second] = if onset % 2 == 0 { -5.0 } else { -20.0 };
+        }
+
+        assert_eq!(
+            AudioProfiler::estimate_bpm(&loudness),
+            None,
+            "collapsing the silences would turn ten-second gaps into a tempo"
+        );
+    }
+
+    /// Feature: BPM estimation
+    /// Scenario: a steady beat followed by silence
+    ///   Given peaks two seconds apart over the first fifteen seconds
+    ///   And ten seconds of digital silence after them
+    ///   When BPM is estimated
+    ///   Then the beat is still reported at 30 BPM
+    ///
+    /// Skipping the silent readings must not cost the estimator the onsets it
+    /// can legitimately see, and the two edges of the silence must not be
+    /// counted as onsets of their own.
+    #[test]
+    fn should_still_detect_a_beat_when_the_profile_ends_in_silence() {
+        let mut loudness = vec![-30.0; 15];
+        for &second in &[5, 7, 9, 11, 13] {
+            loudness[second] = -5.0;
+        }
+        loudness.extend(std::iter::repeat_n(SILENCE_FLOOR_DB, 10));
+
+        let bpm = AudioProfiler::estimate_bpm(&loudness).expect("the beat is still there");
+
+        assert!((bpm - 30.0).abs() < 1.0, "Expected ~30 BPM, got {bpm}");
     }
 
     #[test]
@@ -1049,6 +1128,61 @@ size=N/A time=00:00:20.00 bitrate=N/A speed=50.0x
             message.contains("Stream #0:0"),
             "the error must quote the start of the log: {message}"
         );
+    }
+
+    /// Feature: audio loudness measurement
+    /// Scenario: the meter prints frame lines this parser cannot read
+    ///   Given a log whose every momentary token is not a number
+    ///   And a summary block that does carry an integrated loudness
+    ///   When the loudness pass is parsed
+    ///   Then it fails, naming the filter and quoting the start of the log
+    ///
+    /// Every frame line yields a reading, so an unreadable log and a silent one
+    /// produce the same series: a profile of pure floor. Publishing it would
+    /// report a file as silent because the log was in a shape this parser does
+    /// not know, which is the `metadata=1` lie in a new spelling. The summary
+    /// block cannot vouch for a per-second curve it did not produce.
+    #[test]
+    fn should_fail_when_every_frame_line_is_unreadable() {
+        let log = "[Parsed_ebur128_0 @ 0x1] t: 0.4 TARGET:-23 LUFS M: ????? S: ?????
+[Parsed_ebur128_0 @ 0x1] t: 0.5 TARGET:-23 LUFS M: ????? S: ?????
+[Parsed_ebur128_0 @ 0x1] Summary:
+
+  Integrated loudness:
+    I:  -16.4 LUFS";
+
+        let error = measure_loudness(log)
+            .expect_err("a log of unreadable frame lines must not report silence");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("ebur128"),
+            "the error must name the filter: {message}"
+        );
+        assert!(
+            message.contains("Parsed_ebur128_0"),
+            "the error must quote the start of the log: {message}"
+        );
+    }
+
+    /// Feature: audio loudness measurement
+    /// Scenario: a single frame line is unreadable
+    ///   Given a log with two readable frame lines and one that is not
+    ///   When the loudness pass is parsed
+    ///   Then it succeeds, since the readable lines still measured something
+    ///
+    /// The unreadable line costs its own slot, nothing more. Only a log where
+    /// *nothing* was readable is refused.
+    #[test]
+    fn should_measure_when_only_some_frame_lines_are_unreadable() {
+        let log = "[Parsed_ebur128_0 @ 0x1] t: 0.4 TARGET:-23 LUFS M: -16.4 S: -16.4
+[Parsed_ebur128_0 @ 0x1] t: 0.5 TARGET:-23 LUFS M: ????? S: ?????
+[Parsed_ebur128_0 @ 0x1] t: 0.6 TARGET:-23 LUFS M: -16.2 S: -16.2";
+
+        let measurement = measure_loudness(log).expect("readable lines are a measurement");
+
+        assert_eq!(measurement.momentary_lufs.len(), 3);
+        assert!(measurement.loudness_profile[0] > SILENCE_FLOOR_DB);
     }
 
     /// Feature: audio loudness measurement

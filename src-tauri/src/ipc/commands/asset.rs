@@ -602,6 +602,14 @@ pub async fn relink_asset(
 
     state.allow_asset_protocol_file(&path);
 
+    // The new media is a new question for the loudness meter, so the session's
+    // record of having already tried this asset no longer applies.
+    state
+        .loudness_remeasure_attempts
+        .lock()
+        .await
+        .remove(&asset_id);
+
     Ok(AssetRelinkResult {
         asset_id,
         op_id,

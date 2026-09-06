@@ -21,7 +21,7 @@ use openreelio_core::analysis::cleanup::{
     DEFAULT_SILENCE_MIN_DURATION_SEC, DEFAULT_SILENCE_THRESHOLD_DB,
 };
 use openreelio_core::analysis::{
-    AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata,
+    AnalysisBundle, AnalysisJobRunner, AnalysisOptions, RunOutcome, VideoMetadata,
 };
 use openreelio_core::annotations::{
     AnalysisProvider, AnalysisResult, AnnotationStore, AssetAnnotation, ShotResult,
@@ -418,7 +418,7 @@ pub fn audio(args: AudioArgs) -> anyhow::Result<()> {
         "assetId": args.id,
         "durationSec": metadata.duration_sec,
         "bpm": profile.bpm,
-        "loudnessMeasured": measured,
+        "hasLoudnessMeasurement": measured,
         "loudnessError": loudness_error,
         "peakDb": measured.then_some(profile.peak_db),
         "truePeakDbtp": measured.then_some(profile.true_peak_dbtp).flatten(),
@@ -458,8 +458,8 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     let emit_progress = args.progress;
     // The runner persists under the bundle lock and merges what this run did not
     // reproduce back in, so the returned bundle is the asset's full analysis.
-    let bundle = runtime
-        .block_on(runner.analyze_full_with_metadata(
+    let (bundle, outcome) = runtime
+        .block_on(runner.analyze_full_with_outcome(
             &args.id,
             &media_path.to_string_lossy(),
             metadata,
@@ -473,7 +473,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("Analysis run failed: {}", error))?;
 
     let enabled = enabled_job_names(&options);
-    let (failed, barren) = classify_run(&bundle, &enabled);
+    let (failed, barren) = classify_run(&bundle, &outcome, &enabled);
     let status = run_status(&failed, barren);
 
     output::print_json_pretty(&json!({
@@ -516,7 +516,17 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
 /// and still produce a usable result — the audio pass stores its silence and
 /// speech regions when only the loudness meter failed — and that is a partial
 /// run, not a failed one, even when it was the only job enabled.
-fn classify_run<'a>(bundle: &AnalysisBundle, enabled: &[&'a str]) -> (Vec<&'a str>, bool) {
+///
+/// "Left nothing behind" is read from `outcome`, never from `bundle`. The
+/// bundle is the merged one, so a slot in it may hold a result an earlier run
+/// paid for: an audio-only run whose pass failed keeps the cached profile on
+/// purpose, and classifying from the bundle would make the exit code depend on
+/// whether the cache happened to be warm.
+fn classify_run<'a>(
+    bundle: &AnalysisBundle,
+    outcome: &RunOutcome,
+    enabled: &[&'a str],
+) -> (Vec<&'a str>, bool) {
     let failed = enabled
         .iter()
         .filter(|job| bundle.errors.contains_key(**job))
@@ -525,7 +535,7 @@ fn classify_run<'a>(bundle: &AnalysisBundle, enabled: &[&'a str]) -> (Vec<&'a st
     let barren = !enabled.is_empty()
         && enabled
             .iter()
-            .all(|job| failed.contains(job) && !job_produced_a_result(bundle, job));
+            .all(|job| failed.contains(job) && !outcome.produced(job));
 
     (failed, barren)
 }
@@ -538,24 +548,6 @@ fn run_status(failed: &[&str], barren: bool) -> &'static str {
         "failed"
     } else {
         "partial"
-    }
-}
-
-/// Returns whether `job` left something in the bundle despite its error.
-///
-/// The bundle's error map records what went wrong, not whether anything
-/// survived. Only `audio` can currently do both — a loudness meter that fails
-/// while `silencedetect` and the VAD succeed — but reading the slot rather than
-/// special-casing the job keeps the rule true if another pass grows the same
-/// shape.
-fn job_produced_a_result(bundle: &AnalysisBundle, job: &str) -> bool {
-    match job {
-        "shots" => bundle.shots.is_some(),
-        "audio" => bundle.audio_profile.is_some(),
-        "transcript" => bundle.transcript.is_some(),
-        "segments" => bundle.segments.is_some(),
-        "visual" => bundle.frame_analysis.is_some(),
-        _ => false,
     }
 }
 
@@ -849,6 +841,13 @@ mod tests {
     use openreelio_core::analysis::cleanup::can_reuse_cached_silence_regions;
     use openreelio_core::analysis::AudioProfile;
 
+    /// Builds the outcome of a run that filled exactly `jobs`.
+    fn produced(jobs: &[&'static str]) -> RunOutcome {
+        RunOutcome {
+            produced: jobs.iter().copied().collect(),
+        }
+    }
+
     fn run_args() -> RunArgs {
         RunArgs {
             path: PathBuf::from("."),
@@ -949,7 +948,7 @@ mod tests {
             "Loudness measurement failed: no readings".to_string(),
         );
 
-        let (failed, barren) = classify_run(&bundle, &["audio"]);
+        let (failed, barren) = classify_run(&bundle, &produced(&["audio"]), &["audio"]);
 
         assert_eq!(failed, vec!["audio"]);
         assert!(!barren);
@@ -966,9 +965,35 @@ mod tests {
         let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(10.0));
         bundle.add_error("audio", "No audio stream found in input".to_string());
 
-        let (failed, barren) = classify_run(&bundle, &["audio"]);
+        let (failed, barren) = classify_run(&bundle, &produced(&[]), &["audio"]);
 
         assert!(barren);
+        assert_eq!(run_status(&failed, barren), "failed");
+    }
+
+    /// Feature: `analysis run` exit code
+    /// Scenario: the same failing run on a warm cache
+    ///   Given an audio-only run whose whole pass failed
+    ///   And a cached profile an earlier run left behind, which the merge keeps
+    ///   When the run is classified
+    ///   Then it is barren just as it is on a cold cache, so the exit matches
+    ///
+    /// The bundle a run returns is the merged one, so the cached profile is
+    /// sitting in `audio_profile` here. Classifying from it would report this
+    /// failure as `partial` and exit 0 on a machine that had analysed the asset
+    /// before, and `failed` and exit 1 on one that had not.
+    #[test]
+    fn classify_run_should_call_a_barren_run_barren_on_a_warm_cache() {
+        let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(10.0));
+        bundle.add_error("audio", "No audio stream found in input".to_string());
+        bundle.audio_profile = Some(openreelio_core::analysis::AudioProfile::silent(10.0));
+
+        let (failed, barren) = classify_run(&bundle, &produced(&[]), &["audio"]);
+
+        assert!(
+            barren,
+            "a cached profile this run did not produce must not rescue its exit code"
+        );
         assert_eq!(run_status(&failed, barren), "failed");
     }
 
@@ -977,7 +1002,7 @@ mod tests {
         let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(10.0));
         bundle.audio_profile = Some(openreelio_core::analysis::AudioProfile::silent(10.0));
 
-        let (failed, barren) = classify_run(&bundle, &["audio"]);
+        let (failed, barren) = classify_run(&bundle, &produced(&["audio"]), &["audio"]);
 
         assert!(failed.is_empty());
         assert_eq!(run_status(&failed, barren), "ok");
