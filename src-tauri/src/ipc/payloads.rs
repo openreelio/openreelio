@@ -1271,9 +1271,12 @@ pub struct AddTextClipPayload {
     /// backgroundColor, backgroundPadding, alignment, bold, italic, underline,
     /// lineHeight and letterSpacing; `position` accepts x and y as 0.0-1.0
     /// fractions of the canvas.
-    // The wire shape is looser than the struct here, so the schema is a
-    // hand-written stub: deriving from `TextClipData` would keep its `required`
-    // list and formally reject every partial override a preset exists for.
+    // The wire shape is looser than the struct here, so the derivation cannot
+    // be used as it stands: `TextClipData`'s `required` list would formally
+    // reject every partial override a preset exists for. What the schema states
+    // instead is that same type's members with the `required` list dropped,
+    // stitched on in `command_schema`'s `PAYLOAD_PROPERTY_SHAPES` — an object
+    // of free-form JSON here, every member of it described there.
     #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub text_data: TextClipData,
 }
@@ -4237,8 +4240,9 @@ mod tests {
 
         let clip_id = property(&schema, "clipId").expect("clipId is a declared property");
         assert_eq!(
-            clip_id["type"], "string",
-            "clipId names one clip: {clip_id:?}"
+            clip_id["type"],
+            serde_json::json!(["string", "null"]),
+            "clipId names one clip, and the parser reads an explicit null as the absent              property it is: {clip_id:?}"
         );
         assert!(
             clip_id["description"]
@@ -4249,7 +4253,7 @@ mod tests {
 
         let affect_all =
             property(&schema, "affectAllTracks").expect("affectAllTracks is a declared property");
-        assert_eq!(affect_all["type"], "boolean");
+        assert_eq!(affect_all["type"], serde_json::json!(["boolean", "null"]));
         assert!(
             affect_all["description"]
                 .as_str()
@@ -5554,6 +5558,11 @@ pub enum CommandPayload {
     /// A shape naming a property the payload no longer has would be dropped in
     /// silence, and the property would go back to being unconstrained wherever
     /// no branch of an either/or group happens to reach it.
+    ///
+    /// The members are compared against the derived source rather than a list
+    /// kept beside it, which is the bug this replaces: the hand-written list
+    /// covered three of `TextClipData`'s seven members, so `{"textData":
+    /// {"rotation": "90"}}` was schema-valid and parser-refused.
     #[test]
     fn every_property_shape_should_reach_the_property_it_describes() {
         for shape in PAYLOAD_PROPERTY_SHAPES {
@@ -5572,15 +5581,75 @@ pub enum CommandPayload {
                 "{command_type}.{property} must state the types that hold in every branch: \
                  {declared}"
             );
-            for (name, declared_type) in shape.members {
-                assert_eq!(
-                    declared["properties"][name]["type"],
-                    serde_json::json!(declared_type),
-                    "{command_type}.{property}.{name} must state the type that holds in every \
-                     branch: {declared}"
+
+            let source = (shape.members)();
+            assert_eq!(
+                declared["properties"], source["properties"],
+                "{command_type}.{property} must state every member of the type it is parsed \
+                 into, exactly as that type declares it"
+            );
+            assert!(
+                declared["required"].is_null(),
+                "{command_type}.{property} must not require a member: a preset supplies whatever \
+                 the override leaves out"
+            );
+
+            // A member the shape describes through a `$ref` is described by
+            // nothing at all unless the definition travelled with it.
+            for (name, member) in declared["properties"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .flat_map(|(name, member)| references(member).map(move |target| (name, target)))
+            {
+                assert!(
+                    schema["definitions"][member].is_object(),
+                    "{command_type}.{property}.{name} points at #/definitions/{member}, which the \
+                     schema does not carry"
                 );
             }
         }
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a shaped property never hides its members behind a bare `$ref`
+    ///
+    /// Draft-07 ignores every sibling of `$ref`, so a `type` or a `properties`
+    /// map written beside one is read by nobody: the shape would be in the
+    /// document and out of the schema at the same time.
+    #[test]
+    fn a_shaped_property_should_not_carry_a_top_level_ref() {
+        for shape in PAYLOAD_PROPERTY_SHAPES {
+            let (command_type, struct_name, schema) = schema_declaring(shape.owner);
+            let declaring = if struct_name == shape.owner {
+                schema.clone()
+            } else {
+                schema["definitions"][shape.owner].clone()
+            };
+            let declared = &declaring["properties"][shape.property];
+            let property = shape.property;
+
+            assert!(
+                declared["$ref"].is_null(),
+                "{command_type}.{property} states a shape beside a $ref, which draft-07 ignores: \
+                 {declared}"
+            );
+        }
+    }
+
+    /// Every local definition one subschema points at, directly or through the
+    /// single-entry `allOf`/`anyOf` `schemars` writes beside a description.
+    fn references(member: &Value) -> impl Iterator<Item = &str> {
+        let direct = member["$ref"].as_str().into_iter();
+        let nested = ["allOf", "anyOf", "oneOf"]
+            .into_iter()
+            .filter_map(|keyword| member[keyword].as_array())
+            .flatten()
+            .filter_map(|branch| branch["$ref"].as_str());
+
+        direct
+            .chain(nested)
+            .filter_map(|reference| reference.strip_prefix("#/definitions/"))
     }
 
     /// Feature: derived command payload schemas
@@ -5620,6 +5689,131 @@ pub enum CommandPayload {
             .expect("a partial override of the preset's style stays valid");
         CommandPayload::parse("AddTextClip".to_string(), accepted)
             .expect("the parser merges a partial style override onto the preset");
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: every member of a text override is shaped, not just three
+    ///
+    /// The bug this covers: `textData`'s shape was a hand-written list of
+    /// `content`, `style` and `position`, while the parser reads seven members
+    /// and descends into two of them. Everything the list did not mention was
+    /// unconstrained, so an agent could write `{"rotation": "90"}` or
+    /// `{"style": {"color": 7}}`, be told the payload was valid, and be refused
+    /// by the parser the schema is derived from.
+    #[test]
+    fn every_member_of_a_text_data_override_should_be_shaped() {
+        let schema = command_payload_schema("AddTextClip").expect("AddTextClip has a schema");
+        let payload = |text_data: Value| {
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_v1",
+                "timelineIn": 5.0,
+                "duration": 3.0,
+                "preset": "quote",
+                "textData": text_data
+            })
+        };
+
+        let refused = [
+            serde_json::json!({ "shadow": "soft" }),
+            serde_json::json!({ "rotation": "90" }),
+            serde_json::json!({ "opacity": "half" }),
+            serde_json::json!({ "style": { "fontSize": "big" } }),
+            serde_json::json!({ "style": { "color": 7 } }),
+        ];
+
+        for text_data in refused {
+            let payload = payload(text_data);
+            check_against_schema(&schema, &payload).expect_err(&format!(
+                "the schema must refuse what the parser refuses: {payload}"
+            ));
+            CommandPayload::parse("AddTextClip".to_string(), payload.clone()).expect_err(&format!(
+                "the parser must refuse this for the guard to mean anything: {payload}"
+            ));
+        }
+
+        let accepted = payload(serde_json::json!({ "style": { "fontSize": 40 } }));
+        check_against_schema(&schema, &accepted)
+            .expect("a partial override of the preset's style stays valid");
+        CommandPayload::parse("AddTextClip".to_string(), accepted)
+            .expect("the parser merges a partial style override onto the preset");
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a text override's members are the ones the parser reads
+    ///
+    /// Derived from `TextClipData` a second time here, rather than from the
+    /// table that builds the schema, so the guard fails when a member is added
+    /// to the type and the schema stops describing what the parser accepts.
+    #[test]
+    fn a_text_data_override_should_declare_every_member_of_the_type_it_parses_into() {
+        let schema = command_payload_schema("AddTextClip").expect("AddTextClip has a schema");
+        let generator = schemars::gen::SchemaSettings::draft07().into_generator();
+        let source = serde_json::to_value(
+            generator.into_root_schema_for::<crate::core::text::TextClipData>(),
+        )
+        .expect("a derived schema is plain data");
+
+        let names = |schema: &Value| -> Vec<String> {
+            let mut names: Vec<String> = schema["properties"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(name, _)| name.clone())
+                .collect();
+            names.sort();
+            names
+        };
+
+        assert_eq!(
+            names(&schema["properties"]["textData"]),
+            names(&source),
+            "textData must name every member of TextClipData and nothing else"
+        );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a stand-in property may be written as an explicit null
+    ///
+    /// `RippleDelete` reads `clipId` into an `Option`, so a caller who spells
+    /// the absent single-clip form out as `null` beside a populated `clipIds`
+    /// is accepted. The schema said `"type": "string"` and refused it.
+    #[test]
+    fn a_null_stand_in_should_be_valid_beside_the_property_it_substitutes_for() {
+        let schema = command_payload_schema("RippleDelete").expect("RippleDelete has a schema");
+        let payload = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_v1",
+            "clipIds": ["clip_1"],
+            "clipId": Value::Null
+        });
+
+        check_against_schema(&schema, &payload)
+            .expect("an explicit null stand-in reaches the parser as the absent property it is");
+        CommandPayload::parse("RippleDelete".to_string(), payload)
+            .expect("the parser takes the populated clipIds and ignores the null stand-in");
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a null stand-in does not satisfy the requirement on its own
+    ///
+    /// Nullable widened the stand-in's type, and `required` reads presence
+    /// alone: without this the pair `{"clipIds": [], "clipId": null}` would
+    /// satisfy the group while the parser refuses it for naming no clip.
+    #[test]
+    fn a_null_stand_in_should_not_satisfy_the_requirement_it_joins() {
+        let schema = command_payload_schema("RippleDelete").expect("RippleDelete has a schema");
+        let payload = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_v1",
+            "clipIds": [],
+            "clipId": Value::Null
+        });
+
+        check_against_schema(&schema, &payload)
+            .expect_err("neither spelling names a clip, which is what the group demands");
+        CommandPayload::parse("RippleDelete".to_string(), payload)
+            .expect_err("the parser refuses a ripple delete that names no clip");
     }
 
     /// Feature: derived command payload schemas
@@ -5935,13 +6129,13 @@ pub enum CommandPayload {
 
     /// A value for a required property whose schema declares no shape.
     ///
-    /// `AddTextClip`'s `textData` reaches the preset resolver as a
-    /// `serde_json::Value`, so what it accepts is prose in its description
-    /// rather than a subschema and no sampler can work out that `content` is a
-    /// string. The sample is the payload's own doc-comment example. Anything
-    /// else that needs an entry here is a property an agent cannot compose from
-    /// the schema either, which is worth noticing — the guard below keeps the
-    /// table to properties that really are free-form.
+    /// The table is empty, and the guard below is what keeps it that way: a
+    /// property an agent cannot compose from the schema is a property the
+    /// schema does not describe, and a hand-written sample for it would hide
+    /// exactly the divergence the sweeps exist to find. `AddTextClip`'s
+    /// `textData` was the one entry — its members are now derived from the type
+    /// the preset resolver parses it into, so the sampler builds it like any
+    /// other object.
     fn free_form_sample(command_type: &str, property: &str) -> Option<Value> {
         free_form_samples()
             .into_iter()
@@ -5951,15 +6145,7 @@ pub enum CommandPayload {
 
     /// Every hand-written sample, as `(command type, property, value)`.
     fn free_form_samples() -> Vec<(&'static str, &'static str, Value)> {
-        vec![(
-            "AddTextClip",
-            "textData",
-            serde_json::json!({
-                "content": "Hello World",
-                "style": { "fontFamily": "Arial", "fontSize": 48, "color": "#FFFFFF" },
-                "position": { "x": 0.5, "y": 0.5 }
-            }),
-        )]
+        Vec::new()
     }
 
     /// Feature: derived command payload schemas

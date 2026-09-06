@@ -271,24 +271,31 @@ pub const NON_EXECUTABLE_COMMAND_TYPES: &[&str] = &[
 const NOT_EXECUTABLE_NOTE: &str = "This command is parseable and validatable, \
      but `command execute` refuses it until it is registered with the executor.";
 
-/// Builds the JSON Schema of one payload type, titled by its command type.
-///
-/// The derived title is the Rust struct name (`UpdateCaptionPayload`), which is
-/// not a name any caller can use. It is replaced by the command type so the
-/// schema names the thing an agent actually writes into `commandType`.
-///
-/// Two things `schemars` cannot see are added afterwards: the alternative
-/// spellings `#[serde(alias = "…")]` accepts, and the properties a hand written
-/// `Deserialize` reads off the wire — see [`declare_wire_spellings`].
-pub fn payload_schema<T: JsonSchema>(command_type: &str) -> Value {
+/// The schema `schemars` derives for one type, before any wire step runs.
+fn derived_schema<T: JsonSchema>() -> Value {
     let generator = schemars::gen::SchemaSettings::draft07().into_generator();
     let root = generator.into_root_schema_for::<T>();
 
     // A `RootSchema` is plain data — maps, strings and bools — so this cannot
     // fail in practice. It is still not worth failing a whole schema listing
     // over one command: an empty object says "no shape known" honestly, and the
-    // command's own name is still carried below.
-    let mut value = serde_json::to_value(root).unwrap_or_else(|_| json!({}));
+    // command's own name is carried beside the schema either way.
+    serde_json::to_value(root).unwrap_or_else(|_| json!({}))
+}
+
+/// Builds the JSON Schema of one payload type, titled by its command type.
+///
+/// The derived title is the Rust struct name (`UpdateCaptionPayload`), which is
+/// not a name any caller can use. It is replaced by the command type so the
+/// schema names the thing an agent actually writes into `commandType`.
+///
+/// Three things `schemars` cannot see are added afterwards: the alternative
+/// spellings `#[serde(alias = "…")]` accepts, the properties a hand written
+/// `Deserialize` reads off the wire — see [`declare_wire_spellings`] — and the
+/// shape a property has whichever either/or branch a payload takes, see
+/// [`declare_property_shapes`].
+pub fn payload_schema<T: JsonSchema>(command_type: &str) -> Value {
+    let mut value = derived_schema::<T>();
 
     if let Value::Object(object) = &mut value {
         // The derived title is the Rust type name, which is the key the wire
@@ -309,6 +316,8 @@ pub fn payload_schema<T: JsonSchema>(command_type: &str) -> Value {
                 }
             }
         }
+
+        declare_property_shapes(object, &type_name);
 
         object.insert("title".to_string(), Value::String(command_type.to_string()));
 
@@ -467,6 +476,15 @@ pub(crate) struct WireOnlyProperty {
     pub name: &'static str,
     /// The JSON Schema `type` of the value the parser accepts.
     pub json_type: &'static str,
+    /// Whether the parser also accepts an explicit `null` for it.
+    ///
+    /// Every stand-in is read into an `Option`, so `{"clipId": null}` reaches
+    /// the parser as the absent property it is rather than as a type error. A
+    /// schema saying `"type": "string"` there refuses a payload the parser
+    /// takes, which is the same lie as an alias the schema forbids — the null
+    /// is added to the type list instead, and the requirement group below
+    /// states separately that a null stand-in satisfies nothing.
+    pub nullable: bool,
     /// What the property means, for the schema's `description`.
     pub description: &'static str,
     /// The required property this spelling stands in for, if any.
@@ -487,6 +505,7 @@ pub(crate) const WIRE_ONLY_PROPERTIES: &[WireOnlyProperty] = &[
         owner: "RippleDeletePayload",
         name: "clipId",
         json_type: "string",
+        nullable: true,
         description: "A single clip to remove, instead of `clipIds`. Exactly one \
                       of the two has to name a clip: a non-empty `clipIds` wins, \
                       and an empty or absent one falls back to this.",
@@ -497,12 +516,35 @@ pub(crate) const WIRE_ONLY_PROPERTIES: &[WireOnlyProperty] = &[
         owner: "RippleDeletePayload",
         name: "affectAllTracks",
         json_type: "boolean",
+        nullable: true,
         description: "Deprecated and ignored. Accepted so an older caller is not \
                       refused; ripple delete only ever touched `trackId`.",
         satisfies: None,
         satisfies_min_items: None,
     },
 ];
+
+impl WireOnlyProperty {
+    /// The subschema this stand-in is declared as.
+    fn declaration(&self) -> Value {
+        let declared = if self.nullable {
+            json!([self.json_type, "null"])
+        } else {
+            json!(self.json_type)
+        };
+        json!({ "type": declared, "description": self.description })
+    }
+
+    /// What the stand-in has to look like to satisfy the requirement it joins.
+    ///
+    /// A nullable stand-in is present-but-absent when it is written as `null`,
+    /// and `required` alone reads that as satisfied — so a null one states the
+    /// same `not` an either/or branch does, and the requirement falls back to
+    /// the property this substitutes for. `None` when there is nothing to say.
+    fn constraints(&self) -> Option<Value> {
+        self.nullable.then(|| json!({ "not": { "type": "null" } }))
+    }
+}
 
 /// A requirement one payload's parse step enforces that its field types do not.
 ///
@@ -592,11 +634,12 @@ pub(crate) const PAYLOAD_EITHER_OR_REQUIREMENTS: &[EitherOrRequirement] = &[
 /// `textData` branch states disappears: `{"preset": "quote", "textData":
 /// {"style": "nope"}}` was schema-valid and parser-refused. What the merge step
 /// demands of a `textData` it is handed is true in every branch — an object,
-/// whose `content` is a string and whose `style` and `position` are objects —
-/// so it is stated on the root property rather than inside one branch.
+/// each of whose members has the type the type it merges into declares — so it
+/// is stated on the root property rather than inside one branch.
 ///
-/// Only the facts that hold everywhere belong here: the property stays open
-/// otherwise, because a preset supplies whatever the override leaves out.
+/// Only the facts that hold everywhere belong here: which members exist and
+/// what each one looks like, never which of them are required, because a preset
+/// supplies whatever the override leaves out.
 pub(crate) struct PropertyShape {
     /// Rust type that declares the property.
     pub owner: &'static str,
@@ -604,8 +647,16 @@ pub(crate) struct PropertyShape {
     pub property: &'static str,
     /// The JSON types the value may have.
     pub types: &'static [&'static str],
-    /// The JSON type each named member of the value must have, when present.
-    pub members: &'static [(&'static str, &'static str)],
+    /// The derived schema of the type the value is parsed into.
+    ///
+    /// Its `properties` become the members of the shape and its `definitions`
+    /// are merged into the schema the shape lands in, so every member the
+    /// parser reads is described exactly once, by the type that reads it. A
+    /// hand written member list is the same duplication in a place nothing
+    /// checks: `textData`'s listed `content`, `style` and `position` while the
+    /// parser reads seven, so `{"textData": {"rotation": "90"}}` was
+    /// schema-valid and parser-refused.
+    pub members: fn() -> Value,
 }
 
 /// Every branch-independent property shape, by the type that declares it.
@@ -613,12 +664,13 @@ pub(crate) const PAYLOAD_PROPERTY_SHAPES: &[PropertyShape] = &[PropertyShape {
     owner: "AddTextClipPayload",
     property: "textData",
     types: &["object", "null"],
-    members: &[
-        ("content", "string"),
-        ("style", "object"),
-        ("position", "object"),
-    ],
+    members: text_clip_data_schema,
 }];
+
+/// The derived schema of the type `AddTextClip`'s `textData` is parsed into.
+pub(crate) fn text_clip_data_schema() -> Value {
+    derived_schema::<crate::core::text::TextClipData>()
+}
 
 impl EitherOrRequirement {
     /// The `anyOf` group this requirement states.
@@ -682,9 +734,9 @@ struct SpellingGroup {
     /// it as its own field and picks between them — `RippleDelete` takes
     /// `clipIds` and `clipId` together without complaint.
     exclusive: bool,
-    /// What the canonical spelling has to look like to satisfy the requirement
-    /// on its own, beyond merely being present.
-    canonical_constraints: Option<Value>,
+    /// What a spelling has to look like to satisfy the requirement on its own,
+    /// beyond merely being present, by the spelling it constrains.
+    constraints: Vec<(String, Value)>,
 }
 
 impl SpellingGroup {
@@ -699,14 +751,16 @@ impl SpellingGroup {
             .iter()
             .map(|spelling| {
                 let mut option = json!({ "required": [spelling] });
-                match (&self.canonical_constraints, option.as_object_mut()) {
-                    (Some(constraints), Some(option)) if *spelling == self.canonical => {
-                        option.insert(
-                            "properties".to_string(),
-                            json!({ spelling.as_str(): constraints }),
-                        );
-                    }
-                    _ => {}
+                let constraints = self
+                    .constraints
+                    .iter()
+                    .find(|(constrained, _)| constrained == spelling)
+                    .map(|(_, constraints)| constraints);
+                if let (Some(constraints), Some(option)) = (constraints, option.as_object_mut()) {
+                    option.insert(
+                        "properties".to_string(),
+                        json!({ spelling.as_str(): constraints }),
+                    );
                 }
                 option
             })
@@ -783,7 +837,7 @@ fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name
             canonical: (*canonical).to_string(),
             spellings,
             exclusive: true,
-            canonical_constraints: None,
+            constraints: Vec::new(),
         });
     }
 
@@ -791,16 +845,17 @@ fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name
         .iter()
         .filter(|extra| extra.owner == type_name)
     {
-        properties.insert(
-            extra.name.to_string(),
-            json!({ "type": extra.json_type, "description": extra.description }),
-        );
+        properties.insert(extra.name.to_string(), extra.declaration());
         let Some(canonical) = extra.satisfies else {
             continue;
         };
-        let constraints = extra
-            .satisfies_min_items
-            .map(|minimum| json!({ "minItems": minimum }));
+        let mut constraints: Vec<(String, Value)> = Vec::new();
+        if let Some(minimum) = extra.satisfies_min_items {
+            constraints.push((canonical.to_string(), json!({ "minItems": minimum })));
+        }
+        if let Some(stand_in) = extra.constraints() {
+            constraints.push((extra.name.to_string(), stand_in));
+        }
         match groups.iter_mut().find(|group| group.canonical == canonical) {
             // A stand-in the parser reads as a field of its own can be sent
             // beside the spellings it substitutes for, so a group it joins
@@ -808,35 +863,15 @@ fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name
             Some(group) => {
                 group.spellings.push(extra.name.to_string());
                 group.exclusive = false;
-                if constraints.is_some() {
-                    group.canonical_constraints = constraints;
-                }
+                group.constraints.extend(constraints);
             }
             None => groups.push(SpellingGroup {
                 canonical: canonical.to_string(),
                 spellings: vec![canonical.to_string(), extra.name.to_string()],
                 exclusive: false,
-                canonical_constraints: constraints,
+                constraints,
             }),
         }
-    }
-
-    // Stated on the property itself, because an `anyOf` branch constrains only
-    // the payloads that take it.
-    for shape in PAYLOAD_PROPERTY_SHAPES
-        .iter()
-        .filter(|shape| shape.owner == type_name)
-    {
-        let Some(Value::Object(declared)) = properties.get_mut(shape.property) else {
-            continue;
-        };
-        declared.insert("type".to_string(), json!(shape.types));
-        let members: serde_json::Map<String, Value> = shape
-            .members
-            .iter()
-            .map(|(name, declared)| ((*name).to_string(), json!({ "type": declared })))
-            .collect();
-        declared.insert("properties".to_string(), Value::Object(members));
     }
 
     let either_or: Vec<Value> = PAYLOAD_EITHER_OR_REQUIREMENTS
@@ -856,6 +891,125 @@ fn declare_wire_spellings(object: &mut serde_json::Map<String, Value>, type_name
         .collect();
 
     declare_requirements(object, &groups, either_or);
+}
+
+/// States the branch-independent shape of every property that declares one.
+///
+/// This runs over the whole schema rather than one object at a time because a
+/// shape's members are derived from another type's schema: the definitions
+/// those members point at have to reach the same document, or every `$ref` the
+/// shape carries would dangle and a reader would be left with a member name and
+/// no shape at all.
+fn declare_property_shapes(object: &mut serde_json::Map<String, Value>, root_type: &str) {
+    // `None` is the schema's own root type; the rest are its definitions.
+    let mut owners: Vec<Option<String>> = vec![None];
+    if let Some(definitions) = object.get("definitions").and_then(Value::as_object) {
+        owners.extend(definitions.keys().cloned().map(Some));
+    }
+
+    for owner in owners {
+        let type_name = owner.clone().unwrap_or_else(|| root_type.to_string());
+        for shape in PAYLOAD_PROPERTY_SHAPES
+            .iter()
+            .filter(|shape| shape.owner == type_name)
+        {
+            let derived = (shape.members)();
+            merge_definitions(object, derived.get("definitions"));
+
+            // The `required` list the derivation states is dropped on the way
+            // in: with a preset every member is optional, and the members that
+            // are required without one are already demanded by the either/or
+            // branch that says so.
+            let members = derived
+                .get("properties")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+
+            if let Some(declared) = shaped_property_mut(object, owner.as_deref(), shape.property) {
+                apply_property_shape(declared, shape.types, members);
+            }
+        }
+    }
+}
+
+/// The subschema of one property of the root type or of one definition.
+fn shaped_property_mut<'a>(
+    object: &'a mut serde_json::Map<String, Value>,
+    owner: Option<&str>,
+    property: &str,
+) -> Option<&'a mut Value> {
+    let properties = match owner {
+        Some(name) => object
+            .get_mut("definitions")?
+            .get_mut(name)?
+            .get_mut("properties")?,
+        None => object.get_mut("properties")?,
+    };
+    properties.get_mut(property)
+}
+
+/// Adds the definitions a derived shape's members point at.
+///
+/// An entry already in the document is left alone: both copies are `schemars`'
+/// rendering of the same Rust type, so the one that is there is the one that
+/// would be written.
+fn merge_definitions(object: &mut serde_json::Map<String, Value>, extra: Option<&Value>) {
+    let Some(extra) = extra.and_then(Value::as_object) else {
+        return;
+    };
+    let Some(definitions) = object
+        .entry("definitions")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    else {
+        return;
+    };
+
+    for (name, definition) in extra {
+        definitions
+            .entry(name.clone())
+            .or_insert_with(|| definition.clone());
+    }
+}
+
+/// Adds one shape to a property's derived subschema.
+///
+/// A `$ref` on the target moves into an `allOf` first, for the same reason
+/// [`alias_property`] does it: draft-07 ignores every sibling of `$ref`, so a
+/// `type` written beside one would be read by nobody and the property would
+/// stay as unconstrained as it was.
+///
+/// What the derivation already stated is kept — the members merge into an
+/// existing map rather than replacing it — because a derived member is a fact
+/// about the same value, and dropping one to state another would trade one
+/// silent gap for a different one. The shape wins where both name a member: the
+/// shape is written from what the parser reads, and the derivation is what
+/// could not see it.
+fn apply_property_shape(
+    declared: &mut Value,
+    types: &[&str],
+    members: serde_json::Map<String, Value>,
+) {
+    if let Some(reference) = declared.get("$ref").cloned() {
+        if let Some(object) = declared.as_object_mut() {
+            object.remove("$ref");
+            object.insert("allOf".to_string(), json!([{ "$ref": reference }]));
+        }
+    }
+
+    let Some(object) = declared.as_object_mut() else {
+        return;
+    };
+    object.insert("type".to_string(), json!(types));
+
+    let mut merged = object
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    merged.extend(members);
+    object.insert("properties".to_string(), Value::Object(merged));
 }
 
 /// Copies a canonical property's subschema for one of its other spellings.
@@ -1422,7 +1576,7 @@ fn check_declared_type(
         return Ok(());
     };
 
-    check_declared_shape(property, value)?;
+    check_declared_shape(root, property, value)?;
 
     if depth > 0 {
         if let Some(definition) = resolve_local_ref(root, property) {
@@ -1448,14 +1602,111 @@ fn check_declared_type(
 ///
 /// `type` is either a single name or the list `schemars` emits for an
 /// `Option<T>` — `["number", "null"]` — and a value has to match one of the
-/// names on the list. A keyword this shallow guard does not model, such as the
-/// `anyOf` an untagged enum becomes, answers `Ok`.
+/// names on the list. A keyword this shallow guard does not model answers `Ok`.
 #[cfg(test)]
 fn check_declared_shape(
+    root: &Value,
     property: &serde_json::Map<String, Value>,
     value: &Value,
 ) -> Result<(), String> {
-    match property.get("type") {
+    check_declared_types(property, value)?;
+
+    let (Some(members), Some(object)) = (
+        property.get("properties").and_then(Value::as_object),
+        value.as_object(),
+    ) else {
+        return Ok(());
+    };
+
+    for (name, member) in members {
+        let Some(present) = object.get(name) else {
+            continue;
+        };
+        check_member_shape(root, member, present, MEMBER_SHAPE_DEPTH)
+            .map_err(|error| format!("'{name}': {error}"))?;
+    }
+
+    Ok(())
+}
+
+/// How far the member walk follows references and nesting.
+///
+/// `textData`'s deepest member is a style two hops down, and a definition that
+/// refers back to itself would otherwise walk forever.
+#[cfg(test)]
+const MEMBER_SHAPE_DEPTH: usize = 6;
+
+/// Checks one value against the types a member's subschema states.
+///
+/// Required properties are deliberately not enforced on this path. The members
+/// it walks are the ones a shaped property states, where a preset supplies
+/// whatever the override leaves out: `{"style": {"fontSize": 40}}` is a
+/// complete `textData` and only the types of the members it does name are
+/// knowable. What is knowable is checked all the way down — through the `$ref`
+/// a member of a derived shape is, and through the `anyOf` an `Option<T>`
+/// becomes — because `{"style": {"color": 7}}` is refused by the parser and the
+/// schema is only worth deriving if it refuses it too.
+#[cfg(test)]
+fn check_member_shape(
+    root: &Value,
+    member: &Value,
+    value: &Value,
+    depth: usize,
+) -> Result<(), String> {
+    let Some(member) = member.as_object() else {
+        return Ok(());
+    };
+
+    check_declared_types(member, value)?;
+
+    if depth == 0 {
+        return Ok(());
+    }
+
+    if let Some(definition) = resolve_local_ref(root, member) {
+        return check_member_shape(root, definition, value, depth - 1);
+    }
+
+    // A union of a definition and `null`, which is how an `Option<T>` over a
+    // named type is written. A value matches when any branch takes it.
+    for keyword in ["anyOf", "oneOf"] {
+        let Some(branches) = member.get(keyword).and_then(Value::as_array) else {
+            continue;
+        };
+        if branches
+            .iter()
+            .any(|branch| check_member_shape(root, branch, value, depth - 1).is_ok())
+        {
+            return Ok(());
+        }
+        return Err(format!("matches no branch of {keyword}: {value}"));
+    }
+
+    let (Some(members), Some(object)) = (
+        member.get("properties").and_then(Value::as_object),
+        value.as_object(),
+    ) else {
+        return Ok(());
+    };
+
+    for (name, nested) in members {
+        let Some(present) = object.get(name) else {
+            continue;
+        };
+        check_member_shape(root, nested, present, depth - 1)
+            .map_err(|error| format!("'{name}': {error}"))?;
+    }
+
+    Ok(())
+}
+
+/// Checks a value against the `type` a subschema states, single or as a list.
+#[cfg(test)]
+fn check_declared_types(
+    schema: &serde_json::Map<String, Value>,
+    value: &Value,
+) -> Result<(), String> {
+    match schema.get("type") {
         Some(Value::String(declared)) => {
             if !value_is(declared, value) {
                 return Err(format!("expected {declared}, got {value}"));
@@ -1471,20 +1722,6 @@ fn check_declared_shape(
             }
         }
         _ => {}
-    }
-
-    let (Some(members), Some(object)) = (
-        property.get("properties").and_then(Value::as_object),
-        value.as_object(),
-    ) else {
-        return Ok(());
-    };
-
-    for (name, member) in members {
-        let (Some(member), Some(present)) = (member.as_object(), object.get(name)) else {
-            continue;
-        };
-        check_declared_shape(member, present).map_err(|error| format!("'{name}': {error}"))?;
     }
 
     Ok(())
@@ -1616,7 +1853,7 @@ mod tests {
                 "id".to_string(),
             ],
             exclusive: true,
-            canonical_constraints: None,
+            constraints: Vec::new(),
         }
         .at_most_one()
         .expect("an exclusive group forbids its pairs");
@@ -1744,6 +1981,79 @@ mod tests {
         assert!(
             runnable.get(EXECUTABLE_KEYWORD).is_none(),
             "a command that runs carries no flag at all"
+        );
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a shape lands beside a `$ref` where draft-07 can read it
+    ///
+    /// Draft-07 ignores every sibling of `$ref`, so writing a `type` and a
+    /// `properties` map next to one states nothing: the reference is moved into
+    /// an `allOf` first, exactly as an alias spelling is.
+    #[test]
+    fn should_move_a_ref_into_an_all_of_before_stating_a_shape_beside_it() {
+        let mut declared = json!({ "$ref": "#/definitions/TextClipData" });
+
+        apply_property_shape(
+            &mut declared,
+            &["object", "null"],
+            json!({ "content": { "type": "string" } })
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        );
+
+        assert!(
+            declared.get("$ref").is_none(),
+            "the reference must not stay at the top level: {declared}"
+        );
+        assert_eq!(
+            declared["allOf"],
+            json!([{ "$ref": "#/definitions/TextClipData" }])
+        );
+        assert_eq!(declared["type"], json!(["object", "null"]));
+        assert_eq!(declared["properties"]["content"], json!({"type": "string"}));
+    }
+
+    /// Feature: derived command payload schemas
+    /// Scenario: a shape adds to what the derivation stated rather than
+    /// replacing it
+    ///
+    /// A derived `properties` map is a set of facts about the same value.
+    /// Overwriting it would trade the gap the shape closes for a new one, in a
+    /// place no guard looks.
+    #[test]
+    fn should_merge_a_shape_into_a_derived_properties_map() {
+        let mut declared = json!({
+            "type": "object",
+            "properties": {
+                "content": { "type": "string" },
+                "rotation": { "type": "integer" }
+            }
+        });
+
+        apply_property_shape(
+            &mut declared,
+            &["object", "null"],
+            json!({ "rotation": { "type": "number" }, "opacity": { "type": "number" } })
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        );
+
+        assert_eq!(
+            declared["properties"]["content"],
+            json!({ "type": "string" }),
+            "a member only the derivation knows about survives: {declared}"
+        );
+        assert_eq!(
+            declared["properties"]["rotation"],
+            json!({ "type": "number" }),
+            "the shape is written from what the parser reads, so it wins: {declared}"
+        );
+        assert_eq!(
+            declared["properties"]["opacity"],
+            json!({ "type": "number" })
         );
     }
 
