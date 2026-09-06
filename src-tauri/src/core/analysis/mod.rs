@@ -35,6 +35,7 @@ pub mod esd;
 pub mod loudness;
 #[cfg(feature = "ai-providers")]
 pub mod openai_perception;
+pub mod remeasure;
 pub mod segmentation;
 pub mod semantic_edit_plan;
 pub mod speaker_turns;
@@ -44,6 +45,7 @@ pub mod visual;
 
 pub use clip_analysis::*;
 pub use clip_perception::*;
+pub use remeasure::*;
 pub use semantic_edit_plan::*;
 pub use types::*;
 
@@ -59,15 +61,6 @@ use crate::core::indexing::shots::{ShotDetector, ShotDetectorConfig};
 use crate::core::{CoreError, CoreResult};
 
 use audio::{AudioAnalysis, AudioProfiler};
-
-/// Error prefix recorded against the `audio` job when only the meter failed.
-///
-/// The audio pass produced a profile — its silence and speech regions are
-/// stored — and could not put numbers on it. Readers that decide whether to try
-/// the pass again need to tell that apart from an audio job that produced
-/// nothing, and the recorded message is the only thing that survives into the
-/// cached bundle.
-pub const LOUDNESS_FAILURE_PREFIX: &str = "Loudness measurement failed: ";
 
 /// What a single pipeline run produced, before its bundle met the cache.
 ///
@@ -493,8 +486,8 @@ impl AnalysisJobRunner {
                 } = analysis;
                 bundle.audio_profile = Some(profile.clone());
                 match loudness_error {
-                    Some(error) => {
-                        let detail = format!("{}{}", LOUDNESS_FAILURE_PREFIX, error);
+                    Some(failure) => {
+                        let detail = loudness_bundle_error(&failure);
                         bundle.add_error("audio", detail.clone());
                         emit_progress("audio", "completed", Some(detail));
                     }
@@ -907,9 +900,7 @@ impl AnalysisJobRunner {
         self.merge_bundle_update(asset_id, fallback_metadata, |bundle| {
             bundle.audio_profile = Some(analysis.profile);
             match analysis.loudness_error {
-                Some(error) => {
-                    bundle.add_error("audio", format!("Loudness measurement failed: {}", error))
-                }
+                Some(failure) => bundle.add_error("audio", loudness_bundle_error(&failure)),
                 None => {
                     bundle.errors.remove("audio");
                 }

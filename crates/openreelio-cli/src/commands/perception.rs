@@ -391,7 +391,12 @@ pub fn audio(args: AudioArgs) -> anyhow::Result<()> {
         .block_on(profiler.analyze(&media_path, metadata.duration_sec))
         .map_err(|error| anyhow::anyhow!("Audio profiling failed: {}", error))?;
     let profile = analysis.profile.clone();
-    let loudness_error = analysis.loudness_error.clone();
+    // Reported as the plain reason: the retry classification is the cache's
+    // business, and a one-shot CLI invocation has nothing to retry with.
+    let loudness_error = analysis
+        .loudness_error
+        .as_ref()
+        .map(|failure| failure.message.clone());
 
     AnalysisJobRunner::new(&project.path)
         .merge_bundle_audio_analysis(&args.id, &metadata, analysis)
@@ -945,7 +950,10 @@ mod tests {
         bundle.audio_profile = Some(openreelio_core::analysis::AudioProfile::silent(10.0));
         bundle.add_error(
             "audio",
-            "Loudness measurement failed: no readings".to_string(),
+            format!(
+                "{}no readings",
+                openreelio_core::analysis::LOUDNESS_FAILURE_PREFIX
+            ),
         );
 
         let (failed, barren) = classify_run(&bundle, &produced(&["audio"]), &["audio"]);

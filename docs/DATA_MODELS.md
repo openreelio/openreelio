@@ -560,6 +560,11 @@ interface ContentSegment {
 type SegmentType = 'talk' | 'performance' | 'reaction' | 'transition' | 'establishing' | 'montage';
 ```
 
+`features` carries the per-window heuristic signals the classifier used.
+`avgLoudness` is `null` when the window holds no audible second at all: a silent
+window has no level, and reporting the silence floor as one would let it be
+compared against loudness thresholds as if it were a measurement.
+
 ### FrameAnalysis
 
 ```typescript
