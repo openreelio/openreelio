@@ -52,7 +52,11 @@ can be missing on its own: `hasLoudnessMeasurement` is `false`, `status` is
 `"partial"` instead of `"ok"`, `loudnessError` says why, and `peakDb`,
 `truePeakDbtp`, `integratedLufs` and `loudnessRangeLu` are `null` rather than
 showing the silence floor as a level. Trust the regions in that case and do not
-read a level from the profile until a later run measures one.
+read a level from the profile until a later run measures one. An asset with no
+audio stream at all is the opposite case and reports as measured — `status` is
+`"ok"`, `hasLoudnessMeasurement` is `true`, and `peakDb` is the silence floor
+(`-90`) rather than `null` — because there is nothing there to measure and no
+later run would find any.
 
 **`analysis run`** drives the job runner with local-only providers. Transcript is
 off unless `--transcript` is passed and fails fast with a

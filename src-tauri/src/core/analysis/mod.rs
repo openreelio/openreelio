@@ -503,8 +503,13 @@ impl AnalysisJobRunner {
             }
             Ok(None) => None,
             Err(e) => {
-                bundle.add_error("audio", e.to_string());
-                emit_progress("audio", "failed", Some(e.to_string()));
+                // Classified like a meter-only failure so the re-measure gate
+                // can read it: a whole pass lost to the analysis timeout is
+                // worth another try, and an unclassified message reads as a
+                // verdict about the media that nothing ever revisits.
+                let detail = audio_pass_bundle_error(&e);
+                bundle.add_error("audio", detail.clone());
+                emit_progress("audio", "failed", Some(detail));
                 None
             }
         };

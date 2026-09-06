@@ -48,7 +48,7 @@ use crate::core::analysis::diarization_import::{
 use crate::core::analysis::esd::{self, EditingStyleDocument, EsdGenerator, EsdSummary};
 use crate::core::analysis::style_planner::{StylePlanResult, StylePlanner, StylePlanningContext};
 use crate::core::analysis::{
-    loudness_remeasure_wanted, AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata,
+    claim_loudness_remeasure, AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata,
 };
 use crate::core::analysis::{
     plan_semantic_clip_edit as plan_semantic_clip_edit_bundle, SemanticTemporalEditAction,
@@ -638,12 +638,12 @@ pub async fn get_analysis_bundle(
 
 /// Decides whether reading `bundle` should queue a loudness re-measurement.
 ///
-/// [`loudness_remeasure_wanted`] answers the question about the bundle — is the
-/// measurement missing, and is the recorded failure one that could clear. This
-/// adds the one thing that is not a property of the bundle: no pass has been
-/// attempted for this asset in this session. Claiming that slot is the last
-/// step so the check doubles as the concurrency gate — two reads of the same
-/// asset that arrive together produce one job, not two.
+/// The decision itself is [`claim_loudness_remeasure`], in the analysis core
+/// beside the gate it wraps: is the measurement missing, is the recorded
+/// failure one that could clear, and has no pass been attempted for this asset
+/// in this session. All this layer adds is the lock the session set lives
+/// behind, held across the claim so two reads of the same asset that arrive
+/// together produce one job, not two.
 ///
 /// The session set is what bounds the retry: a transient failure is tried again
 /// on the next launch, not on the next read. It is also cleared when the asset
@@ -652,7 +652,8 @@ async fn should_attempt_loudness_remeasure(
     bundle: &AnalysisBundle,
     attempted: &tokio::sync::Mutex<HashSet<String>>,
 ) -> bool {
-    loudness_remeasure_wanted(bundle) && attempted.lock().await.insert(bundle.asset_id.clone())
+    let mut attempted = attempted.lock().await;
+    claim_loudness_remeasure(bundle, &mut attempted)
 }
 
 /// Re-runs the audio pass for a bundle whose loudness measurement is missing.

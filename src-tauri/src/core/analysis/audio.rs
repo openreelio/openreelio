@@ -61,15 +61,20 @@ const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Opening words of the message an analysis pass reports when it times out.
 ///
-/// [`LoudnessFailure::from_error`] reads it back to tell a pass that ran out of
-/// time from one that judged the media, so the marker and the message it is
-/// formatted into have to stay together.
+/// Wording only: nothing classifies a failure by reading it back. The reason a
+/// pass failed travels as [`FilterPassFailure`], decided where the evidence is.
 const ANALYSIS_TIMEOUT_MARKER: &str = "Audio analysis timed out";
 
 /// Opening words of the message reported when the FFmpeg process never ran.
 ///
-/// Paired with [`ANALYSIS_TIMEOUT_MARKER`] for the same reason.
+/// Wording only, like [`ANALYSIS_TIMEOUT_MARKER`].
 const FFMPEG_SPAWN_FAILURE_MARKER: &str = "Failed to run FFmpeg";
+
+/// Words FFmpeg prints when the filter a pass asked for is not in this build.
+///
+/// Matched against raw FFmpeg stderr, at the point of capture — never against a
+/// message that has already had that stderr formatted into it.
+const MISSING_FILTER_MARKERS: [&str; 2] = ["No such filter", "Unknown filter"];
 
 /// VAD frame size in milliseconds.
 const VAD_FRAME_MS: usize = 30;
@@ -128,9 +133,10 @@ impl AudioProfiler {
         );
 
         // If all three fail with a "no audio stream" indicator, return silent profile
-        let silence_no_audio = is_no_audio_error(&silence_result);
-        let loudness_no_audio = is_no_audio_error(&loudness_result);
-        let spectral_no_audio = is_no_audio_error(&spectral_result);
+        let silence_no_audio = matches!(&silence_result, Err(FilterPassFailure::NoAudioStream));
+        let loudness_no_audio =
+            matches!(&loudness_result, Err(failure) if failure.is_no_audio_stream());
+        let spectral_no_audio = matches!(&spectral_result, Err(FilterPassFailure::NoAudioStream));
 
         if silence_no_audio && loudness_no_audio && spectral_no_audio {
             tracing::debug!(
@@ -145,10 +151,10 @@ impl AudioProfiler {
         let (loudness, loudness_error) = match loudness_result {
             Ok(measurement) => (measurement, None),
             Err(error) => {
-                let failure = LoudnessFailure::from_error(&error);
+                let failure = error.into_loudness_failure();
                 tracing::warn!(
                     input = %video_path.display(),
-                    %error,
+                    error = %failure.message,
                     transient = failure.is_transient(),
                     "Loudness measurement failed; the audio profile keeps its regions \
                      and reports its loudness as unmeasured"
@@ -214,7 +220,10 @@ impl AudioProfiler {
     /// Detects regions of silence using FFmpeg's `silencedetect` filter.
     ///
     /// Parses stderr for `silence_start` and `silence_end` markers.
-    async fn detect_silence(&self, video_path: &Path) -> CoreResult<Vec<SilenceRegion>> {
+    async fn detect_silence(
+        &self,
+        video_path: &Path,
+    ) -> Result<Vec<SilenceRegion>, FilterPassFailure> {
         let filter = format!(
             "silencedetect=n={}:d={}",
             SILENCE_THRESHOLD_DB, SILENCE_MIN_DURATION
@@ -292,11 +301,12 @@ impl AudioProfiler {
     async fn extract_loudness_and_peak(
         &self,
         video_path: &Path,
-    ) -> CoreResult<LoudnessMeasurement> {
+    ) -> Result<LoudnessMeasurement, LoudnessPassFailure> {
         let capture = self
             .run_ffmpeg_filter(video_path, &loudness_filter_chain())
-            .await?;
-        measure_loudness(&capture.stderr)
+            .await
+            .map_err(LoudnessPassFailure::Pass)?;
+        measure_loudness(&capture.stderr).map_err(LoudnessPassFailure::Meter)
     }
 
     // =========================================================================
@@ -308,16 +318,15 @@ impl AudioProfiler {
     /// Uses FFmpeg's `aspectralstats` filter to compute per-frame spectral
     /// centroids and averages them. Returns 0.0 gracefully if the filter is
     /// unavailable in the current FFmpeg build.
-    async fn extract_spectral_centroid(&self, video_path: &Path) -> CoreResult<f64> {
+    async fn extract_spectral_centroid(&self, video_path: &Path) -> Result<f64, FilterPassFailure> {
         let filter =
             "aspectralstats=measure=centroid,ametadata=mode=print:key=lavfi.aspectralstats.1.centroid";
 
         match self.run_ffmpeg_filter(video_path, filter).await {
             Ok(capture) => Ok(parse_spectral_centroid(&capture.stderr)),
             Err(err) => {
-                let msg = err.to_string();
                 // Only swallow explicit missing-filter errors; other failures propagate.
-                if msg.contains("No such filter") || msg.contains("Unknown filter") {
+                if matches!(err, FilterPassFailure::MissingFilter { .. }) {
                     tracing::debug!("aspectralstats filter unavailable, returning 0.0 Hz");
                     Ok(0.0)
                 } else {
@@ -428,7 +437,7 @@ impl AudioProfiler {
         &self,
         video_path: &Path,
         filter: &str,
-    ) -> CoreResult<crate::core::ffmpeg::FilterCapture> {
+    ) -> Result<crate::core::ffmpeg::FilterCapture, FilterPassFailure> {
         let capture = capture_filter_stderr(
             &self.ffmpeg_path,
             video_path,
@@ -437,28 +446,30 @@ impl AudioProfiler {
         )
         .await
         .map_err(|error| match error {
-            FFmpegError::Timeout => CoreError::Internal(format!(
-                "{} after {}s",
-                ANALYSIS_TIMEOUT_MARKER,
-                ANALYSIS_TIMEOUT.as_secs()
-            )),
-            other => CoreError::Internal(format!("{}: {}", FFMPEG_SPAWN_FAILURE_MARKER, other)),
+            FFmpegError::Timeout => FilterPassFailure::TimedOut,
+            other => FilterPassFailure::NotRun(other.to_string()),
         })?;
 
         // Check for no-audio-stream condition before checking exit status,
         // because FFmpeg may exit non-zero when there is no audio stream.
         if has_no_audio_indicator(&capture.stderr) {
-            return Err(CoreError::Internal(
-                "No audio stream found in input".to_string(),
-            ));
+            return Err(FilterPassFailure::NoAudioStream);
         }
 
         if !capture.success {
-            return Err(CoreError::Internal(format!(
-                "Audio analysis failed (exit {}): {}",
-                capture.exit_code.unwrap_or(-1),
-                capture.stderr_tail(STDERR_TAIL_SIZE)
-            )));
+            let stderr_tail = capture.stderr_tail(STDERR_TAIL_SIZE);
+            // Decided here, over raw FFmpeg stderr, because this is the last
+            // place the two are still separable: once the tail is formatted
+            // into a message, a media path or a caption quoting the words
+            // would read back as a missing filter.
+            if has_missing_filter_indicator(&capture.stderr) {
+                return Err(FilterPassFailure::MissingFilter { stderr_tail });
+            }
+
+            return Err(FilterPassFailure::Failed {
+                exit_code: capture.exit_code.unwrap_or(-1),
+                stderr_tail,
+            });
         }
 
         if capture.truncated {
@@ -485,14 +496,11 @@ fn has_no_audio_indicator(stderr: &str) -> bool {
         || (stderr.contains("no audio") && stderr.contains("stream"))
 }
 
-/// Returns `true` if the result is an error indicating no audio stream.
-fn is_no_audio_error<T>(result: &Result<T, CoreError>) -> bool {
-    match result {
-        Err(CoreError::Internal(msg)) => {
-            msg.contains("No audio stream found") || msg.contains("does not contain any stream")
-        }
-        _ => false,
-    }
+/// Checks whether FFmpeg stderr says the requested filter is not in this build.
+fn has_missing_filter_indicator(stderr: &str) -> bool {
+    MISSING_FILTER_MARKERS
+        .iter()
+        .any(|marker| stderr.contains(marker))
 }
 
 fn map_audio_extraction_error(
@@ -651,6 +659,125 @@ fn extract_silence_end(line: &str) -> Option<f64> {
     num_str.parse::<f64>().ok()
 }
 
+/// Why one FFmpeg filter pass produced no capture.
+///
+/// Each variant is decided where the evidence still is — the watchdog, the
+/// spawn result, the raw stderr — so no caller has to read a formatted message
+/// back to learn what happened. The message is for humans only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FilterPassFailure {
+    /// The watchdog fired before FFmpeg finished.
+    TimedOut,
+    /// FFmpeg never ran to completion: a missing input path, a process that
+    /// would not spawn, an I/O error while waiting for it.
+    NotRun(String),
+    /// The input carries no audio stream for the filter to read.
+    NoAudioStream,
+    /// This FFmpeg build does not have the filter the pass asked for.
+    MissingFilter {
+        /// Tail of the FFmpeg stderr, for the message.
+        stderr_tail: String,
+    },
+    /// FFmpeg ran and exited non-zero for some other reason.
+    Failed {
+        /// The process exit code, or `-1` when it reported none.
+        exit_code: i32,
+        /// Tail of the FFmpeg stderr, for the message.
+        stderr_tail: String,
+    },
+}
+
+impl FilterPassFailure {
+    /// Whether a later pass over the same media could still succeed.
+    ///
+    /// Only two causes are settled: an input with no audio stream, and an
+    /// FFmpeg build without the filter. Everything else — the watchdog, a
+    /// process that would not start, a non-zero exit carrying a decode or I/O
+    /// error — says nothing about the media that the next pass has to repeat.
+    pub(crate) fn kind(&self) -> LoudnessFailureKind {
+        match self {
+            Self::NoAudioStream | Self::MissingFilter { .. } => LoudnessFailureKind::Unmeasurable,
+            Self::TimedOut | Self::NotRun(_) | Self::Failed { .. } => {
+                LoudnessFailureKind::Transient
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for FilterPassFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimedOut => write!(
+                f,
+                "{} after {}s",
+                ANALYSIS_TIMEOUT_MARKER,
+                ANALYSIS_TIMEOUT.as_secs()
+            ),
+            Self::NotRun(reason) => write!(f, "{}: {}", FFMPEG_SPAWN_FAILURE_MARKER, reason),
+            Self::NoAudioStream => write!(f, "No audio stream found in input"),
+            Self::MissingFilter { stderr_tail } => write!(
+                f,
+                "Audio analysis failed: this FFmpeg build has no such filter: {}",
+                stderr_tail
+            ),
+            Self::Failed {
+                exit_code,
+                stderr_tail,
+            } => write!(
+                f,
+                "Audio analysis failed (exit {}): {}",
+                exit_code, stderr_tail
+            ),
+        }
+    }
+}
+
+impl From<FilterPassFailure> for CoreError {
+    /// Carries the verdict across the [`CoreError`] boundary in the variant.
+    ///
+    /// A settled failure becomes [`CoreError::AnalysisFailed`] and a transient
+    /// one [`CoreError::Internal`], which is what lets
+    /// [`LoudnessFailure::from_error`] classify a whole-pass error without
+    /// matching words inside a message that embeds stderr.
+    fn from(failure: FilterPassFailure) -> Self {
+        match failure.kind() {
+            LoudnessFailureKind::Unmeasurable => CoreError::AnalysisFailed(failure.to_string()),
+            LoudnessFailureKind::Transient => CoreError::Internal(failure.to_string()),
+        }
+    }
+}
+
+/// Why the loudness pass produced no measurement.
+///
+/// Kept apart from [`LoudnessFailure`] for the length of the pass because
+/// `analyze` needs one thing the rendered message cannot tell it: whether the
+/// input has an audio stream at all.
+#[derive(Debug)]
+pub(crate) enum LoudnessPassFailure {
+    /// The FFmpeg pass never handed the meter anything to read.
+    Pass(FilterPassFailure),
+    /// The capture came back and [`measure_loudness`] refused it.
+    Meter(CoreError),
+}
+
+impl LoudnessPassFailure {
+    /// Whether this pass failed because the input has no audio stream.
+    pub(crate) fn is_no_audio_stream(&self) -> bool {
+        matches!(self, Self::Pass(FilterPassFailure::NoAudioStream))
+    }
+
+    /// Renders the failure as the verdict stored against the profile.
+    pub(crate) fn into_loudness_failure(self) -> LoudnessFailure {
+        match self {
+            Self::Pass(failure) => LoudnessFailure {
+                message: failure.to_string(),
+                kind: failure.kind(),
+            },
+            Self::Meter(error) => LoudnessFailure::from_error(&error),
+        }
+    }
+}
+
 /// Whether a failed loudness pass could still produce numbers on a later run.
 ///
 /// Read by the re-measure gate in [`crate::core::analysis::remeasure`]: only a
@@ -659,9 +786,12 @@ fn extract_silence_end(line: &str) -> Option<f64> {
 pub enum LoudnessFailureKind {
     /// The pass never reached a verdict about the media.
     ///
-    /// It ran out of time, or FFmpeg could not be started at all. Nothing here
-    /// is a property of the file, so the same asset is worth one more pass once
-    /// the machine or the install has moved on.
+    /// It ran out of time, FFmpeg could not be started at all, or the process
+    /// exited non-zero on something — a read error, a killed decoder, a machine
+    /// out of resources — that the next run need not hit. Nothing here is a
+    /// property of the file, so the same asset is worth one more pass once the
+    /// machine or the install has moved on. This is the default: a cause has to
+    /// be recognised as settled before it costs the asset its numbers forever.
     Transient,
     /// The pass ran and its output could not be turned into numbers.
     ///
@@ -682,23 +812,30 @@ pub struct LoudnessFailure {
 }
 
 impl LoudnessFailure {
-    /// Classifies one failed loudness pass.
+    /// Classifies a failure that has already been flattened into a [`CoreError`].
     ///
-    /// Only the two ways the pass can fail *before* judging the media count as
-    /// transient — the analysis timeout and a process that would not spawn.
-    /// Everything else is the pass having looked and refused: a non-zero exit,
-    /// a missing filter, a meter whose output [`measure_loudness`] rejected.
+    /// The variant carries the verdict, and only the variant: a settled cause —
+    /// output [`measure_loudness`] refused, an FFmpeg build without the filter,
+    /// an input with no audio stream — arrives as [`CoreError::AnalysisFailed`],
+    /// and everything else is transient. Reading the *message* instead is how
+    /// the classifier used to default to permanent: a decode that died on
+    /// `Input/output error` carried no marker, so it was filed as a verdict
+    /// about the media and the asset never got another pass.
+    ///
+    /// Prefer classifying at the pass — `LoudnessPassFailure` and
+    /// `FilterPassFailure::kind` — where the cause is still structured. This
+    /// is for callers holding nothing else, such as a whole analysis pass that
+    /// failed before the loudness result existed.
     pub fn from_error(error: &CoreError) -> Self {
-        let message = error.to_string();
-        let kind = if message.contains(ANALYSIS_TIMEOUT_MARKER)
-            || message.contains(FFMPEG_SPAWN_FAILURE_MARKER)
-        {
-            LoudnessFailureKind::Transient
-        } else {
-            LoudnessFailureKind::Unmeasurable
+        let kind = match error {
+            CoreError::AnalysisFailed(_) => LoudnessFailureKind::Unmeasurable,
+            _ => LoudnessFailureKind::Transient,
         };
 
-        Self { message, kind }
+        Self {
+            message: error.to_string(),
+            kind,
+        }
     }
 
     /// Returns `true` when another pass could still produce numbers.
@@ -897,53 +1034,123 @@ mod tests {
 
     /// Feature: loudness failure classification
     /// Scenario: the pass never reached a verdict about the media
-    ///   Given a loudness pass that timed out, or whose FFmpeg never ran
+    ///   Given a pass that timed out, whose FFmpeg never ran, whose input was
+    ///   rejected before the spawn, or that died on a read error
     ///   When the failure is classified
     ///   Then it is transient
     ///
-    /// Neither cause says anything about the file, so the asset is worth one
-    /// more pass once the machine or the install has moved on.
+    /// None of these say anything about the file, so the asset is worth one
+    /// more pass once the machine or the install has moved on. The old
+    /// classifier read the message instead of the cause and defaulted to
+    /// permanent, so a decode killed by `Input/output error` cost the asset its
+    /// loudness numbers forever.
     #[test]
-    fn should_classify_a_pass_that_never_ran_as_transient() {
-        let timed_out = CoreError::Internal(format!(
-            "{} after {}s",
-            ANALYSIS_TIMEOUT_MARKER,
-            ANALYSIS_TIMEOUT.as_secs()
-        ));
-        let never_spawned = CoreError::Internal(format!(
-            "{}: No such file or directory",
-            FFMPEG_SPAWN_FAILURE_MARKER
-        ));
+    fn should_classify_a_pass_that_never_reached_a_verdict_as_transient() {
+        let never_reached_a_verdict = [
+            FilterPassFailure::TimedOut,
+            FilterPassFailure::NotRun("No such file or directory (os error 2)".to_string()),
+            FilterPassFailure::NotRun("Input file does not exist: /media/clip.mp4".to_string()),
+            FilterPassFailure::Failed {
+                exit_code: 1,
+                stderr_tail: "[in#0 @ 0x1] Error during demuxing: Input/output error".to_string(),
+            },
+        ];
 
-        assert!(LoudnessFailure::from_error(&timed_out).is_transient());
-        assert!(LoudnessFailure::from_error(&never_spawned).is_transient());
+        for failure in never_reached_a_verdict {
+            let rendered = failure.to_string();
+            assert_eq!(
+                failure.kind(),
+                LoudnessFailureKind::Transient,
+                "expected another pass to be worth it for {:?}",
+                rendered
+            );
+            // The same verdict has to survive the CoreError boundary, which is
+            // all a whole-pass failure has to classify from.
+            assert!(
+                LoudnessFailure::from_error(&CoreError::from(failure)).is_transient(),
+                "the verdict was lost crossing CoreError for {:?}",
+                rendered
+            );
+        }
     }
 
     /// Feature: loudness failure classification
-    /// Scenario: the meter ran and refused what it saw
-    ///   Given a pass rejected by `measure_loudness`, or one whose filter is missing
+    /// Scenario: the pass looked at the media and settled the question
+    ///   Given an input with no audio stream, an FFmpeg build without the
+    ///   filter, or output `measure_loudness` refused
     ///   When the failure is classified
     ///   Then it is unmeasurable
     ///
-    /// Marking these transient bought a full decode of the asset per session
-    /// that could only reach the same verdict.
+    /// Each is a property of this media and this FFmpeg build, so a retry buys
+    /// a full decode per session that can only reach the same verdict.
     #[test]
-    fn should_classify_a_meter_rejection_as_unmeasurable() {
-        let measured_nothing = measure_loudness("Input #0, mov, from 'clip.mp4':")
-            .expect_err("a log with no readings is refused");
-        let missing_filter = CoreError::Internal(
-            "Audio analysis failed (exit 1): No such filter: 'ebur128'".to_string(),
-        );
-        let no_audio = CoreError::Internal("No audio stream found in input".to_string());
+    fn should_classify_a_settled_verdict_as_unmeasurable() {
+        let settled = [
+            FilterPassFailure::NoAudioStream,
+            FilterPassFailure::MissingFilter {
+                stderr_tail: "No such filter: 'ebur128'".to_string(),
+            },
+        ];
 
-        for error in [measured_nothing, missing_filter, no_audio] {
-            let failure = LoudnessFailure::from_error(&error);
-            assert!(
-                !failure.is_transient(),
+        for failure in settled {
+            let rendered = failure.to_string();
+            assert_eq!(
+                failure.kind(),
+                LoudnessFailureKind::Unmeasurable,
                 "expected a settled verdict for {:?}",
-                failure.message
+                rendered
+            );
+            assert!(
+                !LoudnessFailure::from_error(&CoreError::from(failure)).is_transient(),
+                "the verdict was lost crossing CoreError for {:?}",
+                rendered
             );
         }
+
+        let measured_nothing = measure_loudness("Input #0, mov, from 'clip.mp4':")
+            .expect_err("a log with no readings is refused");
+        assert!(!LoudnessFailure::from_error(&measured_nothing).is_transient());
+    }
+
+    /// Feature: loudness failure classification
+    /// Scenario: the media path or the stderr quotes the words of a verdict
+    ///   Given a decode that died with a filename containing "No such filter"
+    ///   When the failure is classified
+    ///   Then it is still transient, because the cause is read and not the text
+    ///
+    /// The classifier used to `contains`-match over a message with the stderr
+    /// tail and the media path formatted into it, so a file could talk itself
+    /// out of ever being measured.
+    #[test]
+    fn should_classify_by_cause_and_not_by_words_in_the_message() {
+        let failure = FilterPassFailure::Failed {
+            exit_code: 1,
+            stderr_tail: "Error opening 'No such filter.mp4': Input/output error".to_string(),
+        };
+
+        assert_eq!(failure.kind(), LoudnessFailureKind::Transient);
+    }
+
+    /// Feature: loudness failure classification
+    /// Scenario: the meter refused output the filter pass delivered
+    ///   Given a loudness pass whose capture `measure_loudness` rejected
+    ///   When the pass failure is turned into the stored verdict
+    ///   Then it is unmeasurable, while a failed filter pass keeps its own kind
+    #[test]
+    fn should_keep_the_meter_and_the_filter_pass_verdicts_apart() {
+        let meter = LoudnessPassFailure::Meter(
+            measure_loudness("Input #0, mov, from 'clip.mp4':")
+                .expect_err("a log with no readings is refused"),
+        );
+        let timed_out = LoudnessPassFailure::Pass(FilterPassFailure::TimedOut);
+        let no_audio = LoudnessPassFailure::Pass(FilterPassFailure::NoAudioStream);
+
+        assert!(!meter.is_no_audio_stream());
+        assert!(!meter.into_loudness_failure().is_transient());
+        assert!(!timed_out.is_no_audio_stream());
+        assert!(timed_out.into_loudness_failure().is_transient());
+        assert!(no_audio.is_no_audio_stream());
+        assert!(!no_audio.into_loudness_failure().is_transient());
     }
 
     // -------------------------------------------------------------------------
@@ -1485,14 +1692,16 @@ lavfi.aspectralstats.1.centroid=2800.0
     }
 
     #[test]
-    fn should_detect_no_audio_error_in_result() {
-        let err: Result<Vec<SilenceRegion>, CoreError> = Err(CoreError::Internal(
-            "No audio stream found in input".to_string(),
+    fn should_detect_a_missing_filter_indicator() {
+        assert!(has_missing_filter_indicator(
+            "[AVFilterGraph @ 0x1] No such filter: 'ebur128'"
         ));
-        assert!(is_no_audio_error(&err));
-
-        let ok: Result<Vec<SilenceRegion>, CoreError> = Ok(vec![]);
-        assert!(!is_no_audio_error(&ok));
+        assert!(has_missing_filter_indicator(
+            "Unknown filter 'aspectralstats'"
+        ));
+        assert!(!has_missing_filter_indicator(
+            "Error during demuxing: Input/output error"
+        ));
     }
 
     // -------------------------------------------------------------------------
