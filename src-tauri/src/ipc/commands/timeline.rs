@@ -81,6 +81,75 @@ fn execute_recorded(
     Ok((result, ranges))
 }
 
+/// Reads an asset the app is about to place from, when nothing has measured it.
+///
+/// The CLI probes lazily before every placement, so a project imported with
+/// `asset import --no-probe`, or one written before `audioDurationSec` was
+/// recorded, is corrected the first time a clip is cut from it. Nothing in the
+/// app did: it probes on import and never again, so opening such a project in
+/// the GUI and dragging the asset onto the timeline landed a clip of the
+/// default length — the very case the CLI back-fill exists to stop.
+///
+/// The reading is recorded through the shared
+/// [`ensure_asset_measured`](crate::core::commands::ensure_asset_measured), so
+/// the app logs the same `UpdateAsset` op for the same file as the CLI. FFprobe
+/// runs on the app's own `FFmpegRunner` rather than on a runtime of its own,
+/// which is why the probe is taken here and handed to the shared helper instead
+/// of being called from inside it.
+///
+/// Never an error: a probe that cannot run leaves the placement exactly as
+/// valid as it was, just at the default length, and failing the edit over it
+/// would be worse than the length. Warnings go to the log because
+/// `execute_command` has no channel to report them on.
+async fn back_fill_asset_measurement(
+    project: &mut ActiveProject,
+    asset_id: &str,
+    ffmpeg_state: &State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+) {
+    use crate::core::commands::{
+        asset_needs_measurement, asset_source_path, ensure_asset_measured,
+    };
+
+    let needs_measurement = project
+        .state
+        .assets
+        .get(asset_id)
+        .is_some_and(asset_needs_measurement);
+    if !needs_measurement {
+        return;
+    }
+    let Some(source_path) = asset_source_path(&project.state, &project.path, asset_id) else {
+        return;
+    };
+
+    let probed = {
+        let ffmpeg_guard = ffmpeg_state.read().await;
+        match ffmpeg_guard.runner() {
+            Some(runner) => runner.probe(&source_path).await.map_err(|error| {
+                format!(
+                    "FFprobe could not read '{}': {error}",
+                    source_path.display()
+                )
+            }),
+            None => Err("FFmpeg could not be resolved, so the asset was not re-probed".to_string()),
+        }
+    };
+
+    match ensure_asset_measured(project, asset_id, move |_| probed) {
+        Ok(warnings) => {
+            for warning in warnings {
+                tracing::warn!(asset_id = %asset_id, "{warning}");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                asset_id = %asset_id,
+                "Recording the probed asset duration failed: {error}"
+            );
+        }
+    }
+}
+
 impl CommandResultDto {
     /// Builds the result an executed command reports.
     fn new(result: CommandResult, sequence_id: Option<String>, ranges: Vec<TimeRange>) -> Self {
@@ -201,11 +270,12 @@ pub async fn validate_command_payload(
 /// Executes an edit command
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(state, payload), fields(command_type = %command_type))]
+#[tracing::instrument(skip(state, ffmpeg_state, payload), fields(command_type = %command_type))]
 pub async fn execute_command(
     command_type: String,
     payload: serde_json::Value,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
 ) -> Result<CommandResultDto, String> {
     let started_at = std::time::Instant::now();
     let command_type_for_log = command_type.clone();
@@ -249,6 +319,14 @@ pub async fn execute_command(
     // would run but report no sequence and no affected ranges. Read before
     // `build_command` consumes the payload.
     let targets_active_sequence = typed_command.targets_active_sequence();
+
+    // A placement takes the asset's recorded length, so an asset nothing has
+    // read under the current probe rules is read now — before the clip is cut
+    // from it. Recorded as its own `UpdateAsset` op ahead of the placement, the
+    // way every headless surface records it.
+    if let Some(asset_id) = typed_command.inserted_asset_id().map(str::to_string) {
+        back_fill_asset_measurement(project, &asset_id, &ffmpeg_state).await;
+    }
 
     // Build the Command trait object from the validated payload
     let command = typed_command.build_command(&project.path);

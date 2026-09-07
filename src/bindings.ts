@@ -10604,7 +10604,15 @@ export type UnnestCompoundClipPayload = { sequenceId: string; trackId: string; c
  * Input payload for updating an agent run phase and syncing session state.
  */
 export type UpdateAgentRunPhaseInput = { runId: string; phase: string; traceId: string | null; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
-export type UpdateAssetPayload = { assetId: string; name: string | null; tags: string[] | null; license: LicenseInfo | null; thumbnailUrl: string | null; proxyStatus: ProxyStatus | null; proxyUrl: string | null; uri: string | null; durationSec: number | null; audioDurationSec: number | null; 
+export type UpdateAssetPayload = { assetId: string; name: string | null; tags: string[] | null; license: LicenseInfo | null; thumbnailUrl: string | null; proxyStatus: ProxyStatus | null; proxyUrl: string | null; uri: string | null; durationSec: number | null; 
+/**
+ * How long the asset's sound runs when it outlasts its picture; `Some(None)` clears it.
+ * 
+ * Defaulted for the same reason as `probe_version`: a hand-written
+ * `UpdateAsset` should not have to carry a field only the probe fills in.
+ * See [`Asset::audio_duration_sec`](crate::core::assets::Asset::audio_duration_sec).
+ */
+audioDurationSec?: number | null; 
 /**
  * Which revision of the probe rules measured the asset; `Some(None)` clears it.
  * 

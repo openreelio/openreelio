@@ -1276,7 +1276,13 @@ impl ProjectState {
         // the behaviour they were written under.
         let named_track_id = op.payload.get("trackId").and_then(|value| value.as_str());
 
+        // Whether the trim landed, and whether the sequence was even there to
+        // land it in. A missing sequence is the forgiving case replay is built
+        // for; a sequence that *is* there and still matched nothing is not.
+        let mut applied = false;
+        let mut sequence_found = false;
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
+            sequence_found = true;
             for track in &mut sequence.tracks {
                 if named_track_id.is_some_and(|named_track_id| track.id != named_track_id) {
                     continue;
@@ -1297,10 +1303,32 @@ impl ProjectState {
 
                     Self::sort_track_clips(track);
                     Self::warn_replayed_track_overlap(track);
+                    applied = true;
                     break;
                 }
             }
         }
+
+        // A trim that matched nothing leaves the clip at its pre-trim length
+        // and says so nowhere, which reads downstream as a replay that simply
+        // had no such edit. Replay is deliberately forgiving — an op for a
+        // sequence a later op removed must not fail the whole rebuild — but a
+        // sequence that is present, with a *named* track that holds no such
+        // clip, means the log and the state disagree, and that is worth a line
+        // in the log. Ops written before the track was recorded are exempt:
+        // they replay by scan, so any track may legitimately match.
+        if sequence_found && !applied {
+            if let Some(named_track_id) = named_track_id {
+                tracing::warn!(
+                    sequence_id = %seq_id,
+                    track_id = %named_track_id,
+                    clip_id = %clip_id,
+                    op_id = %op.id,
+                    "ClipTrim op named a track that holds no such clip; the trim was not applied"
+                );
+            }
+        }
+
         Ok(())
     }
 

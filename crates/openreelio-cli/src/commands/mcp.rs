@@ -770,7 +770,7 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.plan.validate",
             "OpenReelio plan validation",
-            "Validate a multi-step command plan without executing it. Reports duplicate and missing step ids, dependency cycles, the step cap, and any payload that does not parse.",
+            "Validate a multi-step command plan without executing it. Reports duplicate and missing step ids, dependency cycles, the step cap, and any payload that does not parse. Everything is measured against the project as it stands, so a pass is not a promise about the state each step will run against: 'openreelio.plan.apply' re-probes a legacy asset before the first step runs, and a trim accepted here against an unmeasured asset can be refused once its real media length is known. Steps whose bounds could not be settled yet are named in 'uncheckedSteps' rather than refused.",
             serde_json::json!({
                 "type": "object",
                 "required": ["plan"],
@@ -4641,14 +4641,16 @@ mod tests {
         );
     }
 
-    /// Feature: one refusal for one plan
+    /// Feature: a pre-flight that never refuses a plan apply would run
     /// Scenario: a trim naming a track that does not hold its clip
     ///   Given a clip on a video track and a plan that trims it through the
     ///   audio track
     ///   When the plan is validated and then applied
-    ///   Then both refuse it, and for the same reason
+    ///   Then validate defers the step rather than refusing it — an earlier
+    ///     step in another plan is exactly what would put the clip on that
+    ///     track — and apply refuses it, with or without a `newSourceOut`
     #[test]
-    fn should_refuse_a_wrong_track_trim_with_the_same_reason_as_apply() {
+    fn should_defer_a_wrong_track_trim_that_apply_then_refuses() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let project_path = temp_dir.path().join("wrong_track_plan_project");
         let media_path = temp_dir.path().join("clip.mp4");
@@ -4725,17 +4727,21 @@ mod tests {
             ..Default::default()
         };
 
+        // The pre-flight measures every step against the project as it stands,
+        // so it cannot tell this apart from a trim whose clip an earlier step
+        // is about to move onto that track. Reporting it refused plans that
+        // apply runs without complaint, so it is deferred instead.
         let validated = validate_plan(&state, serde_json::json!({ "plan": plan.clone() }))
             .expect("validate answers");
-        assert_eq!(validated["status"], "error", "{validated}");
-        assert!(
-            validated["errors"]
+        assert_eq!(validated["status"], "ok", "{validated}");
+        assert_eq!(
+            validated["uncheckedSteps"]
                 .as_array()
-                .expect("errors")
+                .expect("uncheckedSteps")
                 .iter()
-                .any(|error| error
-                    .as_str()
-                    .is_some_and(|text| text.contains("Clip not found"))),
+                .filter_map(|step| step.as_str())
+                .collect::<Vec<_>>(),
+            vec!["step-trim"],
             "{validated}"
         );
 
@@ -4750,8 +4756,59 @@ mod tests {
         assert_eq!(applied["status"], "error", "{applied}");
         assert!(
             applied.to_string().contains("Clip not found"),
-            "apply must refuse it for the reason validate gave: {applied}"
+            "apply must refuse a trim through a track that does not hold the clip: {applied}"
         );
+
+        // And the refusal does not depend on which field the trim moved: the
+        // guard used to answer `Ok` on a missing `newSourceOut` before it had
+        // resolved the track at all, so a trim that only pulled `sourceIn` in
+        // walked straight past it.
+        let source_in_only_plan = serde_json::json!({
+            "id": "wrong-track-plan",
+            "steps": [{
+                "id": "step-trim",
+                "commandType": "TrimClip",
+                "payload": {
+                    "sequenceId": sequence_id,
+                    "trackId": audio_track_id,
+                    "clipId": clip_id,
+                    "newSourceIn": 1.0
+                },
+                "dependsOn": []
+            }]
+        });
+
+        // A fresh grant: an approval token is spent by the apply that used it.
+        let second_state = McpServerState {
+            project: Some(project_path.clone()),
+            approval_token: Some("wrong-track-token-2".to_string()),
+            approval_plan_id: Some("wrong-track-plan".to_string()),
+            ..Default::default()
+        };
+        let applied = apply_plan(
+            &second_state,
+            serde_json::json!({
+                "approvalToken": "wrong-track-token-2",
+                "plan": source_in_only_plan
+            }),
+        )
+        .expect("apply answers");
+        assert_eq!(applied["status"], "error", "{applied}");
+        assert!(
+            applied.to_string().contains("Clip not found"),
+            "a wrong-track trim carrying only newSourceIn is refused too: {applied}"
+        );
+
+        // Nothing landed on either attempt.
+        let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
+        let clip = reopened.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .find(|clip| clip.id == clip_id)
+            .expect("the clip survives");
+        assert_eq!(clip.range.source_in_sec, 0.0);
+        assert_eq!(clip.range.source_out_sec, 4.0);
     }
 
     #[test]

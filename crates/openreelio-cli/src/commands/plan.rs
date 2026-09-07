@@ -49,6 +49,12 @@ pub enum PlanAction {
     },
 
     /// Validate a plan file without executing
+    ///
+    /// The pass measures every step against the project as it stands, so it is
+    /// not a promise about the state each step will actually run against:
+    /// `plan execute` re-probes a legacy asset before the first step runs, and
+    /// a trim accepted here against an unmeasured asset can be refused once its
+    /// real media length is known.
     Validate {
         /// Project directory path
         #[arg(long)]
@@ -650,35 +656,23 @@ pub(crate) struct MediaLengthCheck {
     pub unchecked_steps: Vec<String>,
 }
 
-/// Whether the sequence a trim names actually holds the clip it names.
-///
-/// The media-length guard is deliberately silent about a clip that is nowhere
-/// in its sequence — the command reports that far better than a pre-flight pass
-/// could — so this pass has to recognise the same case itself, or it would
-/// report those steps as measured and found sound.
-fn sequence_holds_clip(
-    state: &openreelio_core::project::ProjectState,
-    sequence_id: &str,
-    clip_id: &str,
-) -> bool {
-    state.sequences.get(sequence_id).is_some_and(|sequence| {
-        sequence
-            .tracks
-            .iter()
-            .any(|track| track.get_clip(clip_id).is_some())
-    })
-}
-
 /// The past-the-media refusals a plan's trims would hit, without running it.
 ///
 /// The read-only counterpart to the guard in [`execute_step`], against the
 /// project as it stands. A step whose payload still carries a `$fromStep`
 /// reference is left to execution: the clip it trims does not exist yet, so
 /// there is nothing here to measure it against — those steps are named in
-/// [`MediaLengthCheck::unchecked_steps`] rather than passed over in silence, and
-/// so is a step naming a clip the sequence does not hold yet. A payload that
-/// does not parse is [`validate_edit_plan`]'s error to report, not this pass's,
-/// and it is not counted as unchecked here.
+/// [`MediaLengthCheck::unchecked_steps`] rather than passed over in silence. A
+/// payload that does not parse is [`validate_edit_plan`]'s error to report, not
+/// this pass's, and it is not counted as unchecked here.
+///
+/// Only the media-length breach itself is an error. The guard also resolves the
+/// track and clip a trim names, and those refusals are unresolvable here: this
+/// pass measures every step against the pre-plan state, so a plan that moves a
+/// clip to V2 and then trims it on V2 makes the trim look like a wrong-track
+/// edit until the move ahead of it has run. Reporting that refused a plan
+/// `plan execute` runs without complaint, so a step the guard cannot resolve is
+/// deferred to execution as unchecked instead.
 pub(crate) fn collect_media_length_errors(
     state: &openreelio_core::project::ProjectState,
     plan: &EditPlan,
@@ -710,18 +704,23 @@ pub(crate) fn collect_media_length_errors(
         };
 
         if let openreelio_core::ipc::CommandPayload::TrimClip(trim) = &payload {
-            if !sequence_holds_clip(state, &trim.sequence_id, &trim.clip_id) {
-                unchecked_steps.push(step.id.clone());
-                continue;
-            }
-            if let Err(error) = openreelio_core::commands::ensure_source_out_within_media(
+            match openreelio_core::commands::ensure_source_out_within_media(
                 state,
                 &trim.sequence_id,
                 &trim.track_id,
                 &trim.clip_id,
                 trim.new_source_out,
             ) {
-                errors.push(format!("Step '{}' cannot run: {}", step.id, error));
+                Ok(()) => {}
+                Err(openreelio_core::CoreError::ValidationError(message)) => {
+                    errors.push(format!("Step '{}' cannot run: {message}", step.id));
+                }
+                // `TrackNotFound`/`ClipNotFound` measured against the pre-plan
+                // state say nothing about the state the step will actually run
+                // against — an earlier step may be what puts the clip on that
+                // track — so the reading is deferred rather than reported as a
+                // refusal.
+                Err(_) => unchecked_steps.push(step.id.clone()),
             }
         }
     }

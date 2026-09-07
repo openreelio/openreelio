@@ -9,7 +9,10 @@
 //! here so both surfaces record the same asset for the same file.
 
 use crate::core::{
-    assets::{AssetKind, AudioInfo, MediaMetadata, VideoInfo, ASSET_PROBE_VERSION},
+    assets::{
+        needs_probe_refresh, Asset, AssetKind, AudioInfo, MediaMetadata, VideoInfo,
+        ASSET_PROBE_VERSION,
+    },
     commands::{ImportAssetCommand, UpdateAssetCommand},
     ffmpeg::{AudioStreamInfo, MediaInfo, VideoStreamInfo},
     project::ProjectState,
@@ -17,6 +20,8 @@ use crate::core::{
     timeline::TrackKind,
     CoreError, CoreResult, Ratio,
 };
+use crate::ActiveProject;
+use std::path::{Path, PathBuf};
 
 /// Tolerance for recognising an NTSC frame rate in a probed float.
 const NTSC_TOLERANCE: f64 = 0.01;
@@ -254,6 +259,11 @@ pub fn asset_duration_for_track(
 /// walked through. Only a clip that is nowhere in the sequence is left to the
 /// command to report, because then there is nothing here to measure.
 ///
+/// That resolution runs whether or not the trim carries a `newSourceOut`:
+/// hanging it off the bound made the refusal depend on which field the caller
+/// happened to send, so a wrong-track trim that moved only `newSourceIn` was
+/// accepted everywhere.
+///
 /// The slack is the renderer's own
 /// [`SOURCE_OVERRUN_TOLERANCE_SEC`](crate::core::render::SOURCE_OVERRUN_TOLERANCE_SEC),
 /// so nothing is refused here that the export would have rendered without
@@ -267,9 +277,6 @@ pub fn ensure_source_out_within_media(
     clip_id: &str,
     source_out: Option<f64>,
 ) -> CoreResult<()> {
-    let Some(source_out) = source_out else {
-        return Ok(());
-    };
     let Some(sequence) = state.sequences.get(sequence_id) else {
         return Ok(());
     };
@@ -291,6 +298,13 @@ pub fn ensure_source_out_within_media(
     };
     let Some(clip) = track.get_clip(clip_id) else {
         return Err(CoreError::ClipNotFound(clip_id.to_string()));
+    };
+    // Only now is there nothing left to refuse: a trim that moves `sourceIn`
+    // alone still names a track and a clip, and resolving them after this early
+    // return let a wrong-track trim through on whichever surface happened not
+    // to send a `newSourceOut`.
+    let Some(source_out) = source_out else {
+        return Ok(());
     };
     let Some(asset) = state.assets.get(&clip.asset_id) else {
         return Ok(());
@@ -469,11 +483,14 @@ pub fn update_command_from_probe(
         // audio clip by a file the asset no longer claims to be.
         command =
             command.with_audio_duration_sec(recorded_audio_duration_sec(media_info, asset_kind));
-        // The marker goes with the pair, so an asset re-read under the current
-        // rules is not read again on the next insert. See
-        // [`Asset::probe_version`](crate::core::assets::Asset::probe_version).
-        command = command.with_probe_version(Some(ASSET_PROBE_VERSION));
     }
+    // The marker records that the file was read under the current rules, which
+    // is true even when the reading held no usable duration for this kind — a
+    // container FFprobe could not measure, say. Stamping it only alongside a
+    // duration left such an asset permanently stale, so every later insert
+    // re-probed the same unmeasurable file and paid for the same reading again.
+    // See [`Asset::probe_version`](crate::core::assets::Asset::probe_version).
+    command = command.with_probe_version(Some(ASSET_PROBE_VERSION));
     // A probe that could not size the file must not erase a size the import
     // already recorded: `0` here means "unread", not "empty".
     if media_info.size_bytes > 0 {
@@ -488,6 +505,173 @@ pub fn update_command_from_probe(
     }
 
     command
+}
+
+/// What a lazy measurement produced: a command to record, and what to report.
+pub struct AssetMeasurement {
+    /// The `UpdateAsset` that records the reading, when there is one to record.
+    ///
+    /// The caller executes it — through its own recorder where it has one — so
+    /// the measurement lands in the same batch as the edit that needed it
+    /// rather than in a batch of its own.
+    pub command: Option<UpdateAssetCommand>,
+    /// Lines the surface should publish to the caller.
+    pub warnings: Vec<String>,
+}
+
+/// Whether an asset still has to be read before its length can be trusted.
+///
+/// A still has no length to measure — the timeline gives it whatever slot it
+/// asks for — so it is never worth probing. Everything else is measured until
+/// a probe has stamped [`ASSET_PROBE_VERSION`] on it, whether or not that probe
+/// found a duration: an asset FFprobe genuinely cannot measure would otherwise
+/// be re-read on every insert forever. See
+/// [`needs_probe_refresh`](crate::core::assets::needs_probe_refresh).
+pub fn asset_needs_measurement(asset: &Asset) -> bool {
+    asset.kind != AssetKind::Image && needs_probe_refresh(asset)
+}
+
+/// The local file an asset points at, when it points at one.
+///
+/// Assets can carry a workspace-relative path, so the project root is what
+/// makes the URI resolvable. `None` when the asset is missing from the state or
+/// its resolved path is not a file on this machine — a re-probe has nothing to
+/// read in either case.
+pub fn asset_source_path(
+    state: &ProjectState,
+    project_root: &Path,
+    asset_id: &str,
+) -> Option<PathBuf> {
+    let asset = state.assets.get(asset_id)?;
+    let path = crate::core::workspace::path_resolver::resolve_to_absolute(
+        project_root,
+        asset.relative_path.as_deref().unwrap_or(asset.uri.as_str()),
+    );
+
+    path.is_file().then_some(path)
+}
+
+/// Measures an asset that has not been read under the current probe rules.
+///
+/// The GUI probes on import, so its assets know how long they are — but an
+/// asset imported before `audioDurationSec` was recorded bounds its linked
+/// audio clip by the picture and cuts the last seconds of the recording off,
+/// and one imported headlessly with `--no-probe` records no length at all so
+/// every insert from it falls back to a default regardless of the file.
+/// Correcting either through `UpdateAsset` rather than by mutating the asset
+/// keeps the correction in the ops log, so replaying the project reproduces it.
+///
+/// `probe` reads the file; it is the caller's because the CLI runs FFprobe on
+/// its own runtime while the app runs it on the shared `FFmpegRunner`. A probe
+/// that cannot run is a warning rather than a failure, because the edit that
+/// needed the measurement is still valid — it just takes the default length.
+pub fn measure_asset<P>(project: &ActiveProject, asset_id: &str, probe: P) -> AssetMeasurement
+where
+    P: FnOnce(&Path) -> Result<MediaInfo, String>,
+{
+    let nothing_to_do = AssetMeasurement {
+        command: None,
+        warnings: Vec::new(),
+    };
+
+    let Some(asset) = project.state.assets.get(asset_id) else {
+        // The command about to run reports the missing asset far better than a
+        // warning would.
+        return nothing_to_do;
+    };
+    if !asset_needs_measurement(asset) {
+        return nothing_to_do;
+    }
+
+    let asset_kind = asset.kind.clone();
+    // A re-read that fails leaves an already-measured asset exactly as usable
+    // as it was, and the edit it precedes is unaffected — so there is nothing
+    // for the caller to act on and nothing to report. Only an asset with no
+    // length at all is worth warning about, because that edit really does fall
+    // back to the default.
+    let measured_duration = asset
+        .duration_sec
+        .is_some_and(|duration| duration.is_finite() && duration > 0.0);
+    let warning = |text: String| AssetMeasurement {
+        command: None,
+        warnings: if measured_duration {
+            Vec::new()
+        } else {
+            vec![text]
+        },
+    };
+
+    let Some(source_path) = asset_source_path(&project.state, &project.path, asset_id) else {
+        return warning(format!(
+            "Asset '{asset_id}' records no duration and its file could not be located, so the clip takes the default length"
+        ));
+    };
+
+    let media_info = match probe(&source_path) {
+        Ok(info) => info,
+        Err(reason) => {
+            return warning(format!(
+                "{reason}; asset '{asset_id}' still records no duration, so the clip takes the default length"
+            ))
+        }
+    };
+
+    let command = update_command_from_probe(asset_id, &asset_kind, &media_info);
+    let Some(duration_sec) = recorded_duration_sec(&media_info, &asset_kind) else {
+        // The file was read, it just held no length for this kind. Recording
+        // the reading anyway stamps the probe marker, which is what stops the
+        // next insert from paying for the same unmeasurable reading again.
+        return AssetMeasurement {
+            command: Some(command),
+            warnings: if measured_duration {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "FFprobe reported no usable duration for asset '{asset_id}', so the clip takes the default length"
+                )]
+            },
+        };
+    };
+
+    let report = if measured_duration {
+        format!(
+            "Asset '{asset_id}' was measured before sound lengths were recorded; it was re-probed at {duration_sec:.3}s and updated before the insert"
+        )
+    } else {
+        format!(
+            "Asset '{asset_id}' recorded no duration; it was probed at {duration_sec:.3}s and updated before the insert"
+        )
+    };
+
+    AssetMeasurement {
+        command: Some(command),
+        warnings: vec![report],
+    }
+}
+
+/// Measures an unmeasured asset and records the reading in its own operation.
+///
+/// For surfaces that apply one command at a time and have no batch to fold the
+/// measurement into — `command execute`, the MCP edit tools, `plan execute`'s
+/// pre-pass, and the app's own `execute_command`. `timeline insert` uses
+/// [`measure_asset`] directly instead, so its `UpdateAsset` shares the insert's
+/// recorder.
+pub fn ensure_asset_measured<P>(
+    project: &mut ActiveProject,
+    asset_id: &str,
+    probe: P,
+) -> CoreResult<Vec<String>>
+where
+    P: FnOnce(&Path) -> Result<MediaInfo, String>,
+{
+    let measurement = measure_asset(project, asset_id, probe);
+    if let Some(command) = measurement.command {
+        project
+            .executor
+            .execute(Box::new(command), &mut project.state)?;
+    }
+
+    Ok(measurement.warnings)
 }
 
 #[cfg(test)]
@@ -909,6 +1093,189 @@ mod tests {
             Some(600.0)
         )
         .is_ok());
+    }
+
+    #[test]
+    fn should_refuse_a_wrong_track_trim_that_moves_only_the_source_in() {
+        let (state, sequence_id, (picture_track_id, picture_clip_id), (sound_track_id, _)) =
+            state_with_mixed_length_asset();
+
+        // A trim that only pulls `sourceIn` in carries no `newSourceOut`, and
+        // the guard used to return `Ok` on that before it had resolved the
+        // track at all — so the wrong-track refusal held on whichever surface
+        // happened to send both fields and not on the one that sent one.
+        let error = ensure_source_out_within_media(
+            &state,
+            &sequence_id,
+            &sound_track_id,
+            &picture_clip_id,
+            None,
+        )
+        .expect_err("a track that does not hold the clip is refused with or without a bound");
+        assert!(
+            matches!(&error, CoreError::ClipNotFound(id) if id == &picture_clip_id),
+            "expected ClipNotFound, got {error:?}"
+        );
+
+        let error = ensure_source_out_within_media(
+            &state,
+            &sequence_id,
+            "no-such-track",
+            &picture_clip_id,
+            None,
+        )
+        .expect_err("a track the sequence does not have is refused with or without a bound");
+        assert!(
+            matches!(&error, CoreError::TrackNotFound(id) if id == "no-such-track"),
+            "expected TrackNotFound, got {error:?}"
+        );
+
+        // The track that does hold the clip still passes: there is no bound to
+        // measure, and moving `sourceIn` alone can never reach past the media.
+        assert!(ensure_source_out_within_media(
+            &state,
+            &sequence_id,
+            &picture_track_id,
+            &picture_clip_id,
+            None
+        )
+        .is_ok());
+
+        // And a clip that is nowhere in the sequence is still the command's
+        // error to report rather than this guard's.
+        assert!(ensure_source_out_within_media(
+            &state,
+            &sequence_id,
+            &picture_track_id,
+            "no-such-clip",
+            None
+        )
+        .is_ok());
+    }
+
+    /// A project holding one asset that points at a real file nothing measured.
+    ///
+    /// The file's contents do not matter — every test here supplies its own
+    /// probe reading — but it has to exist, because an asset whose file cannot
+    /// be located has nothing to re-read.
+    fn project_with_unmeasured_asset(
+        name: &str,
+    ) -> (tempfile::TempDir, crate::ActiveProject, String) {
+        let temp_dir = tempfile::TempDir::new().expect("a temp dir");
+        let project_path = temp_dir.path().join(name);
+        let mut project =
+            crate::ActiveProject::create(name, project_path).expect("the project must be created");
+
+        let media_path = temp_dir.path().join("legacy.mp4");
+        std::fs::write(&media_path, b"not really a video").expect("the media file must be written");
+
+        // The asset an `--no-probe` import records: a real file, no duration,
+        // and no probe marker.
+        let asset = crate::core::assets::Asset::new_video(
+            "legacy",
+            &media_path.to_string_lossy(),
+            VideoInfo::default(),
+        );
+        let asset_id = asset.id.clone();
+        project.state.assets.insert(asset_id.clone(), asset);
+
+        (temp_dir, project, asset_id)
+    }
+
+    #[test]
+    fn should_probe_an_unmeasured_asset_once_and_leave_it_alone_after() {
+        let (_temp_dir, mut project, asset_id) =
+            project_with_unmeasured_asset("measure_once_project");
+
+        let mut info = media_info(6.0);
+        info.video_duration_sec = Some(4.0);
+        info.audio_duration_sec = Some(6.0);
+
+        let warnings = ensure_asset_measured(&mut project, &asset_id, |_| Ok(info))
+            .expect("the reading must be recorded");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "an unmeasured asset is reported: {warnings:?}"
+        );
+
+        let asset = project.state.assets.get(&asset_id).expect("the asset");
+        assert_eq!(
+            asset.duration_sec,
+            Some(4.0),
+            "the picture bounds the asset"
+        );
+        assert_eq!(
+            asset.audio_duration_sec,
+            Some(6.0),
+            "the sound is recorded beside it"
+        );
+        assert_eq!(asset.probe_version, Some(ASSET_PROBE_VERSION));
+
+        // The marker is what stops the next placement paying for the same
+        // reading again, so the second call must not reach the probe at all.
+        let warnings = ensure_asset_measured(&mut project, &asset_id, |_| {
+            panic!("a measured asset must not be probed again")
+        })
+        .expect("a measured asset is a no-op");
+        assert!(warnings.is_empty(), "nothing to report: {warnings:?}");
+    }
+
+    #[test]
+    fn should_stamp_the_probe_marker_even_when_the_reading_held_no_duration() {
+        let (_temp_dir, mut project, asset_id) =
+            project_with_unmeasured_asset("unmeasurable_project");
+
+        // A container FFprobe read but could not measure: `0` is what it
+        // answers for a file whose length it cannot work out.
+        let mut info = media_info(0.0);
+        info.video_duration_sec = None;
+        info.audio_duration_sec = None;
+
+        let warnings = ensure_asset_measured(&mut project, &asset_id, |_| Ok(info))
+            .expect("the reading must be recorded");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the caller is told the clip takes the default length: {warnings:?}"
+        );
+
+        let asset = project.state.assets.get(&asset_id).expect("the asset");
+        assert_eq!(asset.duration_sec, None, "nothing usable was measured");
+        assert_eq!(
+            asset.probe_version,
+            Some(ASSET_PROBE_VERSION),
+            "the file was still read under the current rules"
+        );
+
+        // Without the marker this file was re-probed before every placement,
+        // forever, and never got any further.
+        let warnings = ensure_asset_measured(&mut project, &asset_id, |_| {
+            panic!("an asset already read under these rules must not be probed again")
+        })
+        .expect("a read asset is a no-op");
+        assert!(warnings.is_empty(), "nothing to report: {warnings:?}");
+    }
+
+    #[test]
+    fn should_leave_an_asset_untouched_when_the_probe_could_not_run() {
+        let (_temp_dir, mut project, asset_id) = project_with_unmeasured_asset("failed_probe");
+
+        let warnings = ensure_asset_measured(&mut project, &asset_id, |_| {
+            Err("FFmpeg is missing".to_string())
+        })
+        .expect("a probe that cannot run is not a failure");
+        assert_eq!(warnings.len(), 1, "the caller is warned: {warnings:?}");
+
+        let asset = project.state.assets.get(&asset_id).expect("the asset");
+        assert_eq!(
+            asset.probe_version, None,
+            "nothing read the file, so nothing is stamped"
+        );
+        assert!(
+            asset_needs_measurement(asset),
+            "a failed reading must leave the asset open to being read again"
+        );
     }
 
     #[test]

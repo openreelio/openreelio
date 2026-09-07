@@ -594,6 +594,12 @@ pub struct UpdateAssetPayload {
     pub proxy_url: Option<Option<String>>,
     pub uri: Option<String>,
     pub duration_sec: Option<Option<f64>>,
+    /// How long the asset's sound runs when it outlasts its picture; `Some(None)` clears it.
+    ///
+    /// Defaulted for the same reason as `probe_version`: a hand-written
+    /// `UpdateAsset` should not have to carry a field only the probe fills in.
+    /// See [`Asset::audio_duration_sec`](crate::core::assets::Asset::audio_duration_sec).
+    #[serde(default)]
     pub audio_duration_sec: Option<Option<f64>>,
     /// Which revision of the probe rules measured the asset; `Some(None)` clears it.
     ///
@@ -1931,6 +1937,25 @@ impl CommandPayload {
         match self {
             Self::SetSequenceFormat(payload) => payload.sequence_id.is_none(),
             _ => false,
+        }
+    }
+
+    /// The asset this payload places a clip from, when it places one.
+    ///
+    /// The clip a placement lands takes the asset's recorded length, so every
+    /// surface that applies one has to give an unmeasured asset a chance to be
+    /// read first — see
+    /// [`ensure_asset_measured`](crate::core::commands::ensure_asset_measured).
+    /// All four placements, not just the two an agent reaches for most: an
+    /// `OverwriteEdit` from an unprobed asset took the ten-second default
+    /// exactly as an `InsertClip` did.
+    pub fn inserted_asset_id(&self) -> Option<&str> {
+        match self {
+            Self::InsertMedia(insert) => Some(insert.asset_id.as_str()),
+            Self::InsertClip(insert) => Some(insert.asset_id.as_str()),
+            Self::InsertEdit(insert) => Some(insert.asset_id.as_str()),
+            Self::OverwriteEdit(overwrite) => Some(overwrite.asset_id.as_str()),
+            _ => None,
         }
     }
 

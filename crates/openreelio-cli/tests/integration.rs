@@ -2215,11 +2215,39 @@ fn test_a_trim_is_refused_when_the_named_track_does_not_hold_the_clip() {
         "a trackId nothing answers to must be refused, got: {stderr}"
     );
 
-    // And a wrong track no longer buys a way past the media bound, nor does it
-    // make one surface refuse the plan for a different reason than the next:
-    // the guard used to measure the clip on whichever track *did* hold it, so
-    // `plan validate` answered "past the end of asset" where `plan execute`
-    // answered "Clip not found".
+    // A trim carrying only `newSourceIn` is refused for the same reason: the
+    // guard used to answer `Ok` on a missing `newSourceOut` before it had
+    // resolved the track at all, so which field the caller happened to send
+    // decided whether the wrong track was caught.
+    let (_stdout, stderr) = run_cli_err(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "TrimClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": audio_track_id,
+            "clipId": picture_clip_id,
+            "newSourceIn": 1.0,
+        })
+        .to_string(),
+    ]);
+    assert!(
+        stderr.contains("Clip not found"),
+        "a wrong-track trim that moves only sourceIn must be refused too, got: {stderr}"
+    );
+
+    // A wrong track no longer buys a way past the media bound either: the guard
+    // used to measure the clip on whichever track *did* hold it, so a trim
+    // through the audio track was answered with "past the end of asset".
+    //
+    // `plan validate` reports it as unchecked rather than refused, though.
+    // Its pass measures every step against the pre-plan state, and against that
+    // state a wrong-track trim is indistinguishable from one an earlier step
+    // moves into place — refusing it rejected plans `plan execute` runs.
     let plan_file = dir.path().join("wrong_track_plan.json");
     std::fs::write(
         &plan_file,
@@ -2249,24 +2277,23 @@ fn test_a_trim_is_refused_when_the_named_track_does_not_hold_the_clip() {
         "--file",
         plan_file.to_str().expect("plan path"),
     ]);
-    assert_eq!(validated["status"], "error", "{validated}");
-    assert!(
-        validated["errors"]
+    assert_eq!(validated["status"], "ok", "{validated}");
+    assert_eq!(
+        validated["uncheckedSteps"]
             .as_array()
-            .expect("errors")
+            .expect("uncheckedSteps")
             .iter()
-            .any(|error| error
-                .as_str()
-                .is_some_and(|text| text.contains("Clip not found"))),
-        "validate must refuse the clip the named track does not hold: {validated}"
+            .filter_map(|step| step.as_str())
+            .collect::<Vec<_>>(),
+        vec!["step-trim"],
+        "the trim is deferred to execution, not refused: {validated}"
     );
     assert!(
         !validated.to_string().contains("past the end of asset"),
         "the clip is not on that track at all, so its media is beside the point: {validated}"
     );
 
-    // `plan execute` reports its refusal as JSON on stdout and exits 1, for the
-    // same reason `plan validate` gave.
+    // `plan execute` reports the refusal as JSON on stdout and exits 1.
     let (stdout, _stderr) = run_cli_err(&[
         "plan",
         "execute",
@@ -5863,6 +5890,121 @@ fn test_plan_validate_names_the_trims_it_could_not_measure() {
         vec!["step_trim"],
         "only the trim whose clip does not exist yet is unmeasured: {result}"
     );
+}
+
+/// Feature: validate never refuses a plan execute would run
+/// Scenario: a plan that moves a clip to a second track and then trims it there
+///   Given a clip on V1 and a plan that moves it to V2 before trimming it on V2
+///   When the plan is validated and then executed
+///   Then validate passes with the trim listed as unchecked — the move that
+///     puts the clip on V2 has not run yet — and execute applies both steps
+#[test]
+fn test_plan_validate_defers_a_trim_a_previous_step_moves_into_place() {
+    let dir = create_temp_project("plan_validate_move_then_trim");
+    let Some(fixture) = import_fixture_asset(&dir, "plan_validate_move_then_trim", &[]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let source_track_id = first_video_track_id(&path);
+    let sequence_id = active_sequence_id(&path);
+    let inserted = run_cli_ok(&[
+        "timeline",
+        "insert",
+        "--path",
+        &path,
+        "--asset",
+        &asset_id,
+        "--track",
+        &source_track_id,
+        "--at",
+        "0.0",
+    ]);
+    let clip_id = inserted["createdIds"][0]
+        .as_str()
+        .expect("clip id")
+        .to_string();
+
+    let added = run_cli_ok(&[
+        "timeline",
+        "add-track",
+        "--path",
+        &path,
+        "--kind",
+        "video",
+        "--name",
+        "Video 2",
+    ]);
+    let destination_track_id = added["createdIds"][0]
+        .as_str()
+        .expect("the added track id")
+        .to_string();
+
+    let plan_file = write_plan(
+        &dir,
+        "move_then_trim.json",
+        serde_json::json!({
+            "id": "move_then_trim_plan",
+            "steps": [
+                {
+                    "id": "step_move",
+                    "commandType": "MoveClip",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": source_track_id,
+                        "clipId": clip_id,
+                        "newTimelineIn": 0.0,
+                        "newTrackId": destination_track_id
+                    },
+                    "dependsOn": []
+                },
+                {
+                    "id": "step_trim",
+                    "commandType": "TrimClip",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": destination_track_id,
+                        "clipId": clip_id,
+                        "newSourceIn": 0.0,
+                        "newSourceOut": 2.0
+                    },
+                    "dependsOn": ["step_move"]
+                }
+            ]
+        }),
+    );
+
+    // The pre-flight measures every step against the pre-plan state, where the
+    // clip is still on V1 — so the guard reads the trim as a wrong-track edit.
+    // Reporting that refused a plan `plan execute` runs without complaint.
+    let validated = run_cli_ok(&["plan", "validate", "--path", &path, "--file", &plan_file]);
+    assert_eq!(validated["status"], "ok", "{validated}");
+    let unchecked: Vec<&str> = validated["uncheckedSteps"]
+        .as_array()
+        .expect("uncheckedSteps")
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect();
+    assert_eq!(
+        unchecked,
+        vec!["step_trim"],
+        "the trim is deferred, not refused: {validated}"
+    );
+
+    let executed = run_cli_ok(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(executed["status"], "ok", "{executed}");
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .find(|clip| clip["id"].as_str() == Some(clip_id.as_str()))
+        .expect("the moved clip");
+    assert_eq!(
+        clip["trackId"].as_str(),
+        Some(destination_track_id.as_str())
+    );
+    assert_eq!(clip["sourceOutSec"].as_f64(), Some(2.0), "{clip}");
 }
 
 #[test]
