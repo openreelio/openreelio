@@ -122,12 +122,21 @@ impl InsertMediaCommand {
         self.primary_clip_id.as_deref()
     }
 
-    /// Returns the resolved source range, if any.
+    /// Returns the resolved source range of the *primary* clip, if any.
+    ///
+    /// A linked audio clip is cut from the same asset but bounded by its
+    /// sound's own length, which can outlast the picture — see
+    /// [`Asset::audio_duration_sec`](crate::core::assets::Asset::audio_duration_sec).
+    /// Read [`linked_audio`](Self::linked_audio) for that half; this range
+    /// never describes it.
     pub fn resolved_source_range(&self) -> Option<(TimeSec, TimeSec)> {
         self.resolved_source_range
     }
 
-    /// Returns the resolved clip duration.
+    /// Returns the resolved clip duration of the *primary* clip.
+    ///
+    /// Scoped the same way as [`resolved_source_range`](Self::resolved_source_range):
+    /// a linked audio clip placed beside it may run longer.
     pub fn resolved_duration_sec(&self) -> TimeSec {
         self.resolved_duration_sec
     }
