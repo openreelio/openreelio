@@ -43,6 +43,9 @@
 //!   second question, answered from its colour and alpha rather than from its
 //!   existence — see [`CaptionPaint::outline_protects`] — because a stroke in
 //!   the text's own colour, or one washed out by its alpha, separates nothing.
+//!   A stroke that is not opaque is graded against the ring the viewer sees,
+//!   `alpha * outline + (1 - alpha) * picture`, by the same interval arithmetic
+//!   a box is graded by, not against the colour the style authored.
 //! * **Box** — same shape for `backgroundColor`/`background_color`. A box the
 //!   renderer quantises away — both paths round the alpha before they draw, so
 //!   anything under half a step of it paints nothing — selects no box at all,
@@ -501,6 +504,11 @@ const MAX_POSSIBLE_BAND_STDDEV: f64 = 0.5;
 /// drawn at six tenths. At an opacity of zero nothing is guaranteed and nothing
 /// needs to be - [`CaptionPaint::draws_text`] takes those cues out of the pass
 /// before this is asked.
+///
+/// A stroke is the same arithmetic with the ring in the box's place, so
+/// [`CaptionPaint::outline_protects`] calls this with the stroke's painted
+/// alpha and colour rather than repeating it; `box_*` names the caller it was
+/// written for, not the only decoration it grades.
 fn box_guarantees_legibility(
     text_luminance: f64,
     box_alpha: f64,
@@ -607,12 +615,32 @@ impl CaptionPaint {
     ///
     /// A stroke separates the glyphs from the picture by standing between the
     /// two, so what it is worth is the separation between the *text* and the
-    /// *stroke*, scaled by how much of the stroke reaches the picture. Both
-    /// halves matter and neither is enough on its own: a white stroke around
-    /// white words at full opacity separates nothing, and a black stroke drawn
-    /// at a fifth of an alpha carries a fifth of its blackness. Gating on the
-    /// layer opacity alone waved both through — the cue was never decoded and
-    /// never reported: not graded clean, not counted as faded out, simply
+    /// *ring the viewer actually sees*. A stroke that is not opaque is not its
+    /// own colour: it is `a * outline + (1 - a) * picture` at the alpha `a` it
+    /// is painted at, and the picture is somewhere on 0–1, so the ring lies on
+    /// the same interval a box leaves — `[a * outline, a * outline + (1 - a)]`.
+    /// Measuring the stroke against its *authored* colour instead
+    /// (`a * |text - outline|`) is not conservative: it credits a translucent
+    /// stroke with a separation no picture behind it allows. A half-alpha black
+    /// stroke around `#CCCCCC` words reads that way as 0.4, while over a white
+    /// shot the ring is 0.498 and the words clear it by 0.302 — under the
+    /// default floor, and waved through unmeasured.
+    ///
+    /// So the ring is graded by exactly the arithmetic a box is graded by, and
+    /// [`box_guarantees_legibility`] is called with the stroke's painted alpha
+    /// and colour in the box's place. The stddev clause comes with it and is
+    /// right for a ring too: what makes a stroke protection is that it stands
+    /// between the glyphs and *whatever* the shot does, and a translucent one
+    /// lets the shot's own variation through the ring, so it no longer settles
+    /// [`ContrastFault::MixedBackground`] either. Only an opaque stroke flattens
+    /// the picture behind the glyph edge completely, and only an opaque stroke
+    /// is waved through on that clause.
+    ///
+    /// Both halves matter and neither is enough on its own: a white stroke
+    /// around white words at full opacity separates nothing, and a black stroke
+    /// drawn at a fifth of an alpha carries a fifth of its blackness. Gating on
+    /// the layer opacity alone waved both through — the cue was never decoded
+    /// and never reported: not graded clean, not counted as faded out, simply
     /// absent from the report.
     ///
     /// Graded against the run's own `min_contrast`, the same floor
@@ -621,9 +649,15 @@ impl CaptionPaint {
     /// the check had it been measured.
     fn outline_protects(&self, thresholds: ContrastThresholds) -> bool {
         let painted_alpha = (self.outline_alpha * self.layer_opacity).clamp(0.0, 1.0);
-        let separation = (self.text_luminance - self.outline_luminance).abs();
 
-        self.draws_outline() && painted_alpha * separation >= thresholds.min_contrast
+        self.draws_outline()
+            && box_guarantees_legibility(
+                self.text_luminance,
+                painted_alpha,
+                self.outline_luminance,
+                self.layer_opacity,
+                thresholds,
+            )
     }
 
     /// Whether the style already protects the words from their background.
@@ -2338,6 +2372,65 @@ mod tests {
         assert!(
             opaque.outline_protects(thresholds_default()),
             "an opaque black stroke around white words reads over anything"
+        );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should grade a stroke against the ring the viewer sees
+    ///
+    /// A translucent stroke is not its own colour: the viewer reads
+    /// `a * outline + (1 - a) * picture`, so the ring lies on the interval a
+    /// box leaves and the stroke is worth the distance from the text to the
+    /// *nearest* tone that interval can take. Grading it as
+    /// `alpha * |text - outline|` credited it with a separation no picture
+    /// behind it allows, and the cue was waved through unmeasured.
+    #[test]
+    fn should_grade_a_translucent_stroke_against_the_band_it_leaves() {
+        // Light-grey words behind a half-alpha black stroke. The authored
+        // arithmetic called this 0.502 * 0.8 = 0.4 and skipped the cue; over a
+        // white shot the ring is 0.498 and the words clear it by 0.302, which
+        // is under the default floor of 0.35.
+        let half_alpha_stroke = paint_of(Some(&serde_json::json!({
+            "color": "#CCCCCC",
+            "outlineColor": "#00000080",
+            "outlineWidth": 4,
+        })));
+        assert!(half_alpha_stroke.draws_outline());
+        assert!(
+            !half_alpha_stroke.outline_protects(thresholds_default()),
+            "a stroke the shot shows through cannot promise more than the band it leaves"
+        );
+
+        // The same reasoning through the layer: an opaque black stroke on a
+        // caption drawn at half opacity reaches the picture at half an alpha,
+        // so the ring runs to 0.5 and the words - themselves at half opacity -
+        // clear it by 0.25.
+        let faded_layer = paint_of(Some(&serde_json::json!({
+            "color": "#FFFFFF",
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+            "opacity": 0.5,
+        })));
+        assert!(faded_layer.draws_outline());
+        assert!(
+            !faded_layer.outline_protects(thresholds_default()),
+            "half of a full separation does not clear a floor of {DEFAULT_MIN_CONTRAST}"
+        );
+        assert!(
+            faded_layer.draws_text(),
+            "and the glyphs do reach the picture, so this is a cue to measure"
+        );
+
+        // The gate still waves through the stroke it exists for: opaque, and
+        // so the only tone the ring can take is the stroke's own.
+        let opaque = paint_of(Some(&serde_json::json!({
+            "color": "#FFFFFF",
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+        })));
+        assert!(
+            opaque.outline_protects(thresholds_default()),
+            "an opaque stroke leaves the shot no way through to the glyph edge"
         );
     }
 

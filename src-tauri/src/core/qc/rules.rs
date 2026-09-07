@@ -1626,30 +1626,22 @@ impl CaptionSafeAreaRule {
 
     /// Reads the size, in script pixels, the caption's glyphs are drawn at.
     ///
-    /// The style's `fontSize` is only half the answer:
-    /// `apply_text_transform_overrides` (`core::render::export`) folds the
-    /// clip's own transform scale into the size it hands the renderer, as the
-    /// mean of the two axes, so a caption scaled to 200 % really is drawn twice
-    /// as large. Reading the style alone measured the unscaled block and
-    /// reported a scaled caption as sitting safely inside a band it overruns.
-    /// Mirrored here clamp for clamp with that seam.
+    /// The style's `fontSize` is the whole answer, because the caption path
+    /// never applies `clip.transform` at all. The burn-in collector in
+    /// `core::render::export` dispatches a `TrackKind::Caption` clip to
+    /// `build_caption_text_effect`, which reads the style and nothing else;
+    /// only a text clip on a video or overlay track goes through
+    /// `build_text_clip_effect_with_transform`, and it is that call - not the
+    /// caption one - that reaches `apply_text_transform_overrides` and folds
+    /// the clip's scale into the size handed to the renderer. This rule
+    /// measures caption tracks only (`track.is_caption()`), so folding a
+    /// caption clip's scale in here sized the estimate for a block libass is
+    /// never asked to draw. Clamped the way the render path clamps a font size.
     fn font_size_px(clip: &Clip) -> f64 {
-        let authored = Self::authored_font_size_px(clip.caption_style.as_ref());
-
-        let axis = |value: f64| {
-            if value.is_finite() {
-                value.abs().clamp(0.01, 100.0)
-            } else {
-                1.0
-            }
-        };
-        let scale = ((axis(clip.transform.scale.x) + axis(clip.transform.scale.y)) / 2.0)
-            .clamp(0.01, 100.0);
-
-        (authored * scale).clamp(1.0, 500.0)
+        Self::authored_font_size_px(clip.caption_style.as_ref()).clamp(1.0, 500.0)
     }
 
-    /// Reads the caption font size the style JSON asks for, before any scale.
+    /// Reads the caption font size the style JSON asks for.
     fn authored_font_size_px(style: Option<&serde_json::Value>) -> f64 {
         let default_size = f64::from(CaptionStyle::default().font_size);
 
@@ -3721,11 +3713,16 @@ mod tests {
     }
 
     #[test]
-    fn test_caption_safe_area_rule_should_size_the_estimate_at_the_clip_transform_scale() {
-        // The export folds the clip's transform scale into the font size it
-        // hands the renderer, so a caption scaled up really is drawn larger.
-        // Measuring the authored size instead reported a scaled block sitting
-        // safely inside a band it overruns.
+    fn test_caption_safe_area_rule_should_ignore_a_caption_clips_transform_scale() {
+        // The caption burn-in never applies `clip.transform`: the collector in
+        // `core::render::export` sends a `TrackKind::Caption` clip to
+        // `build_caption_text_effect`, and only the `TrackKind::Video |
+        // TrackKind::Overlay` text arm goes through
+        // `build_text_clip_effect_with_transform` and its
+        // `apply_text_transform_overrides`. This rule measures caption tracks
+        // only, so sizing the estimate at the clip's scale reported a block
+        // libass is never asked to draw - a caption at 200% was flagged for
+        // overrunning a band it sits well inside.
         let scaled = |scale_x: f64, scale_y: f64| {
             let sequence =
                 sequence_with_caption("Words", None, Some(serde_json::json!({ "fontSize": 48 })));
@@ -3741,30 +3738,29 @@ mod tests {
         };
 
         let unscaled = scaled(1.0, 1.0);
-        let doubled = scaled(2.0, 2.0);
-        assert!(
-            (doubled.0 - unscaled.0 * 2.0).abs() < 1e-9
-                && (doubled.1 - unscaled.1 * 2.0).abs() < 1e-9,
-            "a caption at 200% covers twice the block: {doubled:?} vs {unscaled:?}"
-        );
+        for (label, scale_x, scale_y) in [
+            ("doubled", 2.0, 2.0),
+            ("anisotropic", 2.0, 1.0),
+            ("shrunk", 0.25, 0.25),
+            ("unreadable", f64::NAN, f64::NAN),
+        ] {
+            let measured = scaled(scale_x, scale_y);
+            assert!(
+                (measured.0 - unscaled.0).abs() < 1e-9 && (measured.1 - unscaled.1).abs() < 1e-9,
+                "a caption clip's {label} scale reaches no renderer, so it moves \
+                 no estimate: {measured:?} vs {unscaled:?}"
+            );
+        }
+    }
 
-        // The renderer takes the mean of the two axes, not one of them, so an
-        // anisotropic scale lands between the two.
-        let anisotropic = scaled(2.0, 1.0);
-        assert!(
-            (anisotropic.0 - unscaled.0 * 1.5).abs() < 1e-9,
-            "the mean of 2.0 and 1.0 is 1.5, got {}",
-            anisotropic.0
-        );
-
-        // A transform nobody set, and one that is not a number at all, both
-        // leave the authored size alone rather than collapsing the block.
-        let unset = scaled(f64::NAN, f64::NAN);
-        assert!(
-            (unset.0 - unscaled.0).abs() < 1e-9,
-            "an unreadable scale is no scale: {} vs {}",
-            unset.0,
-            unscaled.0
+    #[test]
+    fn test_caption_safe_area_rule_should_fall_back_to_the_landscape_script_on_a_zero_side() {
+        // `ass_play_resolution` treats a canvas with a zero side as 16:9, so a
+        // sequence saved with one is measured rather than dividing by nothing.
+        let style = serde_json::json!({ "fontSize": 48 });
+        assert_eq!(
+            estimated_box_percent("M", style.clone(), 0, 1080),
+            estimated_box_percent("M", style, 1920, 1080)
         );
     }
 

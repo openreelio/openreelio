@@ -876,10 +876,17 @@ style `opacity` and the clip's own opacity scale the box, the outline *and* the
 glyphs, so a faded caption separates from its background by that fraction of
 what its colours imply and a box that would protect an opaque cue does not
 protect a faded one. Nor does an outline, and an outline is graded on its colour
-too: a stroke whose alpha times the layer opacity times its distance from the
-text colour comes in under `minContrast` is graded like any other bare cue
-rather than waved through unmeasured, so a white stroke around white words and a
-`#00000033` stroke are both measured. A caption faded out entirely is not decoded at all; it is counted as
+too — by the same interval arithmetic as a box, because a stroke that is not
+opaque is not its own colour either: the viewer reads the ring as `alpha *
+outline + (1 - alpha) * picture`, so it can be anywhere on `[alpha * outline,
+alpha * outline + (1 - alpha)]` and the stroke is worth only the distance from
+the text to the *nearest* tone that interval can take, times the layer opacity.
+A stroke that comes in under `minContrast` on that measure is graded like any
+other bare cue rather than waved through unmeasured, so a white stroke around
+white words, a `#00000033` stroke, a half-alpha black stroke around `#CCCCCC`
+words and an opaque black stroke on a caption drawn at half opacity are all
+measured; only an opaque stroke in a colour the words stand out against is waved
+through. A caption faded out entirely is not decoded at all; it is counted as
 unmeasured instead, with a `fadedOut` reason.
 
 Two numbers decide the verdict. A bare cue whose text sits within `0.35`
@@ -898,9 +905,12 @@ not a contradiction: whether a cue is protected is decided by the box's colour
 and alpha together,
 never by the presence of a box. `hasOutline` is the one flag that cannot appear
 on a violation, because it is only set where the stroke separates the words from
-itself by `minContrast` or better at the alpha it is painted at, and a stroke
-that does reads over anything; a stroke too faint, or too close to the text's own
-colour, leaves the flag `false` and the cue graded like any other bare one. `boxAlpha` is the alpha the box is actually painted at — the
+every tone its ring can take by `minContrast` or better — and, like a box, only
+where the ring is opaque enough to leave the band no more spread than
+`maxBandStddev`, since a stroke the shot shows through settles a mixed
+background no better than a wash does. A stroke that clears both reads over
+anything; one too faint, too translucent, or too close to the text's own colour
+leaves the flag `false` and the cue graded like any other bare one. `boxAlpha` is the alpha the box is actually painted at — the
 style's box alpha times the layer opacity —
 and it is absent, rather than `0`, where no box is painted. `layerOpacity` is
 the opacity the glyphs themselves are drawn at; `contrast` is already scaled by
