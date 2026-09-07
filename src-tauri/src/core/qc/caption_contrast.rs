@@ -59,10 +59,12 @@
 //!   the cue go unmeasured, since a wash the footage reads through - or an
 //!   opaque box the same tone as the words - decides nothing on its own.
 //! * **Layer opacity** — both renderers multiply every decoration's alpha by
-//!   the caption layer's own opacity, which is the style's `opacity` (or the
-//!   alpha of its text colour) times the clip's. A 90 %-opaque box on a clip
-//!   faded to a tenth paints at nine percent, so the same factors are folded
-//!   into the box alpha here before anything is decided from it. The *glyphs*
+//!   the caption layer's own opacity, which folds the style's `opacity` (or the
+//!   alpha of its text colour) together with the clip's - multiplied, except
+//!   that two equal values are one setting expressed twice and count once,
+//!   exactly as `effective_text_layer_opacity` folds them. A 90 %-opaque box on
+//!   a clip faded to a tenth paints at nine percent, so the same factors are
+//!   folded into the box alpha here before anything is decided. The *glyphs*
 //!   carry the same factor — `drawtext` puts it on `fontcolor`, the ASS path on
 //!   `PrimaryColour` — so the words the viewer reads are a blend of the text
 //!   colour and the band behind them, and the separation actually drawn is the
@@ -202,6 +204,14 @@ const MAX_STDERR_BYTES: u64 = 64 * 1024;
 /// while a box is a design decision about the frame that the project may not
 /// want. The weaker-looking fix is the one that is always right.
 const CONTRAST_STYLE_PACK: &str = "standard-outline";
+
+/// Opacity at or above which a half of the layer counts as fully opaque.
+///
+/// `effective_text_layer_opacity` compares the style's opacity with the clip's
+/// on a 0.001 tolerance, so a half within that of 1.0 is one the renderer is
+/// already painting at full strength and raising it would change nothing on
+/// screen.
+const OPAQUE_ENOUGH: f64 = 0.999;
 
 // =============================================================================
 // Samples
@@ -572,9 +582,12 @@ fn decoration_separation(text_luminance: f64, alpha: f64, decoration_luminance: 
 /// the style picks, and whichever side of the band the text is on. The glyphs
 /// are drawn at `L` too, so what the viewer reads is at most `L * L`.
 ///
-/// Below `sqrt(min_contrast)` that ceiling is under the floor, which means no
-/// restyling can rescue the cue and the `standard-outline` fix would be advice
-/// that cannot work. The rule offers the opacity instead.
+/// Below `sqrt(min_contrast)` that ceiling is under the floor, which means a
+/// restyle that leaves `L` alone cannot rescue the cue: an outline on its own
+/// is advice that cannot work, and the opacity is what has to be raised first.
+/// Which command raises it is [`CaptionContrastRule::faded_half`]'s question -
+/// the `standard-outline` pack is still the answer where the style is the faded
+/// half, because replacing the style raises `L` as well as adding the stroke.
 fn best_outline_separation(layer_opacity: f64) -> f64 {
     let opacity = layer_opacity.clamp(0.0, 1.0);
     opacity * opacity
@@ -833,6 +846,27 @@ fn style_field<'a>(
     keys.iter().find_map(|key| style.get(*key))
 }
 
+/// Reads the opacity a caption style names for its own layer, if it names one.
+///
+/// `build_caption_text_effect` takes the layer's opacity from the style's own
+/// `opacity`, falling back to the alpha of the text colour; `None` here means
+/// the style names neither, which the renderer reads as fully opaque.
+///
+/// Factored out of [`caption_paint`] so the rule's fix chooser can ask the same
+/// question of the same blob: the layer opacity a sample was graded at is the
+/// style's half folded together with the clip's, and which of the two carries
+/// the fade decides which command would actually raise it.
+fn style_layer_opacity(style: &serde_json::Map<String, serde_json::Value>) -> Option<f64> {
+    style_field(style, &["opacity"])
+        .and_then(json_number)
+        .map(|opacity| opacity.clamp(0.0, 1.0))
+        .or_else(|| {
+            style_field(style, &["color"])
+                .and_then(parse_paint_colour)
+                .map(|colour| colour.alpha)
+        })
+}
+
 /// Reads the paint a caption clip's stored style JSON will actually render as.
 ///
 /// This is the mirror of the export pipeline described in the module docs: a
@@ -867,15 +901,10 @@ fn caption_paint(style: Option<&serde_json::Value>, clip_opacity: f32) -> Captio
         .map(|colour| colour.luminance)
         .unwrap_or(DEFAULT_TEXT_LUMINANCE);
 
-    // `build_caption_text_effect` takes the layer's opacity from the style's
-    // own `opacity`, falling back to the alpha of the text colour, and then
-    // folds the clip's opacity into it. Every decoration's alpha is multiplied
-    // by the result on both render paths.
-    let text_opacity = style_field(style, &["opacity"])
-        .and_then(json_number)
-        .map(|opacity| opacity.clamp(0.0, 1.0))
-        .or_else(|| text_colour.map(|colour| colour.alpha))
-        .unwrap_or(1.0);
+    // The style's own opacity, folded together with the clip's exactly as
+    // `build_caption_text_effect` folds them. Every decoration's alpha is
+    // multiplied by the result on both render paths.
+    let text_opacity = style_layer_opacity(style).unwrap_or(1.0);
     let layer_opacity = effective_text_layer_opacity(text_opacity, clip_opacity);
 
     // A box the renderer cannot paint is not a box: the ASS path leaves
@@ -1429,6 +1458,39 @@ enum ContrastFault {
     MixedBackground,
 }
 
+/// Which of the two opacities the renderer folds together carries the fade.
+///
+/// The layer opacity a cue is painted at comes from the caption style's own
+/// `opacity` and the clip's, folded by `effective_text_layer_opacity`. Raising
+/// the wrong one changes nothing on screen, so the fix a faded cue is offered
+/// is chosen by reading both halves back off the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FadedHalf {
+    /// The clip is faded and its style paints opaque
+    ///
+    /// `SetClipOpacity` back to 1.0 restores the whole layer.
+    Clip,
+    /// The style is faded and the clip is opaque
+    ///
+    /// `SetClipOpacity` would be a no-op; the restyle is the fix, because the
+    /// pack replaces the stored style outright and the replacement names no
+    /// `opacity` and an opaque text colour.
+    Style,
+    /// Both halves are faded, mirrored or multiplied
+    ///
+    /// One command cannot clear both. The restyle is offered because it always
+    /// changes something, and the details say the clip has to be raised too.
+    Both,
+    /// Neither half reads as faded, or the cue's clip is no longer in the
+    /// sequence
+    ///
+    /// The timeline and the measured sample disagree, so the restyle is offered
+    /// as the fix that always changes something and the details name both
+    /// halves rather than guessing at one. Also the value carried, unused, for
+    /// a cue an outline *can* rescue, where no opacity is raised at all.
+    Undetermined,
+}
+
 impl CaptionContrastRule {
     /// Creates a new CaptionContrastRule
     pub fn new() -> Self {
@@ -1450,10 +1512,9 @@ impl CaptionContrastRule {
     ///
     /// Offered in place of [`Self::restyle_fix`] on a cue whose layer opacity
     /// is already too low for any stroke to lift it over the floor - see
-    /// [`best_outline_separation`]. The layer opacity is the style's opacity
-    /// times the clip's, and this is the clip's half of it, which is why the
-    /// fix carries a lower confidence than the restyle does and the details say
-    /// what to do when the style is the faded one.
+    /// [`best_outline_separation`] - *and* whose clip is the faded half of that
+    /// opacity. Where the style carries the fade this command raises nothing,
+    /// so [`Self::faded_half`] decides which of the two is emitted.
     fn opacity_fix(sequence_id: &str, sample: &CaptionBandSample) -> serde_json::Value {
         serde_json::json!({
             "type": "SetClipOpacity",
@@ -1462,6 +1523,115 @@ impl CaptionContrastRule {
             "clipId": sample.clip_id,
             "opacity": 1.0,
         })
+    }
+
+    /// Reads back which half of a faded cue's layer opacity carries the fade.
+    ///
+    /// The sample records the folded layer opacity only, and the two commands
+    /// available raise different halves of it: `SetClipOpacity` raises the
+    /// clip's, and the `standard-outline` restyle raises the style's by
+    /// replacing the stored style with one that names no `opacity` and an
+    /// opaque text colour. Reading the clip back off the sequence is what keeps
+    /// the offer from being a command that changes nothing.
+    fn faded_half(sequence: &Sequence, sample: &CaptionBandSample) -> FadedHalf {
+        let Some(clip) = sequence
+            .tracks
+            .iter()
+            .find(|track| track.id == sample.track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == sample.clip_id))
+        else {
+            return FadedHalf::Undetermined;
+        };
+
+        // A non-finite opacity is what the renderer treats as opaque, so it is
+        // not a half anything could raise.
+        let clip_opacity = if clip.opacity.is_finite() {
+            (clip.opacity as f64).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let style_opacity = clip
+            .caption_style
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(style_layer_opacity)
+            .unwrap_or(1.0);
+
+        match (clip_opacity < OPAQUE_ENOUGH, style_opacity < OPAQUE_ENOUGH) {
+            (true, true) => FadedHalf::Both,
+            (true, false) => FadedHalf::Clip,
+            (false, true) => FadedHalf::Style,
+            (false, false) => FadedHalf::Undetermined,
+        }
+    }
+
+    /// What the details say about raising a faded cue back up.
+    ///
+    /// One sentence per half, so the report names the command that was offered
+    /// *and* whatever else the edit still needs - a cue faded on both halves is
+    /// only half repaired by the fix it carries, and saying so is the
+    /// difference between a fix an agent can trust and one it has to re-measure
+    /// to discover was incomplete.
+    fn opacity_advice(half: FadedHalf) -> String {
+        match half {
+            FadedHalf::Clip => {
+                "The clip is the faded half and its style paints opaque, so raising \
+                                the clip's opacity to 1.0 restores the whole layer."
+                    .to_string()
+            }
+            FadedHalf::Style => format!(
+                "The clip is already opaque, so the fade is in the style: the \
+                 '{CONTRAST_STYLE_PACK}' pack replaces the stored style, opacity included, which \
+                 is what raises the layer here."
+            ),
+            FadedHalf::Both => format!(
+                "Both halves are faded: the '{CONTRAST_STYLE_PACK}' pack replaces the style's \
+                 opacity, and the clip's own opacity has to be raised to 1.0 as well before the \
+                 words reach the picture."
+            ),
+            FadedHalf::Undetermined => format!(
+                "Which half carries the fade could not be read back from the timeline, so the \
+                 '{CONTRAST_STYLE_PACK}' pack replaces the style's opacity and the clip's own \
+                 opacity has to be raised to 1.0 too if that is the faded one."
+            ),
+        }
+    }
+
+    /// The fix a cue too faded for any outline is offered.
+    ///
+    /// The restyle is the fallback wherever the clip is not demonstrably the
+    /// faded half, because it always changes something: it rewrites the stored
+    /// style whatever that style said, while `SetClipOpacity` on an already
+    /// opaque clip is a command an agent can apply and re-measure unchanged.
+    fn opacity_remedy(
+        sequence_id: &str,
+        sample: &CaptionBandSample,
+        half: FadedHalf,
+    ) -> ViolationFix {
+        match half {
+            FadedHalf::Clip => ViolationFix::new(
+                "Raise the caption clip back to full opacity",
+                vec![Self::opacity_fix(sequence_id, sample)],
+            )
+            // The measurement is certain, and so is the half: the clip is the
+            // only one of the two that is faded.
+            .with_confidence(0.8),
+            FadedHalf::Style => ViolationFix::new(
+                format!(
+                    "Restyle the caption with the '{CONTRAST_STYLE_PACK}' pack, which clears the \
+                     style's own fade"
+                ),
+                vec![Self::restyle_fix(sequence_id, sample)],
+            )
+            .with_confidence(0.8),
+            FadedHalf::Both | FadedHalf::Undetermined => ViolationFix::new(
+                format!("Restyle the caption with the '{CONTRAST_STYLE_PACK}' pack"),
+                vec![Self::restyle_fix(sequence_id, sample)],
+            )
+            // Lower: the restyle raises the style's half only, and the details
+            // say the clip's may still be holding the layer down.
+            .with_confidence(0.5),
+        }
     }
 
     /// Whether any caption cue exists at all in the sequence.
@@ -1670,20 +1840,28 @@ impl QCRule for CaptionContrastRule {
             };
 
             // An outline is only worth suggesting where the layer leaves room
-            // for one. The stroke is faded with the glyphs, so the most any
-            // stroke can separate them by is the layer opacity squared; under
-            // the floor, the `standard-outline` pack is advice that cannot
-            // work, and the opacity is the thing to raise instead.
+            // for one. A stroke that leaves the layer opacity where it is fades
+            // with the glyphs, so the most it can separate them by is that
+            // opacity squared; under the floor, an outline alone is advice that
+            // cannot work and the opacity is the thing to raise first. Which
+            // command raises it depends on which half of the layer opacity is
+            // the faded one, so the timeline is read back before either the
+            // advice or the fix is written.
             let outline_can_rescue = best_outline_separation(sample.layer_opacity) >= min_contrast;
+            let faded_half = if outline_can_rescue {
+                // Unread: an outline is the fix, and neither half is raised.
+                FadedHalf::Undetermined
+            } else {
+                Self::faded_half(sequence, sample)
+            };
             let remedy = if outline_can_rescue {
                 "Give the cue an outline so it reads over any background.".to_string()
             } else {
                 format!(
                     "At {:.0}% layer opacity no outline can reach {min_contrast:.2} separation - \
-                     the stroke fades with the glyphs - so raise the caption's opacity first. The \
-                     layer opacity is the style's opacity times the clip's, so raise the style's \
-                     too if the clip is already opaque.",
-                    sample.layer_opacity * 100.0
+                     the stroke fades with the glyphs - so raise the caption's opacity first. {}",
+                    sample.layer_opacity * 100.0,
+                    Self::opacity_advice(faded_half)
                 )
             };
 
@@ -1765,13 +1943,7 @@ impl QCRule for CaptionContrastRule {
                 // edit wants is not.
                 .with_confidence(0.8)
             } else {
-                ViolationFix::new(
-                    "Raise the caption clip back to full opacity",
-                    vec![Self::opacity_fix(&sequence.id, sample)],
-                )
-                // Lower still: the clip is only one of the two opacities that
-                // multiply into the layer's, so this can be the wrong half.
-                .with_confidence(0.5)
+                Self::opacity_remedy(&sequence.id, sample, faded_half)
             };
 
             violations.push(
@@ -1899,6 +2071,33 @@ mod tests {
         }
     }
 
+    /// A white-on-white sample carrying the ids of the sequence's first cue.
+    ///
+    /// The fix chooser reads the cue's clip back off the sequence to decide
+    /// which half of the layer opacity is the faded one, so a sample naming a
+    /// clip that is not there tests the fallback rather than the case.
+    fn sample_for_first_cue(sequence: &Sequence, layer_opacity: f64) -> CaptionBandSample {
+        let track = &sequence.tracks[0];
+        let clip = &track.clips[0];
+        CaptionBandSample {
+            clip_id: clip.id.clone(),
+            track_id: track.id.clone(),
+            layer_opacity,
+            ..sample(0.97, 1.0)
+        }
+    }
+
+    /// The single violation `sequence` produces from one sample.
+    async fn violation_for(sequence: &Sequence, sample: CaptionBandSample) -> QCViolation {
+        let measurements = RenderMeasurements {
+            caption_band_samples: vec![sample],
+            ..Default::default()
+        };
+        let mut violations = run_rule(sequence, Some(measurements)).await;
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        violations.remove(0)
+    }
+
     /// A sample of `text_luminance` text over a `band_luminance` picture, with
     /// a black background box painted at `box_alpha`.
     fn boxed_sample(band_luminance: f64, text_luminance: f64, box_alpha: f64) -> CaptionBandSample {
@@ -1951,65 +2150,112 @@ mod tests {
     }
 
     /// Feature: Caption legibility
-    /// Scenario: should offer the opacity, not an outline, on a faded cue
+    /// Scenario: should offer the opacity, not an outline, on a faded clip
     ///
     /// The `standard-outline` pack was suggested whatever the cue's opacity
     /// was, and on a caption drawn at three tenths it is advice that cannot
-    /// work: the stroke fades with the glyphs, so the most any restyle can
-    /// separate them by is 0.09 and the floor is 0.35. The report now names
-    /// the thing that would actually help.
+    /// work: the stroke fades with the glyphs, so the most any restyle that
+    /// leaves the opacity alone can separate them by is 0.09 and the floor is
+    /// 0.35. The report now names the thing that would actually help - here the
+    /// clip's own opacity, because the style paints opaque.
     #[tokio::test]
     async fn should_offer_the_opacity_when_no_outline_could_rescue_the_cue() {
         let mut clip = caption_clip("Barely there", 1.0, 3.0, Some(bare_white_style()));
         clip.opacity = 0.3;
         let sequence = sequence_with_captions(vec![clip]);
-        let faded = CaptionBandSample {
-            layer_opacity: 0.3,
-            ..sample(0.97, 1.0)
-        };
-        let measurements = RenderMeasurements {
-            caption_band_samples: vec![faded],
-            ..Default::default()
-        };
 
-        let violations = run_rule(&sequence, Some(measurements)).await;
+        let violation = violation_for(&sequence, sample_for_first_cue(&sequence, 0.3)).await;
 
-        assert_eq!(violations.len(), 1);
-        let fix = violations[0].suggested_fix.as_ref().expect("a fix");
+        let fix = violation.suggested_fix.as_ref().expect("a fix");
         assert_eq!(fix.commands.len(), 1);
         assert_eq!(fix.commands[0]["type"], "SetClipOpacity");
         assert_eq!(fix.commands[0]["opacity"], 1.0);
+        let details = violation.details.as_ref().expect("details");
         assert!(
-            violations[0]
-                .details
-                .as_ref()
-                .expect("details")
-                .contains("no outline can reach"),
-            "the report says why the outline it usually suggests is not offered"
+            details.contains("no outline can reach"),
+            "the report says why the outline it usually suggests is not offered: {details}"
+        );
+        assert!(
+            details.contains("The clip is the faded half"),
+            "the report names the half the command raises: {details}"
         );
 
         // The outline is still the fix wherever one could clear the floor: at
         // eight tenths a stroke is worth up to 0.64.
-        let workable = CaptionBandSample {
-            layer_opacity: 0.8,
-            ..sample(0.97, 1.0)
-        };
-        let violations = run_rule(
-            &sequence,
-            Some(RenderMeasurements {
-                caption_band_samples: vec![workable],
-                ..Default::default()
-            }),
-        )
-        .await;
-        assert_eq!(violations.len(), 1);
+        let violation = violation_for(&sequence, sample_for_first_cue(&sequence, 0.8)).await;
         assert_eq!(
-            violations[0]
-                .suggested_fix
-                .as_ref()
-                .expect("a fix")
-                .commands[0]["type"],
+            violation.suggested_fix.as_ref().expect("a fix").commands[0]["type"],
             "UpdateCaption"
+        );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should restyle, not raise the clip, when the style is faded
+    ///
+    /// `SetClipOpacity` on a clip that is already opaque is a command an agent
+    /// can apply and re-measure completely unchanged: the fade lives in the
+    /// style, and only replacing the style clears it. The `standard-outline`
+    /// pack does exactly that - it names no `opacity` and an opaque text
+    /// colour - so the restyle is both the outline and the un-fading.
+    #[tokio::test]
+    async fn should_restyle_a_cue_whose_style_carries_the_fade() {
+        let clip = caption_clip_with_style(
+            "Barely there",
+            1.0,
+            3.0,
+            Some(serde_json::json!({
+                "color": "#FFFFFF",
+                "opacity": 0.3,
+                "outlineWidth": 0.0,
+            })),
+        );
+        let sequence = sequence_with_captions(vec![clip]);
+
+        let violation = violation_for(&sequence, sample_for_first_cue(&sequence, 0.3)).await;
+
+        let fix = violation.suggested_fix.as_ref().expect("a fix");
+        assert_eq!(fix.commands.len(), 1);
+        assert_eq!(fix.commands[0]["type"], "UpdateCaption");
+        assert_eq!(fix.commands[0]["stylePack"], CONTRAST_STYLE_PACK);
+        let details = violation.details.as_ref().expect("details");
+        assert!(
+            details.contains("the fade is in the style"),
+            "the report says which half the restyle raises: {details}"
+        );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should say both halves need raising when the fade is mirrored
+    ///
+    /// A clip at three tenths carrying a style at three tenths renders at three
+    /// tenths - the renderer counts a mirrored pair once - and no single
+    /// command clears both halves. The restyle is offered because it always
+    /// changes something, and the details say the clip still has to be raised.
+    #[tokio::test]
+    async fn should_name_both_halves_when_the_clip_and_its_style_are_both_faded() {
+        let mut clip = caption_clip_with_style(
+            "Barely there",
+            1.0,
+            3.0,
+            Some(serde_json::json!({
+                "color": "#FFFFFF",
+                "opacity": 0.3,
+                "outlineWidth": 0.0,
+            })),
+        );
+        clip.opacity = 0.3;
+        let sequence = sequence_with_captions(vec![clip]);
+
+        let violation = violation_for(&sequence, sample_for_first_cue(&sequence, 0.3)).await;
+
+        let fix = violation.suggested_fix.as_ref().expect("a fix");
+        assert_eq!(fix.commands.len(), 1);
+        assert_eq!(fix.commands[0]["type"], "UpdateCaption");
+        let details = violation.details.as_ref().expect("details");
+        assert!(
+            details.contains("Both halves are faded")
+                && details.contains("clip's own opacity has to be raised"),
+            "the report says the restyle is only half the repair: {details}"
         );
     }
 

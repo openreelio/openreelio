@@ -14,6 +14,7 @@
 use crate::core::assets::{Asset, AudioInfo, VideoInfo};
 use crate::core::captions::CaptionPosition;
 use crate::core::project::ProjectState;
+use crate::core::qc::caption_contrast::CaptionBandSample;
 use crate::core::qc::context::RenderMeasurements;
 use crate::core::qc::engine::QCEngine;
 use crate::core::qc::violation::QCViolation;
@@ -29,10 +30,18 @@ const EXPECTED_FIX_COMMAND_TYPES: &[&str] = &[
     "CloseGap",
     "CreateCaption",
     "RemoveClip",
+    "SetClipOpacity",
     "SetMasterVolume",
     "TrimClip",
     "UpdateCaption",
 ];
+
+/// Label of the fixture's faded caption cue.
+///
+/// Named so the measurements can find the clip again and address the band
+/// sample at it: the contrast rule reads the cue's clip back off the sequence
+/// to decide which half of its layer opacity is the faded one.
+const FADED_CAPTION_LABEL: &str = "Faded caption";
 
 /// Source length of the fixture asset, in seconds.
 ///
@@ -97,6 +106,7 @@ fn video_clip(asset_id: &str, timeline_in_sec: f64, duration_sec: f64) -> Clip {
 /// * a sub-frame leftover clip — `RemoveClip`
 /// * a caption pinned to the very bottom of the canvas — `UpdateCaption`
 /// * a caption that reads too fast with no gap to grow into — `CreateCaption`
+/// * a caption clip faded too far for any outline to rescue — `SetClipOpacity`
 /// * black at the head of a clip whose source has room — `TrimClip`
 /// * a clipped, over-loud mix — `SetMasterVolume`
 fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
@@ -143,6 +153,17 @@ fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
     follower.label = Some("Next".to_string());
     captions.add_clip(follower);
 
+    // Drawn at three tenths with no style of its own, so the style paints
+    // opaque and the clip is the faded half: the contrast rule's fix is the
+    // clip's opacity rather than a restyle. `measurements_for` carries the
+    // band sample that reports it.
+    let mut faded = Clip::with_range("caption", 0.0, 2.0);
+    faded.place.timeline_in_sec = 6.0;
+    faded.place.duration_sec = 2.0;
+    faded.label = Some(FADED_CAPTION_LABEL.to_string());
+    faded.opacity = 0.3;
+    captions.add_clip(faded);
+
     sequence.add_track(captions);
 
     let mut state = ProjectState::new("QC Fix Round Trip");
@@ -153,11 +174,48 @@ fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
     (sequence, state)
 }
 
+/// The band sample that reports the fixture's faded caption cue.
+///
+/// White words on a near-white band, measured on the cue the fixture drew at
+/// three tenths: no stroke can reach the contrast floor from there, so the rule
+/// offers the opacity instead of the `standard-outline` pack.
+fn faded_caption_sample(sequence: &Sequence) -> CaptionBandSample {
+    let (track, clip) = sequence
+        .tracks
+        .iter()
+        .filter(|track| track.is_caption())
+        .find_map(|track| {
+            track
+                .clips
+                .iter()
+                .find(|clip| clip.label.as_deref() == Some(FADED_CAPTION_LABEL))
+                .map(|clip| (track, clip))
+        })
+        .expect("the fixture holds a faded caption cue");
+
+    CaptionBandSample {
+        clip_id: clip.id.clone(),
+        track_id: track.id.clone(),
+        start_sec: clip.place.timeline_in_sec,
+        end_sec: clip.timeline_end(),
+        sampled_at_sec: clip.place.timeline_in_sec + clip.place.duration_sec / 2.0,
+        band_luminance: 0.97,
+        band_luminance_stddev: 0.01,
+        text_luminance: 1.0,
+        has_box: false,
+        has_outline: false,
+        box_alpha: 0.0,
+        box_luminance: 0.0,
+        layer_opacity: 0.3,
+    }
+}
+
 /// Measurements that trip the rendered rules that carry fixes.
 fn measurements_for(sequence: &Sequence) -> RenderMeasurements {
     RenderMeasurements {
         // Starts exactly at the first clip's head, so a slip is available.
         black_ranges: vec![(0.0, 0.6)],
+        caption_band_samples: vec![faded_caption_sample(sequence)],
         // Over the ceiling: the peak rule suggests lowering the master.
         true_peak_dbtp: Some(-0.2),
         // Well above the -14 LUFS target, so the loudness fix is a cut rather

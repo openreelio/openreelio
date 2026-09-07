@@ -903,12 +903,21 @@ maxBandStddev, fault, hasBox, hasOutline}`, plus `boxAlpha` on a cue that
 carries a box and `layerOpacity` on a cue drawn at less than full opacity, and an `UpdateCaption` fix applying the `standard-outline` pack —
 not `boxed-contrast`, because an outline drawn at full opacity survives any
 background including a mixed one. On a cue too faded for any stroke to rescue
-the fix is a `SetClipOpacity` back to `1.0` instead: the stroke fades with the
-glyphs, so the most a restyle can separate them by is `layerOpacity` squared,
-and below `sqrt(minContrast)` — about `0.6` at the default floor — an outline is
-advice that cannot work. That fix carries a lower confidence, because
-`layerOpacity` is the style's opacity times the clip's and the command raises
-only the clip's half; the `details` say so. `hasBox: true` on a violation is normal and
+the fix raises the opacity instead: the stroke fades with the glyphs, so a
+restyle that leaves `layerOpacity` where it is can separate them by at most
+`layerOpacity` squared, and below `sqrt(minContrast)` — about `0.6` at the
+default floor — an outline alone is advice that cannot work. Which command is
+offered depends on which half of `layerOpacity` carries the fade, read back off
+the timeline: `layerOpacity` is the caption style's own opacity folded together
+with the clip's — multiplied, except that a mirrored pair counts once, which is
+what the renderer does — so a faded clip under an opaque style gets a
+`SetClipOpacity` back to `1.0`, an opaque clip under a faded style gets the
+`standard-outline` restyle (the pack replaces the stored style, opacity
+included, so it is both the outline and the un-fading), and a cue faded on both
+halves gets the restyle at a lower confidence with `details` saying the clip's
+opacity still has to be raised as well. `SetClipOpacity` on a clip that is
+already opaque would be a fix that changes nothing, which is why the half is
+read rather than assumed; the `details` always name it. `hasBox: true` on a violation is normal and
 not a contradiction: whether a cue is protected is decided by the box's colour
 and alpha together,
 never by the presence of a box: a box is waved through unmeasured only where its
