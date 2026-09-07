@@ -3,12 +3,14 @@
 //! Coordinates scanning, indexing, and watching for the project workspace.
 //! This is the main entry point for workspace operations.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::core::assets::{Asset, AssetKind, MetadataExtractor};
+use crate::core::assets::{probe_measured_nothing, Asset, AssetKind, MetadataExtractor};
 use crate::core::project::ProjectState;
 use crate::core::CoreResult;
 
@@ -28,6 +30,37 @@ pub struct ScanResult {
     pub removed_files: usize,
     /// Number of files already registered as assets
     pub registered_files: usize,
+}
+
+/// What one auto-registration pass over the workspace index did.
+///
+/// A pass is not all-or-nothing: it mutates `ProjectState` file by file, and the
+/// caller turns those mutations into ops afterwards. Propagating the first file
+/// FFprobe could not be launched for would abandon that pass mid-way, leaving
+/// the assets it had already inserted in state with no op behind them — a
+/// project that diverges from its own log. So the pass carries its refusals out
+/// instead of throwing them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoRegisterOutcome {
+    /// Number of workspace files registered as assets during this pass.
+    pub registered: usize,
+    /// Workspace-relative paths left for a later pass because the probe
+    /// measured nothing about them. They stay unregistered in the index, so the
+    /// next scan — after FFmpeg finishes installing, say — picks them up again.
+    pub skipped: Vec<String>,
+    /// Workspace-relative paths that were linked to an asset that already
+    /// existed, but whose missing metadata could not be filled in because the
+    /// probe measured nothing.
+    ///
+    /// Separate from [`Self::skipped`] because nothing was refused: the asset
+    /// is real, carries the metadata it was imported with, and is registered in
+    /// the index. Only the top-up did not happen.
+    ///
+    /// Being registered is exactly why the retry needs its own pass: the
+    /// unregistered loop never looks at these files again, so the second pass
+    /// over already-registered entries is what fills the gaps once a probe can
+    /// run.
+    pub unrefreshed: Vec<String>,
 }
 
 /// An entry in the file tree hierarchy
@@ -62,16 +95,55 @@ pub struct WorkspaceService {
     event_tx: mpsc::Sender<WorkspaceEvent>,
     event_rx: Option<mpsc::Receiver<WorkspaceEvent>>,
     ignore_rules: Arc<IgnoreRules>,
+    last_skipped_count: AtomicUsize,
+    last_unrefreshed_count: AtomicUsize,
 }
 
-fn build_workspace_asset(entry: &IndexEntry, absolute_path: &std::path::Path) -> Asset {
+/// Builds the [`Asset`] a discovered workspace file should be registered as.
+///
+/// Fails when the probe measured nothing - FFprobe could not be started, or it
+/// ran and produced output nothing could be read from (see
+/// [`probe_measured_nothing`]) - and only then. Every default below - a
+/// zero-valued `VideoInfo`,
+/// `1920x1080` for an image, an absent duration - is a statement about a file
+/// FFprobe *looked at* and could not describe. When no probe ran, the same
+/// defaults are pure invention, and the GUI's own import path (the workspace
+/// scan that auto-registers what it finds) would silently fill a project with
+/// assets carrying a made-up frame size and no duration. The scan refuses
+/// instead, the same way `import_asset` refuses a hand-picked file. Verdicts
+/// FFprobe reached about the file itself keep the defaults: something did look,
+/// and a workspace scan should not be stopped by one unreadable file.
+/// The measurement is supplied rather than taken here. That seam is what lets a
+/// test produce one specific failure - FFprobe missing versus FFprobe rejecting
+/// the file - without installing or removing binaries. The alternative is
+/// registering a bogus FFprobe path, which is process-global and would reach
+/// every other test running beside this one.
+fn build_workspace_asset_with<F>(
+    entry: &IndexEntry,
+    absolute_path: &std::path::Path,
+    extract: F,
+) -> CoreResult<Asset>
+where
+    F: FnOnce(&std::path::Path) -> CoreResult<crate::core::assets::MediaMetadata>,
+{
     let uri = absolute_path.to_string_lossy().to_string();
     let name = entry
         .relative_path
         .rsplit('/')
         .next()
         .unwrap_or(&entry.relative_path);
-    let extracted_metadata = MetadataExtractor::extract(absolute_path).ok();
+    let extracted_metadata = match extract(absolute_path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if probe_measured_nothing(&error) => return Err(error),
+        Err(error) => {
+            tracing::warn!(
+                path = %entry.relative_path,
+                "Registering workspace file without probed metadata: {}",
+                error
+            );
+            None
+        }
+    };
 
     let resolved_file_size = extracted_metadata
         .as_ref()
@@ -119,28 +191,49 @@ fn build_workspace_asset(entry: &IndexEntry, absolute_path: &std::path::Path) ->
         }
     }
 
-    asset.with_file_size(resolved_file_size)
+    Ok(asset.with_file_size(resolved_file_size))
 }
 
-fn refresh_existing_workspace_asset_metadata(
+/// Whether a probe could still fill something in on an already-built asset.
+///
+/// Asked before every top-up, so it decides how much probing a pass over the
+/// whole workspace costs. Only gaps a probe can actually close count: a still
+/// has no duration to measure, and treating its absence as a gap would make
+/// every image in the workspace look unmeasured forever, so every pass would
+/// re-probe every image. A codec is likewise only expected where a video stream
+/// is.
+fn workspace_asset_needs_metadata_refresh(asset: &Asset) -> bool {
+    let duration_missing = !matches!(asset.kind, AssetKind::Image) && asset.duration_sec.is_none();
+    let video_codec_missing = matches!(asset.kind, AssetKind::Video)
+        && asset
+            .video
+            .as_ref()
+            .map(|video| video.codec.trim().is_empty())
+            .unwrap_or(true);
+
+    duration_missing || asset.file_size == 0 || video_codec_missing
+}
+
+/// Fills in what an already-registered asset is missing, from a fresh probe.
+///
+/// Propagates a probe that measured nothing for the reason
+/// [`build_workspace_asset_with`] does: with no measurement, the "refreshed"
+/// asset is all defaults, and copying those over a real codec or frame size is
+/// worse than leaving the gaps alone.
+fn refresh_existing_workspace_asset_metadata<F>(
     asset: &mut Asset,
     entry: &IndexEntry,
     absolute_path: &std::path::Path,
-) {
-    let needs_refresh = asset.duration_sec.is_none()
-        || asset.file_size == 0
-        || (matches!(asset.kind, AssetKind::Video)
-            && asset
-                .video
-                .as_ref()
-                .map(|video| video.codec.trim().is_empty())
-                .unwrap_or(true));
-
-    if !needs_refresh {
-        return;
+    extract: F,
+) -> CoreResult<()>
+where
+    F: FnOnce(&std::path::Path) -> CoreResult<crate::core::assets::MediaMetadata>,
+{
+    if !workspace_asset_needs_metadata_refresh(asset) {
+        return Ok(());
     }
 
-    let refreshed = build_workspace_asset(entry, absolute_path);
+    let refreshed = build_workspace_asset_with(entry, absolute_path, extract)?;
     asset.duration_sec = asset.duration_sec.or(refreshed.duration_sec);
     if refreshed.file_size > 0 {
         asset.file_size = refreshed.file_size;
@@ -157,6 +250,8 @@ fn refresh_existing_workspace_asset_metadata(
     if asset.audio.is_none() {
         asset.audio = refreshed.audio;
     }
+
+    Ok(())
 }
 
 impl WorkspaceService {
@@ -176,6 +271,8 @@ impl WorkspaceService {
             event_tx,
             event_rx: Some(event_rx),
             ignore_rules,
+            last_skipped_count: AtomicUsize::new(0),
+            last_unrefreshed_count: AtomicUsize::new(0),
         })
     }
 
@@ -389,40 +486,71 @@ impl WorkspaceService {
 
     /// Auto-register all discovered files that don't yet have an asset_id.
     /// Creates Asset entries in ProjectState and links them in the index.
+    ///
+    /// A file the probe measured nothing about is reported in
+    /// [`AutoRegisterOutcome::skipped`] and the pass carries on with the rest;
+    /// see that type for why one such probe must not abort the pass.
     pub fn auto_register_discovered_files(
         &self,
         state: &mut ProjectState,
         project_root: &std::path::Path,
-    ) -> CoreResult<usize> {
+    ) -> CoreResult<AutoRegisterOutcome> {
+        self.auto_register_discovered_files_with(state, project_root, |path| {
+            MetadataExtractor::extract(path)
+        })
+    }
+
+    /// [`Self::auto_register_discovered_files`], with the measurement supplied.
+    ///
+    /// The seam exists for the same reason [`build_workspace_asset_with`]'s
+    /// does: a test needs one file's probe to fail without touching the
+    /// process-global FFmpeg resolution every other test shares.
+    fn auto_register_discovered_files_with<F>(
+        &self,
+        state: &mut ProjectState,
+        project_root: &std::path::Path,
+        extract: F,
+    ) -> CoreResult<AutoRegisterOutcome>
+    where
+        F: Fn(&std::path::Path) -> CoreResult<crate::core::assets::MediaMetadata>,
+    {
         let unregistered = self.index.get_unregistered()?;
-        let mut registered_count = 0;
+        let mut outcome = AutoRegisterOutcome::default();
+
+        // Files this pass has already probed. The second pass below must not
+        // measure them again: they were built moments ago, from the freshest
+        // probe there is.
+        let mut probed_in_this_pass: HashSet<String> = HashSet::new();
 
         for entry in &unregistered {
-            // Check if there's already an asset with this relative_path
-            let already_exists = state
+            // An asset for this path may already be in the project - imported
+            // by hand before the scan reached the file. Link it and leave its
+            // metadata alone. The link is made even when the asset still has
+            // gaps: refusing it would leave a real asset unlinked from the file
+            // it points at, so the explorer would show that file as
+            // unregistered and offer to import a second copy of it. Whatever is
+            // missing is filled by the pass over registered entries below, so
+            // one place tops an asset up rather than two.
+            let existing_asset_id = state
                 .assets
                 .values()
-                .any(|a| a.relative_path.as_deref() == Some(&entry.relative_path));
-            if already_exists {
-                // Link existing asset to the index entry
-                if let Some(asset) = state
-                    .assets
-                    .values()
-                    .find(|a| a.relative_path.as_deref() == Some(&entry.relative_path))
-                {
-                    let asset_id = asset.id.clone();
-                    if let Some(existing_asset) = state.assets.get_mut(&asset_id) {
-                        let abs_path = project_root.join(&entry.relative_path);
-                        refresh_existing_workspace_asset_metadata(existing_asset, entry, &abs_path);
-                    }
-                    self.index
-                        .mark_registered(&entry.relative_path, &asset_id)?;
-                }
+                .find(|asset| asset.relative_path.as_deref() == Some(&entry.relative_path))
+                .map(|asset| asset.id.clone());
+            if let Some(asset_id) = existing_asset_id {
+                self.index
+                    .mark_registered(&entry.relative_path, &asset_id)?;
                 continue;
             }
 
             let abs_path = project_root.join(&entry.relative_path);
-            let asset = build_workspace_asset(entry, &abs_path);
+            let asset = match build_workspace_asset_with(entry, &abs_path, &extract) {
+                Ok(asset) => asset,
+                Err(error) if probe_measured_nothing(&error) => {
+                    skip_unmeasurable(&mut outcome, entry);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
 
             let asset = asset
                 .with_relative_path(&entry.relative_path)
@@ -433,41 +561,158 @@ impl WorkspaceService {
             state.assets.insert(asset_id.clone(), asset);
             self.index
                 .mark_registered(&entry.relative_path, &asset_id)?;
-            registered_count += 1;
+            probed_in_this_pass.insert(entry.relative_path.clone());
+            outcome.registered += 1;
         }
 
-        // Also handle stale entries: asset_id in index but not in state.assets.
-        // Reuse the SAME asset_id so clips referencing it remain valid.
+        // Second pass, over what the index already calls registered. Two kinds
+        // of entry need it.
+        //
+        // A stale entry names an asset id `state` no longer has; it is rebuilt
+        // under that same id so clips referencing it remain valid.
+        //
+        // A live entry names an asset `state` does have, which may still be
+        // missing the metadata an earlier pass could not measure.
+        // `mark_registered` has already run for it, so the loop above - which
+        // only sees unregistered entries - will never look at it again. Without
+        // this pass the retry [`AutoRegisterOutcome::unrefreshed`] promises
+        // would never happen, and a project opened once while FFmpeg was
+        // missing would carry durationless assets until every file was touched
+        // by hand.
+        //
+        // The work is bounded twice over: files this pass already probed are
+        // skipped, and a probe only runs for an asset that still has a gap
+        // worth closing (see [`workspace_asset_needs_metadata_refresh`]).
         let registered_entries = self.index.get_all_registered()?;
         for entry in &registered_entries {
-            if let Some(ref asset_id) = entry.asset_id {
-                if !state.assets.contains_key(asset_id) {
-                    let abs_path = project_root.join(&entry.relative_path);
-                    let mut asset = build_workspace_asset(entry, &abs_path);
-
-                    // Preserve the original asset_id from the index
-                    asset.id = asset_id.clone();
-
-                    let asset = asset
-                        .with_relative_path(&entry.relative_path)
-                        .as_workspace_managed()
-                        .with_file_size(entry.file_size);
-
-                    state.assets.insert(asset_id.clone(), asset);
-                    registered_count += 1;
-                }
+            let Some(asset_id) = entry.asset_id.as_ref() else {
+                continue;
+            };
+            if probed_in_this_pass.contains(&entry.relative_path) {
+                continue;
             }
+
+            let abs_path = project_root.join(&entry.relative_path);
+
+            if let Some(existing_asset) = state.assets.get_mut(asset_id) {
+                if !workspace_asset_needs_metadata_refresh(existing_asset) {
+                    continue;
+                }
+                // A top-up needs a file to measure. The project may already know
+                // this one is gone, or it may have been deleted since it was
+                // indexed with the removal not yet processed. Probing a path
+                // that is not there fails with an error this pass propagates,
+                // which would turn one deleted file into a failed scan of the
+                // whole workspace - and this pass sweeps every registered entry,
+                // not just the ones the scanner just saw on disk.
+                if existing_asset.missing || !abs_path.exists() {
+                    continue;
+                }
+                match refresh_existing_workspace_asset_metadata(
+                    existing_asset,
+                    entry,
+                    &abs_path,
+                    &extract,
+                ) {
+                    Ok(()) => {}
+                    // The asset keeps the metadata it already has: it is real,
+                    // and copying defaults over a measured codec or frame size
+                    // is worse than leaving the gaps for the pass after this
+                    // one.
+                    Err(error) if probe_measured_nothing(&error) => {
+                        record_unrefreshed(&mut outcome, entry);
+                    }
+                    Err(error) => return Err(error),
+                }
+                continue;
+            }
+
+            let mut asset = match build_workspace_asset_with(entry, &abs_path, &extract) {
+                Ok(asset) => asset,
+                Err(error) if probe_measured_nothing(&error) => {
+                    skip_unmeasurable(&mut outcome, entry);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+
+            // Preserve the original asset_id from the index
+            asset.id = asset_id.clone();
+
+            let asset = asset
+                .with_relative_path(&entry.relative_path)
+                .as_workspace_managed()
+                .with_file_size(entry.file_size);
+
+            state.assets.insert(asset_id.clone(), asset);
+            outcome.registered += 1;
         }
 
-        if registered_count > 0 {
+        if outcome.registered > 0 {
             tracing::info!(
-                count = registered_count,
+                count = outcome.registered,
                 "Auto-registered workspace files as assets"
             );
         }
+        log_unmeasured_aggregate(
+            &self.last_skipped_count,
+            outcome.skipped.len(),
+            "Left workspace files unregistered: the probe measured nothing about them",
+        );
+        log_unmeasured_aggregate(
+            &self.last_unrefreshed_count,
+            outcome.unrefreshed.len(),
+            "Linked workspace files without their missing metadata: the probe measured nothing about them",
+        );
 
-        Ok(registered_count)
+        Ok(outcome)
     }
+}
+
+/// Logs one pass-level count, loudly only when it is news.
+///
+/// The watcher runs a pass per filesystem event, so a workspace opened before
+/// FFmpeg finished installing would repeat the same warning for every file that
+/// lands, drowning out the one line that matters. A count that has not moved
+/// since the previous pass says nothing new and drops to `debug!`; the first
+/// pass to reach a count still warns, and so does the next pass that reaches a
+/// different one. A count of zero is not logged at all, but is still recorded,
+/// so a workspace that recovers and then regresses warns again.
+fn log_unmeasured_aggregate(previous: &AtomicUsize, count: usize, message: &'static str) {
+    let unchanged = previous.swap(count, Ordering::Relaxed) == count;
+    if count == 0 {
+        return;
+    }
+
+    if unchanged {
+        tracing::debug!(count, "{}", message);
+    } else {
+        tracing::warn!(count, "{}", message);
+    }
+}
+
+/// Records one file the pass could not measure, and says so in the log.
+///
+/// Per-file at `debug!`: a scan of a workspace opened before FFmpeg finished
+/// installing reaches every file at once, and one `warn!` each buries the
+/// aggregate the caller actually acts on. The pass logs that count once.
+fn skip_unmeasurable(outcome: &mut AutoRegisterOutcome, entry: &IndexEntry) {
+    tracing::debug!(
+        path = %entry.relative_path,
+        "Skipping workspace file: the probe measured nothing about it"
+    );
+    outcome.skipped.push(entry.relative_path.clone());
+}
+
+/// Records one already-registered file whose metadata gaps stayed unfilled.
+///
+/// At `debug!` for the reason [`skip_unmeasurable`] is.
+fn record_unrefreshed(outcome: &mut AutoRegisterOutcome, entry: &IndexEntry) {
+    tracing::debug!(
+        path = %entry.relative_path,
+        "Linked workspace file without refreshing its metadata: the probe measured nothing about it"
+    );
+    outcome.unrefreshed.push(entry.relative_path.clone());
 }
 
 /// Build a hierarchical file tree from flat index entries
@@ -573,6 +818,422 @@ fn get_direct_child_dir(prefix: &str, full_path: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::core::assets::{AssetKind, AudioInfo};
+    use crate::core::CoreError;
+
+    /// An index entry for a file the scanner claims to have found.
+    fn index_entry(relative_path: &str, kind: AssetKind) -> IndexEntry {
+        IndexEntry {
+            relative_path: relative_path.to_string(),
+            kind,
+            file_size: 1024,
+            modified_at: 0,
+            asset_id: None,
+            indexed_at: 0,
+            metadata_extracted: false,
+        }
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: FFprobe cannot be started while the workspace is scanned
+    ///
+    /// Given a workspace file and an FFprobe that cannot be launched
+    /// When the scan builds the asset it would register
+    /// Then it refuses instead of registering one, because the frame size,
+    /// duration and codec it would otherwise attach were never measured - this
+    /// is the GUI's own import path, and it must not fill a project with
+    /// invented 1920x1080 stills and durationless clips.
+    #[test]
+    fn a_workspace_file_is_not_registered_when_ffprobe_cannot_be_launched() {
+        for kind in [AssetKind::Video, AssetKind::Image, AssetKind::Audio] {
+            let entry = index_entry("footage/subject.mp4", kind.clone());
+            let built = build_workspace_asset_with(
+                &entry,
+                std::path::Path::new("/workspace/footage/subject.mp4"),
+                |_| {
+                    Err(CoreError::FFprobeUnavailable(
+                        "Failed to run ffprobe: program not found".to_string(),
+                    ))
+                },
+            );
+
+            assert!(
+                matches!(built, Err(CoreError::FFprobeUnavailable(_))),
+                "a {kind:?} asset must not be invented when no probe ran"
+            );
+        }
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: FFprobe ran and could not describe the file
+    ///
+    /// Given a workspace file FFprobe looked at and refused
+    /// When the scan builds the asset it would register
+    /// Then the asset is still built from the index entry and the defaults,
+    /// because something did look: one unreadable file must not stop a scan.
+    #[test]
+    fn a_file_ffprobe_refused_is_still_registered_from_the_index_entry() {
+        let entry = index_entry("footage/broken.mp4", AssetKind::Video);
+        let built = build_workspace_asset_with(
+            &entry,
+            std::path::Path::new("/workspace/footage/broken.mp4"),
+            |_| {
+                Err(CoreError::FFprobeError(
+                    "FFprobe failed: Invalid data found when processing input".to_string(),
+                ))
+            },
+        );
+
+        let asset = built.expect("a verdict about the file is not a reason to refuse the scan");
+        assert_eq!(asset.name, "broken.mp4");
+        assert_eq!(asset.file_size, entry.file_size);
+        assert_eq!(asset.duration_sec, None);
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: FFprobe runs and returns output nothing can be read from
+    ///
+    /// Given a workspace file whose probe exits without a measurement
+    /// When the scan builds the asset it would register
+    /// Then it refuses, exactly as it does when no probe could be launched:
+    /// output that cannot be read is not a verdict about the file, so the
+    /// frame size and duration the defaults would supply are still invented.
+    #[test]
+    fn a_workspace_file_is_not_registered_when_the_probe_measured_nothing() {
+        let entry = index_entry("footage/subject.mp4", AssetKind::Video);
+        let built = build_workspace_asset_with(
+            &entry,
+            std::path::Path::new("/workspace/footage/subject.mp4"),
+            |_| {
+                Err(CoreError::FFprobeError(format!(
+                    "{}: failed to parse ffprobe output: EOF while parsing a value",
+                    crate::core::assets::PROBE_MEASURED_NOTHING_PREFIX
+                )))
+            },
+        );
+
+        assert!(
+            built.is_err(),
+            "an asset must not be invented from a probe that measured nothing"
+        );
+    }
+
+    /// What a successful probe of a short clip reports.
+    fn probed_metadata() -> crate::core::assets::MediaMetadata {
+        crate::core::assets::MediaMetadata {
+            duration_sec: 12.0,
+            video_duration_sec: Some(12.0),
+            file_size: 1024,
+            video: Some(crate::core::assets::VideoInfo::default()),
+            audio: None,
+            format: "mov,mp4,m4a,3gp,3g2,mj2".to_string(),
+            rotation_deg: 0.0,
+        }
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: FFprobe cannot be launched for one file of several
+    ///
+    /// Given two workspace files, one of which no FFprobe can be started for
+    /// When the scan auto-registers what it found
+    /// Then the measurable file is registered and the other is reported as
+    /// skipped - abandoning the pass at the first refusal would leave the
+    /// assets already inserted in the project state with no op behind them.
+    #[test]
+    fn one_unlaunchable_probe_does_not_abandon_the_rest_of_the_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("footage")).unwrap();
+        std::fs::write(dir.path().join("footage/measurable.mp4"), "v").unwrap();
+        std::fs::write(dir.path().join("footage/unreachable.mp4"), "v").unwrap();
+
+        let service = WorkspaceService::open(dir.path().to_path_buf()).unwrap();
+        service.initial_scan().unwrap();
+
+        let mut state = ProjectState::new("Workspace Skip Test");
+        let outcome = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |path| {
+                if path.ends_with("unreachable.mp4") {
+                    return Err(CoreError::FFprobeUnavailable(
+                        "Failed to run ffprobe: program not found".to_string(),
+                    ));
+                }
+                Ok(probed_metadata())
+            })
+            .expect("a probe that could not be launched is not a scan failure");
+
+        assert_eq!(outcome.registered, 1);
+        assert_eq!(outcome.skipped.len(), 1);
+        assert!(
+            outcome.skipped[0].ends_with("unreachable.mp4"),
+            "the unmeasurable file is the one reported: {:?}",
+            outcome.skipped
+        );
+        assert_eq!(state.assets.len(), 1);
+        assert!(
+            state
+                .assets
+                .values()
+                .any(|asset| asset.name == "measurable.mp4"),
+            "the file FFprobe did measure is still registered"
+        );
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: the file already has an asset, and the top-up probe fails
+    ///
+    /// Given a project whose asset for a workspace file is missing a duration
+    /// And a probe that measures nothing when asked to fill that gap
+    /// When the scan links the file to that existing asset
+    /// Then the link is still made and the asset keeps the metadata it was
+    /// imported with, because the asset is real: refusing the link would leave
+    /// the explorer showing an already-imported file as unregistered. The file
+    /// is reported as unrefreshed, not skipped - nothing was refused.
+    #[test]
+    fn an_existing_asset_is_still_linked_when_the_top_up_probe_measures_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("footage")).unwrap();
+        std::fs::write(dir.path().join("footage/known.mp4"), "v").unwrap();
+
+        let service = WorkspaceService::open(dir.path().to_path_buf()).unwrap();
+        service.initial_scan().unwrap();
+
+        let mut state = ProjectState::new("Workspace Relink Test");
+        let video = crate::core::assets::VideoInfo {
+            codec: "h264".to_string(),
+            ..Default::default()
+        };
+        let existing = Asset::new_video(
+            "known.mp4",
+            &dir.path().join("footage/known.mp4").to_string_lossy(),
+            video,
+        )
+        .with_relative_path("footage/known.mp4")
+        .as_workspace_managed()
+        .with_file_size(4096);
+        let existing_id = existing.id.clone();
+        state.assets.insert(existing_id.clone(), existing);
+
+        let outcome = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                Err(CoreError::FFprobeUnavailable(
+                    "Failed to run ffprobe: program not found".to_string(),
+                ))
+            })
+            .expect("a probe that measured nothing is not a scan failure");
+
+        assert!(
+            outcome.skipped.is_empty(),
+            "an asset that already exists was not refused: {:?}",
+            outcome.skipped
+        );
+        assert_eq!(outcome.unrefreshed.len(), 1);
+        assert!(outcome.unrefreshed[0].ends_with("known.mp4"));
+
+        let asset = state.assets.get(&existing_id).expect("the asset survives");
+        assert_eq!(
+            asset.file_size, 4096,
+            "imported metadata is not overwritten"
+        );
+        assert_eq!(asset.duration_sec, None, "the gap is left for a later pass");
+        assert_eq!(
+            asset.video.as_ref().map(|video| video.codec.as_str()),
+            Some("h264"),
+            "a real codec is not replaced by a default"
+        );
+
+        let linked = service
+            .index
+            .get_all()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.relative_path.ends_with("known.mp4"))
+            .expect("the file stays in the index");
+        assert_eq!(
+            linked.asset_id.as_deref(),
+            Some(existing_id.as_str()),
+            "the file is linked to the asset that already covers it"
+        );
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: the top-up a failed probe deferred is retried by a later pass
+    ///
+    /// Given a workspace file whose asset was linked without its duration,
+    /// because the probe of an earlier pass measured nothing
+    /// When a later pass runs and a probe works this time
+    /// Then the gap is filled. The file is registered in the index, so the
+    /// unregistered loop can never reach it again: only a pass over registered
+    /// entries makes the retry that `unrefreshed` promises real.
+    #[test]
+    fn a_deferred_top_up_is_retried_by_a_later_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("footage")).unwrap();
+        std::fs::write(dir.path().join("footage/known.mp4"), "v").unwrap();
+
+        let service = WorkspaceService::open(dir.path().to_path_buf()).unwrap();
+        service.initial_scan().unwrap();
+
+        let mut state = ProjectState::new("Workspace Top-Up Retry Test");
+        let video = crate::core::assets::VideoInfo {
+            codec: "h264".to_string(),
+            ..Default::default()
+        };
+        let existing = Asset::new_video(
+            "known.mp4",
+            &dir.path().join("footage/known.mp4").to_string_lossy(),
+            video,
+        )
+        .with_relative_path("footage/known.mp4")
+        .as_workspace_managed()
+        .with_file_size(4096);
+        let existing_id = existing.id.clone();
+        state.assets.insert(existing_id.clone(), existing);
+
+        let first = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                Err(CoreError::FFprobeUnavailable(
+                    "Failed to run ffprobe: program not found".to_string(),
+                ))
+            })
+            .expect("a probe that measured nothing is not a scan failure");
+
+        assert_eq!(first.unrefreshed.len(), 1);
+        assert_eq!(
+            state.assets.get(&existing_id).unwrap().duration_sec,
+            None,
+            "nothing was measured, so nothing was filled in"
+        );
+
+        let second = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| Ok(probed_metadata()))
+            .expect("the retry is an ordinary pass");
+
+        assert_eq!(
+            second.registered, 0,
+            "the file was already registered by the first pass"
+        );
+        assert!(
+            second.unrefreshed.is_empty(),
+            "the gap the first pass left is closed: {:?}",
+            second.unrefreshed
+        );
+        assert_eq!(
+            state.assets.get(&existing_id).unwrap().duration_sec,
+            Some(12.0),
+            "a working probe fills the duration the first pass could not measure"
+        );
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: a registered file is gone when the top-up pass reaches it
+    ///
+    /// Given a registered asset with a gap, whose file was deleted before the
+    /// removal reached the index
+    /// When a pass sweeps the registered entries looking for gaps to fill
+    /// Then it leaves that entry alone. The pass covers every registered file,
+    /// not only the ones the scanner just saw, so probing one that is no longer
+    /// there would fail the scan of the whole workspace.
+    #[test]
+    fn a_deleted_file_does_not_fail_the_top_up_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("footage")).unwrap();
+        std::fs::write(dir.path().join("footage/gone.mp4"), "v").unwrap();
+
+        let service = WorkspaceService::open(dir.path().to_path_buf()).unwrap();
+        service.initial_scan().unwrap();
+
+        let mut state = ProjectState::new("Workspace Deleted File Test");
+        let registered = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                Err(CoreError::FFprobeUnavailable(
+                    "Failed to run ffprobe: program not found".to_string(),
+                ))
+            })
+            .expect("an unmeasurable file is not a scan failure");
+        assert_eq!(registered.skipped.len(), 1);
+
+        // Register it for real, so the next pass has a linked asset with a gap.
+        let outcome = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                Ok(crate::core::assets::MediaMetadata {
+                    duration_sec: 0.0,
+                    video_duration_sec: None,
+                    file_size: 0,
+                    video: None,
+                    audio: None,
+                    format: "mov,mp4,m4a,3gp,3g2,mj2".to_string(),
+                    rotation_deg: 0.0,
+                })
+            })
+            .expect("the file is registered from what the probe did report");
+        assert_eq!(outcome.registered, 1);
+
+        std::fs::remove_file(dir.path().join("footage/gone.mp4")).unwrap();
+
+        let after_delete = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                panic!("a file that is no longer on disk must not be probed")
+            })
+            .expect("a deleted file does not fail the pass");
+
+        assert_eq!(after_delete, AutoRegisterOutcome::default());
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: a pass over a workspace with nothing left to fill in
+    ///
+    /// Given a workspace whose assets are all fully measured, including a still
+    /// When another pass runs with a probe that would panic if it were called
+    /// Then no probe runs. A still has no duration to measure, so treating its
+    /// absence as a gap would re-probe every image in the workspace on every
+    /// pass, for a measurement that can never arrive.
+    #[test]
+    fn a_pass_does_not_re_probe_files_that_have_nothing_left_to_fill() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("footage")).unwrap();
+        std::fs::write(dir.path().join("footage/still.png"), "i").unwrap();
+
+        let service = WorkspaceService::open(dir.path().to_path_buf()).unwrap();
+        service.initial_scan().unwrap();
+
+        // What FFprobe reports about a still: dimensions, bytes, no duration.
+        let still_metadata = crate::core::assets::MediaMetadata {
+            duration_sec: 0.0,
+            video_duration_sec: None,
+            file_size: 1024,
+            video: Some(crate::core::assets::VideoInfo {
+                width: 1920,
+                height: 1080,
+                codec: "png".to_string(),
+                ..Default::default()
+            }),
+            audio: None,
+            format: "png_pipe".to_string(),
+            rotation_deg: 0.0,
+        };
+
+        let mut state = ProjectState::new("Workspace Re-Probe Test");
+        let first = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                Ok(still_metadata.clone())
+            })
+            .expect("the still is measurable");
+        assert_eq!(first.registered, 1);
+        assert!(
+            state
+                .assets
+                .values()
+                .all(|asset| asset.duration_sec.is_none()),
+            "a still has no duration to report"
+        );
+
+        let second = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                panic!("a fully measured workspace must not be probed again")
+            })
+            .expect("a pass with nothing to do is not a failure");
+
+        assert_eq!(second, AutoRegisterOutcome::default());
+    }
 
     fn create_test_project(dir: &std::path::Path) {
         std::fs::create_dir_all(dir.join("footage")).unwrap();

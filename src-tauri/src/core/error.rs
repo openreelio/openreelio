@@ -81,6 +81,13 @@ pub enum CoreError {
     #[error("FFprobe error: {0}")]
     FFprobeError(String),
 
+    /// FFprobe could not be started at all, so nothing was learned about the
+    /// file. Distinct from [`CoreError::FFprobeError`], which means FFprobe ran
+    /// and rejected what it read: a caller that remembers verdicts must not
+    /// remember this one, because the next call may find the binary installed.
+    #[error("FFprobe could not be run: {0}")]
+    FFprobeUnavailable(String),
+
     // =========================================================================
     // Timeline Errors
     // =========================================================================

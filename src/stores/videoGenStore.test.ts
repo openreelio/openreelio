@@ -78,7 +78,7 @@ describe('videoGenStore placement sync', () => {
 
     mockedInvoke.mockImplementation(async (command) => {
       if (command === 'download_generated_video') return { outputPath: '/project/generated.mp4' };
-      if (command === 'import_asset') return { id: 'asset-generated' };
+      if (command === 'import_asset') return { assetId: 'asset-generated' };
       if (command === 'generate_asset_thumbnail') return null;
       throw new Error(`Unhandled invoke: ${command}`);
     });
@@ -163,7 +163,7 @@ describe('videoGenStore placement sync', () => {
 
     mockedInvoke.mockImplementation(async (command) => {
       if (command === 'download_generated_video') return { outputPath: '/project/generated.mp4' };
-      if (command === 'import_asset') return { id: 'asset-generated' };
+      if (command === 'import_asset') return { assetId: 'asset-generated' };
       if (command === 'generate_asset_thumbnail') return null;
       throw new Error(`Unhandled invoke: ${command}`);
     });

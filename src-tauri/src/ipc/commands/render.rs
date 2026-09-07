@@ -12,13 +12,45 @@ use crate::core::{
         validate_scoped_output_path,
     },
     render::{
-        cancel_render_job, is_agent_render_output, prune_agent_renders, register_render_job,
-        unregister_render_job, AudioExportFormat, ExportError, ImageFormat, VideoExportRequest,
-        MAX_AGENT_RENDERS,
+        cancel_render_job, clear_transient_probes, is_agent_render_output, prune_agent_renders,
+        register_render_job, unregister_render_job, AudioExportFormat, ExportError, ImageFormat,
+        VideoExportRequest, MAX_AGENT_RENDERS,
     },
     CoreError,
 };
 use crate::AppState;
+
+/// Measures a sequence's audio presence without holding the project lock.
+///
+/// The probe is one FFprobe spawn per unmeasured video asset. Running it while
+/// `state.project` is held parks every other IPC command behind a child
+/// process — and the render graph is rebuilt on paths that are polled, not just
+/// clicked: [`get_render_cache_status`] runs on every cache progress event.
+///
+/// So the asset list is read under the lock, the guard is dropped, and the probe
+/// runs on a blocking thread. The caller re-locks to build the graph; between
+/// the two the project may have changed, which is no worse than the graph any
+/// other await point in these commands already races with — an asset the probe
+/// measured but the sequence no longer uses is simply not looked up.
+///
+/// The one change an asset id cannot survive is a relink, so the result is a
+/// [`crate::core::render::SequenceAudioProbe`] rather than a bare map: the
+/// caller turns it into measurements with `measurements_for` *after* re-locking,
+/// which drops anything now pointing at a different file.
+async fn probe_sequence_audio_info_off_lock(
+    app_state: &crate::AppState,
+    sequence_id: &str,
+) -> Result<crate::core::render::SequenceAudioProbe, String> {
+    let targets = {
+        let guard = app_state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        crate::core::render::sequence_probe_targets(&project.state, sequence_id)
+    };
+
+    Ok(crate::core::render::probe_assets_audio_info_off_runtime(targets).await)
+}
 
 /// Runs export validation without blocking the async runtime.
 ///
@@ -545,6 +577,16 @@ pub async fn validate_export(
         }
     }
 
+    // This is the check the export dialog answers "will this clip be silent?"
+    // with, and the user opened that dialog on purpose. Answering it out of the
+    // window that suppresses re-probing after a failure that reached no verdict
+    // would warn about silence in a file that has been reachable for a while.
+    clear_transient_probes();
+
+    // FFprobe must not run under the project lock: see
+    // `probe_sequence_audio_info_off_lock`.
+    let audio_probe = probe_sequence_audio_info_off_lock(&state, &sequence_id).await?;
+
     let (sequence, assets, effects, render_graph, project_path) = {
         let guard = state.project.lock().await;
 
@@ -559,8 +601,16 @@ pub async fn validate_export(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        // Measurements the project still stands behind: an asset relinked
+        // while the probe ran is dropped rather than answered from the
+        // file it no longer points at.
+        let audio_info = audio_probe.measurements_for(&project.state);
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &audio_info,
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -648,6 +698,16 @@ pub async fn start_render(
     use crate::core::render::{ExportEngine, ExportProgress};
     use tauri::Emitter;
 
+    // A render the user asked for is not a status poll, so the window that
+    // suppresses re-probing after a failure that reached no verdict is dropped
+    // before measuring: a file that was locked or on a dropped share when the
+    // last poll ran is exactly what this export needs asked about again.
+    clear_transient_probes();
+
+    // FFprobe must not run under the project lock: see
+    // `probe_sequence_audio_info_off_lock`.
+    let audio_probe = probe_sequence_audio_info_off_lock(&state, &sequence_id).await?;
+
     // Get sequence/assets/effects + project path from project state
     let (sequence, assets, effects, render_graph, project_path) = {
         let guard = state.project.lock().await;
@@ -663,8 +723,16 @@ pub async fn start_render(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        // Measurements the project still stands behind: an asset relinked
+        // while the probe ran is dropped rather than answered from the
+        // file it no longer points at.
+        let audio_info = audio_probe.measurements_for(&project.state);
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &audio_info,
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -971,6 +1039,14 @@ pub async fn render_range(
         return Err("In point must be non-negative".to_string());
     }
 
+    // As in [`start_render`]: a user-initiated render drops the post-failure
+    // suppression window so every asset is asked about again.
+    clear_transient_probes();
+
+    // FFprobe must not run under the project lock: see
+    // `probe_sequence_audio_info_off_lock`.
+    let audio_probe = probe_sequence_audio_info_off_lock(&state, &sequence_id).await?;
+
     // Get sequence/assets/effects + project path
     let (sequence, assets, effects, render_graph, project_path) = {
         let guard = state.project.lock().await;
@@ -985,8 +1061,16 @@ pub async fn render_range(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        // Measurements the project still stands behind: an asset relinked
+        // while the probe ran is dropped rather than answered from the
+        // file it no longer points at.
+        let audio_info = audio_probe.measurements_for(&project.state);
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &audio_info,
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -1215,6 +1299,14 @@ pub async fn batch_render(
         return Err("Batch render requires at least one item".to_string());
     }
 
+    // As in [`start_render`]: a user-initiated render drops the post-failure
+    // suppression window so every asset is asked about again.
+    clear_transient_probes();
+
+    // FFprobe must not run under the project lock: see
+    // `probe_sequence_audio_info_off_lock`.
+    let audio_probe = probe_sequence_audio_info_off_lock(&state, &sequence_id).await?;
+
     // Get project state (shared across all batch items)
     let (sequence, assets, effects, render_graph, project_path) = {
         let guard = state.project.lock().await;
@@ -1229,8 +1321,16 @@ pub async fn batch_render(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        // Measurements the project still stands behind: an asset relinked
+        // while the probe ran is dropped rather than answered from the
+        // file it no longer points at.
+        let audio_info = audio_probe.measurements_for(&project.state);
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &audio_info,
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -1663,6 +1763,14 @@ pub async fn export_audio_only(
         _ => return Err(format!("Unsupported audio format: {}", format)),
     };
 
+    // As in [`start_render`]: a user-initiated render drops the post-failure
+    // suppression window so every asset is asked about again.
+    clear_transient_probes();
+
+    // FFprobe must not run under the project lock: see
+    // `probe_sequence_audio_info_off_lock`.
+    let audio_probe = probe_sequence_audio_info_off_lock(&state, &sequence_id).await?;
+
     // Get sequence/assets/effects + project path
     let (sequence, assets, effects, render_graph, project_path) = {
         let guard = state.project.lock().await;
@@ -1677,8 +1785,16 @@ pub async fn export_audio_only(
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
 
-        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
-            .map_err(|e| e.to_ipc_error())?;
+        // Measurements the project still stands behind: an asset relinked
+        // while the probe ran is dropped rather than answered from the
+        // file it no longer points at.
+        let audio_info = audio_probe.measurements_for(&project.state);
+        let render_graph = crate::core::render::build_render_graph_with_audio_info(
+            &project.state,
+            &sequence_id,
+            &audio_info,
+        )
+        .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -2624,28 +2740,45 @@ pub async fn get_cache_status(
 ) -> Result<crate::core::render::RenderCacheStatus, String> {
     use crate::core::render::cache::{cache_status_snapshot, preview_profile_hash};
 
+    // This command is polled on every cache progress event, so the FFprobe the
+    // graph needs is taken before the lock rather than under it.
+    let seq_id = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        project
+            .state
+            .active_sequence_id
+            .clone()
+            .ok_or_else(|| "No active sequence".to_string())?
+    };
+    let audio_probe = probe_sequence_audio_info_off_lock(&state, &seq_id).await?;
+
     let guard = state.project.lock().await;
     let project = guard
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    let seq_id = project
-        .state
-        .active_sequence_id
-        .as_ref()
-        .ok_or_else(|| "No active sequence".to_string())?;
-
     let sequence = project
         .state
         .sequences
-        .get(seq_id)
+        .get(&seq_id)
         .ok_or_else(|| format!("Sequence not found: {seq_id}"))?;
 
     // The status snapshot re-fingerprints a private copy of the manifest so the
     // indicator reports staleness honestly (it never persists). That needs the
     // same render graph / assets / effects the fill path builds.
-    let render_graph = crate::core::render::build_render_graph(&project.state, seq_id)
-        .map_err(|error| format!("Failed to build render graph: {error}"))?;
+    // Measurements the project still stands behind: an asset relinked
+    // while the probe ran is dropped rather than answered from the
+    // file it no longer points at.
+    let audio_info = audio_probe.measurements_for(&project.state);
+    let render_graph = crate::core::render::build_render_graph_with_audio_info(
+        &project.state,
+        &seq_id,
+        &audio_info,
+    )
+    .map_err(|error| format!("Failed to build render graph: {error}"))?;
 
     let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
         .state
@@ -3051,17 +3184,25 @@ struct CacheRenderInputs {
 async fn gather_cache_render_inputs(
     state: &State<'_, AppState>,
 ) -> Result<CacheRenderInputs, String> {
+    let seq_id = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        project
+            .state
+            .active_sequence_id
+            .clone()
+            .ok_or_else(|| "No active sequence".to_string())?
+    };
+    // FFprobe must not run under the project lock: see
+    // `probe_sequence_audio_info_off_lock`.
+    let audio_probe = probe_sequence_audio_info_off_lock(state, &seq_id).await?;
+
     let guard = state.project.lock().await;
     let project = guard
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-
-    let seq_id = project
-        .state
-        .active_sequence_id
-        .as_ref()
-        .ok_or_else(|| "No active sequence".to_string())?
-        .clone();
 
     let sequence = project
         .state
@@ -3070,8 +3211,16 @@ async fn gather_cache_render_inputs(
         .ok_or_else(|| format!("Sequence not found: {seq_id}"))?
         .clone();
 
-    let render_graph = crate::core::render::build_render_graph(&project.state, &seq_id)
-        .map_err(|error| format!("Failed to build render graph: {error}"))?;
+    // Measurements the project still stands behind: an asset relinked
+    // while the probe ran is dropped rather than answered from the
+    // file it no longer points at.
+    let audio_info = audio_probe.measurements_for(&project.state);
+    let render_graph = crate::core::render::build_render_graph_with_audio_info(
+        &project.state,
+        &seq_id,
+        &audio_info,
+    )
+    .map_err(|error| format!("Failed to build render graph: {error}"))?;
 
     let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
         .state
@@ -3616,6 +3765,17 @@ fn ensure_cache_fill(
             // Retracts the identity on every path out of this iteration.
             let _armed = ArmedSegmentGuard(task_cancel.clone());
 
+            // FFprobe must not run under the project lock: see
+            // `probe_sequence_audio_info_off_lock`. A project closed underneath
+            // this fill answers with no measurements, and the re-lock below
+            // reports the closure the way it always did.
+            let segment_audio_probe = {
+                let app_state = app_handle.state::<crate::AppState>();
+                probe_sequence_audio_info_off_lock(&app_state, &job_seq_id)
+                    .await
+                    .unwrap_or_default()
+            };
+
             // Re-acquire fresh project state for each segment to avoid rendering
             // with stale data if the user edits the timeline during cache rendering.
             let (fresh_sequence, fresh_assets, fresh_effects, fresh_render_graph) = {
@@ -3647,9 +3807,13 @@ fn ensure_cache_fill(
                                 break;
                             }
                         };
-                        let graph = match crate::core::render::build_render_graph(
+                        // Measurements the project still stands behind: an asset relinked
+                        // while the probe ran is dropped rather than answered from the
+                        // file it no longer points at.
+                        let graph = match crate::core::render::build_render_graph_with_audio_info(
                             &project.state,
                             &job_seq_id,
+                            &segment_audio_probe.measurements_for(&project.state),
                         ) {
                             Ok(graph) => graph,
                             Err(error) => {

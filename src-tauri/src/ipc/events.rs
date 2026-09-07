@@ -332,20 +332,6 @@ pub struct WorkspaceFileEvent {
     pub kind: Option<AssetKind>,
 }
 
-/// Workspace scan complete event payload.
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceScanCompleteEvent {
-    /// Total number of media files found
-    pub total_files: usize,
-    /// Number of new files discovered
-    pub new_files: usize,
-    /// Number of files removed since last scan
-    pub removed_files: usize,
-    /// Number of files already registered as assets
-    pub registered_files: usize,
-}
-
 // =============================================================================
 // Event Emitter
 // =============================================================================
@@ -514,6 +500,15 @@ impl EventEmitter {
                     )
                     .map_err(|e| format!("Failed to emit marker deleted event: {}", e))?;
                 }
+                StateChange::CaptionsSnappedToFrameGrid { count, dropped } => {
+                    app.emit(
+                        "caption:snapped-to-frame-grid",
+                        &serde_json::json!({ "count": count, "dropped": dropped }),
+                    )
+                    .map_err(|e| {
+                        format!("Failed to emit caption snapped-to-frame-grid event: {}", e)
+                    })?;
+                }
             }
         }
         Ok(())
@@ -640,24 +635,6 @@ impl EventEmitter {
         app.emit(event_names::WORKSPACE_FILE_MODIFIED, &event)
             .map_err(|e| format!("Failed to emit workspace file modified event: {}", e))
     }
-
-    /// Emits a workspace scan complete event
-    pub fn emit_workspace_scan_complete(
-        app: &AppHandle,
-        total_files: usize,
-        new_files: usize,
-        removed_files: usize,
-        registered_files: usize,
-    ) -> Result<(), String> {
-        let event = WorkspaceScanCompleteEvent {
-            total_files,
-            new_files,
-            removed_files,
-            registered_files,
-        };
-        app.emit(event_names::WORKSPACE_SCAN_COMPLETE, &event)
-            .map_err(|e| format!("Failed to emit workspace scan complete event: {}", e))
-    }
 }
 
 // =============================================================================
@@ -747,23 +724,5 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("old_file.mp4"));
         assert!(json.contains("null"));
-    }
-
-    #[test]
-    fn test_workspace_scan_complete_event() {
-        let event = WorkspaceScanCompleteEvent {
-            total_files: 42,
-            new_files: 10,
-            removed_files: 2,
-            registered_files: 30,
-        };
-
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("totalFiles"));
-        assert!(json.contains("42"));
-        assert!(json.contains("newFiles"));
-        assert!(json.contains("10"));
-        assert!(json.contains("removedFiles"));
-        assert!(json.contains("registeredFiles"));
     }
 }

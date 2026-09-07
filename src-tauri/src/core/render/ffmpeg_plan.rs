@@ -18,14 +18,14 @@ use crate::core::{
 };
 
 use super::{
+    audio_presence::clip_carries_audio,
     export::{
         append_animated_video_transform_composition, append_ass_text_overlay,
         append_black_video_gap, append_drawtext_text_overlays, append_master_audio_output,
         append_timeline_video_output, append_video_stream_normalization,
         append_video_transform_composition, append_window_frame_cap, append_window_silence_audio,
-        append_windowed_output_duration_arg, apply_audio_mix_settings, asset_has_playable_audio,
-        build_audio_trim_filter, build_video_trim_filter, clip_audio_is_suppressed_by_companion,
-        clip_composition_is_motion_only, clip_needs_transform_composition,
+        append_windowed_output_duration_arg, apply_audio_mix_settings, build_audio_trim_filter,
+        build_video_trim_filter, clip_composition_is_motion_only, clip_needs_transform_composition,
         collect_audio_companion_keys, collect_drawtext_text_overlays, collect_enabled_clips_sorted,
         effective_source_dimensions, generated_text_visual_end_sec, hdr_metadata_for_asset,
         is_text_clip, output_video_dimensions, output_video_fps, output_video_pixel_format,
@@ -227,14 +227,13 @@ pub(super) fn build_sequence_ffmpeg_args(
         let validated_path = validate_local_input_path(&asset.uri, "Asset file")
             .map_err(ExportError::InvalidSettings)?;
 
-        let clip_has_audio =
-            asset_has_playable_audio(asset, &track.kind, ctx.audio_info.get(&clip.asset_id))
-                && !clip_audio_is_suppressed_by_companion(
-                    clip,
-                    track,
-                    asset,
-                    &audio_companion_keys,
-                );
+        let clip_has_audio = clip_carries_audio(
+            clip,
+            track,
+            asset,
+            ctx.audio_info.get(&clip.asset_id),
+            &audio_companion_keys,
+        );
 
         // Recorded before the window has any say, because the question it
         // answers is about the *sequence*: whether a full render of it would
@@ -827,14 +826,13 @@ pub(super) fn build_audio_only_ffmpeg_args(
             ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
         })?;
 
-        let clip_has_audio =
-            asset_has_playable_audio(asset, &track.kind, ctx.audio_info.get(&clip.asset_id))
-                && !clip_audio_is_suppressed_by_companion(
-                    clip,
-                    track,
-                    asset,
-                    &audio_companion_keys,
-                );
+        let clip_has_audio = clip_carries_audio(
+            clip,
+            track,
+            asset,
+            ctx.audio_info.get(&clip.asset_id),
+            &audio_companion_keys,
+        );
 
         if !clip_has_audio {
             continue;

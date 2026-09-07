@@ -95,6 +95,12 @@ pub fn apply_workspace_event_to_project(
                 }
             }
             // Auto-register any brand-new files
+            // Files the probe measured nothing about stay unregistered, and
+            // files it could not top up keep the metadata they already had;
+            // both are retried by the next pass, which sweeps the registered
+            // entries as well as the unregistered ones. The files that were
+            // registered still get their ops below. The pass logs those counts
+            // itself, so this caller does not repeat them.
             if let Err(e) = service.auto_register_discovered_files(&mut project.state, project_root)
             {
                 tracing::warn!(

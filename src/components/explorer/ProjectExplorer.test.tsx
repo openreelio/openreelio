@@ -6,7 +6,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import type { Asset, FileTreeEntry } from '@/types';
+
+const workspaceGateway = vi.hoisted(() => ({
+  importExternalFilesToWorkspaceFromBackend: vi.fn(),
+  fetchWorkspaceTreeFromBackend: vi.fn(),
+}));
 
 const mockState = vi.hoisted(() => ({
   scanWorkspace: vi.fn(),
@@ -28,6 +34,7 @@ const mockState = vi.hoisted(() => ({
   downloadTranscriptionModel: vi.fn(),
   fileTree: [] as FileTreeEntry[],
   assets: new Map<string, Asset>(),
+  scanWarning: null as string | null,
 }));
 
 vi.mock('@/stores', () => ({
@@ -37,6 +44,7 @@ vi.mock('@/stores', () => ({
       isScanning: false,
       scanWorkspace: mockState.scanWorkspace,
       importExternalFiles: mockState.importExternalFiles,
+      scanWarning: mockState.scanWarning,
     };
     return typeof selector === 'function' ? selector(state) : state;
   },
@@ -99,6 +107,24 @@ vi.mock('@/bindings', () => ({
 
 vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => false,
+  invoke: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async () => () => undefined),
+}));
+
+// The real workspace store is driven directly by one test below, so its only
+// boundary - the Tauri gateway - is what gets mocked, not the store itself.
+vi.mock('@/services/workspaceGateway', () => ({
+  importExternalFilesToWorkspaceFromBackend:
+    workspaceGateway.importExternalFilesToWorkspaceFromBackend,
+  fetchWorkspaceTreeFromBackend: workspaceGateway.fetchWorkspaceTreeFromBackend,
+  scanWorkspaceFromBackend: vi.fn(),
+  createFolderInBackend: vi.fn(),
+  renameFileInBackend: vi.fn(),
+  moveFileInBackend: vi.fn(),
+  deleteFileInBackend: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -111,6 +137,8 @@ vi.mock('@/services/logger', () => ({
     debug: vi.fn(),
     error: vi.fn(),
     warn: vi.fn(),
+    time: vi.fn(),
+    timeEnd: vi.fn(),
   }),
 }));
 
@@ -119,10 +147,12 @@ vi.mock('./FileTree', () => ({
     entries,
     onFileClick,
     onFileDoubleClick,
+    onContextMenu,
   }: {
     entries: FileTreeEntry[];
     onFileClick?: (entry: FileTreeEntry) => void;
     onFileDoubleClick?: (entry: FileTreeEntry) => void;
+    onContextMenu?: (event: ReactMouseEvent, entry: FileTreeEntry) => void;
   }) => (
     <div data-testid="file-tree">
       {entries.map((entry) => (
@@ -133,6 +163,7 @@ vi.mock('./FileTree', () => ({
           data-workspace-entry-directory={entry.isDirectory ? 'true' : 'false'}
           onClick={() => onFileClick?.(entry)}
           onDoubleClick={() => onFileDoubleClick?.(entry)}
+          onContextMenu={(event) => onContextMenu?.(event, entry)}
         >
           {entry.name}
         </button>
@@ -142,7 +173,17 @@ vi.mock('./FileTree', () => ({
 }));
 
 vi.mock('./FileTreeContextMenu', () => ({
-  FileTreeContextMenu: () => null,
+  FileTreeContextMenu: ({
+    entry,
+    onRelinkAsset,
+  }: {
+    entry: FileTreeEntry;
+    onRelinkAsset?: (entry: FileTreeEntry) => void;
+  }) => (
+    <button type="button" data-testid="context-relink" onClick={() => onRelinkAsset?.(entry)}>
+      Relink
+    </button>
+  ),
 }));
 
 vi.mock('@/components/ui', () => ({
@@ -154,6 +195,7 @@ vi.mock('@/components/features/transcription', () => ({
 }));
 
 import { ProjectExplorer } from './ProjectExplorer';
+import { useWorkspaceStore } from '@/stores/workspaceStore';
 
 function createFileEntry(overrides: Partial<FileTreeEntry>): FileTreeEntry {
   return {
@@ -206,6 +248,7 @@ describe('ProjectExplorer', () => {
     vi.clearAllMocks();
     mockState.fileTree = [];
     mockState.assets = new Map();
+    mockState.scanWarning = null;
     mockState.createFolder.mockResolvedValue(undefined);
     mockState.renameFile.mockResolvedValue(undefined);
     mockState.deleteFile.mockResolvedValue(undefined);
@@ -219,6 +262,8 @@ describe('ProjectExplorer', () => {
       importedFiles: [],
       failedFiles: [],
     });
+    useWorkspaceStore.getState().reset();
+    workspaceGateway.fetchWorkspaceTreeFromBackend.mockResolvedValue([]);
     mockState.getTranscriptionStatus.mockResolvedValue({
       featureAvailable: true,
       ready: true,
@@ -434,6 +479,52 @@ describe('ProjectExplorer', () => {
     expect(screen.getByTestId('import-status')).toHaveTextContent('Imported 2/3 files; 1 failed');
   });
 
+  it('should report a drop as failed when the backend could not measure the files', async () => {
+    // The backend copies a file it cannot probe into the workspace but does not
+    // register it as an asset, so it comes back as a failure rather than an
+    // import. Counting it as imported would tell the user a file landed that
+    // nothing in the app can actually use yet.
+    //
+    // The real store action runs here, with only the Tauri gateway mocked: a
+    // drop where nothing landed is exactly the case a store that threw would
+    // turn into a generic error, hiding the per-file reason below.
+    const backendMessage =
+      "'unreachable.mp4' was copied but could not be measured: FFprobe could not be launched, or returned nothing readable; it registers on the next scan";
+    workspaceGateway.importExternalFilesToWorkspaceFromBackend.mockResolvedValue({
+      importedFiles: [],
+      failedFiles: [
+        {
+          sourcePath: '/Users/test/Desktop/unreachable.mp4',
+          message: backendMessage,
+        },
+      ],
+    });
+    mockState.importExternalFiles.mockImplementation((sourcePaths: string[], targetDir?: string) =>
+      useWorkspaceStore.getState().importExternalFiles(sourcePaths, targetDir),
+    );
+    mockState.openDialog.mockResolvedValue(['/Users/test/Desktop/unreachable.mp4']);
+
+    render(<ProjectExplorer />);
+
+    fireEvent.click(screen.getByTestId('import-files-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('import-status')).toHaveTextContent('Imported 0/1 files; 1 failed');
+    });
+    expect(screen.getByTestId('import-status')).toHaveTextContent(backendMessage);
+  });
+
+  it('should surface the warning when a scan left files unmeasured', async () => {
+    mockState.scanWarning =
+      '2 files could not be measured: FFprobe could not be launched, or returned nothing readable, so they are not available as media yet. Check FFmpeg is installed, then scan again.';
+
+    render(<ProjectExplorer />);
+
+    expect(screen.getByTestId('workspace-scan-warning')).toHaveTextContent(
+      'FFprobe could not be launched, or returned nothing readable',
+    );
+  });
+
   it('should import externally dropped files into a hovered folder', async () => {
     mockState.fileTree = [
       createFileEntry({
@@ -498,6 +589,36 @@ describe('ProjectExplorer', () => {
 
     expect(screen.getByRole('button', { name: 'music.wav' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'interview.mp4' })).not.toBeInTheDocument();
+  });
+
+  it('should report the failure in the status line when relinking an asset fails', async () => {
+    mockState.fileTree = [
+      createFileEntry({
+        relativePath: 'footage/interview.mp4',
+        name: 'interview.mp4',
+        kind: 'video',
+        assetId: 'video-1',
+      }),
+    ];
+    mockState.assets = new Map([['video-1', createAsset('video-1', 'video')]]);
+    mockState.openDialog.mockResolvedValue('/Users/test/Desktop/replacement.mp4');
+    mockState.relinkAsset.mockRejectedValue(
+      new Error('FFprobe could not be run: Failed to run ffprobe for replacement.mp4 (os error 2)'),
+    );
+
+    render(<ProjectExplorer />);
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: 'interview.mp4' }));
+    fireEvent.click(screen.getByTestId('context-relink'));
+
+    await waitFor(() => {
+      expect(mockState.relinkAsset).toHaveBeenCalledWith(
+        'video-1',
+        '/Users/test/Desktop/replacement.mp4',
+      );
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/FFmpeg is not installed/i);
   });
 
   it('should request proxy generation automatically for high-resolution video assets', async () => {

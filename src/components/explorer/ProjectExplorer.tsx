@@ -339,6 +339,7 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
   const isScanning = useWorkspaceStore((state) => state.isScanning);
   const scanWorkspace = useWorkspaceStore((state) => state.scanWorkspace);
   const importExternalFiles = useWorkspaceStore((state) => state.importExternalFiles);
+  const scanWarning = useWorkspaceStore((state) => state.scanWarning);
 
   // Project store
   const {
@@ -530,6 +531,10 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
         const importedCount = result.importedFiles.length;
         const failedCount = result.failedFiles.length;
         const totalCount = importedCount + failedCount || sourcePaths.length;
+        // The count alone does not say what to do next; the backend's reason
+        // does ("copied but could not be measured", say). One is enough to act
+        // on, and a drop usually fails for one reason.
+        const firstFailure = result.failedFiles[0]?.message;
 
         setImportStatus({
           kind: failedCount > 0 ? 'warning' : 'success',
@@ -537,7 +542,9 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
             importedCount === 0 && failedCount === 0
               ? 'No new files imported'
               : failedCount > 0
-                ? `Imported ${importedCount.toLocaleString()}/${totalCount.toLocaleString()} files; ${failedCount.toLocaleString()} failed`
+                ? `Imported ${importedCount.toLocaleString()}/${totalCount.toLocaleString()} files; ${failedCount.toLocaleString()} failed${
+                    firstFailure ? `. ${firstFailure}` : ''
+                  }`
                 : `Imported ${importedCount.toLocaleString()} file${importedCount === 1 ? '' : 's'}`,
         });
 
@@ -878,6 +885,14 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
             relativePath: entry.relativePath,
           });
         } catch (error) {
+          // Relink is how a user rescues a missing asset, and the file it
+          // points at is the one thing they can act on. A failure that only
+          // reaches the log leaves the entry looking unchanged, so it is
+          // surfaced in the same status line the import paths use.
+          setImportStatus({
+            kind: 'error',
+            message: getUserFriendlyError(error, { includeTechnicalDetails: false }),
+          });
           logger.error('Failed to relink asset', {
             assetId,
             relativePath: entry.relativePath,
@@ -1284,6 +1299,16 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
           role={importStatus.kind === 'error' ? 'alert' : 'status'}
         >
           {importStatus.message}
+        </div>
+      )}
+
+      {scanWarning && (
+        <div
+          data-testid="workspace-scan-warning"
+          className="min-w-0 break-words border-b border-editor-border px-3 py-2 text-xs text-amber-300 [overflow-wrap:anywhere]"
+          role="status"
+        >
+          {scanWarning}
         </div>
       )}
 

@@ -254,6 +254,32 @@ pub async fn import_asset(
                     );
                     Some(media_info)
                 }
+                // A probe that never started measured nothing, so the
+                // "defaults" below would be an invented duration and an
+                // invented frame size on an asset the user thinks was
+                // imported. Refuse instead, in the wording the frontend maps
+                // to "FFmpeg is not installed".
+                Err(e) if e.is_launch_failure() => {
+                    return Err(CoreError::FFprobeUnavailable(format!(
+                        "Failed to run ffprobe for {}: {}",
+                        name, e
+                    ))
+                    .to_ipc_error());
+                }
+                // A probe killed by the watchdog, or one whose output could not
+                // be read, measured nothing either - the defaults would be just
+                // as invented. The cause is named rather than hidden behind
+                // "FFmpeg is not installed", because FFmpeg is installed and
+                // ran; it is this file it got nowhere on.
+                Err(e) if e.measured_nothing() => {
+                    return Err(CoreError::FFprobeError(format!(
+                        "{} about {}: {}",
+                        crate::core::assets::PROBE_MEASURED_NOTHING_PREFIX,
+                        name,
+                        e
+                    ))
+                    .to_ipc_error());
+                }
                 Err(e) => {
                     tracing::warn!(
                         "Failed to extract metadata for {}: {}. Using defaults.",
@@ -264,11 +290,14 @@ pub async fn import_asset(
                 }
             }
         } else {
-            tracing::warn!(
-                "FFmpeg not available for metadata extraction of {}. Using defaults.",
+            // No runner means FFmpeg was never resolved, so nothing has looked
+            // at this file at all - the same "no measurement was taken" the
+            // launch-failure arm refuses, and it gets the same answer.
+            return Err(CoreError::FFprobeUnavailable(format!(
+                "FFmpeg is not available to probe {}",
                 name
-            );
-            None
+            ))
+            .to_ipc_error());
         }
     };
 
@@ -543,6 +572,29 @@ pub async fn relink_asset(
         if let Some(runner) = ffmpeg_guard.runner() {
             match runner.probe(&path).await {
                 Ok(media_info) => Some(media_info),
+                // As in `import_asset`: unmeasured defaults would silently
+                // overwrite the asset's real duration and frame size.
+                Err(e) if e.is_launch_failure() => {
+                    return Err(CoreError::FFprobeUnavailable(format!(
+                        "Failed to run ffprobe for {}: {}",
+                        name, e
+                    ))
+                    .to_ipc_error());
+                }
+                // Also as in `import_asset`: a probe the watchdog killed, or one
+                // whose output could not be read, measured nothing either. A
+                // relink writes what it measured over the asset, so falling
+                // through here would clear a real duration, video and audio to
+                // `None` on the strength of no measurement at all.
+                Err(e) if e.measured_nothing() => {
+                    return Err(CoreError::FFprobeError(format!(
+                        "{} about {}: {}",
+                        crate::core::assets::PROBE_MEASURED_NOTHING_PREFIX,
+                        name,
+                        e
+                    ))
+                    .to_ipc_error());
+                }
                 Err(e) => {
                     tracing::warn!(
                         "Failed to extract replacement metadata for {}: {}. Using defaults.",
@@ -553,11 +605,13 @@ pub async fn relink_asset(
                 }
             }
         } else {
-            tracing::warn!(
-                "FFmpeg not available for replacement metadata extraction of {}. Using defaults.",
+            // No runner means nothing has looked at the replacement file at
+            // all, so there is nothing to relink to but invented defaults.
+            return Err(CoreError::FFprobeUnavailable(format!(
+                "FFmpeg is not available to probe {}",
                 name
-            );
-            None
+            ))
+            .to_ipc_error());
         }
     };
 

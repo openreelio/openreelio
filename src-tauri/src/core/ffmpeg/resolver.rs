@@ -287,16 +287,26 @@ fn resolved_cell() -> &'static RwLock<Option<ResolvedFFmpeg>> {
 /// managed installer writes its new binaries and then re-initializes, so this
 /// is the one place every route to a different build passes through — including
 /// an install that lands at the same path the analysis latch already wrote off.
+///
+/// Verdicts reached with the *previous* binaries are forgotten: a probe that
+/// refused a file under a stale or half-installed FFprobe says nothing about
+/// what the one being registered now can read, and remembering it would leave a
+/// project silent for the rest of the session.
 pub fn set_resolved_paths(ffmpeg: PathBuf, ffprobe: PathBuf) {
-    // A poisoned lock only means another thread panicked mid-write; the
-    // stored Option is still valid, so recover the guard instead of panicking.
-    let mut guard = resolved_cell()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(ResolvedFFmpeg { ffmpeg, ffprobe });
-    drop(guard);
+    {
+        // A poisoned lock only means another thread panicked mid-write; the
+        // stored Option is still valid, so recover the guard instead of
+        // panicking.
+        let mut guard = resolved_cell()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(ResolvedFFmpeg { ffmpeg, ffprobe });
+    }
 
+    // Outside the guard: each cache has a lock of its own, and holding both at
+    // once is an ordering nobody else has to observe.
     crate::core::analysis::audio::clear_loudness_filter_latch();
+    crate::core::render::clear_negative_probes();
 }
 
 /// Returns the globally resolved paths, running lazy detection if needed.
@@ -524,6 +534,11 @@ mod tests {
     // deterministic.
     #[test]
     fn test_resolver_lazy_fallback_then_explicit_registration() {
+        // `set_resolved_paths` retires every remembered probe failure, so this
+        // test would otherwise wipe the cache out from under the audio-presence
+        // tests that assert a verdict is still remembered.
+        let _serialized = crate::core::render::probe_counter_guard();
+
         // Lazy path: with or without prior registration, the resolver must
         // always return a non-empty path for both binaries.
         let lazy_ffmpeg = resolved_ffmpeg_path();

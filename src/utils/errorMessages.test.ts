@@ -426,6 +426,52 @@ describe('Edge Cases', () => {
       const result = getUserFriendlyError('FFprobe error: Invalid data found');
       expect(result).toBe('Could not read media information. The file may be corrupted.');
     });
+
+    it('should ask for a retry when FFprobe reached no verdict about the file', () => {
+      // The backend refuses an import or a relink rather than attaching an
+      // invented duration when the probe was killed or unreadable. The file
+      // itself is usually fine, so the user is not sent looking for corruption.
+      const result = getUserFriendlyError(
+        'FFprobe error: FFprobe reported nothing about interview.mp4: FFmpeg operation timed out'
+      );
+      expect(result).toBe(
+        'FFprobe could not measure this file (it may be on a slow or disconnected drive). Try again once the file is reachable.'
+      );
+    });
+
+    it('should ask for a retry when the probe output could not be read', () => {
+      // The exact string the Rust side produces from
+      // `PROBE_MEASURED_NOTHING_PREFIX` when ffprobe exits cleanly and returns
+      // output nothing can be built from. The prefix is shared with
+      // `probe_measured_nothing`, so this pattern has to keep matching it
+      // verbatim: the backend refuses the import, and this is the only place
+      // that tells the user what to do about it.
+      const result = getUserFriendlyError(
+        'FFprobe error: FFprobe reported nothing: failed to parse ffprobe output: EOF while parsing a value at line 1 column 0'
+      );
+      expect(result).toBe(
+        'FFprobe could not measure this file (it may be on a slow or disconnected drive). Try again once the file is reachable.'
+      );
+    });
+
+    it('should point at the missing FFmpeg when FFprobe could not be run', () => {
+      const result = getUserFriendlyError(
+        'FFprobe could not be run: Failed to run ffprobe: The system cannot find the file specified. (os error 2)'
+      );
+      expect(result).toBe('FFmpeg is not installed. Export and preview features require FFmpeg.');
+    });
+
+    it('should point at the missing FFmpeg when launching FFprobe was refused', () => {
+      // Windows and Unix report a blocked or non-executable binary as an access
+      // failure, not as a missing file; both are still "there is no usable
+      // FFprobe here", not "your media is locked".
+      for (const detail of ['Access is denied. (os error 5)', 'Permission denied (os error 13)']) {
+        const result = getUserFriendlyError(
+          `FFprobe could not be run: Failed to run ffprobe: ${detail}`
+        );
+        expect(result).toBe('FFmpeg is not installed. Export and preview features require FFmpeg.');
+      }
+    });
   });
 
   describe('Empty and unusual inputs', () => {

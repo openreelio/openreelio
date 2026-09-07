@@ -980,13 +980,38 @@ pub async fn get_sequence_render_graph(
     sequence_id: String,
     state: State<'_, AppState>,
 ) -> Result<crate::core::render::RenderGraph, String> {
+    // Measured audio presence, the same way `render graph` and the export do:
+    // an A/V file the GUI imported without a probe carries no audio metadata, and
+    // reading the guess here would show the user a silent graph for a render that
+    // has sound. Measurements are memoized per file, so a repeated poll is free.
+    //
+    // The probe is taken with the project lock released — it spawns FFprobe, and
+    // holding the lock across a child process parks every other IPC command.
+    let probe_targets = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        crate::core::render::sequence_probe_targets(&project.state, &sequence_id)
+    };
+    let audio_probe = crate::core::render::probe_assets_audio_info_off_runtime(probe_targets).await;
+
     let guard = state.project.lock().await;
     let project = guard
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    crate::core::render::build_render_graph(&project.state, &sequence_id)
-        .map_err(|error| error.to_ipc_error())
+    // Measurements the project still stands behind: an asset relinked while the
+    // probe ran is dropped rather than answered from the file it no longer
+    // points at.
+    let audio_info = audio_probe.measurements_for(&project.state);
+
+    crate::core::render::build_render_graph_with_audio_info(
+        &project.state,
+        &sequence_id,
+        &audio_info,
+    )
+    .map_err(|error| error.to_ipc_error())
 }
 
 /// Returns the backend effect capability contract used by export validation.

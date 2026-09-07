@@ -522,14 +522,14 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
         });
 
         // Import as asset
-        const importResult = await invoke<{ id: string }>('import_asset', {
+        const importResult = await invoke<{ assetId: string }>('import_asset', {
           uri: downloadResult.outputPath,
         });
 
         // Generate thumbnail
         try {
           await invoke('generate_asset_thumbnail', {
-            assetId: importResult.id,
+            assetId: importResult.assetId,
           });
         } catch (thumbErr) {
           logger.warn('Thumbnail generation failed', { error: String(thumbErr) });
@@ -544,7 +544,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
             const placementResult = await insertAgentMediaClip({
               sequenceId: placement.sequenceId,
               trackId: placement.trackId,
-              assetId: importResult.id,
+              assetId: importResult.assetId,
               timelineStart: placement.timelineStart,
             });
             placedClipId = placementResult.clipId;
@@ -567,7 +567,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
             placementError = error instanceof Error ? error.message : String(error);
             logger.error('Generated asset placement failed', {
               jobId,
-              assetId: importResult.id,
+              assetId: importResult.assetId,
               error: placementError,
             });
           }
@@ -577,7 +577,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
           const j = state.jobs.get(jobId);
           if (j) {
             j.status = 'completed';
-            j.assetId = importResult.id;
+            j.assetId = importResult.assetId;
             j.placedClipId = placedClipId;
             j.placementError = placementError;
             j.completedAt = new Date().toISOString();
@@ -587,7 +587,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
 
         logger.info('Video generation completed and imported', {
           jobId,
-          assetId: importResult.id,
+          assetId: importResult.assetId,
           placedClipId,
         });
       } catch (error) {

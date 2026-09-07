@@ -1,13 +1,14 @@
 //! Render and export commands.
 
-use crate::ffmpeg_env::ensure_ffmpeg;
+use crate::ffmpeg_env::{ensure_ffmpeg, ensure_ffmpeg_optional};
 use crate::output;
 use crate::validate;
 use clap::Subcommand;
 use openreelio_core::ffmpeg::FFmpegRunner;
 use openreelio_core::render::{
-    build_render_graph, build_render_plan, validate_export_settings, AudioCodec, ExportEngine,
-    ExportPreset, ExportProgress, ExportSettings, HdrMode, VideoCodec,
+    build_render_graph_with_audio_info, build_render_plan, clear_transient_probes,
+    probe_sequence_audio_info, validate_export_settings, AudioCodec, ExportEngine, ExportPreset,
+    ExportProgress, ExportSettings, HdrMode, VideoCodec,
 };
 use openreelio_core::timeline::Canvas;
 use std::path::PathBuf;
@@ -47,7 +48,14 @@ pub enum RenderAction {
     /// List available render presets
     Presets,
 
-    /// Output the renderer-agnostic graph for preview/export tooling
+    /// Output the renderer-agnostic graph for preview/export tooling.
+    ///
+    /// Costs one FFprobe per unique asset on the sequence the first time it sees
+    /// a file: whether a clip carries sound is a property of the media, not of
+    /// the metadata an extension-based import guessed. Repeat runs in the same
+    /// process reuse the measurement for a file whose size and modification time
+    /// have not changed. Without FFmpeg the stored metadata is all there is, and
+    /// the graph still builds.
     Graph {
         /// Project directory path
         #[arg(long)]
@@ -107,9 +115,25 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
         }
 
         RenderAction::Graph { path, sequence } => {
+            // The graph tells an agent what a render of this sequence will
+            // contain, so its audio layers have to be the ones the render will
+            // actually mix. Whether a video asset carries sound is a property of
+            // the file, not of the metadata an extension-based import guessed,
+            // so it is measured here — one FFprobe per unique asset. Without
+            // FFmpeg the stored metadata is all there is, and the graph still
+            // builds rather than failing an introspection command.
+            ensure_ffmpeg_optional();
+
+            // An agent asks for the graph to decide what to do next, so this is
+            // a request, not a poll. In the long-lived MCP server a file that
+            // was locked when an earlier command probed it would otherwise be
+            // reported as carrying no audio for the rest of the session.
+            clear_transient_probes();
+
             let project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
-            let graph = build_render_graph(&project.state, &seq_id)
+            let audio_info = probe_sequence_audio_info(&project.state, &seq_id);
+            let graph = build_render_graph_with_audio_info(&project.state, &seq_id, &audio_info)
                 .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
 
             output::print_json_pretty(&graph)
@@ -187,6 +211,13 @@ pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
 
     validate_render_range(start, end)?;
 
+    // A render is user-initiated, so it must not be answered out of the window
+    // that suppresses re-probing after a failure that reached no verdict. A
+    // one-shot CLI process starts with an empty window, but the MCP server is
+    // long-lived: without this, a file that was locked when an earlier analysis
+    // probed it would render mute for the rest of the session.
+    clear_transient_probes();
+
     let preset_id = if proxy {
         PROXY_PRESET_ID.to_string()
     } else {
@@ -210,12 +241,19 @@ pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
     let effects = project.state.effects.clone();
     let settings =
         build_export_settings(&preset_id, output_path, &sequence.format.canvas, start, end)?;
-    let graph = build_render_graph(&project.state, &seq_id)
-        .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
 
-    // Validation measures transformed clips with FFprobe, so the resolved
-    // binaries have to be registered before it runs — see `ffmpeg_env`.
+    // Validation measures transformed clips with FFprobe, and so does the audio
+    // probe below, so the resolved binaries have to be registered first — see
+    // `ffmpeg_env`.
     let ffmpeg_info = ensure_ffmpeg()?;
+
+    // The same measured audio presence `render graph` reports. Building the plan
+    // from the stored metadata instead would have `render start` plan a silent
+    // render for a sequence `render graph` says has sound — an A/V file imported
+    // from its extension carries no audio metadata at all.
+    let audio_info = probe_sequence_audio_info(&project.state, &seq_id);
+    let graph = build_render_graph_with_audio_info(&project.state, &seq_id, &audio_info)
+        .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
 
     let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
     if !validation.is_valid {
@@ -232,6 +270,10 @@ pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
         ));
     }
     let plan_hash = render_plan.plan_hash.clone();
+    // Reported so an agent can see, without a second command, that the render it
+    // asked for carries the layers `render graph` said it would.
+    let planned_video_layers = render_plan.video_layers.len();
+    let planned_audio_layers = render_plan.audio_layers.len();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -301,6 +343,8 @@ pub fn run_start_render(args: StartArgs) -> anyhow::Result<serde_json::Value> {
         "fileSize": result.file_size,
         "encodingTimeSec": result.encoding_time_sec,
         "planHash": plan_hash,
+        "videoLayerCount": planned_video_layers,
+        "audioLayerCount": planned_audio_layers,
         "warnings": validation.warnings,
     }))
 }

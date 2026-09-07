@@ -91,7 +91,17 @@ fn track_included_in_media_collection(track: &Track) -> bool {
     track.contributes_to_output()
 }
 
-pub(super) fn asset_has_playable_audio(
+/// Whether this asset carries audio the given track can play.
+///
+/// An audio asset always does. A video asset does when the probe found an audio
+/// stream; with no probe result the answer falls back to the *stored* asset
+/// metadata on a picture track, and to "assume yes" on an audio track, where the
+/// clip exists only because something put the sound there. Every other asset
+/// kind — images, text, adjustment layers — carries none.
+///
+/// Prefer [`crate::core::render::clip_carries_audio`], which also asks whether
+/// the same sound is already on the timeline as a detached companion.
+pub fn asset_has_playable_audio(
     asset: &Asset,
     track_kind: &TrackKind,
     audio_info: Option<&AssetAudioInfo>,
@@ -130,7 +140,13 @@ fn create_audio_companion_key(clip: &Clip) -> String {
     .join("|")
 }
 
-pub(super) fn collect_audio_companion_keys(
+/// Identifies the audio-track clips that already carry a video clip's own sound.
+///
+/// `DetachAudio` leaves the video clip in place and adds an audio-track clip
+/// over the same source range. The key is the pair's shared identity — asset,
+/// placement, source range, speed — so the video clip's embedded audio can be
+/// suppressed and the sound mixed exactly once.
+pub fn collect_audio_companion_keys(
     sequence: &Sequence,
     assets: &HashMap<String, Asset>,
     audio_info: &HashMap<String, AssetAudioInfo>,
@@ -162,7 +178,12 @@ pub(super) fn collect_audio_companion_keys(
     keys
 }
 
-pub(super) fn clip_audio_is_suppressed_by_companion(
+/// Whether this clip's embedded audio is already on the timeline separately.
+///
+/// True only for a video clip on a picture track whose detached companion — see
+/// [`collect_audio_companion_keys`] — is present, in which case mixing its
+/// embedded audio too would double the sound.
+pub fn clip_audio_is_suppressed_by_companion(
     clip: &Clip,
     track: &Track,
     asset: &Asset,
@@ -194,13 +215,13 @@ fn sequence_has_exportable_audio(
                     return false;
                 };
 
-                asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
-                    && !clip_audio_is_suppressed_by_companion(
-                        clip,
-                        track,
-                        asset,
-                        &audio_companion_keys,
-                    )
+                crate::core::render::clip_carries_audio(
+                    clip,
+                    track,
+                    asset,
+                    audio_info.get(&clip.asset_id),
+                    &audio_companion_keys,
+                )
             })
         })
 }
@@ -2283,6 +2304,35 @@ impl AssetAudioInfo {
                 .video_duration_sec
                 .filter(|duration| duration.is_finite() && *duration > 0.0)
                 .or(Some(media_info.duration_sec))
+                .filter(|duration| duration.is_finite() && *duration > 0.0),
+        }
+    }
+
+    /// Create from an FFprobe [`crate::core::assets::MediaMetadata`] result.
+    ///
+    /// The same measurement [`Self::from_media_info`] describes, from the probe
+    /// the asset pipeline runs. Every field comes from the probe: filling in only
+    /// `has_audio` and taking the rest from the stored metadata would give a
+    /// measured file the dimensions and length an extension-based import guessed,
+    /// which for such an import is nothing at all.
+    pub fn from_media_metadata(metadata: &crate::core::assets::MediaMetadata) -> Self {
+        Self {
+            has_audio: metadata.audio.is_some(),
+            source_dimensions: metadata
+                .video
+                .as_ref()
+                .map(|video| {
+                    crate::core::ffmpeg::display_dimensions(
+                        video.width,
+                        video.height,
+                        metadata.rotation_deg,
+                    )
+                })
+                .filter(|(width, height)| *width > 0 && *height > 0),
+            source_duration_sec: metadata
+                .video_duration_sec
+                .filter(|duration| duration.is_finite() && *duration > 0.0)
+                .or(Some(metadata.duration_sec))
                 .filter(|duration| duration.is_finite() && *duration > 0.0),
         }
     }
@@ -7896,19 +7946,33 @@ fn validate_caption_track_qc(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // One warning per track, not one per pair. Overlapping cues are legal and
+    // ordinary — a held lyric under a whole song, a rolling VTT where each line
+    // is still up when the next arrives — and the import preserves them
+    // deliberately. A file like that produced one warning per neighbouring
+    // pair, which buried every other finding the export had to report.
+    let mut overlapping_pairs = 0usize;
+    let mut first_overlap: Option<(&str, &str)> = None;
     for pair in enabled_caption_clips.windows(2) {
         let previous = pair[0];
         let next = pair[1];
         if previous.place.overlaps(&next.place) {
-            validation.add_clip_warning(
-                sequence_id,
-                &next.id,
-                format!(
-                    "Caption clips '{}' and '{}' overlap on track '{}'",
-                    previous.id, next.id, track.name
-                ),
-            );
+            overlapping_pairs += 1;
+            if first_overlap.is_none() {
+                first_overlap = Some((previous.id.as_str(), next.id.as_str()));
+            }
         }
+    }
+
+    if let Some((first, second)) = first_overlap {
+        validation.add_clip_warning(
+            sequence_id,
+            second,
+            format!(
+                "{overlapping_pairs} overlapping caption pairs on track '{}'; first: {first}/{second}",
+                track.name
+            ),
+        );
     }
 }
 
@@ -10438,6 +10502,60 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("overlap")));
+    }
+
+    /// Feature: export validation of a caption track
+    /// Scenario: a subtitle file whose cues deliberately overlap
+    ///
+    /// Given four captions that each overlap the next
+    /// When the sequence is validated for export
+    /// Then one warning covers the whole track, carrying the number of
+    /// overlapping pairs and naming the first — a held lyric or a rolling VTT
+    /// otherwise produced a warning per pair and buried everything else.
+    #[test]
+    fn overlapping_captions_warn_once_for_the_whole_track() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut caption_track = Track::new_caption("Captions");
+        for index in 0..4 {
+            let mut caption = Clip::new(&format!("caption_{index}"))
+                .with_source_range(0.0, 2.0)
+                .place_at(f64::from(index));
+            caption.id = format!("cap-{index}");
+            caption.label = Some(format!("Line {index}"));
+            caption_track.add_clip(caption);
+        }
+        sequence.add_track(caption_track);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        let overlap_warnings = validation
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("overlapping caption pairs"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            overlap_warnings.len(),
+            1,
+            "one warning per track, not per pair: {:?}",
+            validation.warnings
+        );
+        assert!(
+            overlap_warnings[0].starts_with("3 overlapping caption pairs on track 'Captions'; "),
+            "{}",
+            overlap_warnings[0]
+        );
+        assert!(
+            overlap_warnings[0].contains("first: cap-0/cap-1"),
+            "{}",
+            overlap_warnings[0]
+        );
     }
 
     #[test]

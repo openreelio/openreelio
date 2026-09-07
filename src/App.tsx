@@ -5,10 +5,15 @@
  * Shows WelcomeScreen when no project is loaded, Editor when project is active.
  */
 
-import { lazy, Suspense, useCallback, useState, useEffect, useMemo } from 'react';
+import { lazy, Suspense, useCallback, useRef, useState, useEffect, useMemo } from 'react';
 import { ErrorBoundary } from './components/shared';
 import { FFmpegWarning, ToastContainer, type ToastVariant } from './components/ui';
-import { useProjectStore, setupProxyEventListeners, cleanupProxyEventListeners } from './stores';
+import {
+  useProjectStore,
+  useWorkspaceStore,
+  setupProxyEventListeners,
+  cleanupProxyEventListeners,
+} from './stores';
 import {
   useFFmpegStatus,
   useAutoSave,
@@ -119,6 +124,24 @@ function App(): JSX.Element {
       setShowFFmpegWarning(true);
     }
   }, [isFFmpegLoading, isFFmpegAvailable, ffmpegWarningDismissed]);
+
+  // A workspace opened before FFmpeg finished installing left every file it
+  // could not probe unregistered. Nothing else re-asks for those: the watcher
+  // only fires on filesystem changes, and the files have not changed. So the
+  // moment FFmpeg becomes available is the one event that can make them
+  // registerable, and the store re-scans then - and only if a scan actually
+  // left files behind.
+  const wasFFmpegAvailableRef = useRef(false);
+  useEffect(() => {
+    if (isFFmpegLoading) {
+      return;
+    }
+    const becameAvailable = isFFmpegAvailable && !wasFFmpegAvailableRef.current;
+    wasFFmpegAvailableRef.current = isFFmpegAvailable;
+    if (becameAvailable) {
+      void useWorkspaceStore.getState().rescanUnmeasuredFiles();
+    }
+  }, [isFFmpegLoading, isFFmpegAvailable]);
 
   // Load recent projects and version on mount
   useEffect(() => {
