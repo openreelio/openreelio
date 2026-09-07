@@ -1224,7 +1224,7 @@ fn call_tool(
         "openreelio.annotation.read" => build_annotation_read(state, arguments),
         "openreelio.command.schema" => read_command_schema(arguments),
         "openreelio.command.validate" => validate_command(arguments),
-        "openreelio.plan.validate" => validate_plan(arguments),
+        "openreelio.plan.validate" => validate_plan(state, arguments),
         "openreelio.verify" => run_verify_tool(state, arguments),
         "openreelio.render.range" => run_render_range_tool(state, arguments),
         "openreelio.media.insert" => apply_media_insert(state, arguments),
@@ -3220,6 +3220,14 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
         state.consume_approval_token()?;
     }
 
+    // The same lazy measurement `timeline insert` makes: an asset imported with
+    // `--no-probe`, or before probing existed, records no duration, and an
+    // insert with no duration takes a default length whatever the media is.
+    // `help-json` promises this of the command surface, so it has to be true of
+    // the MCP tool as well as of the CLI verb.
+    let measurement_warnings = crate::media_probe::ensure_asset_measured(&mut project, &asset_id)
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+
     let command = InsertMediaCommand::new(&sequence_id, &track_id, &asset_id, timeline_start)
         .with_source_range(source_in, source_out)
         .with_audio_only(audio_only)
@@ -3256,30 +3264,10 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
     ));
     let duration_sec = primary_clip.place.duration_sec;
 
-    let linked_audio = match primary_clip.link_group_id.clone() {
-        Some(link_group_id) => sequence
-            .tracks
-            .iter()
-            .find_map(|t| {
-                t.clips
-                    .iter()
-                    .find(|c| {
-                        c.id != primary_clip_id
-                            && c.link_group_id.as_deref() == Some(link_group_id.as_str())
-                    })
-                    .map(|c| (t.id.clone(), c.id.clone()))
-            })
-            .map(|(audio_track_id, audio_clip_id)| {
-                let created_track = command_result.created_ids.contains(&audio_track_id);
-                serde_json::json!({
-                    "trackId": audio_track_id,
-                    "clipId": audio_clip_id,
-                    "createdTrack": created_track,
-                })
-            })
-            .unwrap_or(Value::Null),
-        None => Value::Null,
-    };
+    // Shaped by the same helper `timeline insert` reports through, so the two
+    // surfaces cannot drift about what an insert with sound came back as.
+    let linked_audio =
+        super::linked_audio_json(&project.state, &sequence_id, &command_result.created_ids);
 
     Ok(serde_json::json!({
         "status": "ok",
@@ -3294,7 +3282,8 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
         "sourceIn": source_range.map(|range| range.0),
         "sourceOut": source_range.map(|range| range.1),
         "durationSec": duration_sec,
-        "linkedAudio": linked_audio
+        "linkedAudio": linked_audio,
+        "warnings": measurement_warnings,
     }))
 }
 
@@ -3361,7 +3350,7 @@ fn missing_step_field_errors(plan_value: &Value) -> Vec<String> {
     errors
 }
 
-fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
+fn validate_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
     let plan_value = arguments
         .get("plan")
         .cloned()
@@ -3391,7 +3380,49 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
 
     // Everything structural lives in the shared validator, so this surface
     // cannot drift from what `plan execute` will actually accept.
-    let validation = plan::validate_edit_plan(&edit_plan);
+    let mut validation = plan::validate_edit_plan(&edit_plan);
+
+    // Structure is not the whole of what `openreelio.plan.apply` will refuse:
+    // a trim that reaches past the end of its media fails mid-plan and rolls
+    // the whole thing back. `plan validate` on the CLI reads the project and
+    // reports those steps up front, and this tool answered "Plan is valid" for
+    // the very same plan. The project is loaded the way `apply_plan` loads it,
+    // so the two agree on what they are measuring.
+    //
+    // When the pass could not run, the caller is told *why*: "no project
+    // configured" is the caller's own omission and is fixed by passing --path
+    // or opening a project, while a project that failed to load is a fault in
+    // the project itself. Reporting only `mediaLengthChecked: false` left an
+    // agent to guess between the two, and retrying the same call was the wrong
+    // move in both.
+    let media_length = match state.project.as_ref() {
+        None => Err(
+            "no project configured; start the server with --path or open a project first"
+                .to_string(),
+        ),
+        Some(project_path) => match super::load_project(project_path) {
+            Ok(project) => Ok(plan::collect_media_length_errors(
+                &project.state,
+                &edit_plan,
+            )),
+            Err(error) => Err(format!("project failed to load: {error}")),
+        },
+    };
+    let media_length_checked = media_length.is_ok();
+    let mut media_length_reason = None;
+    let unchecked_steps = match media_length {
+        Ok(check) => {
+            validation.errors.extend(check.errors);
+            check.unchecked_steps
+        }
+        // Nothing was measured, so naming every step is the honest answer. An
+        // empty list here would read as "the pass ran and found nothing to
+        // defer".
+        Err(reason) => {
+            media_length_reason = Some(reason);
+            edit_plan.steps.iter().map(|step| step.id.clone()).collect()
+        }
+    };
 
     Ok(if validation.errors.is_empty() {
         serde_json::json!({
@@ -3399,6 +3430,9 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
             "planId": edit_plan.id,
             "stepCount": edit_plan.steps.len(),
             "stepsWithReferences": validation.steps_with_references,
+            "uncheckedSteps": unchecked_steps,
+            "mediaLengthChecked": media_length_checked,
+            "mediaLengthReason": media_length_reason,
             "message": "Plan is valid"
         })
     } else {
@@ -3407,7 +3441,10 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
             "planId": edit_plan.id,
             "message": "Plan validation failed",
             "errors": validation.errors,
-            "stepsWithReferences": validation.steps_with_references
+            "stepsWithReferences": validation.steps_with_references,
+            "uncheckedSteps": unchecked_steps,
+            "mediaLengthChecked": media_length_checked,
+            "mediaLengthReason": media_length_reason
         })
     })
 }
@@ -4421,6 +4458,300 @@ mod tests {
         assert!(video_clip.audio.muted);
         assert!(video_clip.link_group_id.is_some());
         assert_eq!(video_clip.link_group_id, audio_clip.link_group_id);
+    }
+
+    /// Feature: `plan.validate` and `plan.apply` refuse the same plans
+    /// Scenario: a plan trimming a clip past the end of its own media
+    ///   Given a four-second asset placed whole on the timeline
+    ///   When the plan is validated and then applied
+    ///   Then validate reports the refusal instead of "Plan is valid", and
+    ///     apply fails on the same step
+    #[test]
+    fn should_refuse_a_trim_past_the_media_in_both_plan_validate_and_plan_apply() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("plan_media_bound_project");
+        let media_path = temp_dir.path().join("clip.mp4");
+        std::fs::write(&media_path, b"fake video bytes").expect("media fixture");
+
+        let mut project =
+            openreelio_core::ActiveProject::create("Plan Media Bound", project_path.clone())
+                .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        let track_id = project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .find(|track| matches!(track.kind, TrackKind::Video | TrackKind::Overlay))
+            .expect("video track")
+            .id
+            .clone();
+        let import_command =
+            ImportAssetCommand::new("clip.mp4", &media_path.to_string_lossy()).with_duration(4.0);
+        let asset_id = import_command.asset_id().to_string();
+        project
+            .executor
+            .execute(Box::new(import_command), &mut project.state)
+            .expect("import video asset");
+        let clip_id = project
+            .executor
+            .execute(
+                Box::new(
+                    openreelio_core::commands::InsertClipCommand::new(
+                        &sequence_id,
+                        &track_id,
+                        &asset_id,
+                        0.0,
+                    )
+                    .with_source_range(0.0, 4.0),
+                ),
+                &mut project.state,
+            )
+            .expect("place the clip")
+            .created_ids
+            .first()
+            .cloned()
+            .expect("the placed clip id");
+        project.save().expect("save project");
+        drop(project);
+
+        let plan = serde_json::json!({
+            "id": "media-bound-plan",
+            "steps": [{
+                "id": "step-trim",
+                "commandType": "TrimClip",
+                "payload": {
+                    "sequenceId": sequence_id,
+                    "trackId": track_id,
+                    "clipId": clip_id,
+                    "newSourceIn": 0.0,
+                    "newSourceOut": 9.0
+                },
+                "dependsOn": []
+            }]
+        });
+
+        let state = McpServerState {
+            project: Some(project_path.clone()),
+            approval_token: Some("media-bound-token".to_string()),
+            approval_plan_id: Some("media-bound-plan".to_string()),
+            ..Default::default()
+        };
+
+        // Validate used to answer "Plan is valid" here: it ran the structural
+        // checks and never read the project the plan would run against.
+        let validated = validate_plan(&state, serde_json::json!({ "plan": plan.clone() }))
+            .expect("validate answers");
+        assert_eq!(validated["status"], "error", "{validated}");
+        assert_eq!(validated["mediaLengthChecked"], true, "{validated}");
+        assert!(
+            validated["errors"]
+                .as_array()
+                .expect("errors")
+                .iter()
+                .any(|error| error
+                    .as_str()
+                    .is_some_and(|text| text.contains("past the end of asset"))),
+            "{validated}"
+        );
+
+        let applied = apply_plan(
+            &state,
+            serde_json::json!({
+                "approvalToken": "media-bound-token",
+                "plan": plan
+            }),
+        )
+        .expect("apply answers");
+        assert_eq!(applied["status"], "error", "{applied}");
+
+        // And nothing landed: the clip still stops where its media does.
+        let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
+        let clip = reopened.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .find(|clip| clip.id == clip_id)
+            .expect("the clip survives");
+        assert_eq!(clip.range.source_out_sec, 4.0);
+    }
+
+    /// Without a project there is nothing to measure against, and the answer
+    /// says so rather than implying every trim was checked.
+    #[test]
+    fn should_report_that_no_media_lengths_were_checked_without_a_project() {
+        let result = call_plan_validate(serde_json::json!({
+            "id": "no-project-plan",
+            "steps": [{
+                "id": "step-a",
+                "commandType": "AddTrack",
+                "payload": { "sequenceId": "sequence-1", "name": "A", "kind": "video" }
+            }]
+        }));
+
+        assert_eq!(result["status"], "ok", "{result}");
+        assert_eq!(result["mediaLengthChecked"], false, "{result}");
+        // "not measured" is two different situations with two different fixes,
+        // and the caller has to be able to tell them apart.
+        assert!(
+            result["mediaLengthReason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("no project configured")),
+            "{result}"
+        );
+        assert_eq!(
+            result["uncheckedSteps"]
+                .as_array()
+                .expect("uncheckedSteps")
+                .len(),
+            1,
+            "{result}"
+        );
+    }
+
+    /// A configured path that will not open is the project's fault, not the
+    /// caller's, and retrying the same call is the wrong move for both.
+    #[test]
+    fn should_say_the_project_failed_to_load_when_the_configured_path_is_not_one() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = McpServerState {
+            project: Some(temp_dir.path().join("no_such_project")),
+            ..Default::default()
+        };
+
+        let result = validate_plan(
+            &state,
+            serde_json::json!({
+                "plan": {
+                    "id": "unloadable-project-plan",
+                    "steps": [{
+                        "id": "step-a",
+                        "commandType": "AddTrack",
+                        "payload": { "sequenceId": "sequence-1", "name": "A", "kind": "video" }
+                    }]
+                }
+            }),
+        )
+        .expect("validate answers");
+
+        assert_eq!(result["mediaLengthChecked"], false, "{result}");
+        assert!(
+            result["mediaLengthReason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("project failed to load")),
+            "{result}"
+        );
+    }
+
+    /// Feature: one refusal for one plan
+    /// Scenario: a trim naming a track that does not hold its clip
+    ///   Given a clip on a video track and a plan that trims it through the
+    ///   audio track
+    ///   When the plan is validated and then applied
+    ///   Then both refuse it, and for the same reason
+    #[test]
+    fn should_refuse_a_wrong_track_trim_with_the_same_reason_as_apply() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let project_path = temp_dir.path().join("wrong_track_plan_project");
+        let media_path = temp_dir.path().join("clip.mp4");
+        std::fs::write(&media_path, b"fake video bytes").expect("media fixture");
+
+        let mut project =
+            openreelio_core::ActiveProject::create("Wrong Track Plan", project_path.clone())
+                .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        let video_track_id = project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .find(|track| matches!(track.kind, TrackKind::Video | TrackKind::Overlay))
+            .expect("video track")
+            .id
+            .clone();
+        let audio_track_id = project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .find(|track| matches!(track.kind, TrackKind::Audio))
+            .expect("audio track")
+            .id
+            .clone();
+        let import_command =
+            ImportAssetCommand::new("clip.mp4", &media_path.to_string_lossy()).with_duration(4.0);
+        let asset_id = import_command.asset_id().to_string();
+        project
+            .executor
+            .execute(Box::new(import_command), &mut project.state)
+            .expect("import video asset");
+        let clip_id = project
+            .executor
+            .execute(
+                Box::new(
+                    openreelio_core::commands::InsertClipCommand::new(
+                        &sequence_id,
+                        &video_track_id,
+                        &asset_id,
+                        0.0,
+                    )
+                    .with_source_range(0.0, 4.0),
+                ),
+                &mut project.state,
+            )
+            .expect("place the clip")
+            .created_ids
+            .first()
+            .cloned()
+            .expect("the placed clip id");
+        project.save().expect("save project");
+        drop(project);
+
+        let plan = serde_json::json!({
+            "id": "wrong-track-plan",
+            "steps": [{
+                "id": "step-trim",
+                "commandType": "TrimClip",
+                "payload": {
+                    "sequenceId": sequence_id,
+                    "trackId": audio_track_id,
+                    "clipId": clip_id,
+                    "newSourceIn": 0.0,
+                    // Inside the media, so only the track mismatch can refuse it.
+                    "newSourceOut": 2.0
+                },
+                "dependsOn": []
+            }]
+        });
+
+        let state = McpServerState {
+            project: Some(project_path.clone()),
+            approval_token: Some("wrong-track-token".to_string()),
+            approval_plan_id: Some("wrong-track-plan".to_string()),
+            ..Default::default()
+        };
+
+        let validated = validate_plan(&state, serde_json::json!({ "plan": plan.clone() }))
+            .expect("validate answers");
+        assert_eq!(validated["status"], "error", "{validated}");
+        assert!(
+            validated["errors"]
+                .as_array()
+                .expect("errors")
+                .iter()
+                .any(|error| error
+                    .as_str()
+                    .is_some_and(|text| text.contains("Clip not found"))),
+            "{validated}"
+        );
+
+        let applied = apply_plan(
+            &state,
+            serde_json::json!({
+                "approvalToken": "wrong-track-token",
+                "plan": plan
+            }),
+        )
+        .expect("apply answers");
+        assert_eq!(applied["status"], "error", "{applied}");
+        assert!(
+            applied.to_string().contains("Clip not found"),
+            "apply must refuse it for the reason validate gave: {applied}"
+        );
     }
 
     #[test]

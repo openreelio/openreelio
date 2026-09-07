@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::core::{
     assets::AssetKind,
-    commands::{Command, CommandResult, StateChange},
+    commands::{asset_duration_for_track, Command, CommandResult, StateChange},
     project::ProjectState,
     timeline::{
         AudioKeyframe, AudioSettings, BlendMode, Clip, ClipPlace, ClipRange, FadeType,
@@ -18,6 +18,13 @@ use crate::core::{
 };
 
 const TIME_REMAP_EPSILON: TimeSec = 1e-6;
+
+/// Length given to a clip whose asset has no usable duration.
+///
+/// Matches `DEFAULT_MEDIA_INSERT_DURATION_SEC`, the length `InsertMedia`
+/// resolves for the same case, so the two entry points into a clip place the
+/// same slot.
+const DEFAULT_CLIP_DURATION_SEC: TimeSec = 10.0;
 
 fn is_valid_time_sec(value: TimeSec) -> bool {
     value.is_finite() && value >= 0.0
@@ -655,6 +662,31 @@ impl InsertClipCommand {
     }
 }
 
+/// How long a clip placed from `asset_id` runs when the caller named no range.
+///
+/// The bound is the end of the stream the *target track* plays: an mp4 whose
+/// sound outlasts its pictures holds seconds that a length read off the picture
+/// would make unreachable on an audio track, and a still has no length at all,
+/// so it takes the default slot the timeline gives it.
+///
+/// Falls back to [`DEFAULT_CLIP_DURATION_SEC`] whenever there is nothing to read
+/// — an unmeasured asset, a still, or a sequence or track that does not exist.
+/// The last of those is not this function's to report: every caller resolves the
+/// track itself a few lines later and fails there with the right error.
+fn default_source_duration_sec(
+    state: &ProjectState,
+    asset: &crate::core::assets::Asset,
+    sequence_id: &str,
+    track_id: &str,
+) -> TimeSec {
+    state
+        .sequences
+        .get(sequence_id)
+        .and_then(|sequence| sequence.tracks.iter().find(|track| track.id == track_id))
+        .and_then(|track| asset_duration_for_track(asset, &track.kind))
+        .unwrap_or(DEFAULT_CLIP_DURATION_SEC)
+}
+
 impl Command for InsertClipCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
         if !is_valid_time_sec(self.timeline_start) {
@@ -669,8 +701,8 @@ impl Command for InsertClipCommand {
             .get(&self.asset_id)
             .ok_or_else(|| CoreError::AssetNotFound(self.asset_id.clone()))?;
 
-        // Get asset duration for default source range
-        let asset_duration = asset.duration_sec.unwrap_or(10.0);
+        let asset_duration =
+            default_source_duration_sec(state, asset, &self.sequence_id, &self.track_id);
         let source_start = self.source_start.unwrap_or(0.0);
         let source_end = self.source_end.unwrap_or(asset_duration);
 
@@ -860,7 +892,8 @@ impl Command for InsertEditCommand {
             .get(&self.asset_id)
             .ok_or_else(|| CoreError::AssetNotFound(self.asset_id.clone()))?;
 
-        let asset_duration = asset.duration_sec.unwrap_or(10.0);
+        let asset_duration =
+            default_source_duration_sec(state, asset, &self.sequence_id, &self.track_id);
         let source_start = self.source_start.unwrap_or(0.0);
         let source_end = self.source_end.unwrap_or(asset_duration);
 
@@ -1218,7 +1251,8 @@ impl Command for OverwriteEditCommand {
             .get(&self.asset_id)
             .ok_or_else(|| CoreError::AssetNotFound(self.asset_id.clone()))?;
 
-        let asset_duration = asset.duration_sec.unwrap_or(10.0);
+        let asset_duration =
+            default_source_duration_sec(state, asset, &self.sequence_id, &self.track_id);
         let source_start = self.source_start.unwrap_or(0.0);
         let source_end = self.source_end.unwrap_or(asset_duration);
 
@@ -2708,6 +2742,21 @@ impl Command for MoveClipCommand {
 pub struct TrimClipCommand {
     /// Target sequence ID
     pub sequence_id: SequenceId,
+    /// Track the clip is expected to be on.
+    ///
+    /// Named by every surface a caller reaches — IPC, `timeline trim`,
+    /// `command execute`, `plan execute`, MCP — and honoured the way
+    /// [`SplitClipCommand`] and [`SetClipSpeedCommand`] honour theirs: a clip
+    /// that is not on *this* track is [`CoreError::ClipNotFound`], not a clip
+    /// found by scanning the sequence. Accepting the scan let a trim land on a
+    /// different track from the one the media-length guard measured, so a trim
+    /// past the end of the file was refused for one clip and applied to
+    /// another that happened to share its id.
+    ///
+    /// `None` only for [`TrimClipCommand::new_simple`], whose callers hold no
+    /// track id; the lookup then falls back to a sequence-wide search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<TrackId>,
     /// Clip ID to trim
     pub clip_id: ClipId,
     /// New source in point (optional)
@@ -2728,10 +2777,15 @@ pub struct TrimClipCommand {
 }
 
 impl TrimClipCommand {
-    /// Creates a new trim clip command (simple version)
+    /// Creates a trim command for a clip whose track the caller does not know.
+    ///
+    /// The clip is then looked up across the sequence. Prefer [`Self::new`]
+    /// wherever a track id is available: naming the track is what keeps the
+    /// trim on the clip the media-length guard measured.
     pub fn new_simple(sequence_id: &str, clip_id: &str) -> Self {
         Self {
             sequence_id: sequence_id.to_string(),
+            track_id: None,
             clip_id: clip_id.to_string(),
             new_source_in: None,
             new_source_out: None,
@@ -2743,10 +2797,13 @@ impl TrimClipCommand {
         }
     }
 
-    /// Creates a new trim clip command with all parameters
+    /// Creates a new trim clip command with all parameters.
+    ///
+    /// `track_id` is the track the clip has to be on; see
+    /// [`TrimClipCommand::track_id`].
     pub fn new(
         sequence_id: &str,
-        _track_id: &str, // For API consistency, not stored
+        track_id: &str,
         clip_id: &str,
         new_source_in: Option<TimeSec>,
         new_source_out: Option<TimeSec>,
@@ -2754,6 +2811,7 @@ impl TrimClipCommand {
     ) -> Self {
         Self {
             sequence_id: sequence_id.to_string(),
+            track_id: Some(track_id.to_string()),
             clip_id: clip_id.to_string(),
             new_source_in,
             new_source_out,
@@ -2791,18 +2849,35 @@ impl Command for TrimClipCommand {
             .get_mut(&self.sequence_id)
             .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
 
-        let (track_idx, clip_idx) = sequence
-            .tracks
-            .iter()
-            .enumerate()
-            .find_map(|(track_idx, track)| {
-                track
+        // A named track is the track: a clip that is not on it is not this
+        // command's clip, however many other tracks share the id.
+        let (track_idx, clip_idx) = match self.track_id.as_deref() {
+            Some(track_id) => {
+                let track_idx = sequence
+                    .tracks
+                    .iter()
+                    .position(|track| track.id == track_id)
+                    .ok_or_else(|| CoreError::TrackNotFound(track_id.to_string()))?;
+                let clip_idx = sequence.tracks[track_idx]
                     .clips
                     .iter()
-                    .position(|c| c.id == self.clip_id)
-                    .map(|clip_idx| (track_idx, clip_idx))
-            })
-            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+                    .position(|clip| clip.id == self.clip_id)
+                    .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+                (track_idx, clip_idx)
+            }
+            None => sequence
+                .tracks
+                .iter()
+                .enumerate()
+                .find_map(|(track_idx, track)| {
+                    track
+                        .clips
+                        .iter()
+                        .position(|c| c.id == self.clip_id)
+                        .map(|clip_idx| (track_idx, clip_idx))
+                })
+                .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?,
+        };
 
         let original = sequence.tracks[track_idx].clips[clip_idx].clone();
 
@@ -2887,6 +2962,15 @@ impl Command for TrimClipCommand {
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
         if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
             for track in &mut sequence.tracks {
+                // The undo has to land on the clip `execute` changed, so the
+                // named track narrows the search here exactly as it does there.
+                if self
+                    .track_id
+                    .as_deref()
+                    .is_some_and(|track_id| track.id != track_id)
+                {
+                    continue;
+                }
                 if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
                     // Restore all old values
                     if let Some(old_in) = self.old_source_in {
@@ -7717,6 +7801,113 @@ mod tests {
         let clip = &state.sequences[&seq_id].tracks[0].clips[0];
         assert_eq!(clip.range.source_in_sec, 2.0);
         assert_eq!(clip.range.source_out_sec, 8.0);
+    }
+
+    #[test]
+    fn should_refuse_a_trim_whose_named_track_does_not_hold_the_clip() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let other_track = Track::new("Video 2", TrackKind::Video);
+        let other_track_id = other_track.id.clone();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .push(other_track);
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // The clip exists in the sequence, but not on the track the caller
+        // named: a scan would have trimmed it anyway.
+        let mut trim_cmd =
+            TrimClipCommand::new(&seq_id, &other_track_id, &clip_id, None, Some(4.0), None);
+        assert!(matches!(
+            trim_cmd.execute(&mut state),
+            Err(CoreError::ClipNotFound(id)) if id == clip_id
+        ));
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .range
+                .source_out_sec,
+            10.0
+        );
+
+        // A track that does not exist at all is refused as a missing track.
+        let mut trim_cmd =
+            TrimClipCommand::new(&seq_id, "does-not-exist", &clip_id, None, Some(4.0), None);
+        assert!(matches!(
+            trim_cmd.execute(&mut state),
+            Err(CoreError::TrackNotFound(id)) if id == "does-not-exist"
+        ));
+    }
+
+    #[test]
+    fn should_trim_the_clip_on_the_named_track_when_two_tracks_share_a_clip_id() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let other_track = Track::new("Video 2", TrackKind::Video);
+        let other_track_id = other_track.id.clone();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .push(other_track);
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // A duplicated id across tracks is a model violation, but replay can
+        // carry one in; the trim still has to land on the track it was told.
+        let mut duplicate = state.sequences[&seq_id].tracks[0].clips[0].clone();
+        duplicate.range.source_out_sec = 20.0;
+        duplicate.place.duration_sec = 20.0;
+        state.sequences.get_mut(&seq_id).unwrap().tracks[1]
+            .clips
+            .push(duplicate);
+
+        let mut trim_cmd =
+            TrimClipCommand::new(&seq_id, &other_track_id, &clip_id, None, Some(6.0), None);
+        trim_cmd.execute(&mut state).unwrap();
+
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .range
+                .source_out_sec,
+            10.0
+        );
+        assert_eq!(
+            state.sequences[&seq_id].tracks[1].clips[0]
+                .range
+                .source_out_sec,
+            6.0
+        );
+
+        trim_cmd.undo(&mut state).unwrap();
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .range
+                .source_out_sec,
+            10.0
+        );
+        assert_eq!(
+            state.sequences[&seq_id].tracks[1].clips[0]
+                .range
+                .source_out_sec,
+            20.0
+        );
     }
 
     #[test]

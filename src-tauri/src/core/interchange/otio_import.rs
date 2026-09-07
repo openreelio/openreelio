@@ -1090,6 +1090,8 @@ mod tests {
             uri: uri.to_string(),
             hash: "abc123".to_string(),
             duration_sec: duration,
+            audio_duration_sec: None,
+            probe_version: None,
             file_size: 1024,
             imported_at: "2026-01-01T00:00:00Z".to_string(),
             video: None,

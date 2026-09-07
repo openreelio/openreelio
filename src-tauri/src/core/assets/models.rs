@@ -69,6 +69,23 @@ pub enum ProxyStatus {
 /// Minimum video height that requires proxy generation
 pub const PROXY_THRESHOLD_HEIGHT: u32 = 720;
 
+/// The revision of the probe rules this build records on the assets it reads.
+///
+/// Bump it whenever a probe starts recording something an older reading does
+/// not have, so that assets measured under the older rules are read once more.
+/// Revision 1 is the first that records
+/// [`Asset::audio_duration_sec`](crate::core::assets::Asset::audio_duration_sec).
+pub const ASSET_PROBE_VERSION: u32 = 1;
+
+/// Whether an asset still has to be read under the current probe rules.
+///
+/// `true` for an asset nothing has probed and for one measured before
+/// [`ASSET_PROBE_VERSION`] reached its current value; `false` once a probe has
+/// stamped the marker, whether or not that probe found anything new to record.
+pub fn needs_probe_refresh(asset: &Asset) -> bool {
+    asset.probe_version.unwrap_or(0) < ASSET_PROBE_VERSION
+}
+
 /// Check if an asset requires proxy generation
 ///
 /// Returns true if the asset is a video with height > 720p
@@ -223,8 +240,44 @@ pub struct Asset {
     /// SHA256 hash of file content
     pub hash: String,
     /// Duration in seconds (for video/audio)
+    ///
+    /// For a video asset this is the length of its *pictures*, which is what
+    /// every picture clip cut from it is bounded by. The sound may run longer;
+    /// see [`Self::audio_duration_sec`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_sec: Option<f64>,
+    /// How far the asset's sound runs, when it differs from `duration_sec`.
+    ///
+    /// A container reports the longest stream it holds, so an mp4 whose AAC
+    /// outlasts its video is longer as sound than as picture. `duration_sec`
+    /// records the picture, because that is what bounds a clip on a video
+    /// track; this records the sound, because that is what bounds the linked
+    /// audio clip and any `--audio-only` insert. Capping those at the picture's
+    /// length made the last seconds of the recording unreachable.
+    ///
+    /// `None` for an asset with no audio stream, for one nothing has probed,
+    /// and for an audio-only asset — whose `duration_sec` already is the
+    /// sound's length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_duration_sec: Option<f64>,
+    /// Which revision of the probe rules last measured this asset.
+    ///
+    /// `duration_sec` alone cannot say whether an asset was read under the
+    /// current rules: [`Self::audio_duration_sec`] was added after projects had
+    /// already been written, so a video imported before it carries a picture
+    /// length, no sound length, and no way to tell that apart from a file whose
+    /// sound simply does not outlast its pictures. Re-probing on the second
+    /// reading would then repeat forever, and never re-probing leaves every
+    /// pre-existing video's linked audio cut short.
+    ///
+    /// Recorded whenever a probe measures the asset — see
+    /// [`ASSET_PROBE_VERSION`] — so a reader can re-measure exactly the assets
+    /// whose marker is behind, once each.
+    ///
+    /// `None` on every asset written before the marker existed, and on one
+    /// nothing has probed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_version: Option<u32>,
     /// File size in bytes
     pub file_size: u64,
     /// Import timestamp (ISO 8601)
@@ -314,6 +367,8 @@ impl Asset {
             uri: uri.to_string(),
             hash: String::new(),
             duration_sec: None,
+            audio_duration_sec: None,
+            probe_version: None,
             file_size: 0,
             imported_at: chrono::Utc::now().to_rfc3339(),
             video: Some(video_info),
@@ -340,6 +395,8 @@ impl Asset {
             uri: uri.to_string(),
             hash: String::new(),
             duration_sec: None,
+            audio_duration_sec: None,
+            probe_version: None,
             file_size: 0,
             imported_at: chrono::Utc::now().to_rfc3339(),
             video: None,
@@ -375,6 +432,8 @@ impl Asset {
             uri: uri.to_string(),
             hash: String::new(),
             duration_sec: None,
+            audio_duration_sec: None,
+            probe_version: None,
             file_size: 0,
             imported_at: chrono::Utc::now().to_rfc3339(),
             video: Some(VideoInfo {

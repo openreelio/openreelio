@@ -224,8 +224,24 @@ pub fn execute_prepared_plan(
             }
         };
 
-        // Parse tool_name + resolved_params into a CommandPayload
-        let typed_payload = match CommandPayload::parse(step.tool_name.clone(), resolved_params) {
+        // Parse tool_name + resolved_params into a CommandPayload, then hold it
+        // against the project the way `execute_command` and the CLI's
+        // `plan execute` do. `parse` sees the payload and not the project, so
+        // the caption-track and past-the-media refusals — the shared
+        // `ensure_source_out_within_media` among them — live in the validator
+        // rather than in the parse. Without this call the in-app agent was the
+        // one plan surface that would trim a clip past the end of its own
+        // media, and the edit only announced itself as black frames in the
+        // export.
+        let typed_payload = match CommandPayload::parse(step.tool_name.clone(), resolved_params)
+            .and_then(|payload| {
+                crate::ipc::validate_command_payload_against_project_state(
+                    &step.tool_name,
+                    &payload,
+                    &project.state,
+                )
+                .map(|()| payload)
+            }) {
             Ok(payload) => payload,
             Err(e) => {
                 let duration_ms = step_start.elapsed().as_millis() as u64;
@@ -794,6 +810,90 @@ mod tests {
         // And the hand-off of whatever landed before must not be overwritten
         // by a plan that did not land.
         assert!(crate::core::commands::load_last_affected_ranges(&project.path).is_none());
+    }
+
+    /// The length of the fixture file the media-bound plan test measures against.
+    const MEDIA_LENGTH_SEC: f64 = 4.0;
+
+    /// Feature: the in-app agent obeys the same refusals as every other surface
+    /// Scenario: a plan step trims a clip past the end of its own media
+    ///   Given a four-second file placed whole on the timeline
+    ///   When an agent plan asks to trim it out at nine seconds
+    ///   Then the step is refused, and the clip keeps its four seconds
+    #[test]
+    fn run_agent_plan_refuses_a_trim_past_the_end_of_its_media() {
+        use crate::core::assets::{Asset, VideoInfo};
+        use crate::core::timeline::{Clip, TrackKind};
+
+        let dir = TempDir::new().expect("temp dir");
+        let mut project = open_project(&dir);
+        let sequence_id = project
+            .state
+            .active_sequence_id
+            .clone()
+            .expect("active sequence");
+
+        let asset = Asset::new_video("clip.mp4", "/clip.mp4", VideoInfo::default())
+            .with_duration(MEDIA_LENGTH_SEC);
+        let asset_id = asset.id.clone();
+        project.state.assets.insert(asset_id.clone(), asset);
+
+        let (track_id, clip_id) = {
+            let track = project
+                .state
+                .sequences
+                .get_mut(&sequence_id)
+                .expect("the active sequence")
+                .tracks
+                .iter_mut()
+                .find(|track| matches!(track.kind, TrackKind::Video))
+                .expect("a new project has a video track");
+            let mut clip = Clip::new(&asset_id);
+            clip.range.source_in_sec = 0.0;
+            clip.range.source_out_sec = MEDIA_LENGTH_SEC;
+            clip.place.timeline_in_sec = 0.0;
+            clip.place.duration_sec = MEDIA_LENGTH_SEC;
+            let clip_id = clip.id.clone();
+            track.clips.push(clip);
+            (track.id.clone(), clip_id)
+        };
+
+        let plan = plan_with(vec![PlanStep {
+            id: "step-trim".to_string(),
+            tool_name: "trimClip".to_string(),
+            params: serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": track_id,
+                "clipId": clip_id,
+                "newSourceOut": 9.0,
+            }),
+            description: "Trim past the media".to_string(),
+            risk_level: PlanRiskLevel::Low,
+            depends_on: vec![],
+            optional: false,
+        }]);
+
+        let result = run_agent_plan(&mut project, &plan, &NullPlanStepReporter, Instant::now())
+            .expect("a refused step is reported as a failed result");
+
+        assert!(!result.success, "the plan must not apply");
+        let error = result.step_results[0]
+            .error
+            .clone()
+            .expect("the refused step says why");
+        assert!(
+            error.contains("past the end of asset"),
+            "the refusal must name the media bound, got: {error}"
+        );
+
+        // The frames the step asked for do not exist, and neither does the edit.
+        let clip = project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .find(|clip| clip.id == clip_id)
+            .expect("the clip is still there");
+        assert_eq!(clip.range.source_out_sec, MEDIA_LENGTH_SEC);
     }
 
     #[test]

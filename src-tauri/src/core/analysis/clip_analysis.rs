@@ -1068,6 +1068,8 @@ mod tests {
             uri: "/tmp/clip.mp4".to_string(),
             hash: "sha256:test".to_string(),
             duration_sec: Some(20.0),
+            audio_duration_sec: None,
+            probe_version: None,
             file_size: 100,
             imported_at: "2026-01-01T00:00:00Z".to_string(),
             video: Some(VideoInfo::default()),

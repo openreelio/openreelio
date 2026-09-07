@@ -232,6 +232,18 @@ pub async fn execute_command(
     // Strict validation via CommandPayload::parse
     let typed_command = CommandPayload::parse(command_type, payload)?;
 
+    // The against-the-project checks every other surface applies — the
+    // trim-past-the-media refusal above all. `parse` sees the payload and not
+    // the project, so it cannot make them, and `validate_command_payload` is
+    // the frontend's dry run rather than a gate anything downstream can rely
+    // on. Running the shared validator here rather than an inlined copy of one
+    // of its arms is what keeps the app's refusals identical to the CLI's.
+    validate_command_payload_against_project_state(
+        &command_type_for_log,
+        &typed_command,
+        &project.state,
+    )?;
+
     // A command that resolves the active sequence itself — `SetSequenceFormat`
     // with no `sequenceId` — has to be resolved the same way here, or the edit
     // would run but report no sequence and no affected ranges. Read before

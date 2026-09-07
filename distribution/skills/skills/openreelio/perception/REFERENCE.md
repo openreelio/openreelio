@@ -24,11 +24,11 @@ stores written, or `--no-persist`), `partial` (some written — still exit `0`),
 or `failed` (none written — detection worked but the verb did not, exit `1`).
 Cut on shot boundaries, not round numbers.
 
-> `asset import` does not probe media duration, so a clip placed by
-> `timeline insert` gets the 10-second default length — which is also why a
-> second `timeline insert --at 4.0` is refused as an overlap. `totalDurationSec`
-> from `analysis shots` (or `durationSec` from `analysis audio`) is how you learn
-> the real length; then trim the clip to it, naming the clip and its track:
+> `asset import` probes media duration, so a clip placed by `timeline insert`
+> is already as long as the media and a second insert at its end does not
+> overlap. You still need `totalDurationSec` from `analysis shots` (or
+> `durationSec` from `analysis audio`) to retrim a clip an earlier edit
+> shortened, naming the clip and its track:
 >
 > ```bash
 > openreelio-cli timeline trim --path ./demo --clip <CLIP_ID> --track <TRACK_ID> \

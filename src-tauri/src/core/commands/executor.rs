@@ -557,16 +557,18 @@ impl CommandExecutor {
             .into_iter()
             .filter(|clip_id| !split_original_ids.contains(clip_id))
         {
-            let (_, clip) = Self::find_clip_in_sequence(sequence, &clip_id).ok_or_else(|| {
-                CoreError::Internal(format!(
-                    "OverwriteEdit could not find trimmed clip: {clip_id}"
-                ))
-            })?;
+            let (trimmed_track_id, clip) = Self::find_clip_in_sequence(sequence, &clip_id)
+                .ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "OverwriteEdit could not find trimmed clip: {clip_id}"
+                    ))
+                })?;
 
             operations.push(Operation::new(
                 OpKind::ClipTrim,
                 serde_json::json!({
                     "sequenceId": seq_id,
+                    "trackId": trimmed_track_id,
                     "clipId": clip.id,
                     "sourceIn": clip.range.source_in_sec,
                     "sourceOut": clip.range.source_out_sec,
@@ -954,6 +956,7 @@ impl CommandExecutor {
                 OpKind::ClipTrim,
                 serde_json::json!({
                     "sequenceId": seq_id,
+                    "trackId": track_id,
                     "clipId": clip.id,
                     "sourceIn": clip.range.source_in_sec,
                     "sourceOut": clip.range.source_out_sec,
@@ -1113,16 +1116,24 @@ impl CommandExecutor {
             let created_track = result.created_ids.contains(&audio_track_id);
 
             // When a linked audio track was created, replay it before the clip.
+            //
+            // Empty, because the very next operation is the `clip_add` that
+            // puts the audio clip on it. Serialising the track as it stands —
+            // with the clip already on it — replayed the clip twice, so every
+            // reopen of the project reported overlapping clips and repaired one
+            // of the duplicates away.
             if created_track {
                 let position = sequence
                     .tracks
                     .iter()
                     .position(|track| track.id == audio_track_id);
+                let mut empty_track = audio_track.clone();
+                empty_track.clips.clear();
                 operations.push(Operation::new(
                     OpKind::TrackAdd,
                     serde_json::json!({
                         "sequenceId": seq_id,
-                        "track": to_value(audio_track)?,
+                        "track": to_value(&empty_track)?,
                         "position": position,
                     }),
                 ));
@@ -1233,6 +1244,8 @@ impl CommandExecutor {
                     "proxyUrl": asset.proxy_url.clone(),
                     "uri": asset.uri.clone(),
                     "durationSec": asset.duration_sec,
+                    "audioDurationSec": asset.audio_duration_sec,
+                    "probeVersion": asset.probe_version,
                     "fileSize": asset.file_size,
                     "video": asset.video.clone(),
                     "audio": asset.audio.clone(),
@@ -1329,9 +1342,20 @@ impl CommandExecutor {
                         CoreError::Internal(format!("TrackAdd could not find track: {track_id}"))
                     })?;
 
+                // The track as it was *added*, never as it stands now. A
+                // composite that creates a track and then fills it — the
+                // linked-audio branch of `InsertMedia` — serialises this after
+                // its clip is already on the track, and the same batch emits a
+                // `clip_add` for that clip. Replaying both put the clip on the
+                // track twice, so reopening the project reported overlapping
+                // clips and repaired one of the copies away. Every clip has its
+                // own operation; this one carries only the track.
+                let mut track = track.clone();
+                track.clips.clear();
+
                 Ok(serde_json::json!({
                     "sequenceId": seq_id,
-                    "track": to_value(track)?,
+                    "track": to_value(&track)?,
                     "position": get_usize(&command_json, "position"),
                 }))
             }
@@ -1576,16 +1600,29 @@ impl CommandExecutor {
                 let sequence = state.sequences.get(seq_id).ok_or_else(|| {
                     CoreError::Internal(format!("ClipTrim could not find sequence: {seq_id}"))
                 })?;
-                let clip = sequence
-                    .tracks
-                    .iter()
-                    .find_map(|t| t.get_clip(clip_id))
-                    .ok_or_else(|| {
-                        CoreError::Internal(format!("ClipTrim could not find clip: {clip_id}"))
-                    })?;
+                // The track the command named, when it named one: a clip id is
+                // unique within a sequence only by convention, so an op that
+                // recorded no track left the replay to scan and land the trim on
+                // whichever duplicate came first.
+                let (track_id, clip) = match get_str(&command_json, "trackId") {
+                    Some(named_track_id) => sequence
+                        .tracks
+                        .iter()
+                        .find(|track| track.id == named_track_id)
+                        .and_then(|track| {
+                            track
+                                .get_clip(clip_id)
+                                .map(|clip| (track.id.as_str(), clip))
+                        }),
+                    None => Self::find_clip_in_sequence(sequence, clip_id),
+                }
+                .ok_or_else(|| {
+                    CoreError::Internal(format!("ClipTrim could not find clip: {clip_id}"))
+                })?;
 
                 Ok(serde_json::json!({
                     "sequenceId": seq_id,
+                    "trackId": track_id,
                     "clipId": clip_id,
                     "sourceIn": clip.range.source_in_sec,
                     "sourceOut": clip.range.source_out_sec,
@@ -2554,6 +2591,106 @@ mod tests {
         state.apply_operation(&track_op).unwrap();
 
         (seq_id, track_id)
+    }
+
+    /// Feature: a linked audio clip survives a reopen exactly once
+    /// Scenario: the insert has to create the audio track it places the clip on
+    ///   Given a video asset with sound and no free audio track to receive it
+    ///   When `InsertMedia` creates the track and places the linked audio clip
+    ///   Then replaying the log puts that clip on the track once, with no
+    ///   overlap for the loader to repair
+    #[test]
+    fn should_replay_a_created_linked_audio_track_without_duplicating_its_clip() {
+        use crate::core::assets::AudioInfo;
+        use crate::core::commands::InsertMediaCommand;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+        let ops_log = OpsLog::new(&ops_path);
+        let mut state = ProjectState::new_empty("Linked Audio Replay");
+
+        let sequence = Sequence::new("Test Sequence", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        let seq_op = Operation::new(
+            OpKind::SequenceCreate,
+            serde_json::to_value(&sequence).unwrap(),
+        );
+        ops_log.append(&seq_op).unwrap();
+        state.apply_operation(&seq_op).unwrap();
+
+        // A video track and nothing else: the sequence holds no audio track, so
+        // the insert has to create one, which is the case that duplicated.
+        let track = Track::new("Video Track", TrackKind::Video);
+        let track_id = track.id.clone();
+        let track_op = Operation::new(
+            OpKind::TrackAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "track": track,
+                "position": 0,
+            }),
+        );
+        ops_log.append(&track_op).unwrap();
+        state.apply_operation(&track_op).unwrap();
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        // Seeded straight into state: the replay counts clips, and importing
+        // through the command would only add its own path validation to the
+        // test.
+        let asset = Asset::new_video("clip.mp4", "/clip.mp4", VideoInfo::default())
+            .with_duration(4.0)
+            .with_audio_info(AudioInfo::default());
+        let asset_id = asset.id.clone();
+        state.assets.insert(asset_id.clone(), asset);
+
+        executor
+            .execute(
+                Box::new(InsertMediaCommand::new(&seq_id, &track_id, &asset_id, 0.0)),
+                &mut state,
+            )
+            .unwrap();
+
+        let live_audio_clips = audio_clip_count(&state, &seq_id);
+        assert_eq!(live_audio_clips, 1, "the insert places one audio clip");
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Test")).unwrap();
+        assert_eq!(
+            audio_clip_count(&replayed, &seq_id),
+            live_audio_clips,
+            "a reopen must reproduce the timeline the insert made, not a second copy of it"
+        );
+
+        // The overlap repair is what hid the duplicate: it split one copy onto a
+        // recovered track, so counting tracks is how the test sees it happen.
+        assert_eq!(
+            replayed
+                .sequences
+                .get(&seq_id)
+                .expect("the replayed sequence")
+                .tracks
+                .len(),
+            state
+                .sequences
+                .get(&seq_id)
+                .expect("the live sequence")
+                .tracks
+                .len(),
+            "no track was recovered out of a repaired overlap"
+        );
+    }
+
+    /// Clips sitting on audio tracks of one sequence.
+    fn audio_clip_count(state: &ProjectState, sequence_id: &str) -> usize {
+        state
+            .sequences
+            .get(sequence_id)
+            .expect("the sequence")
+            .tracks
+            .iter()
+            .filter(|track| matches!(track.kind, TrackKind::Audio))
+            .map(|track| track.clips.len())
+            .sum()
     }
 
     #[test]

@@ -594,6 +594,13 @@ pub struct UpdateAssetPayload {
     pub proxy_url: Option<Option<String>>,
     pub uri: Option<String>,
     pub duration_sec: Option<Option<f64>>,
+    pub audio_duration_sec: Option<Option<f64>>,
+    /// Which revision of the probe rules measured the asset; `Some(None)` clears it.
+    ///
+    /// Defaulted so a hand-written `UpdateAsset` need not carry it. See
+    /// [`Asset::probe_version`](crate::core::assets::Asset::probe_version).
+    #[serde(default)]
+    pub probe_version: Option<Option<u32>>,
     pub file_size: Option<u64>,
     pub video: Option<Option<VideoInfo>>,
     pub audio: Option<Option<AudioInfo>>,
@@ -2344,6 +2351,12 @@ impl CommandPayload {
                 if let Some(duration_sec) = p.duration_sec {
                     cmd = cmd.with_duration_sec(duration_sec);
                 }
+                if let Some(audio_duration_sec) = p.audio_duration_sec {
+                    cmd = cmd.with_audio_duration_sec(audio_duration_sec);
+                }
+                if let Some(probe_version) = p.probe_version {
+                    cmd = cmd.with_probe_version(probe_version);
+                }
                 if let Some(file_size) = p.file_size {
                     cmd = cmd.with_file_size(file_size);
                 }
@@ -2729,6 +2742,18 @@ pub fn validate_command_payload_against_project_state(
             "caption",
             |track| track.is_caption(),
         ),
+        // The trim-past-the-media refusal the CLI, `plan execute` and MCP all
+        // apply. Without it the app was the one surface where a clip could be
+        // pulled past the end of its own file, and the edit only announced
+        // itself as black frames in the export.
+        CommandPayload::TrimClip(payload) => crate::core::commands::ensure_source_out_within_media(
+            state,
+            &payload.sequence_id,
+            &payload.track_id,
+            &payload.clip_id,
+            payload.new_source_out,
+        )
+        .map_err(|error| error.to_string()),
         CommandPayload::AddTextClip(payload) => validate_track_kind(
             state,
             command_type,

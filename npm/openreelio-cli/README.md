@@ -87,11 +87,18 @@ openreelio-cli verify --path ./demo --file ./out/proxy.mp4
 Clip-scoped verbs (`split`, `trim`, `move`, `speed`, `remove`) all need
 `--track` as well as `--clip`; `timeline clips` prints both.
 
-`asset import` records no probed duration, so every clip `timeline insert` places
-is 10 seconds long regardless of the file — and a second insert at 4.0s is
-refused as an overlap. Read the real length from `analysis shots`
-(`totalDurationSec`) and `timeline trim --clip <CLIP> --track <TRACK>
---source-in 0 --source-out <DURATION>` before building on it.
+`asset import` probes the file, so the asset records `durationSec` and its
+dimensions and every clip `timeline insert` places is as long as the media — a
+second insert at the first clip's reported end does not overlap. `--no-probe`
+skips the reading for bulk imports; the first insert of that asset probes it
+lazily before placing the clip, on every surface (`timeline insert`, `command
+execute --type InsertMedia`, `plan execute`, the MCP tools).
+
+Inserting a **video that carries sound** places two clips: a muted picture clip
+and a linked audio clip on its own audio track (created when the sequence has
+none). The response reports it as `linkedAudio {trackId, clipId, createdTrack}`.
+`trim`, `split`, `move` and `remove` act on the single clip you name, so edit
+the audio clip id too — nothing follows the link group for you.
 
 `timeline set-format --fps 25 --width 1080 --height 1920` changes the sequence's
 frame rate, canvas and audio format at any time, as a logged and undoable edit. A

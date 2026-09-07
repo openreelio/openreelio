@@ -8,7 +8,9 @@ use tauri::State;
 
 use crate::core::CoreError;
 use crate::ipc::{
-    command_needs_track_id, ensure_sequence_id, payloads::CommandPayload, serialize_to_json_string,
+    command_needs_track_id, ensure_sequence_id,
+    payloads::validate_command_payload_against_project_state, payloads::CommandPayload,
+    serialize_to_json_string,
 };
 use crate::AppState;
 
@@ -887,6 +889,24 @@ pub async fn apply_edit_script(
                 continue;
             }
         };
+
+        // The refusals that need the project rather than the payload alone --
+        // the caption-track kinds and the past-the-media trim bound among them
+        // -- exactly as `execute_command`, `plan execute` and the in-app plan
+        // runner apply them. Without this call an EditScript was the one path
+        // that could trim a clip past the end of its own media, and the edit
+        // only announced itself as black frames in the export.
+        if let Err(e) = validate_command_payload_against_project_state(
+            cmd.command_type.as_str(),
+            &typed_command,
+            &project.state,
+        ) {
+            errors.push(format!(
+                "Command validation failed ({}): {}",
+                cmd.command_type, e
+            ));
+            continue;
+        }
 
         let command: Box<dyn crate::core::commands::Command> = match typed_command {
             CommandPayload::InsertClip(p) => {

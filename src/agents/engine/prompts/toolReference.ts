@@ -86,8 +86,8 @@ const QUERY_ACTIONS = `## Query Actions (meta-tool: query)
 - compare_edit_structure(sequenceId?, esdId) → compare current cut structure to a reference style`;
 
 const EDIT_ACTIONS = `## Edit Actions (meta-tool: edit, all require sequenceId)
-- insert_clip(trackId, assetId, timelineStart, sourceIn?, sourceOut?, audioOnly?) → place asset on timeline through drag-and-drop parity; video/image assets must target video/overlay tracks, result exposes data.clipId and data.linkedAudio
-- insert_clip_from_file(file, trackId, timelineStart, sourceIn?, sourceOut?, audioOnly?) → insert by filename (auto-imports) through drag-and-drop parity; result exposes data.clipId and data.linkedAudio
+- insert_clip(trackId, assetId, timelineStart, sourceIn?, sourceOut?, audioOnly?) → place asset on timeline through drag-and-drop parity; video/image assets must target video/overlay tracks, and audioOnly=true requires trackId to be an audio track; result exposes data.clipId and data.linkedAudio
+- insert_clip_from_file(file, trackId, timelineStart, sourceIn?, sourceOut?, audioOnly?) → insert by filename (auto-imports) through drag-and-drop parity; audioOnly=true requires trackId to be an audio track; result exposes data.clipId and data.linkedAudio
 - move_clip(trackId, clipId, newTimelineIn, newTrackId?) → reposition or cross-track move
 - trim_clip(trackId, clipId, newSourceIn?, newSourceOut?) → adjust source boundaries
 - split_clip(trackId, clipId, splitTime) → divide into two clips at time point; result exposes data.newClipId for the right-hand segment

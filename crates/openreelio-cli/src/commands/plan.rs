@@ -143,9 +143,15 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
         PlanAction::Validate { path, file } => {
             let plan = read_plan(&file)?;
 
-            let _project = super::load_project(&path)?;
+            let project = super::load_project(&path)?;
 
-            let validation = validate_edit_plan(&plan);
+            let mut validation = validate_edit_plan(&plan);
+            // `plan execute` refuses a trim that reaches past the end of its
+            // media and rolls the whole plan back. Validate has to refuse the
+            // same plan, or a dry run reports "Plan is valid" for steps that
+            // cannot run.
+            let media_length = collect_media_length_errors(&project.state, &plan);
+            validation.errors.extend(media_length.errors);
 
             if validation.errors.is_empty() {
                 output::print_json(&serde_json::json!({
@@ -157,6 +163,15 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
                     // does not exist yet, so their payloads are only fully
                     // checked once `plan execute` resolves the reference.
                     "stepsWithReferences": validation.steps_with_references,
+                    // The trims among them: measured against their media only
+                    // at execute time, so "Plan is valid" does not vouch for
+                    // their lengths.
+                    "uncheckedSteps": media_length.unchecked_steps,
+                    // Always true here — this verb takes a `--path` and so
+                    // always has a project to measure against. Reported anyway
+                    // so the MCP `plan.validate` envelope, which can be handed
+                    // no project at all, is the same shape.
+                    "mediaLengthChecked": true,
                 }))
             } else {
                 output::print_json(&serde_json::json!({
@@ -164,6 +179,8 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
                     "message": "Plan validation failed",
                     "errors": validation.errors,
                     "stepsWithReferences": validation.steps_with_references,
+                    "uncheckedSteps": media_length.unchecked_steps,
+                    "mediaLengthChecked": true,
                 }))
             }
         }
@@ -615,6 +632,136 @@ fn type_check_step_payload(step: &PlanStep, has_references: bool) -> Result<(), 
     }
 }
 
+/// What the read-only media-length pass found, and what it could not look at.
+pub(crate) struct MediaLengthCheck {
+    /// The past-the-media refusals the plan's trims would hit.
+    pub errors: Vec<String>,
+    /// Ids of trims the pass could not measure against the project as it stands.
+    ///
+    /// Two kinds of step land here. One still carries a `$fromStep` reference,
+    /// so the clip it trims does not exist yet. The other names a clip the
+    /// sequence does not hold *yet* — an earlier step in the same plan places
+    /// it — which the guard passes over precisely because it is the executing
+    /// command's error to report.
+    ///
+    /// Reported so a caller cannot read an empty `errors` as "every trim in
+    /// this plan fits its media". Both kinds are measured at execute time
+    /// instead, once the clip they name exists.
+    pub unchecked_steps: Vec<String>,
+}
+
+/// Whether the sequence a trim names actually holds the clip it names.
+///
+/// The media-length guard is deliberately silent about a clip that is nowhere
+/// in its sequence — the command reports that far better than a pre-flight pass
+/// could — so this pass has to recognise the same case itself, or it would
+/// report those steps as measured and found sound.
+fn sequence_holds_clip(
+    state: &openreelio_core::project::ProjectState,
+    sequence_id: &str,
+    clip_id: &str,
+) -> bool {
+    state.sequences.get(sequence_id).is_some_and(|sequence| {
+        sequence
+            .tracks
+            .iter()
+            .any(|track| track.get_clip(clip_id).is_some())
+    })
+}
+
+/// The past-the-media refusals a plan's trims would hit, without running it.
+///
+/// The read-only counterpart to the guard in [`execute_step`], against the
+/// project as it stands. A step whose payload still carries a `$fromStep`
+/// reference is left to execution: the clip it trims does not exist yet, so
+/// there is nothing here to measure it against — those steps are named in
+/// [`MediaLengthCheck::unchecked_steps`] rather than passed over in silence, and
+/// so is a step naming a clip the sequence does not hold yet. A payload that
+/// does not parse is [`validate_edit_plan`]'s error to report, not this pass's,
+/// and it is not counted as unchecked here.
+pub(crate) fn collect_media_length_errors(
+    state: &openreelio_core::project::ProjectState,
+    plan: &EditPlan,
+) -> MediaLengthCheck {
+    let mut errors = Vec::new();
+    let mut unchecked_steps = Vec::new();
+
+    for step in &plan.steps {
+        let mut references = Vec::new();
+        collect_step_references(&step.payload, &mut references);
+        if !references.is_empty() {
+            // Only the steps this pass would otherwise have measured: naming
+            // every reference-carrying step would just restate
+            // `stepsWithReferences`.
+            if matches!(
+                parse_step_payload_with_placeholders(step),
+                Some(openreelio_core::ipc::CommandPayload::TrimClip(_))
+            ) {
+                unchecked_steps.push(step.id.clone());
+            }
+            continue;
+        }
+
+        let Ok(payload) = openreelio_core::ipc::CommandPayload::parse(
+            step.command_type.clone(),
+            step.payload.clone(),
+        ) else {
+            continue;
+        };
+
+        if let openreelio_core::ipc::CommandPayload::TrimClip(trim) = &payload {
+            if !sequence_holds_clip(state, &trim.sequence_id, &trim.clip_id) {
+                unchecked_steps.push(step.id.clone());
+                continue;
+            }
+            if let Err(error) = openreelio_core::commands::ensure_source_out_within_media(
+                state,
+                &trim.sequence_id,
+                &trim.track_id,
+                &trim.clip_id,
+                trim.new_source_out,
+            ) {
+                errors.push(format!("Step '{}' cannot run: {}", step.id, error));
+            }
+        }
+    }
+
+    MediaLengthCheck {
+        errors,
+        unchecked_steps,
+    }
+}
+
+/// Parses a step's payload with its `$fromStep` references stood in for.
+///
+/// Says which command a reference-carrying step *is* without knowing what the
+/// reference will hold. The two placeholders are the ones
+/// [`type_check_step_payload`] uses, and for the same reason: a reference can
+/// stand for a string or for a number, and only the payload's own shape settles
+/// which.
+fn parse_step_payload_with_placeholders(
+    step: &PlanStep,
+) -> Option<openreelio_core::ipc::CommandPayload> {
+    openreelio_core::ipc::CommandPayload::parse(
+        step.command_type.clone(),
+        substitute_step_references(
+            &step.payload,
+            &serde_json::Value::String(STEP_REFERENCE_PLACEHOLDER.to_string()),
+        ),
+    )
+    .ok()
+    .or_else(|| {
+        openreelio_core::ipc::CommandPayload::parse(
+            step.command_type.clone(),
+            substitute_step_references(
+                &step.payload,
+                &serde_json::Value::from(STEP_REFERENCE_NUMERIC_PLACEHOLDER),
+            ),
+        )
+        .ok()
+    })
+}
+
 /// Returns every step id reachable from `step_id` through `dependsOn`.
 fn dependency_closure<'a>(step_id: &str, steps: &'a [PlanStep]) -> HashSet<&'a str> {
     let by_id: HashMap<&str, &PlanStep> = steps.iter().map(|s| (s.id.as_str(), s)).collect();
@@ -750,6 +897,7 @@ pub(crate) fn apply_edit_plan(
     let mut applied_op_ids: Vec<String> = Vec::new();
     let target_sequence_id = resolve_plan_sequence_id(&project.state, plan);
     let mut step_ranges: Vec<Vec<openreelio_core::TimeRange>> = Vec::new();
+    let plan_warnings = measure_assets_the_plan_inserts(project, plan)?;
 
     // Rollback unwinds the executor's in-memory undo stack, and that stack is
     // capped for interactive use — far below the plan step cap. Without this,
@@ -850,6 +998,7 @@ pub(crate) fn apply_edit_plan(
                     step_ranges,
                     succeeded,
                     rollback_failures,
+                    plan_warnings,
                 ));
             }
         }
@@ -870,7 +1019,48 @@ pub(crate) fn apply_edit_plan(
         "sequenceId": (!target_sequence_id.is_empty()).then_some(target_sequence_id.as_str()),
         "affectedRanges": affected_ranges,
         "stepResults": results,
+        "warnings": plan_warnings,
     }))
+}
+
+/// Measures every asset the plan inserts that nothing has measured yet.
+///
+/// The same lazy probe `timeline insert` makes, applied once before the plan
+/// runs rather than inside a step. A step that emitted two operations would
+/// desynchronise the rollback, which undoes exactly one per succeeded step —
+/// and a measurement is not part of the edit anyway: it records how long a file
+/// on disk is, which stays true whether or not the plan is rolled back.
+///
+/// Steps whose `assetId` is a `$fromStep` reference are skipped: the id is not
+/// settled until the referenced step runs, and the asset it will name was
+/// created by this same plan.
+fn measure_assets_the_plan_inserts(
+    project: &mut openreelio_core::ActiveProject,
+    plan: &EditPlan,
+) -> anyhow::Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    let mut measured: Vec<String> = Vec::new();
+
+    for step in &plan.steps {
+        if !matches!(
+            step.command_type.as_str(),
+            "InsertMedia" | "InsertClip" | "InsertEdit" | "OverwriteEdit"
+        ) {
+            continue;
+        }
+        let Some(asset_id) = step.payload.get("assetId").and_then(|id| id.as_str()) else {
+            continue;
+        };
+        if measured.iter().any(|id| id == asset_id) {
+            continue;
+        }
+        measured.push(asset_id.to_string());
+        warnings.extend(crate::media_probe::ensure_asset_measured(
+            project, asset_id,
+        )?);
+    }
+
+    Ok(warnings)
 }
 
 /// Report for a plan that failed at a step and was rolled back.
@@ -890,6 +1080,13 @@ pub(crate) fn apply_edit_plan(
 /// was mutated and that nothing on the timeline moved. The union of the applied
 /// steps' ranges is the only honest answer to "where do I look now", so it is
 /// reported at the top level and each step keeps its own.
+///
+/// `warnings` survives the rollback with the report, because what produced it
+/// does: the pre-measurement that back-fills an unprobed asset's duration is
+/// applied before the first step runs and is deliberately not unwound — it
+/// records how long a file on disk is, which stays true whichever way the plan
+/// went. Dropping the lines said nothing happened to a project that had gained
+/// an operation.
 #[allow(clippy::too_many_arguments)]
 fn rolled_back_report(
     plan_id: &str,
@@ -900,6 +1097,7 @@ fn rolled_back_report(
     step_ranges: Vec<Vec<openreelio_core::TimeRange>>,
     rolled_back: usize,
     rollback_failures: Vec<String>,
+    warnings: Vec<String>,
 ) -> serde_json::Value {
     let rollback_incomplete = !rollback_failures.is_empty();
 
@@ -924,6 +1122,7 @@ fn rolled_back_report(
         "sequenceId": (!sequence_id.is_empty()).then_some(sequence_id),
         "affectedRanges": affected_ranges,
         "stepResults": step_results,
+        "warnings": warnings,
     })
 }
 
@@ -965,6 +1164,19 @@ fn execute_step(
             .map_err(|error| {
                 anyhow::anyhow!("Invalid command '{}': {}", step.command_type, error)
             })?;
+    // Every refusal that needs the project rather than the payload alone — the
+    // past-the-media trim bound among them — on this surface too. Calling the
+    // shared validator rather than reproducing one of its arms is what keeps
+    // this plan runner from drifting away from `command execute`, the in-app
+    // agent and the MCP tools as new arms are added: a step that asks for
+    // frames the file does not hold fails the plan and rolls it back, rather
+    // than quietly producing a clip that renders black.
+    openreelio_core::ipc::validate_command_payload_against_project_state(
+        &step.command_type,
+        &typed_payload,
+        &project.state,
+    )
+    .map_err(|error| anyhow::anyhow!("Command '{}' failed: {}", step.command_type, error))?;
     let cmd = typed_payload.build_command(&project.path);
 
     project
@@ -1439,6 +1651,14 @@ mod tests {
             vec![vec![openreelio_core::TimeRange::new(1.0, 3.0)]],
             1,
             Vec::new(),
+            vec!["asset 'a' was probed at 4.000s".to_string()],
+        );
+
+        // The measurement that produced the warning is not rolled back with the
+        // steps, so the report has to keep saying it happened.
+        assert_eq!(
+            report["warnings"],
+            serde_json::json!(["asset 'a' was probed at 4.000s"])
         );
 
         assert_eq!(report["rollbackIncomplete"], false);
@@ -1472,6 +1692,7 @@ mod tests {
             ],
             2,
             vec!["undo failed".to_string()],
+            Vec::new(),
         );
 
         assert_eq!(report["rollbackIncomplete"], true);

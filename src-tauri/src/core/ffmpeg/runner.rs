@@ -205,6 +205,18 @@ pub struct MediaInfo {
     /// fall back to `duration_sec`.
     #[serde(default)]
     pub video_duration_sec: Option<f64>,
+    /// How far the *sound* goes, when the file reports an audio stream.
+    ///
+    /// The counterpart to [`Self::video_duration_sec`], and needed for the same
+    /// reason in the other direction: an mp4 whose AAC outlasts its pictures
+    /// holds more sound than [`Self::video_duration_sec`] admits, so a clip cut
+    /// from it onto an audio track would be capped at the picture's length and
+    /// two seconds of the recording would be unreachable.
+    ///
+    /// `None` when there is no audio stream, or when the stream advertises no
+    /// duration of its own; callers fall back to `duration_sec`.
+    #[serde(default)]
+    pub audio_duration_sec: Option<f64>,
     /// Video stream info (if present)
     pub video: Option<VideoStreamInfo>,
     /// Audio stream info (if present)
@@ -1035,9 +1047,12 @@ impl FFmpegRunner {
                 input,
                 &[
                     "-select_streams",
-                    "v:0",
+                    "v",
                     "-show_entries",
-                    "stream=duration,nb_frames,r_frame_rate",
+                    // `attached_pic` comes along so cover art can be told from
+                    // a real picture; without it an mp3's album art answers
+                    // "how far do the pictures go" with one frame.
+                    "stream=duration,nb_frames,r_frame_rate:stream_disposition=attached_pic",
                 ],
             )
             .await?;
@@ -1993,16 +2008,21 @@ fn parse_probe_output(json_str: &str) -> FFmpegResult<MediaInfo> {
     let mut video_info: Option<VideoStreamInfo> = None;
     let mut video_duration_sec: Option<f64> = None;
     let mut audio_info: Option<AudioStreamInfo> = None;
+    let mut audio_duration_sec: Option<f64> = None;
 
     for stream in streams {
         let codec_type = stream.get("codec_type").and_then(|c| c.as_str());
 
         match codec_type {
-            Some("video") if video_info.is_none() => {
+            // Cover art is a video stream by codec type and nothing else: one
+            // mjpeg frame carried alongside the sound. Reading it as the file's
+            // picture made an mp3 an eight-hundredth-of-a-second video.
+            Some("video") if video_info.is_none() && !is_attached_picture(&stream) => {
                 video_duration_sec = video_stream_duration(&stream);
                 video_info = Some(parse_video_stream(&stream)?);
             }
             Some("audio") if audio_info.is_none() => {
+                audio_duration_sec = declared_stream_duration(&stream);
                 audio_info = Some(parse_audio_stream(&stream)?);
             }
             _ => {}
@@ -2012,11 +2032,27 @@ fn parse_probe_output(json_str: &str) -> FFmpegResult<MediaInfo> {
     Ok(MediaInfo {
         duration_sec,
         video_duration_sec,
+        audio_duration_sec,
         video: video_info,
         audio: audio_info,
         format: format_name,
         size_bytes,
     })
+}
+
+/// Whether an ffprobe stream object is embedded cover art rather than a movie.
+///
+/// FFprobe reports an mp3's album art as a video stream with `codec_type`
+/// `video`, so anything that picks "the first video stream" picks the artwork:
+/// the file is classified as a video, and its picture length becomes the single
+/// frame's fraction of a second. `disposition.attached_pic` is how FFmpeg
+/// itself tells the two apart.
+fn is_attached_picture(stream: &serde_json::Value) -> bool {
+    stream
+        .get("disposition")
+        .and_then(|disposition| disposition.get("attached_pic"))
+        .and_then(|flag| flag.as_i64())
+        .is_some_and(|flag| flag != 0)
 }
 
 /// Reads the primary video stream's duration out of an ffprobe JSON document.
@@ -2028,7 +2064,11 @@ fn parse_probe_output(json_str: &str) -> FFmpegResult<MediaInfo> {
 /// duration rather than treating a missing value as zero.
 fn parse_video_stream_duration(json_str: &str) -> Option<f64> {
     let json: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    let stream = json.get("streams")?.as_array()?.first()?;
+    let stream = json
+        .get("streams")?
+        .as_array()?
+        .iter()
+        .find(|stream| !is_attached_picture(stream))?;
     video_stream_duration(stream)
 }
 
@@ -2037,12 +2077,7 @@ fn parse_video_stream_duration(json_str: &str) -> Option<f64> {
 /// Split out of [`parse_video_stream_duration`] so the full `-show_streams`
 /// probe and the narrow `v:0` probe answer the question the same way.
 fn video_stream_duration(stream: &serde_json::Value) -> Option<f64> {
-    let declared = stream
-        .get("duration")
-        .and_then(|value| value.as_str())
-        .and_then(|raw| raw.parse::<f64>().ok())
-        .filter(|value| value.is_finite() && *value > 0.0);
-    if let Some(duration) = declared {
+    if let Some(duration) = declared_stream_duration(stream) {
         return Some(duration);
     }
 
@@ -2058,6 +2093,19 @@ fn video_stream_duration(stream: &serde_json::Value) -> Option<f64> {
         .filter(|value| *value > 0.0)?;
 
     Some(frames / fps)
+}
+
+/// The duration one ffprobe stream object advertises for itself, in seconds.
+///
+/// `None` when the container carries no per-stream duration — Matroska does not
+/// — or when the value is zero or non-finite, which is "unmeasured" rather than
+/// "empty".
+fn declared_stream_duration(stream: &serde_json::Value) -> Option<f64> {
+    stream
+        .get("duration")
+        .and_then(|value| value.as_str())
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
 }
 
 /// Parses an FFmpeg rational such as `30/1` or `30000/1001`.
@@ -2744,6 +2792,107 @@ mod tests {
         }"#;
 
         assert_eq!(parse_video_stream_duration(json), Some(2.0));
+    }
+
+    /// An ffprobe document for an mp3 that carries album art, in the order
+    /// FFmpeg emits it: the artwork stream can come first.
+    fn probe_output_with_cover_art() -> &'static str {
+        r#"{
+            "format": {
+                "duration": "300.000000",
+                "size": "4800000",
+                "format_name": "mp3"
+            },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "mjpeg",
+                    "width": 600,
+                    "height": 600,
+                    "r_frame_rate": "90000/1",
+                    "nb_frames": "1",
+                    "duration": "0.040000",
+                    "disposition": { "attached_pic": 1 }
+                },
+                {
+                    "codec_type": "audio",
+                    "codec_name": "mp3",
+                    "sample_rate": "44100",
+                    "channels": 2,
+                    "duration": "300.000000",
+                    "disposition": { "attached_pic": 0 }
+                }
+            ]
+        }"#
+    }
+
+    /// Feature: cover art is not a picture the timeline can play
+    /// Scenario: probing an mp3 whose album art precedes its sound
+    ///   Given the artwork is the first `video` stream in the document
+    ///   When the probe output is parsed
+    ///   Then no video stream is reported and no picture length is measured
+    #[test]
+    fn should_not_read_embedded_cover_art_as_the_files_picture() {
+        let info = parse_probe_output(probe_output_with_cover_art()).expect("a parseable probe");
+
+        assert!(
+            info.video.is_none(),
+            "album art is not a video stream the timeline can play: {:?}",
+            info.video
+        );
+        assert_eq!(
+            info.video_duration_sec, None,
+            "one artwork frame is not how far the file's pictures go"
+        );
+        assert_eq!(info.duration_sec, 300.0);
+        assert_eq!(info.audio_duration_sec, Some(300.0));
+        assert!(info.audio.is_some());
+    }
+
+    #[test]
+    fn should_skip_cover_art_when_reading_the_narrow_video_duration_probe() {
+        // `-select_streams v` returns the artwork alongside any real picture,
+        // so the reader has to pass over it rather than take the first entry.
+        let json = r#"{
+            "streams": [
+                { "duration": "0.040000", "disposition": { "attached_pic": 1 } },
+                { "duration": "12.500000", "disposition": { "attached_pic": 0 } }
+            ]
+        }"#;
+
+        assert_eq!(parse_video_stream_duration(json), Some(12.5));
+    }
+
+    #[test]
+    fn should_read_the_audio_streams_own_length_beside_the_containers() {
+        // 4s of video and 6s of AAC: the container reports 6, the pictures stop
+        // at 4, and an audio-only edit may reach the whole 6.
+        let json = r#"{
+            "format": { "duration": "6.000000", "size": "1024", "format_name": "mp4" },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 320,
+                    "height": 240,
+                    "r_frame_rate": "25/1",
+                    "duration": "4.000000"
+                },
+                {
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "sample_rate": "48000",
+                    "channels": 2,
+                    "duration": "6.000000"
+                }
+            ]
+        }"#;
+
+        let info = parse_probe_output(json).expect("a parseable probe");
+
+        assert_eq!(info.duration_sec, 6.0);
+        assert_eq!(info.video_duration_sec, Some(4.0));
+        assert_eq!(info.audio_duration_sec, Some(6.0));
     }
 
     // =========================================================================
