@@ -116,6 +116,22 @@ impl ImportAssetCommand {
         self
     }
 
+    /// Records how far the asset's sound runs, when it outlasts the picture.
+    ///
+    /// See [`Asset::audio_duration_sec`].
+    pub fn with_audio_duration_sec(mut self, audio_duration_sec: Option<f64>) -> Self {
+        self.asset.audio_duration_sec = audio_duration_sec;
+        self
+    }
+
+    /// Records which revision of the probe rules measured the asset.
+    ///
+    /// See [`Asset::probe_version`].
+    pub fn with_probe_version(mut self, probe_version: Option<u32>) -> Self {
+        self.asset.probe_version = probe_version;
+        self
+    }
+
     /// Sets the file size
     pub fn with_file_size(mut self, file_size: u64) -> Self {
         self.asset = self.asset.with_file_size(file_size);
@@ -324,6 +340,16 @@ pub struct UpdateAssetCommand {
     pub uri: Option<String>,
     /// New duration (optional). `Some(None)` clears duration.
     pub duration_sec: Option<Option<f64>>,
+    /// New sound length (optional). `Some(None)` clears it.
+    ///
+    /// See [`Asset::audio_duration_sec`].
+    #[serde(default)]
+    pub audio_duration_sec: Option<Option<f64>>,
+    /// New probe marker (optional). `Some(None)` clears it.
+    ///
+    /// See [`Asset::probe_version`].
+    #[serde(default)]
+    pub probe_version: Option<Option<u32>>,
     /// New file size (optional)
     pub file_size: Option<u64>,
     /// New video metadata (optional). `Some(None)` clears video metadata.
@@ -353,6 +379,10 @@ pub struct UpdateAssetCommand {
     original_uri: Option<String>,
     #[serde(skip)]
     original_duration_sec: Option<Option<f64>>,
+    #[serde(skip)]
+    original_audio_duration_sec: Option<Option<f64>>,
+    #[serde(skip)]
+    original_probe_version: Option<Option<u32>>,
     #[serde(skip)]
     original_file_size: Option<u64>,
     #[serde(skip)]
@@ -384,6 +414,8 @@ impl UpdateAssetCommand {
             proxy_url: None,
             uri: None,
             duration_sec: None,
+            audio_duration_sec: None,
+            probe_version: None,
             file_size: None,
             video: None,
             audio: None,
@@ -398,6 +430,8 @@ impl UpdateAssetCommand {
             original_proxy_url: None,
             original_uri: None,
             original_duration_sec: None,
+            original_audio_duration_sec: None,
+            original_probe_version: None,
             original_file_size: None,
             original_video: None,
             original_audio: None,
@@ -453,6 +487,22 @@ impl UpdateAssetCommand {
     /// Sets the duration. Use `None` to clear.
     pub fn with_duration_sec(mut self, duration_sec: Option<f64>) -> Self {
         self.duration_sec = Some(duration_sec);
+        self
+    }
+
+    /// Sets how far the asset's sound runs. Use `None` to clear.
+    ///
+    /// See [`Asset::audio_duration_sec`].
+    pub fn with_audio_duration_sec(mut self, audio_duration_sec: Option<f64>) -> Self {
+        self.audio_duration_sec = Some(audio_duration_sec);
+        self
+    }
+
+    /// Records which revision of the probe rules measured the asset.
+    ///
+    /// See [`Asset::probe_version`].
+    pub fn with_probe_version(mut self, probe_version: Option<u32>) -> Self {
+        self.probe_version = Some(probe_version);
         self
     }
 
@@ -534,6 +584,8 @@ impl Command for UpdateAssetCommand {
         self.original_proxy_url = Some(asset.proxy_url.clone());
         self.original_uri = Some(asset.uri.clone());
         self.original_duration_sec = Some(asset.duration_sec);
+        self.original_audio_duration_sec = Some(asset.audio_duration_sec);
+        self.original_probe_version = Some(asset.probe_version);
         self.original_file_size = Some(asset.file_size);
         self.original_video = Some(asset.video.clone());
         self.original_audio = Some(asset.audio.clone());
@@ -573,6 +625,12 @@ impl Command for UpdateAssetCommand {
         }
         if let Some(duration_sec) = self.duration_sec {
             asset.duration_sec = duration_sec;
+        }
+        if let Some(audio_duration_sec) = self.audio_duration_sec {
+            asset.audio_duration_sec = audio_duration_sec;
+        }
+        if let Some(probe_version) = self.probe_version {
+            asset.probe_version = probe_version;
         }
         if let Some(file_size) = self.file_size {
             asset.file_size = file_size;
@@ -627,6 +685,12 @@ impl Command for UpdateAssetCommand {
             }
             if let Some(duration_sec) = self.original_duration_sec {
                 asset.duration_sec = duration_sec;
+            }
+            if let Some(audio_duration_sec) = self.original_audio_duration_sec {
+                asset.audio_duration_sec = audio_duration_sec;
+            }
+            if let Some(probe_version) = self.original_probe_version {
+                asset.probe_version = probe_version;
             }
             if let Some(file_size) = self.original_file_size {
                 asset.file_size = file_size;

@@ -78,6 +78,16 @@ pub struct MediaMetadata {
     /// from; callers fall back to [`Self::duration_sec`].
     #[serde(default)]
     pub video_duration_sec: Option<f64>,
+    /// How far the *sound* goes, when the file reports an audio stream.
+    ///
+    /// The counterpart to [`Self::video_duration_sec`]: a file whose audio
+    /// outlasts its pictures holds more sound than the video stream admits, so
+    /// anything bounding an audio-only edit has to ask the audio stream.
+    ///
+    /// `None` when the file carries no audio stream or the stream advertises no
+    /// duration of its own; callers fall back to [`Self::duration_sec`].
+    #[serde(default)]
+    pub audio_duration_sec: Option<f64>,
     /// File size in bytes
     pub file_size: u64,
     /// Video stream info (if present)
@@ -100,6 +110,7 @@ impl Default for MediaMetadata {
         Self {
             duration_sec: 0.0,
             video_duration_sec: None,
+            audio_duration_sec: None,
             file_size: 0,
             video: None,
             audio: None,
@@ -141,10 +152,19 @@ struct FFprobeStream {
     color_primaries: Option<String>,
     #[allow(dead_code)]
     pix_fmt: Option<String>,
+    /// Per-stream disposition flags; `attached_pic` marks embedded cover art.
+    disposition: Option<FFprobeDisposition>,
     /// Per-stream side data; carries the display matrix on rotated recordings.
     side_data_list: Option<Vec<serde_json::Value>>,
     /// Stream tags; older remuxes only leave `rotate` behind.
     tags: Option<serde_json::Value>,
+}
+
+/// The subset of an ffprobe stream's disposition flags this module reads.
+#[derive(Debug, Deserialize)]
+struct FFprobeDisposition {
+    /// `1` when the stream is embedded cover art rather than a movie.
+    attached_pic: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,12 +257,21 @@ impl MetadataExtractor {
         if let Some(streams) = output.streams {
             for stream in streams {
                 match stream.codec_type.as_str() {
-                    "video" if metadata.video.is_none() => {
+                    // Embedded cover art is a video stream by codec type only.
+                    // Reading it as the file's picture turned an mp3 into a
+                    // video whose pictures last a single frame, which is the
+                    // bound the renderer then cut every clip from it to.
+                    "video" if metadata.video.is_none() && !Self::is_attached_picture(&stream) => {
                         metadata.rotation_deg = Self::parse_display_rotation(&stream);
                         metadata.video_duration_sec = Self::parse_video_stream_duration(&stream);
                         metadata.video = Some(Self::parse_video_stream(&stream));
                     }
                     "audio" if metadata.audio.is_none() => {
+                        metadata.audio_duration_sec = stream
+                            .duration
+                            .as_ref()
+                            .and_then(|raw| raw.parse::<f64>().ok())
+                            .filter(|value| value.is_finite() && *value > 0.0);
                         metadata.audio = Some(Self::parse_audio_stream(&stream));
                     }
                     _ => {}
@@ -251,6 +280,19 @@ impl MetadataExtractor {
         }
 
         Ok(metadata)
+    }
+
+    /// Whether an ffprobe stream is embedded cover art rather than a movie.
+    ///
+    /// FFprobe reports an mp3's album art as a `video` stream, so picking "the
+    /// first video stream" picks the artwork. `disposition.attached_pic` is how
+    /// FFmpeg itself tells the two apart.
+    fn is_attached_picture(stream: &FFprobeStream) -> bool {
+        stream
+            .disposition
+            .as_ref()
+            .and_then(|disposition| disposition.attached_pic)
+            .is_some_and(|flag| flag != 0)
     }
 
     /// Parse video stream info

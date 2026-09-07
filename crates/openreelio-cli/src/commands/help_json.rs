@@ -138,11 +138,12 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli project save --path ./project"
             },
             "asset.import": {
-                "description": "Import a media file as a project asset",
+                "description": "Import a media file as a project asset. The file is probed with ffprobe by default, so the asset records durationSec, video {width,height,fps} and audio, and a clip inserted from it is as long as the media. durationSec is the PICTURE's length for a video; when the sound outlasts it, audioDurationSec carries the sound's length and bounds the linked audio clip and any --audio-only insert. 'probed' says whether the reading happened and 'warnings' says why it did not",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "file": { "type": "string", "required": true, "desc": "Path to media file" },
-                    "name": { "type": "string", "required": false, "desc": "Display name (defaults to filename)" }
+                    "name": { "type": "string", "required": false, "desc": "Display name (defaults to filename)" },
+                    "no-probe": { "type": "boolean", "required": false, "desc": "Skip the ffprobe read. Faster in bulk; the asset records no duration until something measures it, which the first insert of it does lazily (see timeline.insert)" }
                 },
                 "example": "openreelio-cli asset import --path ./project --file video.mp4"
             },
@@ -293,7 +294,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli timeline tracks --path ./project"
             },
             "timeline.insert": {
-                "description": edit_desc("Insert a clip onto the timeline from an asset"),
+                "description": edit_desc("Insert a clip onto the timeline from an asset. The clip is as long as the media: an asset with no recorded duration is probed first and updated through UpdateAsset, on every surface that inserts (this verb, command execute --type InsertMedia, plan execute and the MCP tools). A video asset that carries sound is placed the way the app places it - a muted picture clip plus a linked audio clip on its own audio track, reported under 'linkedAudio' {trackId, clipId, createdTrack}. Later trim/split/move/remove name ONE clip, so the linked audio clip id has to be edited too. Only an asset nothing could measure falls back to a 10-second clip, and 'warnings' says why"),
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "asset": { "type": "string", "required": true, "desc": "Asset ID to insert" },
@@ -332,7 +333,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
                     "track": { "type": "string", "required": true, "desc": "Track ID" },
                     "source-in": { "type": "number", "required": false, "desc": "New source in point (seconds)" },
-                    "source-out": { "type": "number", "required": false, "desc": "New source out point (seconds)" },
+                    "source-out": { "type": "number", "required": false, "desc": "New source out point (seconds). Refused when it is past the end of the asset's media - on every surface that trims, including command execute --type TrimClip and plan execute; the error names the asset's measured length" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli timeline trim --path ./project --clip clip_001 --track track_v1 --source-in 2.0 --source-out 8.0"
@@ -678,7 +679,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli plan execute --path ./project --file edit_plan.json"
             },
             "plan.validate": {
-                "description": "Validate a plan file without executing. Checks duplicate and missing step ids, dependency cycles, the 1000-step cap, and parses every step payload. A payload carrying a '$fromStep' reference is checked with a stand-in of either JSON type, so a reference into a numeric field (splitTime) validates as readily as one into a string field (clipId); those steps are listed in 'stepsWithReferences' because the referenced value itself is only settled at execute time. Exits 0 with the findings in 'status' and 'errors' whenever the plan file parses; exits nonzero with empty stdout when the tool itself cannot run, such as an unreadable plan file, malformed plan JSON, or a project that will not open",
+                "description": "Validate a plan file without executing. Checks duplicate and missing step ids, dependency cycles, the 1000-step cap, and parses every step payload. A payload carrying a '$fromStep' reference is checked with a stand-in of either JSON type, so a reference into a numeric field (splitTime) validates as readily as one into a string field (clipId); those steps are listed in 'stepsWithReferences' because the referenced value itself is only settled at execute time. Exits 0 with the findings in 'status' and 'errors' whenever the plan file parses; exits nonzero with empty stdout when the tool itself cannot run, such as an unreadable plan file, malformed plan JSON, or a project that will not open. A pass here is measured against the project as it stands: 'plan execute' re-probes any legacy asset a step inserts from before the first step runs, so a trim this verb accepted against an unmeasured asset can still be refused once the real media length is known, and a step naming a clip an earlier step has yet to move is deferred to 'uncheckedSteps' rather than refused",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "file": { "type": "string", "required": true, "desc": "Path to plan JSON file" }

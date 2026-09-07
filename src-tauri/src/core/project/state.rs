@@ -448,6 +448,20 @@ impl ProjectState {
                 asset.duration_sec = duration_value.as_f64();
             }
 
+            if let Some(audio_duration_value) = op.payload.get("audioDurationSec") {
+                asset.audio_duration_sec = audio_duration_value.as_f64();
+            }
+
+            // Replayed alongside the two lengths it describes, so a project
+            // rebuilt from its ops does not look unprobed and get re-read on
+            // the next insert. See
+            // [`Asset::probe_version`](crate::core::assets::Asset::probe_version).
+            if let Some(probe_version_value) = op.payload.get("probeVersion") {
+                asset.probe_version = probe_version_value
+                    .as_u64()
+                    .and_then(|version| u32::try_from(version).ok());
+            }
+
             if let Some(video_value) = op.payload.get("video") {
                 asset.video = serde_json::from_value(video_value.clone()).ok();
             }
@@ -1099,6 +1113,42 @@ impl ProjectState {
             .map_err(|e| CoreError::InvalidCommand(format!("Invalid clip data: {}", e)))?;
 
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
+            // Adding a clip the sequence already holds is never what the log
+            // meant. Ops written before `TrackAdd` stopped carrying its clips
+            // inline replay the same clip twice — once with its track, once
+            // through this op — and a clip id names one clip in the whole
+            // sequence, so an id already used on another track is a model
+            // violation replay must not deepen by placing a second copy.
+            if let Some(existing_track_id) = sequence
+                .tracks
+                .iter()
+                .find(|track| track.get_clip(&clip.id).is_some())
+                .map(|track| track.id.clone())
+            {
+                // On the named track this is the expected duplicate: the ops
+                // written before `TrackAdd` stopped carrying its clips inline
+                // replay the same clip on the same track twice, and skipping
+                // the second is routine. On any other track it is a model
+                // violation the log is already carrying — one id naming two
+                // clips — and replay is where it becomes visible, so it is said
+                // out loud rather than buried at debug level.
+                if existing_track_id == track_id {
+                    tracing::debug!(
+                        clip_id = %clip.id,
+                        track_id = %existing_track_id,
+                        "Skipping ClipAdd for a clip the track already holds"
+                    );
+                } else {
+                    tracing::warn!(
+                        clip_id = %clip.id,
+                        existing_track_id = %existing_track_id,
+                        track_id = %track_id,
+                        "Skipping ClipAdd: the clip id is already used on another track"
+                    );
+                }
+                return Ok(());
+            }
+
             if let Some(track) = sequence.get_track_mut(track_id) {
                 track.add_clip(clip);
                 Self::sort_track_clips(track);
@@ -1218,8 +1268,25 @@ impl ProjectState {
             .as_str()
             .ok_or_else(|| CoreError::InvalidCommand("Missing clipId".to_string()))?;
 
+        // The track the op recorded, when it recorded one. A clip id is unique
+        // within a sequence only by convention, so replaying by scan landed a
+        // trim on whichever track held the first clip of that id -- the wrong
+        // one whenever a picture clip and its linked audio share an id. Ops
+        // written before the track was recorded still replay by scan, which is
+        // the behaviour they were written under.
+        let named_track_id = op.payload.get("trackId").and_then(|value| value.as_str());
+
+        // Whether the trim landed, and whether the sequence was even there to
+        // land it in. A missing sequence is the forgiving case replay is built
+        // for; a sequence that *is* there and still matched nothing is not.
+        let mut applied = false;
+        let mut sequence_found = false;
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
+            sequence_found = true;
             for track in &mut sequence.tracks {
+                if named_track_id.is_some_and(|named_track_id| track.id != named_track_id) {
+                    continue;
+                }
                 if let Some(clip) = track.get_clip_mut(clip_id) {
                     if let Some(source_in) = op.payload["sourceIn"].as_f64() {
                         clip.range.source_in_sec = source_in;
@@ -1236,10 +1303,32 @@ impl ProjectState {
 
                     Self::sort_track_clips(track);
                     Self::warn_replayed_track_overlap(track);
+                    applied = true;
                     break;
                 }
             }
         }
+
+        // A trim that matched nothing leaves the clip at its pre-trim length
+        // and says so nowhere, which reads downstream as a replay that simply
+        // had no such edit. Replay is deliberately forgiving — an op for a
+        // sequence a later op removed must not fail the whole rebuild — but a
+        // sequence that is present, with a *named* track that holds no such
+        // clip, means the log and the state disagree, and that is worth a line
+        // in the log. Ops written before the track was recorded are exempt:
+        // they replay by scan, so any track may legitimately match.
+        if sequence_found && !applied {
+            if let Some(named_track_id) = named_track_id {
+                tracing::warn!(
+                    sequence_id = %seq_id,
+                    track_id = %named_track_id,
+                    clip_id = %clip_id,
+                    op_id = %op.id,
+                    "ClipTrim op named a track that holds no such clip; the trim was not applied"
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -2913,6 +3002,166 @@ mod tests {
         let seq = state.get_sequence(&seq_id).unwrap();
         assert_eq!(seq.tracks[0].clips.len(), 1);
         assert_eq!(seq.tracks[0].clips[0].id, clip_id);
+    }
+
+    /// Feature: replay never places a clip id twice
+    /// Scenario: a `ClipAdd` for an id the sequence already holds
+    ///   Given a clip already on one track
+    ///   When the log replays a `ClipAdd` for the same id, on that track and on
+    ///     another
+    ///   Then neither adds a second copy, and the original stays where it was
+    #[test]
+    fn replay_skips_a_clip_add_for_an_id_the_sequence_already_holds() {
+        let mut sequence = Sequence::new("Seq", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        let first_track = Track::new("Video 1", TrackKind::Video);
+        let first_track_id = first_track.id.clone();
+        let second_track = Track::new("Video 2", TrackKind::Video);
+        let second_track_id = second_track.id.clone();
+        sequence.add_track(first_track);
+        sequence.add_track(second_track);
+
+        let clip = Clip::new("asset_a")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let clip_id = clip.id.clone();
+
+        let mut state = ProjectState::new_empty("Test Project");
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let mut add_clip = |track_id: &str, clip: &Clip| {
+            state
+                .apply_operation(&Operation::new(
+                    OpKind::ClipAdd,
+                    serde_json::json!({
+                        "sequenceId": seq_id,
+                        "trackId": track_id,
+                        "clip": clip,
+                    }),
+                ))
+                .unwrap();
+        };
+
+        add_clip(&first_track_id, &clip);
+        // The same op again — what an ops log written before `TrackAdd` stopped
+        // carrying its clips inline replays.
+        add_clip(&first_track_id, &clip);
+        // And the same id aimed at a different track: a model violation the log
+        // is already carrying, which replay must not deepen into two clips.
+        let mut elsewhere = clip.clone();
+        elsewhere.place.timeline_in_sec = 30.0;
+        add_clip(&second_track_id, &elsewhere);
+
+        let sequence = state.get_sequence(&seq_id).unwrap();
+        assert_eq!(
+            sequence
+                .tracks
+                .iter()
+                .map(|track| track.clips.len())
+                .sum::<usize>(),
+            1,
+            "one id names one clip"
+        );
+        let placed = &sequence.tracks[0].clips[0];
+        assert_eq!(placed.id, clip_id);
+        assert_eq!(placed.place.timeline_in_sec, 0.0);
+        assert!(sequence.tracks[1].clips.is_empty());
+    }
+
+    /// Feature: a replayed trim lands on the track its op names
+    /// Scenario: the same clip id on two tracks, trimmed on the second
+    ///   Given a picture clip and its linked audio sharing one id
+    ///   When a `ClipTrim` naming the audio track replays
+    ///   Then only the audio clip moves, and a legacy op with no track still
+    ///     replays by scan
+    #[test]
+    fn replay_trims_the_clip_on_the_track_the_operation_names() {
+        let mut sequence = Sequence::new("Seq", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+
+        // One id on two tracks: a model violation the linked-audio path used to
+        // write, and one an ops log can still be carrying.
+        let picture = Clip::new("asset_a")
+            .with_source_range(0.0, 4.0)
+            .place_at(0.0);
+        let clip_id = picture.id.clone();
+        let mut sound = picture.clone();
+        sound.range.source_out_sec = 4.0;
+
+        let mut picture_track = Track::new("Video 1", TrackKind::Video);
+        picture_track.clips.push(picture);
+        let picture_track_id = picture_track.id.clone();
+        let mut sound_track = Track::new("Audio 1", TrackKind::Audio);
+        sound_track.clips.push(sound);
+        let sound_track_id = sound_track.id.clone();
+        sequence.add_track(picture_track);
+        sequence.add_track(sound_track);
+
+        let mut state = ProjectState::new_empty("Test Project");
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let source_out_of = |state: &ProjectState, track_id: &str| {
+            state.sequences[&seq_id]
+                .tracks
+                .iter()
+                .find(|track| track.id == track_id)
+                .and_then(|track| track.get_clip(&clip_id))
+                .map(|clip| clip.range.source_out_sec)
+                .expect("both tracks hold the id")
+        };
+
+        // Replaying by scan landed this on the picture track, because that is
+        // the track the scan reached first.
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipTrim,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": sound_track_id,
+                    "clipId": clip_id,
+                    "sourceIn": 0.0,
+                    "sourceOut": 6.0,
+                    "timelineIn": 0.0,
+                    "duration": 6.0,
+                }),
+            ))
+            .unwrap();
+
+        assert_eq!(source_out_of(&state, &sound_track_id), 6.0);
+        assert_eq!(
+            source_out_of(&state, &picture_track_id),
+            4.0,
+            "a trim on the audio track must not reach the picture clip"
+        );
+
+        // An op written before the track was recorded still replays the way it
+        // was written: by scan, onto the first track holding the id.
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipTrim,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "sourceIn": 0.0,
+                    "sourceOut": 3.0,
+                    "timelineIn": 0.0,
+                    "duration": 3.0,
+                }),
+            ))
+            .unwrap();
+
+        assert_eq!(source_out_of(&state, &picture_track_id), 3.0);
+        assert_eq!(source_out_of(&state, &sound_track_id), 6.0);
     }
 
     #[test]

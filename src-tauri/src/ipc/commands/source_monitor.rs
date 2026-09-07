@@ -487,6 +487,13 @@ pub struct ThreePointEditResult {
     pub duration: f64,
     /// Edit mode that was applied.
     pub edit_mode: ThreePointEditMode,
+    /// Lines worth showing the operator, empty on the ordinary path.
+    ///
+    /// An asset nothing had measured is probed before the edit is cut from it,
+    /// and this is where that reading — or the reason it could not be taken —
+    /// is reported. Without it a clip that fell back to the default length
+    /// looked exactly like one whose media really is that long.
+    pub warnings: Vec<String>,
 }
 
 /// Performs an atomic 3-point edit: reads source monitor In/Out, resolves the
@@ -496,7 +503,7 @@ pub struct ThreePointEditResult {
 /// edit that occur when the frontend orchestrates these as separate IPC calls.
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(state), fields(
+#[tracing::instrument(skip(state, ffmpeg_state), fields(
     seq = %payload.sequence_id,
     mode = ?payload.edit_mode,
     pos = payload.timeline_position,
@@ -504,6 +511,7 @@ pub struct ThreePointEditResult {
 pub async fn three_point_insert(
     payload: ThreePointEditPayload,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
 ) -> Result<ThreePointEditResult, String> {
     let timeline_position = validate_time_sec("timelinePosition", payload.timeline_position)?;
 
@@ -518,49 +526,103 @@ pub async fn three_point_insert(
     }; // source_monitor lock dropped
 
     // 2. Acquire project, resolve track, build command, execute
-    let mut project_guard = state.project.lock().await;
+    let project_guard = state.project.lock().await;
+
+    // Resolve target track
+    let (track_id, expected_project_id) = {
+        let project = project_guard
+            .as_ref()
+            .ok_or_else(|| "No project open".to_string())?;
+
+        let track_id = crate::core::commands::resolve_three_point_track(
+            &project.state,
+            &payload.sequence_id,
+            payload.track_id.as_deref(),
+        )?;
+        (track_id, project.state.meta.id.clone())
+    };
+
+    // A 3-point edit with no Out point runs to the end of the media, so the
+    // asset has to have been read before that end can be named. An asset
+    // imported headlessly with `--no-probe`, or written before sound lengths
+    // were recorded, is measured here — through the same shared back-fill
+    // `execute_command` uses, so the app records one `UpdateAsset` op for the
+    // file whichever surface noticed it was unmeasured. FFprobe carries a
+    // two-minute watchdog, so the project lock is released around the reading
+    // and taken again to record it; nothing else that touches the project is
+    // made to wait on a measurement.
+    let (mut project_guard, back_filled) = crate::core::commands::back_fill_asset_measurements(
+        project_guard,
+        &state.project,
+        &expected_project_id,
+        std::iter::once(asset_id.as_str()),
+        &ffmpeg_state,
+    )
+    .await?;
+    let mut warnings = back_filled.warnings;
+
     let project = project_guard
         .as_mut()
         .ok_or_else(|| "No project open".to_string())?;
 
-    let sequence = project
-        .state
-        .sequences
-        .get(&payload.sequence_id)
-        .ok_or_else(|| format!("Sequence '{}' not found", payload.sequence_id))?;
-
-    // Resolve target track
-    let track_id = match payload.track_id {
-        Some(ref id) => {
-            let track = sequence
-                .tracks
-                .iter()
-                .find(|t| t.id == *id)
-                .ok_or_else(|| format!("Track '{}' not found", id))?;
-            if track.locked {
-                return Err(format!("Track '{}' is locked", id));
-            }
-            id.clone()
-        }
-        None => {
-            // Auto-detect: first unlocked video track
-            use crate::core::timeline::TrackKind;
-            sequence
-                .tracks
-                .iter()
-                .find(|t| t.kind == TrackKind::Video && !t.locked)
-                .map(|t| t.id.clone())
-                .ok_or_else(|| "No unlocked video track available".to_string())?
-        }
+    // The track was resolved under a guard that has since been released, and
+    // `track_id` is a plain String that says nothing about whether the track is
+    // still there or still unlocked. The operator can lock it — or delete it,
+    // or the whole sequence — while the probe runs, and a refusal that was
+    // correct to make before the probe is just as correct to make after it. So
+    // resolve again, and refuse in the same words.
+    let resolved_track_id = crate::core::commands::resolve_three_point_track(
+        &project.state,
+        &payload.sequence_id,
+        payload.track_id.as_deref(),
+    )?;
+    // A second resolution that disagrees is only reachable on the auto-detected
+    // branch — an explicit track either resolves to itself or refuses above —
+    // and it has two quite different causes. Adding a *new* top video track in
+    // the window moves the auto-detection to it while the track the operator
+    // was shown is still perfectly usable; only a track that was locked or
+    // deleted really became unavailable. Reporting both as "became unavailable"
+    // was untrue in the first case, and following the auto-detection there
+    // moved the edit a track away for no reason. So ask whether the first
+    // resolution still stands, and prefer it when it does.
+    let track_id = if resolved_track_id == track_id {
+        resolved_track_id
+    } else if crate::core::commands::resolve_three_point_track(
+        &project.state,
+        &payload.sequence_id,
+        Some(track_id.as_str()),
+    )
+    .is_ok()
+    {
+        track_id
+    } else {
+        // The edit is still the one the operator asked for, but not on the
+        // track they were shown, so say so rather than let the clip appear a
+        // track away without explanation.
+        warnings.push(format!(
+            "Track '{track_id}' became unavailable while the asset was read; \
+             the edit was placed on '{resolved_track_id}' instead"
+        ));
+        resolved_track_id
     };
 
-    // Resolve source range (None → use full asset)
+    // Resolve source range (None → use full asset). The default is read for the
+    // *target track* by the same helper the insert command applies, so an mp4
+    // whose sound outlasts its pictures is not cut short on an audio track and
+    // this result cannot disagree with the clip that was actually placed. An
+    // asset no probe could measure still falls back to the default length —
+    // `warnings` says so rather than letting the number pass for a reading.
     let asset = project
         .state
         .assets
         .get(&asset_id)
         .ok_or_else(|| format!("Asset '{}' not found in project", asset_id))?;
-    let asset_duration = asset.duration_sec.unwrap_or(10.0);
+    let asset_duration = crate::core::commands::default_source_duration_sec(
+        &project.state,
+        asset,
+        &payload.sequence_id,
+        &track_id,
+    );
 
     let source_in = in_point.unwrap_or(0.0);
     let source_out = out_point.unwrap_or(asset_duration);
@@ -629,6 +691,7 @@ pub async fn three_point_insert(
         timeline_position,
         duration: clip_duration,
         edit_mode,
+        warnings,
     })
 }
 

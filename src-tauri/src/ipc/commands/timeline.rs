@@ -9,9 +9,9 @@ use tauri::State;
 use crate::core::{
     analysis::ducking::{generate_duck_keyframes, AudioDuckingParams, SpeechRegion},
     commands::{
-        infer_sequence_id, payload_string, ApplyAudioDuckingCommand, CommandResult,
-        CreateAdjustmentLayerCommand, CreateCompoundClipCommand, CreateSequenceCommand,
-        EditRecording, RecordSource, UnnestCompoundClipCommand,
+        back_fill_asset_measurements, infer_sequence_id, payload_string, ApplyAudioDuckingCommand,
+        CommandResult, CreateAdjustmentLayerCommand, CreateCompoundClipCommand,
+        CreateSequenceCommand, EditRecording, RecordSource, UnnestCompoundClipCommand,
     },
     timeline::Sequence,
     CoreError, TimeRange,
@@ -201,27 +201,15 @@ pub async fn validate_command_payload(
 /// Executes an edit command
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(state, payload), fields(command_type = %command_type))]
+#[tracing::instrument(skip(state, ffmpeg_state, payload), fields(command_type = %command_type))]
 pub async fn execute_command(
     command_type: String,
     payload: serde_json::Value,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
 ) -> Result<CommandResultDto, String> {
     let started_at = std::time::Instant::now();
     let command_type_for_log = command_type.clone();
-    let mut guard = state.project.lock().await;
-
-    let project = guard
-        .as_mut()
-        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-
-    // Refuse to append on top of edits made by another process (openreelio-cli,
-    // a second window, an agent). The frontend maps this error to a reload
-    // prompt; merging is never attempted automatically.
-    project
-        .ensure_no_external_changes()
-        .map_err(|e| e.to_ipc_error())?;
-
     // Read off the raw payload before it is consumed: the typed command does
     // not carry the ids back out, and the sequence has to be known before the
     // before-image is taken.
@@ -229,14 +217,92 @@ pub async fn execute_command(
     let named_effect_id = payload_string(&payload, "effectId");
     let named_clip_id = payload_string(&payload, "clipId");
 
-    // Strict validation via CommandPayload::parse
-    let typed_command = CommandPayload::parse(command_type, payload)?;
+    let mut guard = state.project.lock().await;
+
+    let (typed_command, expected_project_id) = {
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        // Refuse to append on top of edits made by another process
+        // (openreelio-cli, a second window, an agent). The frontend maps this
+        // error to a reload prompt; merging is never attempted automatically.
+        project
+            .ensure_no_external_changes()
+            .map_err(|e| e.to_ipc_error())?;
+
+        // Strict validation via CommandPayload::parse
+        let typed_command = CommandPayload::parse(command_type, payload)?;
+
+        // The against-the-project checks every other surface applies — the
+        // trim-past-the-media refusal above all. `parse` sees the payload and
+        // not the project, so it cannot make them, and
+        // `validate_command_payload` is the frontend's dry run rather than a
+        // gate anything downstream can rely on. Running the shared validator
+        // here rather than an inlined copy of one of its arms is what keeps the
+        // app's refusals identical to the CLI's.
+        validate_command_payload_against_project_state(
+            &command_type_for_log,
+            &typed_command,
+            &project.state,
+        )?;
+
+        (typed_command, project.state.meta.id.clone())
+    };
 
     // A command that resolves the active sequence itself — `SetSequenceFormat`
     // with no `sequenceId` — has to be resolved the same way here, or the edit
     // would run but report no sequence and no affected ranges. Read before
     // `build_command` consumes the payload.
     let targets_active_sequence = typed_command.targets_active_sequence();
+
+    // A placement takes the asset's recorded length, so an asset nothing has
+    // read under the current probe rules is read now — before the clip is cut
+    // from it. Recorded as its own `UpdateAsset` op ahead of the placement, the
+    // way every headless surface records it. The project lock is released for
+    // the probe itself: FFprobe's watchdog is two minutes, and no other IPC may
+    // be made to wait that long on a measurement.
+    if let Some(asset_id) = typed_command.inserted_asset_id().map(str::to_string) {
+        // `execute_command` answers with a `CommandResultDto` and has no
+        // channel to report warnings on, so the helper's logging is the whole
+        // report here.
+        let (reacquired, back_filled) = back_fill_asset_measurements(
+            guard,
+            &state.project,
+            &expected_project_id,
+            std::iter::once(asset_id.as_str()),
+            &ffmpeg_state,
+        )
+        .await?;
+        guard = reacquired;
+
+        // The payload was judged against the state held under the *first*
+        // guard. If the back-fill released it, judge it again against the state
+        // it is about to execute against, so the validator's verdict is never
+        // older than the state it was a verdict about. Today every command that
+        // gets here takes the validator's catch-all arm, which is exactly why
+        // this is worth spending: the day a placement gains a project-state
+        // arm, that arm is already correct rather than silently evaluated
+        // against a stale snapshot.
+        //
+        // Gated on the release, because a placement from an already-measured
+        // asset — the common case — never lets the guard go, and re-judging
+        // state that provably has not changed is pure cost on every insert.
+        if back_filled.released_lock {
+            let project = guard
+                .as_ref()
+                .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+            validate_command_payload_against_project_state(
+                &command_type_for_log,
+                &typed_command,
+                &project.state,
+            )?;
+        }
+    }
+
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     // Build the Command trait object from the validated payload
     let command = typed_command.build_command(&project.path);

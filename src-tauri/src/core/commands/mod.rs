@@ -5,6 +5,7 @@
 
 mod affected;
 mod asset;
+mod asset_probe;
 mod caption;
 mod clip;
 mod effect;
@@ -21,6 +22,7 @@ mod traits;
 
 pub use affected::*;
 pub use asset::*;
+pub use asset_probe::*;
 pub use caption::*;
 pub use clip::*;
 pub use effect::*;

@@ -1168,6 +1168,1791 @@ fn test_asset_remove() {
 }
 
 // =============================================================================
+// Media Length: probing on import, and the guards that depend on it
+// =============================================================================
+
+/// Nominal length of the fixtures the media-length tests generate.
+const PROBE_FIXTURE_SEC: f64 = 4.0;
+
+/// Nominal width of those fixtures, in pixels.
+const PROBE_FIXTURE_WIDTH: u64 = 320;
+
+/// Nominal height of those fixtures, in pixels.
+const PROBE_FIXTURE_HEIGHT: u64 = 240;
+
+/// Slack between a probed reading and the fixture's nominal length.
+///
+/// A container rounds its duration to its own timebase, so an exactly
+/// four-second encode can report a frame either side of it.
+const PROBE_TOLERANCE_SEC: f64 = 0.1;
+
+/// Asserts a reported number is the fixture's length rather than a default.
+///
+/// The bug this guards against reported `10.0` — the timeline's fallback clip
+/// length — wherever the media's own four seconds belonged, so the assertion
+/// that matters is the distance from the real length.
+fn assert_is_fixture_length(actual: Option<f64>, context: &str) {
+    let actual = actual.unwrap_or_else(|| panic!("Expected a duration, got none: {context}"));
+    assert!(
+        (actual - PROBE_FIXTURE_SEC).abs() < PROBE_TOLERANCE_SEC,
+        "Expected the fixture's {PROBE_FIXTURE_SEC}s, got {actual}: {context}"
+    );
+}
+
+/// The ids of the clips sitting on one track, in the order the CLI reports.
+fn clips_on_track(path: &str, track_id: &str) -> Vec<String> {
+    run_cli_ok(&["timeline", "clips", "--path", path, "--track", track_id])["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .map(|clip| clip["id"].as_str().expect("clip id").to_string())
+        .collect()
+}
+
+/// The id of the first video track of the active sequence.
+fn first_video_track_id(path: &str) -> String {
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", path]);
+    tracks["tracks"]
+        .as_array()
+        .expect("tracks")
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .expect("a video track")
+        .to_string()
+}
+
+/// Folds an insert's linked audio back onto the picture clip that carries it.
+///
+/// A video asset with sound is placed as a muted picture clip plus a separate
+/// linked audio clip, which is drag-and-drop parity with the app. Transitions
+/// are refused on audio tracks - there is no picture to blend - so a fixture
+/// that measures a crossfaded tone has to put the sound back where a video
+/// transition can reach it: on the picture clip itself.
+fn collapse_linked_audio_onto_the_picture(
+    path: &str,
+    sequence_id: &str,
+    picture_track_id: &str,
+    picture_clip_id: &str,
+    inserted: &serde_json::Value,
+) {
+    let created: Vec<&str> = inserted["createdIds"]
+        .as_array()
+        .expect("createdIds")
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect();
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", path]);
+    let linked: Vec<(String, String)> = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .filter(|clip| created.contains(&clip["id"].as_str().unwrap_or_default()))
+        .filter(|clip| clip["trackId"].as_str() != Some(picture_track_id))
+        .map(|clip| {
+            (
+                clip["trackId"].as_str().expect("track id").to_string(),
+                clip["id"].as_str().expect("clip id").to_string(),
+            )
+        })
+        .collect();
+
+    if linked.is_empty() {
+        return;
+    }
+
+    for (track_id, clip_id) in linked {
+        run_cli_ok(&[
+            "timeline", "remove", "--path", path, "--clip", &clip_id, "--track", &track_id,
+        ]);
+    }
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        path,
+        "--type",
+        "SetClipMute",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": picture_track_id,
+            "clipId": picture_clip_id,
+            "muted": false,
+        })
+        .to_string(),
+    ]);
+}
+
+/// Trims every clip one insert created to the same source window.
+///
+/// A video asset that carries sound is placed as two clips — the picture and
+/// the linked audio the insert extracts onto an audio track — and `timeline
+/// trim` names one clip at a time. A fixture that means "a three-second body"
+/// has to say so about both, or the sound outlives the picture and the render
+/// is longer than the test is describing.
+fn trim_inserted_clips(path: &str, inserted: &serde_json::Value, source_in: f64, source_out: f64) {
+    let created: Vec<&str> = inserted["createdIds"]
+        .as_array()
+        .expect("createdIds")
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect();
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", path]);
+    let placements: Vec<(String, String)> = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .filter(|clip| created.contains(&clip["id"].as_str().unwrap_or_default()))
+        .map(|clip| {
+            (
+                clip["id"].as_str().expect("clip id").to_string(),
+                clip["trackId"].as_str().expect("track id").to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        !placements.is_empty(),
+        "The insert created no clip to trim: {inserted}"
+    );
+
+    for (clip_id, track_id) in placements {
+        run_cli_ok(&[
+            "timeline",
+            "trim",
+            "--path",
+            path,
+            "--clip",
+            &clip_id,
+            "--track",
+            &track_id,
+            "--source-in",
+            &source_in.to_string(),
+            "--source-out",
+            &source_out.to_string(),
+        ]);
+    }
+}
+
+/// A generated fixture, imported into a project.
+struct FixtureImport {
+    /// The project directory the fixture was imported into.
+    path: String,
+    /// The id the import assigned to the asset.
+    asset_id: String,
+    /// The generated media file on disk.
+    source_path: PathBuf,
+    /// The JSON `asset import` printed.
+    import: serde_json::Value,
+}
+
+/// Generates the fixture and imports it.
+///
+/// `None` when FFmpeg cannot produce the fixture, so callers skip rather than
+/// fail on a machine without a usable FFmpeg.
+fn import_fixture_asset(
+    dir: &tempfile::TempDir,
+    name: &str,
+    extra_args: &[&str],
+) -> Option<FixtureImport> {
+    available_ffmpeg_path()?;
+    let path = project_path(dir, name);
+    let source_path = dir.path().join("media_length_source.mp4");
+    if !create_sample_video_with_duration(&source_path, PROBE_FIXTURE_SEC as u32) {
+        return None;
+    }
+
+    let mut args = vec![
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().expect("fixture path"),
+    ];
+    args.extend_from_slice(extra_args);
+    let import = run_cli_ok(&args);
+    let asset_id = import["createdIds"][0]
+        .as_str()
+        .expect("the imported asset id")
+        .to_string();
+
+    Some(FixtureImport {
+        path,
+        asset_id,
+        source_path,
+        import,
+    })
+}
+
+/// Feature: `asset import` records what the media actually holds
+/// Scenario: importing a four-second file with the probe on
+///   Given a generated four-second 320x240 fixture
+///   When it is imported without `--no-probe`
+///   Then `asset info` and `asset list` report its measured length and size
+#[test]
+fn test_asset_import_records_the_probed_duration_and_dimensions() {
+    let dir = create_temp_project("asset_import_probe");
+    let Some(fixture) = import_fixture_asset(&dir, "asset_import_probe", &[]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+
+    assert_eq!(fixture.import["probed"], true, "{}", fixture.import);
+    assert_is_fixture_length(
+        fixture.import["durationSec"].as_f64(),
+        &fixture.import.to_string(),
+    );
+    assert!(
+        fixture.import["warnings"]
+            .as_array()
+            .expect("warnings")
+            .is_empty(),
+        "A readable file needs no warning, got {}",
+        fixture.import
+    );
+
+    let info = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    assert_is_fixture_length(info["durationSec"].as_f64(), &info.to_string());
+    assert_eq!(info["width"].as_u64(), Some(PROBE_FIXTURE_WIDTH), "{info}");
+    assert_eq!(
+        info["height"].as_u64(),
+        Some(PROBE_FIXTURE_HEIGHT),
+        "{info}"
+    );
+    assert!(
+        info["video"]["fps"].as_f64().is_some_and(|fps| fps > 0.0),
+        "{info}"
+    );
+
+    let list = run_cli_ok(&["asset", "list", "--path", &path]);
+    let listed = &list["assets"][0];
+    assert_is_fixture_length(listed["durationSec"].as_f64(), &list.to_string());
+    assert_eq!(
+        listed["video"]["width"].as_u64(),
+        Some(PROBE_FIXTURE_WIDTH),
+        "{list}"
+    );
+}
+
+/// Feature: `asset import --no-probe` is the opt-out, not the default
+/// Scenario: a bulk import skips the reading
+///   Given the same fixture
+///   When it is imported with `--no-probe`
+///   Then the asset records no duration, and its dimensions are the extension's
+///   placeholder rather than the media's own
+#[test]
+fn test_asset_import_no_probe_records_no_duration() {
+    let dir = create_temp_project("asset_import_no_probe");
+    let Some(fixture) = import_fixture_asset(&dir, "asset_import_no_probe", &["--no-probe"]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+
+    assert_eq!(fixture.import["probed"], false, "{}", fixture.import);
+    assert!(
+        fixture.import["durationSec"].is_null(),
+        "{}",
+        fixture.import
+    );
+
+    let info = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    assert!(info["durationSec"].is_null(), "{info}");
+    assert_ne!(
+        info["width"].as_u64(),
+        Some(PROBE_FIXTURE_WIDTH),
+        "Nothing measured the file, so its real size cannot be recorded: {info}"
+    );
+}
+
+/// Feature: an inserted clip is as long as its media
+/// Scenario: two inserts that meet at the end of the first
+///   Given a probed four-second asset
+///   When one clip is inserted at 0 and another at 4.0
+///   Then the first clip is four seconds long and the second does not overlap
+#[test]
+fn test_timeline_insert_places_a_clip_as_long_as_the_media() {
+    let dir = create_temp_project("timeline_insert_media_length");
+    let Some(fixture) = import_fixture_asset(&dir, "timeline_insert_media_length", &[]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let track_id = first_video_track_id(&path);
+
+    let first = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    assert_eq!(first["status"], "ok");
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_is_fixture_length(
+        clips["clips"][0]["durationSec"].as_f64(),
+        &clips.to_string(),
+    );
+
+    // The overlap this used to hit was the whole point of the bug: a clip that
+    // took the ten-second default from four seconds of media left no room for
+    // the next one. Butting the second insert against the first clip's
+    // *reported* end rather than the fixture's nominal 4.0 is what an agent
+    // does, and it is the only number that is right: a container rounds its
+    // duration to its own timebase, so the media can measure a frame either
+    // side of four seconds.
+    let first_clip_end = clips["clips"][0]["timelineInSec"]
+        .as_f64()
+        .expect("clip start")
+        + clips["clips"][0]["durationSec"]
+            .as_f64()
+            .expect("clip duration");
+    let second = run_cli_ok(&[
+        "timeline",
+        "insert",
+        "--path",
+        &path,
+        "--asset",
+        &asset_id,
+        "--track",
+        &track_id,
+        "--at",
+        &first_clip_end.to_string(),
+    ]);
+    assert_eq!(second["status"], "ok");
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips["count"], 2, "{clips}");
+}
+
+/// Feature: `timeline insert` measures an asset that was never probed
+/// Scenario: inserting from a `--no-probe` import
+///   Given an asset imported with `--no-probe`
+///   When a clip is inserted from it
+///   Then the asset is probed first, the clip is as long as the media, and the
+///   response says the measurement happened
+#[test]
+fn test_timeline_insert_probes_an_asset_imported_without_a_probe() {
+    let dir = create_temp_project("timeline_insert_lazy_probe");
+    let Some(fixture) = import_fixture_asset(&dir, "timeline_insert_lazy_probe", &["--no-probe"])
+    else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let track_id = first_video_track_id(&path);
+
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let warnings = inserted["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|text| text.contains("probed"))),
+        "Expected the lazy probe to be reported, got {inserted}"
+    );
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_is_fixture_length(
+        clips["clips"][0]["durationSec"].as_f64(),
+        &clips.to_string(),
+    );
+
+    // The measurement went through UpdateAsset, so it survives into the asset.
+    let info = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    assert_is_fixture_length(info["durationSec"].as_f64(), &info.to_string());
+}
+
+/// Feature: a trim cannot ask for frames the media does not hold
+/// Scenario: trimming a four-second clip out to nine seconds
+///   Given a probed four-second asset placed on the timeline
+///   When `timeline trim --source-out 9` is run
+///   Then the command is refused and the error names the asset's real length
+#[test]
+fn test_timeline_trim_refuses_a_source_out_past_the_media() {
+    let dir = create_temp_project("timeline_trim_past_media");
+    let Some(fixture) = import_fixture_asset(&dir, "timeline_trim_past_media", &[]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let track_id = first_video_track_id(&path);
+
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let clip_id = inserted["createdIds"][0].as_str().expect("clip id");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        clip_id,
+        "--track",
+        &track_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        "9",
+    ]);
+
+    assert!(
+        stderr.contains("4.000") && stderr.contains(&asset_id),
+        "Expected the refusal to name the asset's measured length, got: {stderr}"
+    );
+}
+
+/// The active sequence's id.
+fn active_sequence_id(path: &str) -> String {
+    run_cli_ok(&["timeline", "clips", "--path", path])["sequenceId"]
+        .as_str()
+        .expect("an active sequence")
+        .to_string()
+}
+
+/// The id of the first audio track of the active sequence.
+fn first_audio_track_id(path: &str) -> String {
+    run_cli_ok(&["timeline", "tracks", "--path", path])["tracks"]
+        .as_array()
+        .expect("tracks")
+        .iter()
+        .find(|track| track["kind"] == "Audio")
+        .and_then(|track| track["id"].as_str())
+        .expect("an audio track")
+        .to_string()
+}
+
+/// Records a duration nothing could measure onto an imported asset.
+///
+/// FFprobe answers a container it cannot read with `0`, and every project
+/// written before the import probe filtered that reading still carries it, so
+/// this is what the assets on disk actually look like.
+fn record_unmeasurable_duration(path: &str, asset_id: &str) {
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        path,
+        "--type",
+        "UpdateAsset",
+        "--payload",
+        &serde_json::json!({ "assetId": asset_id, "durationSec": 0.0 }).to_string(),
+    ]);
+    let info = run_cli_ok(&["asset", "info", "--path", path, "--id", asset_id]);
+    assert_eq!(
+        info["durationSec"].as_f64(),
+        Some(0.0),
+        "the fixture must actually carry the poisoned reading: {info}"
+    );
+}
+
+/// The clip a `timeline clips` listing reports for one id.
+fn clip_by_id(path: &str, clip_id: &str) -> serde_json::Value {
+    run_cli_ok(&["timeline", "clips", "--path", path])["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .find(|clip| clip["id"].as_str() == Some(clip_id))
+        .cloned()
+        .unwrap_or_else(|| panic!("no clip {clip_id} in the timeline"))
+}
+
+/// Feature: an unmeasurable duration never blocks an insert
+/// Scenario: every surface that places a clip, on an asset recorded as 0.0s
+///   Given a project whose asset carries `durationSec: 0.0`
+///   When the clip is placed by `timeline insert`, by `command execute
+///   --type InsertMedia` and by `command execute --type InsertClip`
+///   Then each places a default-length clip instead of failing with
+///   "Invalid time range: 0~0"
+#[test]
+fn test_insert_places_a_default_length_clip_when_the_asset_records_zero_seconds() {
+    let dir = create_temp_project("insert_zero_duration");
+    let path = project_path(&dir, "insert_zero_duration");
+    let source = dir.path().join("unmeasurable.mp4");
+    std::fs::write(&source, b"not really media").expect("write the fixture");
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source.to_str().expect("fixture path"),
+        "--no-probe",
+    ]);
+    let asset_id = import["createdIds"][0]
+        .as_str()
+        .expect("the imported asset id")
+        .to_string();
+    record_unmeasurable_duration(&path, &asset_id);
+
+    let track_id = first_video_track_id(&path);
+    let sequence_id = active_sequence_id(&path);
+
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let first_clip_id = inserted["createdIds"][0].as_str().expect("clip id");
+    let first_duration = clip_by_id(&path, first_clip_id)["durationSec"]
+        .as_f64()
+        .expect("clip duration");
+    assert!(
+        first_duration > 0.0,
+        "a zero duration is unknown, not an empty range: {inserted}"
+    );
+
+    // The same asset through the two typed payloads an agent can send.
+    let mut next_start = first_duration;
+    for command_type in ["InsertMedia", "InsertClip"] {
+        let payload = serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "assetId": asset_id,
+            "timelineStart": next_start,
+        });
+        let executed = run_cli_ok(&[
+            "command",
+            "execute",
+            "--path",
+            &path,
+            "--type",
+            command_type,
+            "--payload",
+            &payload.to_string(),
+        ]);
+        let clip_id = executed["createdIds"][0]
+            .as_str()
+            .unwrap_or_else(|| panic!("{command_type} must report its clip: {executed}"));
+        let duration = clip_by_id(&path, clip_id)["durationSec"]
+            .as_f64()
+            .expect("clip duration");
+        assert!(
+            duration > 0.0,
+            "{command_type} placed an empty clip: {executed}"
+        );
+        next_start += duration;
+    }
+}
+
+/// Generates a fixture whose length is an NTSC frame count, not a round number.
+///
+/// 100 frames at 30000/1001 is 3.336667s, which `{:.3}` rounds *up*.
+fn create_ntsc_fixture(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        return false;
+    };
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:r=30000/1001",
+        "-frames:v",
+        "100",
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+
+    command
+        .arg(path)
+        .status()
+        .expect("Failed to generate the NTSC fixture")
+        .success()
+}
+
+/// Feature: a refusal names a number the same guard accepts
+/// Scenario: trimming NTSC media, whose length is not a round millisecond
+///   Given a 3.336667s asset placed on the timeline
+///   When a trim to 3.5 is refused
+///   Then the value the message names is itself accepted, and so is the
+///   millisecond above the media that the renderer would have rendered anyway
+#[test]
+fn test_timeline_trim_refusal_names_a_source_out_it_accepts() {
+    let dir = create_temp_project("trim_ntsc_suggestion");
+    let source = dir.path().join("ntsc.mp4");
+    if !create_ntsc_fixture(&source) {
+        skip_without_ffmpeg("ffmpeg could not generate the NTSC fixture");
+        return;
+    }
+    let Some((path, asset_id)) = import_generated_asset(&dir, "trim_ntsc_project", &source) else {
+        return;
+    };
+    let recorded = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id])
+        ["durationSec"]
+        .as_f64()
+        .expect("a probed duration");
+    // The fixture is 100 frames at 30000/1001. If the encoder produced
+    // something else the case this test describes is not on disk, and skipping
+    // silently would have made the test pass without checking anything.
+    assert!(
+        (recorded - 3.336_667).abs() <= 0.005,
+        "the NTSC fixture must be 3.336667s of media, got {recorded}"
+    );
+
+    let track_id = first_video_track_id(&path);
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let clip_id = inserted["createdIds"][0]
+        .as_str()
+        .expect("clip id")
+        .to_string();
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        "3.5",
+    ]);
+    assert!(
+        stderr.contains("3.336"),
+        "the refusal must name a floored length, got: {stderr}"
+    );
+
+    // The value the message names, and the millisecond above the media that
+    // the export's own frame-grid slack allows: both have to get through, or
+    // the caller is told to do something it is then refused for doing.
+    for accepted in ["3.336", "3.337"] {
+        let result = run_cli_ok(&[
+            "timeline",
+            "trim",
+            "--path",
+            &path,
+            "--clip",
+            &clip_id,
+            "--track",
+            &track_id,
+            "--source-in",
+            "0",
+            "--source-out",
+            accepted,
+        ]);
+        assert_eq!(result["status"], "ok", "{accepted} was refused: {result}");
+    }
+}
+
+/// Feature: reopening a project reproduces the timeline the insert made
+/// Scenario: the insert had to create the audio track for its linked audio
+///   Given a sequence whose only audio track is locked
+///   When a video with sound is inserted, creating a second audio track
+///   Then a fresh process reads back one audio clip and repairs nothing
+#[test]
+fn test_insert_that_creates_an_audio_track_reopens_with_one_audio_clip() {
+    let dir = create_temp_project("created_audio_track_replay");
+    let with_sound = dir.path().join("with_sound.mp4");
+    if !create_sample_video_with_audio(&with_sound) {
+        return;
+    }
+    let Some((path, asset_id)) =
+        import_generated_asset(&dir, "created_audio_track_project", &with_sound)
+    else {
+        return;
+    };
+
+    // Lock the base audio track so the insert cannot reuse it. Creating the
+    // track is the case that duplicated the clip on replay.
+    let sequence_id = active_sequence_id(&path);
+    let base_audio_track = first_audio_track_id(&path);
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "ToggleTrackLock",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": base_audio_track,
+            "locked": true,
+        })
+        .to_string(),
+    ]);
+
+    let track_id = first_video_track_id(&path);
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    assert_eq!(
+        inserted["linkedAudio"]["createdTrack"], true,
+        "the fixture must exercise the created-track path: {inserted}"
+    );
+    let audio_clip_id = inserted["linkedAudio"]["clipId"]
+        .as_str()
+        .expect("the linked audio clip id")
+        .to_string();
+
+    // A fresh process: the state comes from replaying the ops log, which is
+    // where the duplicate appeared.
+    let (stdout, stderr, success) = run_cli(&["timeline", "clips", "--path", &path]);
+    assert!(success, "reading the reopened project failed: {stderr}");
+    let clips: serde_json::Value = serde_json::from_str(&stdout).expect("clips JSON");
+    let placements: Vec<&serde_json::Value> = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .filter(|clip| clip["id"].as_str() == Some(audio_clip_id.as_str()))
+        .collect();
+    assert_eq!(
+        placements.len(),
+        1,
+        "the linked audio clip came back more than once: {clips}"
+    );
+    assert!(
+        !stderr.contains("Repaired overlapping clips"),
+        "the reopen had to repair the timeline it just wrote: {stderr}"
+    );
+}
+
+/// Feature: every insert payload measures an asset nothing has measured
+/// Scenario: an overwrite edit from a `--no-probe` import
+///   Given an asset imported with `--no-probe`
+///   When `command execute --type OverwriteEdit` places a clip from it
+///   Then the asset is probed first and the clip is as long as the media
+#[test]
+fn test_command_execute_probes_an_unmeasured_asset_for_an_overwrite_edit() {
+    let dir = create_temp_project("overwrite_lazy_probe");
+    let Some(fixture) = import_fixture_asset(&dir, "overwrite_lazy_probe", &["--no-probe"]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let track_id = first_video_track_id(&path);
+    let sequence_id = active_sequence_id(&path);
+
+    let executed = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "OverwriteEdit",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "assetId": asset_id,
+            "timelinePosition": 0.0,
+        })
+        .to_string(),
+    ]);
+    let clip_id = executed["createdIds"][0]
+        .as_str()
+        .expect("the placed clip id");
+
+    assert_is_fixture_length(
+        clip_by_id(&path, clip_id)["durationSec"].as_f64(),
+        &executed.to_string(),
+    );
+    let info = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    assert_is_fixture_length(info["durationSec"].as_f64(), &info.to_string());
+}
+
+/// Feature: a plan measures the assets its steps insert
+/// Scenario: a plan whose only step is an overwrite from an unprobed asset
+///   Given an asset imported with `--no-probe`
+///   When the plan runs
+///   Then the measurement is reported under `warnings` and the clip is as long
+///   as the media
+#[test]
+fn test_plan_execute_probes_an_unmeasured_asset_before_its_steps_run() {
+    let dir = create_temp_project("plan_lazy_probe");
+    let Some(fixture) = import_fixture_asset(&dir, "plan_lazy_probe", &["--no-probe"]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let track_id = first_video_track_id(&path);
+    let sequence_id = active_sequence_id(&path);
+
+    let plan = serde_json::json!({
+        "id": "plan-lazy-probe",
+        "steps": [{
+            "id": "place",
+            "commandType": "OverwriteEdit",
+            "payload": {
+                "sequenceId": sequence_id,
+                "trackId": track_id,
+                "assetId": asset_id,
+                "timelinePosition": 0.0,
+            },
+        }],
+    });
+    let plan_path = dir.path().join("lazy_probe_plan.json");
+    std::fs::write(&plan_path, plan.to_string()).expect("write the plan");
+
+    let executed = run_cli_ok(&[
+        "plan",
+        "execute",
+        "--path",
+        &path,
+        "--file",
+        plan_path.to_str().expect("plan path"),
+    ]);
+    assert_eq!(executed["status"], "ok", "{executed}");
+    assert!(
+        executed["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|text| text.contains("probed"))),
+        "the plan must report the measurement it made: {executed}"
+    );
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_is_fixture_length(
+        clips["clips"][0]["durationSec"].as_f64(),
+        &clips.to_string(),
+    );
+}
+
+/// Feature: sound is bounded by sound
+/// Scenario: an mp4 whose AAC outlasts its pictures
+///   Given a file with four seconds of video and six of sound
+///   When it is inserted
+///   Then the linked audio clip runs the sound's six seconds, and a trim out to
+///   six on the audio track is accepted while the picture stays at four
+#[test]
+fn test_linked_audio_is_bounded_by_the_sound_not_by_the_picture() {
+    let dir = create_temp_project("linked_audio_bound");
+    let source = dir.path().join("audio_tail.mp4");
+    if !create_video_with_longer_audio(&source, 4, 6) {
+        skip_without_ffmpeg("ffmpeg could not generate the mixed-duration fixture");
+        return;
+    }
+    // Past the "is there an encoder" check the fixture is asserted, not
+    // tolerated: an ffmpeg that trimmed the audio tail leaves nothing here to
+    // measure, and returning quietly made this test pass without ever reaching
+    // the bound it exists to check.
+    let container_duration = ffprobe_duration_secs(&source)
+        .unwrap_or_else(|| panic!("ffprobe must read the fixture's container duration"));
+    let video_duration = ffprobe_video_duration_secs(&source)
+        .unwrap_or_else(|| panic!("ffprobe must read the fixture's video-stream duration"));
+    assert!(
+        container_duration - video_duration >= 0.5,
+        "the fixture must keep its audio tail: {container_duration:.3}s of container against \
+         {video_duration:.3}s of video"
+    );
+    let Some((path, asset_id)) =
+        import_generated_asset(&dir, "linked_audio_bound_project", &source)
+    else {
+        return;
+    };
+
+    let info = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    let recorded_audio = info["audioDurationSec"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("the sound's own length must be recorded: {info}"));
+    assert!(
+        (recorded_audio - container_duration).abs() < 0.1,
+        "expected the sound's {container_duration:.3}s, got {recorded_audio}: {info}"
+    );
+
+    let track_id = first_video_track_id(&path);
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let picture_clip_id = inserted["createdIds"][0].as_str().expect("clip id");
+    let linked = inserted["linkedAudio"]
+        .as_object()
+        .unwrap_or_else(|| panic!("the fixture carries sound: {inserted}"));
+    let audio_clip_id = linked["clipId"].as_str().expect("audio clip id");
+    let audio_track_id = linked["trackId"].as_str().expect("audio track id");
+
+    let audio_duration = clip_by_id(&path, audio_clip_id)["durationSec"]
+        .as_f64()
+        .expect("audio clip duration");
+    assert!(
+        (audio_duration - container_duration).abs() < 0.1,
+        "the linked audio was cut to the picture's length, got {audio_duration}: {inserted}"
+    );
+    let picture_duration = clip_by_id(&path, picture_clip_id)["durationSec"]
+        .as_f64()
+        .expect("picture clip duration");
+    assert!(
+        (picture_duration - video_duration).abs() < 0.1,
+        "the picture clip must still stop with the pictures, got {picture_duration}"
+    );
+
+    // Trimming the sound out to its own end is a legal edit; the same number on
+    // the picture track is not.
+    let trimmed = run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        audio_clip_id,
+        "--track",
+        audio_track_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        "6.0",
+    ]);
+    assert_eq!(trimmed["status"], "ok", "{trimmed}");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        picture_clip_id,
+        "--track",
+        &track_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        "6.0",
+    ]);
+    assert!(
+        stderr.contains("past the end of asset"),
+        "a picture clip cannot reach past the last frame, got: {stderr}"
+    );
+}
+
+/// Feature: a trim lands on the track it names, or nowhere
+/// Scenario: the same clip id addressed through a track that does not hold it
+///   Given a picture clip on a video track and its linked audio on another
+///   When a trim names the audio track but the picture clip
+///   Then every surface refuses it, and the clip keeps its range
+#[test]
+fn test_a_trim_is_refused_when_the_named_track_does_not_hold_the_clip() {
+    let dir = create_temp_project("trim_wrong_track");
+    let source = dir.path().join("audio_tail.mp4");
+    if !create_video_with_longer_audio(&source, 4, 6) {
+        skip_without_ffmpeg("ffmpeg could not generate the mixed-duration fixture");
+        return;
+    }
+    let Some((path, asset_id)) = import_generated_asset(&dir, "trim_wrong_track_project", &source)
+    else {
+        return;
+    };
+
+    let track_id = first_video_track_id(&path);
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .expect("sequence id")
+        .to_string();
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let picture_clip_id = inserted["createdIds"][0]
+        .as_str()
+        .expect("clip id")
+        .to_string();
+    let audio_track_id = inserted["linkedAudio"]["trackId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the fixture carries sound: {inserted}"))
+        .to_string();
+    let original_source_out = clip_by_id(&path, &picture_clip_id)["sourceOutSec"]
+        .as_f64()
+        .expect("the clip's source out");
+
+    // Well inside the media, so nothing but the track mismatch can refuse it.
+    let (_stdout, stderr) = run_cli_err(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        &picture_clip_id,
+        "--track",
+        &audio_track_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        "2.0",
+    ]);
+    assert!(
+        stderr.contains("Clip not found"),
+        "the picture clip is not on the audio track, got: {stderr}"
+    );
+
+    // The generic verb, with a track that exists nowhere at all.
+    let (_stdout, stderr) = run_cli_err(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "TrimClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": "does-not-exist",
+            "clipId": picture_clip_id,
+            "newSourceIn": 0.0,
+            "newSourceOut": 2.0,
+        })
+        .to_string(),
+    ]);
+    assert!(
+        stderr.contains("Track not found"),
+        "a trackId nothing answers to must be refused, got: {stderr}"
+    );
+
+    // A trim carrying only `newSourceIn` is refused for the same reason: the
+    // guard used to answer `Ok` on a missing `newSourceOut` before it had
+    // resolved the track at all, so which field the caller happened to send
+    // decided whether the wrong track was caught.
+    let (_stdout, stderr) = run_cli_err(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "TrimClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": audio_track_id,
+            "clipId": picture_clip_id,
+            "newSourceIn": 1.0,
+        })
+        .to_string(),
+    ]);
+    assert!(
+        stderr.contains("Clip not found"),
+        "a wrong-track trim that moves only sourceIn must be refused too, got: {stderr}"
+    );
+
+    // A wrong track no longer buys a way past the media bound either: the guard
+    // used to measure the clip on whichever track *did* hold it, so a trim
+    // through the audio track was answered with "past the end of asset".
+    //
+    // `plan validate` reports it as unchecked rather than refused, though.
+    // Its pass measures every step against the pre-plan state, and against that
+    // state a wrong-track trim is indistinguishable from one an earlier step
+    // moves into place — refusing it rejected plans `plan execute` runs.
+    let plan_file = dir.path().join("wrong_track_plan.json");
+    std::fs::write(
+        &plan_file,
+        serde_json::json!({
+            "id": "wrong-track-plan",
+            "steps": [{
+                "id": "step-trim",
+                "commandType": "TrimClip",
+                "payload": {
+                    "sequenceId": sequence_id,
+                    "trackId": audio_track_id,
+                    "clipId": picture_clip_id,
+                    "newSourceIn": 0.0,
+                    "newSourceOut": 6.0,
+                },
+            }],
+        })
+        .to_string(),
+    )
+    .expect("the plan must be written");
+
+    let validated = run_cli_ok(&[
+        "plan",
+        "validate",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().expect("plan path"),
+    ]);
+    assert_eq!(validated["status"], "ok", "{validated}");
+    assert_eq!(
+        validated["uncheckedSteps"]
+            .as_array()
+            .expect("uncheckedSteps")
+            .iter()
+            .filter_map(|step| step.as_str())
+            .collect::<Vec<_>>(),
+        vec!["step-trim"],
+        "the trim is deferred to execution, not refused: {validated}"
+    );
+    assert!(
+        !validated.to_string().contains("past the end of asset"),
+        "the clip is not on that track at all, so its media is beside the point: {validated}"
+    );
+
+    // `plan execute` reports the refusal as JSON on stdout and exits 1.
+    let (stdout, _stderr) = run_cli_err(&[
+        "plan",
+        "execute",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().expect("plan path"),
+    ]);
+    assert!(
+        stdout.contains("Clip not found"),
+        "plan execute must refuse the same plan for the same reason, got: {stdout}"
+    );
+
+    assert_eq!(
+        clip_by_id(&path, &picture_clip_id)["sourceOutSec"].as_f64(),
+        Some(original_source_out),
+        "no refused surface may leave the clip changed"
+    );
+}
+
+/// Strips the probe marker and the sound length from a project's ops log.
+///
+/// The only honest way to produce a project written before those fields
+/// existed: the state is rebuilt from the ops, so editing the snapshot alone
+/// would be undone by the first replay. Both fields carry `serde(default)`, so
+/// removing them from the recorded asset is exactly what an older writer left
+/// behind.
+fn age_project_to_before_the_probe_marker(path: &str) {
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.remove("probeVersion");
+                map.remove("audioDurationSec");
+                for nested in map.values_mut() {
+                    strip(nested);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    strip(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let ops_path = std::path::Path::new(path).join(".openreelio/state/ops.jsonl");
+    if let Ok(contents) = std::fs::read_to_string(&ops_path) {
+        let mut aged = String::new();
+        for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+            let mut value: serde_json::Value =
+                serde_json::from_str(line).expect("every recorded op is one JSON line");
+            strip(&mut value);
+            aged.push_str(&value.to_string());
+            aged.push('\n');
+        }
+        std::fs::write(&ops_path, aged).expect("the aged ops log must be written");
+    }
+
+    // The snapshot is one pretty-printed document rather than a line per op.
+    let snapshot_path = std::path::Path::new(path).join(".openreelio/state/snapshot.json");
+    if let Ok(contents) = std::fs::read_to_string(&snapshot_path) {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&contents).expect("the snapshot is JSON");
+        strip(&mut value);
+        std::fs::write(&snapshot_path, value.to_string())
+            .expect("the aged snapshot must be written");
+    }
+}
+
+/// Counts the `UpdateAsset` operations a project has recorded.
+///
+/// Read off the log rather than through `state ops`, which pages, and counted
+/// across nested operations because an `UpdateAsset` folded into an insert's
+/// batch is recorded inside that batch rather than beside it.
+fn update_asset_op_count(path: &str) -> usize {
+    fn count(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(map) => {
+                let here = usize::from(map.get("kind") == Some(&serde_json::json!("asset_update")));
+                here + map.values().map(count).sum::<usize>()
+            }
+            serde_json::Value::Array(items) => items.iter().map(count).sum(),
+            _ => 0,
+        }
+    }
+
+    let ops_path = std::path::Path::new(path).join(".openreelio/state/ops.jsonl");
+    let Ok(contents) = std::fs::read_to_string(ops_path) else {
+        return 0;
+    };
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| count(&serde_json::from_str(line).expect("every recorded op is JSON")))
+        .sum()
+}
+
+/// Feature: a project written before sound lengths were recorded is re-read once
+/// Scenario: an asset carrying a duration but no probe marker
+///   Given a video whose sound outlasts its pictures, imported and then aged
+///   back to a project that records neither `audioDurationSec` nor
+///   `probeVersion`
+///   When it is inserted
+///   Then the asset is re-probed exactly once, its linked audio runs the full
+///   six seconds, and a second insert records no further `UpdateAsset`
+#[test]
+fn test_an_asset_measured_before_the_probe_marker_is_re_probed_once() {
+    let dir = create_temp_project("legacy_probe_marker");
+    let source = dir.path().join("audio_tail.mp4");
+    if !create_video_with_longer_audio(&source, 4, 6) {
+        skip_without_ffmpeg("ffmpeg could not generate the mixed-duration fixture");
+        return;
+    }
+    let Some((path, asset_id)) =
+        import_generated_asset(&dir, "legacy_probe_marker_project", &source)
+    else {
+        return;
+    };
+
+    age_project_to_before_the_probe_marker(&path);
+
+    let aged = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    assert!(
+        aged["durationSec"].as_f64().is_some(),
+        "the aged asset keeps the picture length it was written with: {aged}"
+    );
+    assert!(
+        aged["audioDurationSec"].is_null() && aged["probeVersion"].is_null(),
+        "the fixture must actually look like a pre-marker project: {aged}"
+    );
+    let ops_before = update_asset_op_count(&path);
+
+    // A duration alone used to be taken as proof the asset had been read, so
+    // the sound length was never back-filled and the linked audio was cut to
+    // the picture.
+    let track_id = first_video_track_id(&path);
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let audio_clip_id = inserted["linkedAudio"]["clipId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the fixture carries sound: {inserted}"));
+    let audio_duration = clip_by_id(&path, audio_clip_id)["durationSec"]
+        .as_f64()
+        .expect("audio clip duration");
+    assert!(
+        (audio_duration - 6.0).abs() < 0.1,
+        "the re-probe must reach the sound's six seconds, got {audio_duration}: {inserted}"
+    );
+
+    let refreshed = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    assert!(
+        refreshed["probeVersion"].as_u64().is_some(),
+        "the re-probe must stamp the marker: {refreshed}"
+    );
+    let ops_after_first = update_asset_op_count(&path);
+    assert_eq!(
+        ops_after_first,
+        ops_before + 1,
+        "the lazy probe records exactly one UpdateAsset"
+    );
+
+    // And the marker is what stops it happening again: the second insert reads
+    // the asset as already measured.
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "20.0",
+    ]);
+    assert_eq!(
+        update_asset_op_count(&path),
+        ops_after_first,
+        "a measured asset must not be probed again"
+    );
+}
+
+/// Feature: `audioOnly` needs a track that plays sound
+/// Scenario: an audioOnly insert aimed at a video track, then at an audio track
+///   Given an mp4 with four seconds of video and six of sound
+///   When an audioOnly `InsertMedia` targets the video track
+///   Then it is refused; on the audio track it takes all six seconds
+#[test]
+fn test_audio_only_insert_is_refused_on_a_track_that_plays_pictures() {
+    let dir = create_temp_project("audio_only_track");
+    let source = dir.path().join("audio_tail.mp4");
+    if !create_video_with_longer_audio(&source, 4, 6) {
+        skip_without_ffmpeg("ffmpeg could not generate the mixed-duration fixture");
+        return;
+    }
+    let Some((path, asset_id)) = import_generated_asset(&dir, "audio_only_track_project", &source)
+    else {
+        return;
+    };
+
+    let video_track_id = first_video_track_id(&path);
+    let audio_track_id = first_audio_track_id(&path);
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .expect("sequence id")
+        .to_string();
+
+    let insert_payload = |track_id: &str| {
+        serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "assetId": asset_id,
+            "timelineStart": 0.0,
+            "audioOnly": true,
+        })
+        .to_string()
+    };
+
+    // On a video track this used to place a clip six seconds long over four
+    // seconds of frames: the tail rendered black.
+    let (_stdout, stderr) = run_cli_err(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "InsertMedia",
+        "--payload",
+        &insert_payload(&video_track_id),
+    ]);
+    assert!(
+        stderr.contains("audioOnly") && stderr.contains("audio track"),
+        "the refusal must name the fix, got: {stderr}"
+    );
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        0,
+        "a refused insert must place nothing"
+    );
+
+    // On the audio track the same insert is the sound, all six seconds of it.
+    let inserted = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "InsertMedia",
+        "--payload",
+        &insert_payload(&audio_track_id),
+    ]);
+    assert_eq!(inserted["status"], "ok", "{inserted}");
+    let clip_id = inserted["createdIds"][0].as_str().expect("clip id");
+    let duration = clip_by_id(&path, clip_id)["durationSec"]
+        .as_f64()
+        .expect("clip duration");
+    assert!(
+        (duration - 6.0).abs() < 0.1,
+        "an audio-only clip is bounded by the sound, got {duration}"
+    );
+}
+
+/// Creates a project beside the fixtures and imports one file into it.
+///
+/// Its own project rather than a shared one, so several fixtures can live in
+/// the same temp directory without their timelines meeting. `None` when FFmpeg
+/// is unavailable, so callers skip.
+fn import_generated_asset(
+    dir: &tempfile::TempDir,
+    project_name: &str,
+    source_path: &std::path::Path,
+) -> Option<(String, String)> {
+    available_ffmpeg_path()?;
+    let path = project_path(dir, project_name);
+    std::fs::create_dir_all(&path).expect("Failed to create the project directory");
+    run_cli_ok(&["project", "create", "--name", project_name, "--path", &path]);
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().expect("fixture path"),
+    ]);
+    let asset_id = import["createdIds"][0]
+        .as_str()
+        .expect("the imported asset id")
+        .to_string();
+    Some((path, asset_id))
+}
+
+/// Feature: a probed still records no duration
+/// Scenario: importing a PNG and a JPEG, then placing each on the timeline
+///   Given FFprobe answers a PNG with no duration at all and a JPEG with one
+///   frame's 0.04s
+///   When each is imported with the probe on and inserted
+///   Then neither records a duration, both are placed at the default length,
+///   and no warning claims the clip may outrun its media
+#[test]
+fn test_probed_stills_record_no_duration_and_insert_at_the_default_length() {
+    let dir = create_temp_project("still_probe_insert");
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    for (file_name, project_name) in [
+        ("still_source.png", "still_probe_png"),
+        ("still_source.jpg", "still_probe_jpg"),
+    ] {
+        let source_path = dir.path().join(file_name);
+        if !create_solid_colour_still(&source_path, "blue", "320x240") {
+            return;
+        }
+        let Some((path, asset_id)) = import_generated_asset(&dir, project_name, &source_path)
+        else {
+            return;
+        };
+
+        let info = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+        assert_eq!(info["kind"], "Image", "{info}");
+        assert!(
+            info["durationSec"].is_null(),
+            "A still has no length to record: {info}"
+        );
+
+        let track_id = first_video_track_id(&path);
+        let inserted = run_cli_ok(&[
+            "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id,
+            "--at", "0.0",
+        ]);
+        assert_eq!(inserted["status"], "ok", "{inserted}");
+        assert!(
+            inserted["warnings"]
+                .as_array()
+                .expect("warnings")
+                .is_empty(),
+            "A still needs no measurement, so it needs no warning: {inserted}"
+        );
+
+        let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+        let duration = clips["clips"][0]["durationSec"]
+            .as_f64()
+            .expect("clip duration");
+        assert!(
+            duration > 1.0,
+            "Expected the still to hold a real slot, got {duration}: {clips}"
+        );
+    }
+}
+
+/// Feature: an asset records the length of its pictures, not of its container
+/// Scenario: an mp4 whose AAC outlasts its video
+///   Given a file with four seconds of video and six of sound
+///   When it is imported and inserted
+///   Then the clip is as long as the video stream, and sampling it reports no
+///   overrun past the end of the asset
+#[test]
+fn test_import_records_the_video_stream_length_not_the_container_length() {
+    let dir = create_temp_project("video_stream_length");
+    let source_path = dir.path().join("audio_tail.mp4");
+    if !create_video_with_longer_audio(&source_path, 4, 6) {
+        return;
+    }
+    let (Some(container_duration), Some(video_duration)) = (
+        ffprobe_duration_secs(&source_path),
+        ffprobe_video_duration_secs(&source_path),
+    ) else {
+        return;
+    };
+    if container_duration - video_duration < 0.5 {
+        // FFmpeg trimmed the audio tail, so there is nothing to test here.
+        return;
+    }
+    let Some((path, asset_id)) =
+        import_generated_asset(&dir, "video_stream_length_project", &source_path)
+    else {
+        return;
+    };
+
+    let info = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    let recorded = info["durationSec"].as_f64().expect("a probed duration");
+    assert!(
+        (recorded - video_duration).abs() < 0.1,
+        "Expected the video stream's {video_duration:.3}s rather than the container's \
+         {container_duration:.3}s, got {recorded}: {info}"
+    );
+
+    let track_id = first_video_track_id(&path);
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    assert_eq!(inserted["status"], "ok", "{inserted}");
+
+    // The renderer bounds every picture clip by the video stream, so a clip cut
+    // from the container length would carry a black tail and be reported as an
+    // overrun. Sampling the edit is what surfaces that verdict.
+    let still_path = dir.path().join("audio_tail_frame.png");
+    let extracted = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.0",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+    assert!(
+        !extracted["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("past the end of asset"))),
+        "A clip bounded by its own video stream cannot overrun it: {extracted}"
+    );
+}
+
+/// Feature: `timeline insert` names the linked audio clip it created
+/// Scenario: inserting a video that carries sound, and one that does not
+///   Given a fixture with an audio stream and a silent fixture
+///   When each is inserted
+///   Then only the first reports `linkedAudio`, naming the clip an agent has to
+///   trim alongside the picture
+#[test]
+fn test_timeline_insert_reports_the_linked_audio_it_extracted() {
+    let dir = create_temp_project("insert_linked_audio");
+    let with_sound = dir.path().join("with_sound.mp4");
+    if !create_sample_video_with_audio(&with_sound) {
+        return;
+    }
+    let Some((path, asset_id)) =
+        import_generated_asset(&dir, "insert_linked_audio_project", &with_sound)
+    else {
+        return;
+    };
+    let track_id = first_video_track_id(&path);
+
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let linked = inserted["linkedAudio"]
+        .as_object()
+        .unwrap_or_else(|| panic!("Expected the extracted audio to be named: {inserted}"));
+    let audio_clip_id = linked["clipId"].as_str().expect("audio clip id");
+    let audio_track_id = linked["trackId"].as_str().expect("audio track id");
+    assert_ne!(audio_track_id, track_id);
+    assert!(linked["createdTrack"].is_boolean(), "{inserted}");
+
+    // The id has to be actionable on its own: nothing follows the link group,
+    // so an agent that does not trim this clip leaves the sound behind.
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips["count"], 2, "{clips}");
+    run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        audio_clip_id,
+        "--track",
+        audio_track_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        "2",
+    ]);
+
+    // A silent video is one clip and says so by reporting no linked audio.
+    let silent = dir.path().join("silent.mp4");
+    if !create_sample_video_with_duration(&silent, 4) {
+        return;
+    }
+    let Some((silent_path, silent_asset)) =
+        import_generated_asset(&dir, "insert_linked_audio_silent", &silent)
+    else {
+        return;
+    };
+    let silent_track = first_video_track_id(&silent_path);
+    let silent_insert = run_cli_ok(&[
+        "timeline",
+        "insert",
+        "--path",
+        &silent_path,
+        "--asset",
+        &silent_asset,
+        "--track",
+        &silent_track,
+        "--at",
+        "0.0",
+    ]);
+    assert!(
+        silent_insert["linkedAudio"].is_null(),
+        "A silent asset has no sound to extract: {silent_insert}"
+    );
+}
+
+/// Feature: a video with sound survives a transition
+/// Scenario: two inserts of an A/V fixture, dissolved at the cut
+///   Given two clips placed from a fixture that carries sound, each holding a
+///   handle for the blend
+///   When a dissolve is hung on the outgoing clip
+///   Then the recipe applies and the linked audio clips are still there,
+///   untouched by an edit that named only the picture
+#[test]
+fn test_transition_over_clips_inserted_with_their_linked_audio() {
+    let dir = create_temp_project("transition_linked_audio");
+    let with_sound = dir.path().join("with_sound.mp4");
+    if !create_sample_video_with_audio(&with_sound) {
+        return;
+    }
+    let Some((path, asset_id)) =
+        import_generated_asset(&dir, "transition_linked_audio_project", &with_sound)
+    else {
+        return;
+    };
+    let track_id = first_video_track_id(&path);
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .expect("sequence id")
+        .to_string();
+
+    const SHOT_SEC: f64 = 3.0;
+    let first = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let first_clip = first["createdIds"][0]
+        .as_str()
+        .expect("clip id")
+        .to_string();
+    assert!(
+        first["linkedAudio"].is_object(),
+        "The fixture carries sound, so the insert must name the audio clip: {first}"
+    );
+    // Both halves of the insert, so the sound does not outlive the picture and
+    // the outgoing clip keeps a handle for the blend to be made from.
+    trim_inserted_clips(&path, &first, 0.0, SHOT_SEC);
+
+    let second = run_cli_ok(&[
+        "timeline",
+        "insert",
+        "--path",
+        &path,
+        "--asset",
+        &asset_id,
+        "--track",
+        &track_id,
+        "--at",
+        &SHOT_SEC.to_string(),
+    ]);
+    trim_inserted_clips(&path, &second, 0.0, SHOT_SEC);
+
+    // Four clips: two pictures and the two linked audio clips beside them.
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips["count"], 4, "{clips}");
+
+    add_dissolve(&path, &sequence_id, &track_id, &first_clip);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(
+        clips["count"], 4,
+        "The transition must leave the linked audio where it was: {clips}"
+    );
+}
+
+/// Feature: the past-the-media refusal holds on the generic command surface
+/// Scenario: `command execute --type TrimClip` past the end of the media
+///   Given a probed four-second asset placed on the timeline
+///   When the trim is asked for through the generic command verb
+///   Then it is refused the same way `timeline trim` refuses it
+#[test]
+fn test_command_execute_refuses_a_trim_past_the_media() {
+    let dir = create_temp_project("command_trim_past_media");
+    let Some(fixture) = import_fixture_asset(&dir, "command_trim_past_media", &[]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let track_id = first_video_track_id(&path);
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .expect("sequence id")
+        .to_string();
+
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let clip_id = inserted["createdIds"][0].as_str().expect("clip id");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "TrimClip",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "newSourceIn": 0.0,
+            "newSourceOut": 9.0,
+        })
+        .to_string(),
+    ]);
+
+    assert!(
+        stderr.contains("4.000") && stderr.contains(&asset_id),
+        "Expected the generic verb to refuse it too, naming the media length, got: {stderr}"
+    );
+}
+
+/// Feature: the lazy probe holds on the generic command surface
+/// Scenario: `command execute --type InsertMedia` from a `--no-probe` asset
+///   Given an asset imported without a probe
+///   When it is inserted through the generic command verb
+///   Then the asset is measured first and the clip is as long as the media
+#[test]
+fn test_command_execute_insert_media_measures_an_unprobed_asset() {
+    let dir = create_temp_project("command_insert_lazy_probe");
+    let Some(fixture) = import_fixture_asset(&dir, "command_insert_lazy_probe", &["--no-probe"])
+    else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let track_id = first_video_track_id(&path);
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .expect("sequence id")
+        .to_string();
+
+    let executed = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "InsertMedia",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "assetId": asset_id,
+            "timelineStart": 0.0,
+        })
+        .to_string(),
+    ]);
+    assert_eq!(executed["status"], "ok", "{executed}");
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_is_fixture_length(
+        clips["clips"][0]["durationSec"].as_f64(),
+        &clips.to_string(),
+    );
+    let info = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    assert_is_fixture_length(info["durationSec"].as_f64(), &info.to_string());
+}
+
+// =============================================================================
 // Timeline Commands
 // =============================================================================
 
@@ -1866,9 +3651,9 @@ fn sample_rendered_pixel(
 /// Imports a fixture, places it on the first video track and trims it to the
 /// fixture's real length, returning `(sequence_id, track_id, clip_id)`.
 ///
-/// `asset import` records no probed duration, so the timeline hands the clip its
-/// 10s default; trimming keeps the rendered length a statement about the edit
-/// rather than about a clip that outruns its source.
+/// The insert already bounds the clip by the probed media, so the trim states
+/// the edit rather than repairing it: it names the exact source window the
+/// rendered length is a statement about.
 fn place_trimmed_clip(path: &str, source_path: &std::path::Path, duration_sec: f64) -> String {
     let import = run_cli_ok(&[
         "asset",
@@ -3005,6 +4790,69 @@ fn test_frame_extract_names_the_sequence_end_when_asked_past_it() {
     assert!(!output_path.exists());
 }
 
+/// Feature: a clip that outruns its media still produces a picture
+/// Scenario: sampling a still one second past the end of the media
+///   Given a clip that took the default length because nothing could measure
+///   its asset
+///   When `frame extract --time 5.0` samples it a second past the media end
+///   Then a still is written, the overrun is named in `warnings`, and the
+///   caller never sees a raw FFmpeg dump
+#[test]
+fn test_frame_extract_over_a_clip_that_outruns_its_media_reports_the_overrun() {
+    let dir = create_temp_project("frame_overrun_test");
+    let Some(fixture) = import_fixture_asset(&dir, "frame_overrun_test", &["--no-probe"]) else {
+        return;
+    };
+    let (path, asset_id, source_path) = (fixture.path, fixture.asset_id, fixture.source_path);
+    let track_id = first_video_track_id(&path);
+
+    // Hiding the media is the only way left to make the clip outrun it: the
+    // insert probes an unmeasured asset, so the file has to be unreadable at
+    // that moment for the ten-second default to survive.
+    let hidden_path = dir.path().join("media_length_source.hidden");
+    std::fs::rename(&source_path, &hidden_path).expect("Failed to hide the fixture");
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    std::fs::rename(&hidden_path, &source_path).expect("Failed to restore the fixture");
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip_duration = clips["clips"][0]["durationSec"]
+        .as_f64()
+        .expect("clip duration");
+    assert!(
+        clip_duration > PROBE_FIXTURE_SEC + PROBE_TOLERANCE_SEC,
+        "Expected the clip to outrun the media for this test, got {clip_duration}: {inserted}"
+    );
+
+    let output_path = dir.path().join("overrun_frame.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "5.0",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert!(
+        result["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("past the end of asset"))),
+        "Expected the overrun to be named in the warnings, got {result}"
+    );
+    assert!(output_path.exists(), "Expected a still past the media end");
+    assert!(output_path.metadata().unwrap().len() > 0);
+}
+
 #[test]
 fn test_frame_extract_rejects_a_grid_range_wider_than_the_sequence() {
     let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_past_end_test", 4)
@@ -3968,6 +5816,205 @@ fn test_plan_validate_valid() {
     ]);
     assert_eq!(result["status"], "ok");
     assert_eq!(result["stepCount"], 1);
+    assert_eq!(
+        result["uncheckedSteps"].as_array().map(Vec::len),
+        Some(0),
+        "nothing here defers a media bound: {result}"
+    );
+}
+
+/// Feature: validate says which trims it could not measure
+/// Scenario: a trim aimed at a clip a previous step has yet to create
+///   Given a plan that splits a clip and then trims the half the split makes
+///   When the plan is validated
+///   Then the trim is reported as an unchecked step rather than passed over,
+///     because its clip does not exist to be measured yet
+#[test]
+fn test_plan_validate_names_the_trims_it_could_not_measure() {
+    let dir = create_temp_project("plan_validate_unchecked");
+    let Some(fixture) = import_fixture_asset(&dir, "plan_validate_unchecked", &[]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let track_id = first_video_track_id(&path);
+    let sequence_id = active_sequence_id(&path);
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let clip_id = inserted["createdIds"][0].as_str().expect("clip id");
+
+    let plan_file = write_plan(
+        &dir,
+        "unchecked.json",
+        serde_json::json!({
+            "id": "unchecked_plan",
+            "steps": [
+                {
+                    "id": "step_split",
+                    "commandType": "SplitClip",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": track_id,
+                        "clipId": clip_id,
+                        "splitTime": 2.0
+                    },
+                    "dependsOn": []
+                },
+                {
+                    "id": "step_trim",
+                    "commandType": "TrimClip",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": track_id,
+                        "clipId": { "$fromStep": "step_split", "$path": "createdIds.0" },
+                        "newSourceIn": 2.0,
+                        "newSourceOut": 3.0
+                    },
+                    "dependsOn": ["step_split"]
+                }
+            ]
+        }),
+    );
+
+    let result = run_cli_ok(&["plan", "validate", "--path", &path, "--file", &plan_file]);
+    assert_eq!(result["status"], "ok", "{result}");
+    let unchecked: Vec<&str> = result["uncheckedSteps"]
+        .as_array()
+        .expect("uncheckedSteps")
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect();
+    assert_eq!(
+        unchecked,
+        vec!["step_trim"],
+        "only the trim whose clip does not exist yet is unmeasured: {result}"
+    );
+    // Same envelope as the MCP `plan.validate` tool. This verb takes a `--path`
+    // and so always has a project to measure against, which makes the reason
+    // null — but present, not absent, so one reader works on both surfaces.
+    assert_eq!(result["mediaLengthChecked"], true, "{result}");
+    assert!(
+        result
+            .get("mediaLengthReason")
+            .is_some_and(serde_json::Value::is_null),
+        "the reason is reported as null rather than omitted: {result}"
+    );
+}
+
+/// Feature: validate never refuses a plan execute would run
+/// Scenario: a plan that moves a clip to a second track and then trims it there
+///   Given a clip on V1 and a plan that moves it to V2 before trimming it on V2
+///   When the plan is validated and then executed
+///   Then validate passes with the trim listed as unchecked — the move that
+///     puts the clip on V2 has not run yet — and execute applies both steps
+#[test]
+fn test_plan_validate_defers_a_trim_a_previous_step_moves_into_place() {
+    let dir = create_temp_project("plan_validate_move_then_trim");
+    let Some(fixture) = import_fixture_asset(&dir, "plan_validate_move_then_trim", &[]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let source_track_id = first_video_track_id(&path);
+    let sequence_id = active_sequence_id(&path);
+    let inserted = run_cli_ok(&[
+        "timeline",
+        "insert",
+        "--path",
+        &path,
+        "--asset",
+        &asset_id,
+        "--track",
+        &source_track_id,
+        "--at",
+        "0.0",
+    ]);
+    let clip_id = inserted["createdIds"][0]
+        .as_str()
+        .expect("clip id")
+        .to_string();
+
+    let added = run_cli_ok(&[
+        "timeline",
+        "add-track",
+        "--path",
+        &path,
+        "--kind",
+        "video",
+        "--name",
+        "Video 2",
+    ]);
+    let destination_track_id = added["createdIds"][0]
+        .as_str()
+        .expect("the added track id")
+        .to_string();
+
+    let plan_file = write_plan(
+        &dir,
+        "move_then_trim.json",
+        serde_json::json!({
+            "id": "move_then_trim_plan",
+            "steps": [
+                {
+                    "id": "step_move",
+                    "commandType": "MoveClip",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": source_track_id,
+                        "clipId": clip_id,
+                        "newTimelineIn": 0.0,
+                        "newTrackId": destination_track_id
+                    },
+                    "dependsOn": []
+                },
+                {
+                    "id": "step_trim",
+                    "commandType": "TrimClip",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": destination_track_id,
+                        "clipId": clip_id,
+                        "newSourceIn": 0.0,
+                        "newSourceOut": 2.0
+                    },
+                    "dependsOn": ["step_move"]
+                }
+            ]
+        }),
+    );
+
+    // The pre-flight measures every step against the pre-plan state, where the
+    // clip is still on V1 — so the guard reads the trim as a wrong-track edit.
+    // Reporting that refused a plan `plan execute` runs without complaint.
+    let validated = run_cli_ok(&["plan", "validate", "--path", &path, "--file", &plan_file]);
+    assert_eq!(validated["status"], "ok", "{validated}");
+    let unchecked: Vec<&str> = validated["uncheckedSteps"]
+        .as_array()
+        .expect("uncheckedSteps")
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect();
+    assert_eq!(
+        unchecked,
+        vec!["step_trim"],
+        "the trim is deferred, not refused: {validated}"
+    );
+
+    let executed = run_cli_ok(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(executed["status"], "ok", "{executed}");
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip = clips["clips"]
+        .as_array()
+        .expect("clips")
+        .iter()
+        .find(|clip| clip["id"].as_str() == Some(clip_id.as_str()))
+        .expect("the moved clip");
+    assert_eq!(
+        clip["trackId"].as_str(),
+        Some(destination_track_id.as_str())
+    );
+    assert_eq!(clip["sourceOutSec"].as_f64(), Some(2.0), "{clip}");
 }
 
 #[test]
@@ -4803,9 +6850,10 @@ fn place_two_shot_timeline(
             &(index as f64 * TRANSITION_SHOT_SEC).to_string(),
         ]);
         let clip_id = inserted["createdIds"][0].as_str().unwrap().to_string();
+        collapse_linked_audio_onto_the_picture(path, &sequence_id, &track_id, &clip_id, &inserted);
 
-        // `asset import` records no probed duration, so the timeline hands every
-        // clip its 10s default; trimming is what states the edit.
+        // The insert places a clip as long as the media; the trim is what
+        // states this shot's own window inside it.
         run_cli_ok(&[
             "timeline",
             "trim",
@@ -7990,32 +10038,15 @@ fn create_project_with_three_second_body(
         .unwrap()
         .to_string();
 
-    run_cli_ok(&[
+    let inserted = run_cli_ok(&[
         "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
         "0.0",
     ]);
 
-    let clip_id = run_cli_ok(&["timeline", "clips", "--path", &path])["clips"][0]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // Keep the clip inside the fixture's real media length so the render has
-    // decodable frames for the whole file-backed span.
-    run_cli_ok(&[
-        "timeline",
-        "trim",
-        "--path",
-        &path,
-        "--clip",
-        &clip_id,
-        "--track",
-        &track_id,
-        "--source-in",
-        "0",
-        "--source-out",
-        "3",
-    ]);
+    // Three seconds is shorter than the fixture, so this states the body's
+    // length rather than repairing an overrun — and it has to state it for the
+    // linked audio too, or the sound outlives the picture.
+    trim_inserted_clips(&path, &inserted, 0.0, 3.0);
 
     let sequence_id = run_cli_ok(&["project", "info", "--path", &path])["activeSequenceId"]
         .as_str()
@@ -8616,13 +10647,21 @@ fn test_agent_perception_loop_end_to_end() {
         "0.0",
     ]);
 
-    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
-    assert_eq!(clips["count"], 1);
-    let clip_id = clips["clips"][0]["id"].as_str().unwrap().to_string();
+    // The fixture carries sound, so the insert also places the linked audio the
+    // app would place: the picture track is where this loop counts clips, and
+    // the whole-timeline count is what says the sound was placed at all.
+    let picture_clips = clips_on_track(&path, &track_id);
+    assert_eq!(picture_clips.len(), 1, "{picture_clips:?}");
+    let all_clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(
+        all_clips["count"], 2,
+        "Expected the picture clip and its linked audio: {all_clips}"
+    );
+    let clip_id = picture_clips[0].clone();
 
-    // `asset import` does not probe duration, so the placed clip carries the
-    // default length. Perception is what tells the agent how long the media
-    // actually is; trim to it before cutting so the edit stays inside the media.
+    // Import already measured the media, so the clip is as long as the file.
+    // Trimming to what perception reported is the loop's own check that the two
+    // measurements agree before the cut is made.
     let media_end = shots["totalDurationSec"].as_f64().unwrap();
     run_cli_ok(&[
         "timeline",
@@ -8662,10 +10701,18 @@ fn test_agent_perception_loop_end_to_end() {
     ]);
     assert_eq!(split["status"], "ok");
 
-    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let picture_clips = clips_on_track(&path, &track_id);
     assert_eq!(
-        clips["count"], 2,
-        "Expected the shot-informed split to yield two clips: {clips}"
+        picture_clips.len(),
+        2,
+        "Expected the shot-informed split to yield two clips: {picture_clips:?}"
+    );
+    // The split names one clip, so the linked audio is untouched and still
+    // whole: two picture halves beside one audio clip.
+    let all_clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(
+        all_clips["count"], 3,
+        "Expected the split to leave the linked audio alone: {all_clips}"
     );
 
     // 5. Render a proxy of the edit, streaming progress to stderr.
@@ -9712,6 +11759,63 @@ fn mcp_frame_extract(
             .expect("frame extract payload");
     assert_eq!(payload["status"], "ok", "{label}");
     payload
+}
+
+/// Feature: the lazy probe holds on the MCP surface
+/// Scenario: `openreelio.media.insert` from an asset imported with `--no-probe`
+///   Given an asset that records no duration
+///   When it is inserted through the MCP tool rather than the CLI verb
+///   Then the asset is measured first and the clip is as long as the media
+#[test]
+fn test_mcp_media_insert_measures_an_unprobed_asset() {
+    let dir = create_temp_project("mcp_insert_lazy_probe");
+    let Some(fixture) = import_fixture_asset(&dir, "mcp_insert_lazy_probe", &["--no-probe"]) else {
+        return;
+    };
+    let (path, asset_id) = (fixture.path, fixture.asset_id);
+    let track_id = first_video_track_id(&path);
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .expect("sequence id")
+        .to_string();
+
+    let mut requests = mcp_handshake();
+    requests.push(mcp_request(
+        2,
+        "tools/call",
+        serde_json::json!({
+            "name": "openreelio.media.insert",
+            "arguments": {
+                "sequenceId": sequence_id,
+                "trackId": track_id,
+                "assetId": asset_id,
+                "timelineStart": 0.0,
+            }
+        }),
+    ));
+
+    let (responses, stderr) = run_mcp_stdio_session(&path, true, &requests);
+    assert_eq!(
+        responses.len(),
+        2,
+        "Expected the initialize result and the tool result.\nstderr: {stderr}"
+    );
+    let content = responses[1]["result"]["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("media insert failed: {}\nstderr: {stderr}", responses[1]));
+    let text = content
+        .iter()
+        .find(|block| block["type"] == "text")
+        .expect("a text block");
+    let payload: serde_json::Value =
+        serde_json::from_str(text["text"].as_str().expect("text block"))
+            .expect("media insert payload");
+    assert_eq!(payload["status"], "ok", "{payload}");
+    assert_is_fixture_length(payload["durationSec"].as_f64(), &payload.to_string());
+
+    // The measurement went through UpdateAsset, so the asset carries it too.
+    let info = run_cli_ok(&["asset", "info", "--path", &path, "--id", &asset_id]);
+    assert_is_fixture_length(info["durationSec"].as_f64(), &info.to_string());
 }
 
 /// A sampler with an auto grid used to kill the MCP server outright.
@@ -11595,7 +13699,7 @@ fn test_timeline_info_reports_duration_fps_markers_and_spans() {
 
     let info = run_cli_ok(&["timeline", "info", "--path", &path]);
 
-    // The dummy asset carries no probed duration, so the clip takes the
+    // Nothing can probe the dummy asset, so the clip falls back to the
     // timeline's default length; what matters is that both durations agree
     // with the clip that is actually there.
     let duration = info["durationSec"].as_f64().expect("durationSec");

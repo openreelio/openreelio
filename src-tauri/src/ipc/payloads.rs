@@ -594,6 +594,19 @@ pub struct UpdateAssetPayload {
     pub proxy_url: Option<Option<String>>,
     pub uri: Option<String>,
     pub duration_sec: Option<Option<f64>>,
+    /// How long the asset's sound runs when it outlasts its picture; `Some(None)` clears it.
+    ///
+    /// Defaulted for the same reason as `probe_version`: a hand-written
+    /// `UpdateAsset` should not have to carry a field only the probe fills in.
+    /// See [`Asset::audio_duration_sec`](crate::core::assets::Asset::audio_duration_sec).
+    #[serde(default)]
+    pub audio_duration_sec: Option<Option<f64>>,
+    /// Which revision of the probe rules measured the asset; `Some(None)` clears it.
+    ///
+    /// Defaulted so a hand-written `UpdateAsset` need not carry it. See
+    /// [`Asset::probe_version`](crate::core::assets::Asset::probe_version).
+    #[serde(default)]
+    pub probe_version: Option<Option<u32>>,
     pub file_size: Option<u64>,
     pub video: Option<Option<VideoInfo>>,
     pub audio: Option<Option<AudioInfo>>,
@@ -1927,6 +1940,25 @@ impl CommandPayload {
         }
     }
 
+    /// The asset this payload places a clip from, when it places one.
+    ///
+    /// The clip a placement lands takes the asset's recorded length, so every
+    /// surface that applies one has to give an unmeasured asset a chance to be
+    /// read first — see
+    /// [`ensure_asset_measured`](crate::core::commands::ensure_asset_measured).
+    /// All four placements, not just the two an agent reaches for most: an
+    /// `OverwriteEdit` from an unprobed asset took the ten-second default
+    /// exactly as an `InsertClip` did.
+    pub fn inserted_asset_id(&self) -> Option<&str> {
+        match self {
+            Self::InsertMedia(insert) => Some(insert.asset_id.as_str()),
+            Self::InsertClip(insert) => Some(insert.asset_id.as_str()),
+            Self::InsertEdit(insert) => Some(insert.asset_id.as_str()),
+            Self::OverwriteEdit(overwrite) => Some(overwrite.asset_id.as_str()),
+            _ => None,
+        }
+    }
+
     /// Expands curated caption packs and transition recipes into explicit values.
     ///
     /// This runs at the single strict-parsing chokepoint every JSON entry point
@@ -2344,6 +2376,12 @@ impl CommandPayload {
                 if let Some(duration_sec) = p.duration_sec {
                     cmd = cmd.with_duration_sec(duration_sec);
                 }
+                if let Some(audio_duration_sec) = p.audio_duration_sec {
+                    cmd = cmd.with_audio_duration_sec(audio_duration_sec);
+                }
+                if let Some(probe_version) = p.probe_version {
+                    cmd = cmd.with_probe_version(probe_version);
+                }
                 if let Some(file_size) = p.file_size {
                     cmd = cmd.with_file_size(file_size);
                 }
@@ -2729,6 +2767,18 @@ pub fn validate_command_payload_against_project_state(
             "caption",
             |track| track.is_caption(),
         ),
+        // The trim-past-the-media refusal the CLI, `plan execute` and MCP all
+        // apply. Without it the app was the one surface where a clip could be
+        // pulled past the end of its own file, and the edit only announced
+        // itself as black frames in the export.
+        CommandPayload::TrimClip(payload) => crate::core::commands::ensure_source_out_within_media(
+            state,
+            &payload.sequence_id,
+            &payload.track_id,
+            &payload.clip_id,
+            payload.new_source_out,
+        )
+        .map_err(|error| error.to_string()),
         CommandPayload::AddTextClip(payload) => validate_track_kind(
             state,
             command_type,
@@ -2807,6 +2857,89 @@ mod tests {
         state.sequences.insert(sequence_id.clone(), sequence);
 
         (state, sequence_id, video_track_id, caption_track_id)
+    }
+
+    /// Feature: an unread asset is measured before a clip is cut from it
+    /// Scenario: a plan step written the way the app writes them
+    ///   Given a placement step naming its command in camelCase
+    ///   When the measurement pre-pass asks which asset it places from
+    ///   Then the asset is named, for every placement and either spelling
+    ///
+    /// The pre-pass used to match PascalCase names only, so it never fired on a
+    /// plan from the app — `normalizeToolNameForBackend` emits `insertClip` —
+    /// and every clip from an unprobed asset silently took the default length.
+    /// Asking the same parse the executor asks is what keeps the two in step.
+    #[test]
+    fn every_placement_names_its_asset_under_either_spelling() {
+        let placed_at_start = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_1",
+            "assetId": "asset_1",
+            "timelineStart": 0.0,
+        });
+        let placed_at_position = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_1",
+            "assetId": "asset_1",
+            "timelinePosition": 0.0,
+        });
+
+        for (pascal_case, camel_case, params) in [
+            ("InsertClip", "insertClip", &placed_at_start),
+            ("InsertMedia", "insertMedia", &placed_at_start),
+            ("InsertEdit", "insertEdit", &placed_at_position),
+            ("OverwriteEdit", "overwriteEdit", &placed_at_position),
+        ] {
+            for command_type in [pascal_case, camel_case] {
+                let payload = CommandPayload::parse(command_type.to_string(), params.clone())
+                    .unwrap_or_else(|error| panic!("{command_type} should parse: {error}"));
+
+                assert_eq!(
+                    payload.inserted_asset_id(),
+                    Some("asset_1"),
+                    "{command_type} places a clip and must name its asset"
+                );
+            }
+        }
+    }
+
+    /// An asset id that is still a `$fromStep` reference names nothing: the id
+    /// is not settled until the step it depends on has run, and the pre-pass
+    /// has to skip it rather than probe an object.
+    #[test]
+    fn an_unresolved_asset_reference_names_nothing_to_measure() {
+        let parsed = CommandPayload::parse(
+            "insertClip".to_string(),
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "assetId": { "$fromStep": "step-1", "$path": "createdIds.0" },
+                "timelineStart": 0.0,
+            }),
+        );
+
+        assert!(
+            parsed.is_err(),
+            "an unresolved reference is not an asset id, and must not be probed as one"
+        );
+    }
+
+    /// A command that places nothing has no asset to measure, so the pre-pass
+    /// makes no probe for it.
+    #[test]
+    fn a_command_that_places_nothing_names_no_asset() {
+        let payload = CommandPayload::parse(
+            "splitClip".to_string(),
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "clipId": "clip_1",
+                "splitTime": 1.0,
+            }),
+        )
+        .expect("payload should parse");
+
+        assert_eq!(payload.inserted_asset_id(), None);
     }
 
     #[test]

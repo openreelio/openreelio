@@ -3844,8 +3844,46 @@ uri: string;
 hash: string; 
 /**
  * Duration in seconds (for video/audio)
+ * 
+ * For a video asset this is the length of its *pictures*, which is what
+ * every picture clip cut from it is bounded by. The sound may run longer;
+ * see [`Self::audio_duration_sec`].
  */
 durationSec?: number | null; 
+/**
+ * How far the asset's sound runs, when it differs from `duration_sec`.
+ * 
+ * A container reports the longest stream it holds, so an mp4 whose AAC
+ * outlasts its video is longer as sound than as picture. `duration_sec`
+ * records the picture, because that is what bounds a clip on a video
+ * track; this records the sound, because that is what bounds the linked
+ * audio clip and any `--audio-only` insert. Capping those at the picture's
+ * length made the last seconds of the recording unreachable.
+ * 
+ * `None` for an asset with no audio stream, for one nothing has probed,
+ * and for an audio-only asset — whose `duration_sec` already is the
+ * sound's length.
+ */
+audioDurationSec?: number | null; 
+/**
+ * Which revision of the probe rules last measured this asset.
+ * 
+ * `duration_sec` alone cannot say whether an asset was read under the
+ * current rules: [`Self::audio_duration_sec`] was added after projects had
+ * already been written, so a video imported before it carries a picture
+ * length, no sound length, and no way to tell that apart from a file whose
+ * sound simply does not outlast its pictures. Re-probing on the second
+ * reading would then repeat forever, and never re-probing leaves every
+ * pre-existing video's linked audio cut short.
+ * 
+ * Recorded whenever a probe measures the asset — see
+ * [`ASSET_PROBE_VERSION`] — so a reader can re-measure exactly the assets
+ * whose marker is behind, once each.
+ * 
+ * `None` on every asset written before the marker existed, and on one
+ * nothing has probed.
+ */
+probeVersion?: number | null; 
 /**
  * File size in bytes
  */
@@ -7011,6 +7049,19 @@ durationSec: number;
  */
 videoDurationSec?: number | null; 
 /**
+ * How far the *sound* goes, when the file reports an audio stream.
+ * 
+ * The counterpart to [`Self::video_duration_sec`], and needed for the same
+ * reason in the other direction: an mp4 whose AAC outlasts its pictures
+ * holds more sound than [`Self::video_duration_sec`] admits, so a clip cut
+ * from it onto an audio track would be capped at the picture's length and
+ * two seconds of the recording would be unreachable.
+ * 
+ * `None` when there is no audio stream, or when the stream advertises no
+ * duration of its own; callers fall back to `duration_sec`.
+ */
+audioDurationSec?: number | null; 
+/**
  * Video stream info (if present)
  */
 video: VideoStreamInfo | null; 
@@ -9713,7 +9764,16 @@ duration: number;
 /**
  * Edit mode that was applied.
  */
-editMode: ThreePointEditMode }
+editMode: ThreePointEditMode; 
+/**
+ * Lines worth showing the operator, empty on the ordinary path.
+ * 
+ * An asset nothing had measured is probed before the edit is cut from it,
+ * and this is where that reading — or the reason it could not be taken —
+ * is reported. Without it a clip that fell back to the default length
+ * looked exactly like one whose media really is that long.
+ */
+warnings: string[] }
 /**
  * Time range
  */
@@ -10553,7 +10613,22 @@ export type UnnestCompoundClipPayload = { sequenceId: string; trackId: string; c
  * Input payload for updating an agent run phase and syncing session state.
  */
 export type UpdateAgentRunPhaseInput = { runId: string; phase: string; traceId: string | null; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
-export type UpdateAssetPayload = { assetId: string; name: string | null; tags: string[] | null; license: LicenseInfo | null; thumbnailUrl: string | null; proxyStatus: ProxyStatus | null; proxyUrl: string | null; uri: string | null; durationSec: number | null; fileSize: number | null; video: VideoInfo | null; audio: AudioInfo | null; relativePath: string | null; workspaceManaged: boolean | null; missing: boolean | null }
+export type UpdateAssetPayload = { assetId: string; name: string | null; tags: string[] | null; license: LicenseInfo | null; thumbnailUrl: string | null; proxyStatus: ProxyStatus | null; proxyUrl: string | null; uri: string | null; durationSec: number | null; 
+/**
+ * How long the asset's sound runs when it outlasts its picture; `Some(None)` clears it.
+ * 
+ * Defaulted for the same reason as `probe_version`: a hand-written
+ * `UpdateAsset` should not have to carry a field only the probe fills in.
+ * See [`Asset::audio_duration_sec`](crate::core::assets::Asset::audio_duration_sec).
+ */
+audioDurationSec?: number | null; 
+/**
+ * Which revision of the probe rules measured the asset; `Some(None)` clears it.
+ * 
+ * Defaulted so a hand-written `UpdateAsset` need not carry it. See
+ * [`Asset::probe_version`](crate::core::assets::Asset::probe_version).
+ */
+probeVersion?: number | null; fileSize: number | null; video: VideoInfo | null; audio: AudioInfo | null; relativePath: string | null; workspaceManaged: boolean | null; missing: boolean | null }
 /**
  * Payload for `UpdateCaption` (restyle or retime one caption line).
  * 

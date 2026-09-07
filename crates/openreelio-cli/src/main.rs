@@ -22,6 +22,7 @@
 //! ```
 mod commands;
 mod ffmpeg_env;
+mod media_probe;
 mod output;
 mod validate;
 

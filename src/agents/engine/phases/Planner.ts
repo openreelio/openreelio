@@ -504,7 +504,7 @@ export class Planner {
       '16. When the target track is known, prefer get_track_clips(trackId) over get_clips_at_time(time) so later steps can reference data.clips[n].id without cross-track ambiguity.',
     );
     parts.push(
-      '17. For media placement, target video/image assets to video or overlay tracks and audio assets to audio tracks. insert_clip and insert_clip_from_file automatically preserve sourceIn/sourceOut and linked audio parity; set audioOnly=true only when intentionally extracting audio from a video asset.',
+      '17. For media placement, target video/image assets to video or overlay tracks and audio assets to audio tracks. insert_clip and insert_clip_from_file automatically preserve sourceIn/sourceOut and linked audio parity; set audioOnly=true only when intentionally extracting audio from a video asset, and then trackId must be an audio track - an audioOnly insert onto a video track is refused, so add an audio track first if the sequence has none.',
     );
     parts.push('');
     parts.push(...ORCHESTRATION_PLAYBOOK_LINES);
