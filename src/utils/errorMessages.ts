@@ -79,8 +79,16 @@ const ERROR_PATTERNS: Array<{
   // The retry is deliberately not named as an import: the same probe backs
   // relinking, scanning and rendering, and telling someone whose export warned
   // about this to import again sends them nowhere.
+  //
+  // Anchored, and case-sensitive, because this is one exact string the Rust
+  // side writes (`PROBE_MEASURED_NOTHING_PREFIX`) at the *start* of the probe
+  // error, not a phrase to hunt for: `^` catches the bare message and `: `
+  // catches it after the `FFprobe error: ` an inner `CoreError` is displayed
+  // behind. A loose match would also claim a verdict FFprobe did reach that
+  // happened to quote these words, and send the user off retrying a file that
+  // is genuinely broken.
   {
-    pattern: /FFprobe reported nothing/i,
+    pattern: /(^|: )FFprobe reported nothing/,
     message: () =>
       'FFprobe could not measure this file (it may be on a slow or disconnected drive). Try again once the file is reachable.',
   },

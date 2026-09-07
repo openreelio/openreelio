@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
@@ -97,6 +97,25 @@ pub struct WorkspaceService {
     ignore_rules: Arc<IgnoreRules>,
     last_skipped_count: AtomicUsize,
     last_unrefreshed_count: AtomicUsize,
+    /// Workspace-relative paths whose metadata gap a *successful* probe left
+    /// open, and so no further probe of the same bytes can close.
+    ///
+    /// A container that carries no `format.duration` — a raw stream, a
+    /// zero-byte file — probes fine and still leaves `duration_sec` unset, so
+    /// [`workspace_asset_needs_metadata_refresh`] keeps saying yes forever.
+    /// Without this set the watcher would re-probe that file on every
+    /// filesystem event, with the project lock held. A path settles only after
+    /// a probe that returned `Ok` and changed nothing; a probe that measured
+    /// nothing never settles, because the next one may well succeed.
+    ///
+    /// The set lives on the service, and [`WorkspaceService::open`] runs per
+    /// IPC call, so a one-shot scan starts with an empty one and probes each
+    /// gap once. That is the intended reach: the repetition worth stopping is
+    /// the watcher loop, which holds a single service for the life of the
+    /// session. An entry is dropped again when the file itself changes (see
+    /// [`WorkspaceService::handle_event`]), because new bytes may finally
+    /// carry the measurement the old ones did not.
+    settled_metadata_gaps: Mutex<HashSet<String>>,
 }
 
 /// Builds the [`Asset`] a discovered workspace file should be registered as.
@@ -273,7 +292,20 @@ impl WorkspaceService {
             ignore_rules,
             last_skipped_count: AtomicUsize::new(0),
             last_unrefreshed_count: AtomicUsize::new(0),
+            settled_metadata_gaps: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// The settled-gap set, with a poisoned lock recovered rather than
+    /// propagated.
+    ///
+    /// The set is a probe-cost cache, never a source of project state: a pass
+    /// that panicked mid-update can leave it stale at worst, which costs one
+    /// extra probe. Refusing the whole scan over that would be the larger harm.
+    fn settled_metadata_gaps(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.settled_metadata_gaps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Perform an initial scan and populate the index
@@ -471,6 +503,9 @@ impl WorkspaceService {
                         indexed_at: now,
                         metadata_extracted: false,
                     };
+                    // The bytes changed, so a gap an earlier probe could not
+                    // close may now be measurable. Let the next pass try again.
+                    self.settled_metadata_gaps().remove(&entry.relative_path);
                     self.index.upsert(&entry)?;
                 }
             }
@@ -580,9 +615,16 @@ impl WorkspaceService {
         // missing would carry durationless assets until every file was touched
         // by hand.
         //
-        // The work is bounded twice over: files this pass already probed are
-        // skipped, and a probe only runs for an asset that still has a gap
-        // worth closing (see [`workspace_asset_needs_metadata_refresh`]).
+        // The work is bounded three times over: files this pass already probed
+        // are skipped, a probe only runs for an asset that still has a gap
+        // worth closing (see [`workspace_asset_needs_metadata_refresh`]), and a
+        // gap a successful probe already failed to close is not asked again
+        // (see [`Self::settled_metadata_gaps`]).
+        //
+        // The top-up writes to `state` without an op behind it, unlike the
+        // registrations above. That is deliberate: it copies what is on disk
+        // into a cache of what is on disk, so a reopen re-derives the same
+        // values from the same files rather than replaying them.
         let registered_entries = self.index.get_all_registered()?;
         for entry in &registered_entries {
             let Some(asset_id) = entry.asset_id.as_ref() else {
@@ -598,14 +640,26 @@ impl WorkspaceService {
                 if !workspace_asset_needs_metadata_refresh(existing_asset) {
                     continue;
                 }
-                // A top-up needs a file to measure. The project may already know
-                // this one is gone, or it may have been deleted since it was
-                // indexed with the removal not yet processed. Probing a path
-                // that is not there fails with an error this pass propagates,
-                // which would turn one deleted file into a failed scan of the
-                // whole workspace - and this pass sweeps every registered entry,
-                // not just the ones the scanner just saw on disk.
-                if existing_asset.missing || !abs_path.exists() {
+                // Checked before the filesystem is touched: a gap no probe can
+                // close is the common case here, and asking the disk about it
+                // every pass is the cost this set exists to remove.
+                if self.settled_metadata_gaps().contains(&entry.relative_path) {
+                    continue;
+                }
+                // A top-up needs a file to measure. It may have been deleted
+                // since it was indexed, with the removal not yet processed.
+                // Probing a path that is not there fails with an error this
+                // pass propagates, which would turn one deleted file into a
+                // failed scan of the whole workspace - and this pass sweeps
+                // every registered entry, not just the ones the scanner just
+                // saw on disk.
+                //
+                // Only the disk is asked. `Asset::missing` is this session's
+                // last word on the file, and it goes stale the moment the file
+                // comes back: a restored asset whose flag no watcher event has
+                // cleared yet would otherwise never get the top-up it is
+                // sitting here waiting for.
+                if !abs_path.exists() {
                     continue;
                 }
                 match refresh_existing_workspace_asset_metadata(
@@ -614,6 +668,14 @@ impl WorkspaceService {
                     &abs_path,
                     &extract,
                 ) {
+                    // A probe ran and the gap is still open, so the file simply
+                    // does not carry that measurement - a container with no
+                    // duration, say. Re-probing the same bytes would report the
+                    // same nothing, so stop asking until they change.
+                    Ok(()) if workspace_asset_needs_metadata_refresh(existing_asset) => {
+                        self.settled_metadata_gaps()
+                            .insert(entry.relative_path.clone());
+                    }
                     Ok(()) => {}
                     // The asset keeps the metadata it already has: it is real,
                     // and copying defaults over a measured codec or frame size
@@ -1233,6 +1295,181 @@ mod tests {
             .expect("a pass with nothing to do is not a failure");
 
         assert_eq!(second, AutoRegisterOutcome::default());
+    }
+
+    /// What FFprobe reports about a container that carries no duration of its
+    /// own: the streams are described, `format.duration` is simply absent.
+    fn undurated_metadata() -> crate::core::assets::MediaMetadata {
+        crate::core::assets::MediaMetadata {
+            duration_sec: 0.0,
+            video_duration_sec: None,
+            file_size: 1024,
+            video: Some(crate::core::assets::VideoInfo {
+                width: 1920,
+                height: 1080,
+                codec: "h264".to_string(),
+                ..Default::default()
+            }),
+            audio: None,
+            format: "h264".to_string(),
+            rotation_deg: 0.0,
+        }
+    }
+
+    /// A workspace holding one file, scanned and ready for a pass.
+    fn workspace_with_file(name: &str) -> (tempfile::TempDir, WorkspaceService) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("footage")).unwrap();
+        std::fs::write(dir.path().join("footage").join(name), "v").unwrap();
+
+        let service = WorkspaceService::open(dir.path().to_path_buf()).unwrap();
+        service.initial_scan().unwrap();
+        (dir, service)
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: a metadata gap no successful probe can ever close
+    ///
+    /// Given a file whose container reports no duration, so the probe succeeds
+    /// and the asset still has none
+    /// When pass after pass sweeps the registered entries
+    /// Then the file is probed once and then left alone. The gap check would
+    /// otherwise keep saying yes forever, and the watcher runs a pass per
+    /// filesystem event with the project lock held - so an unclosable gap
+    /// would spawn an FFprobe on every keystroke that touches the folder.
+    #[test]
+    fn a_gap_no_probe_can_close_is_measured_once_per_service() {
+        let (dir, service) = workspace_with_file("rawstream.mp4");
+        let probes = AtomicUsize::new(0);
+        let probe = |_: &std::path::Path| -> CoreResult<crate::core::assets::MediaMetadata> {
+            probes.fetch_add(1, Ordering::Relaxed);
+            Ok(undurated_metadata())
+        };
+
+        let mut state = ProjectState::new("Workspace Settled Gap Test");
+        let first = service
+            .auto_register_discovered_files_with(&mut state, dir.path(), probe)
+            .expect("the file is measurable, it just has no duration to report");
+        assert_eq!(first.registered, 1);
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            1,
+            "registering the file is one probe; the same pass must not measure it twice"
+        );
+        let asset_id = state.assets.keys().next().cloned().expect("one asset");
+        assert_eq!(
+            state.assets[&asset_id].duration_sec, None,
+            "the container reported no duration, so the asset has none"
+        );
+
+        service
+            .auto_register_discovered_files_with(&mut state, dir.path(), probe)
+            .expect("a pass over a registered file is not a failure");
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            2,
+            "the first pass built the asset moments earlier; the retry is this one"
+        );
+
+        for _ in 0..3 {
+            service
+                .auto_register_discovered_files_with(&mut state, dir.path(), probe)
+                .expect("a pass with nothing left to measure is not a failure");
+        }
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            2,
+            "a gap a successful probe left open is not re-measured"
+        );
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: the file whose gap was given up on is written to again
+    ///
+    /// Given a settled gap, no longer probed by any pass
+    /// When the watcher reports that the file changed
+    /// Then the next pass measures it again. New bytes may carry the duration
+    /// the old ones did not - a growing recording finalised by its camera, a
+    /// placeholder overwritten with the real take.
+    #[test]
+    fn a_modified_file_re_opens_a_settled_gap() {
+        let (dir, service) = workspace_with_file("rawstream.mp4");
+
+        let mut state = ProjectState::new("Workspace Re-Open Gap Test");
+        for _ in 0..2 {
+            service
+                .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                    Ok(undurated_metadata())
+                })
+                .expect("the file is measurable");
+        }
+        let asset_id = state.assets.keys().next().cloned().expect("one asset");
+        assert_eq!(state.assets[&asset_id].duration_sec, None);
+
+        std::fs::write(dir.path().join("footage/rawstream.mp4"), "vv").unwrap();
+        service
+            .handle_event(&WorkspaceEvent::FileModified(
+                "footage/rawstream.mp4".to_string(),
+            ))
+            .expect("an ordinary modification event");
+
+        service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| Ok(probed_metadata()))
+            .expect("the pass after the change is an ordinary one");
+
+        assert_eq!(
+            state.assets[&asset_id].duration_sec,
+            Some(12.0),
+            "the changed file is measured again, and this time it has a duration"
+        );
+    }
+
+    /// Feature: workspace auto-registration
+    /// Scenario: the top-up probe measured nothing, over and over
+    ///
+    /// Given a registered asset with a gap and a probe that keeps failing to
+    /// measure anything
+    /// When pass after pass reaches it
+    /// Then every pass tries again and reports it unrefreshed. Giving up is
+    /// only ever right when a probe *ran* and had nothing to add; a probe that
+    /// never measured says nothing about the file, and the FFmpeg it is
+    /// waiting on may finish installing at any moment.
+    #[test]
+    fn a_probe_that_measured_nothing_never_settles_the_gap() {
+        let (dir, service) = workspace_with_file("rawstream.mp4");
+
+        let mut state = ProjectState::new("Workspace Unsettled Gap Test");
+        service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                Ok(undurated_metadata())
+            })
+            .expect("the file is registered from what the probe did report");
+        let asset_id = state.assets.keys().next().cloned().expect("one asset");
+
+        for pass in 0..3 {
+            let outcome = service
+                .auto_register_discovered_files_with(&mut state, dir.path(), |_| {
+                    Err(CoreError::FFprobeUnavailable(
+                        "Failed to run ffprobe: program not found".to_string(),
+                    ))
+                })
+                .expect("a probe that measured nothing is not a scan failure");
+            assert_eq!(
+                outcome.unrefreshed.len(),
+                1,
+                "pass {pass} must still be trying: {:?}",
+                outcome.unrefreshed
+            );
+        }
+
+        service
+            .auto_register_discovered_files_with(&mut state, dir.path(), |_| Ok(probed_metadata()))
+            .expect("the pass that finally has an FFprobe is an ordinary one");
+        assert_eq!(
+            state.assets[&asset_id].duration_sec,
+            Some(12.0),
+            "the gap the failing probes deferred is closed once one works"
+        );
     }
 
     fn create_test_project(dir: &std::path::Path) {

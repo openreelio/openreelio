@@ -454,6 +454,29 @@ describe('Edge Cases', () => {
       );
     });
 
+    it('should ask for a retry when the marker arrives without an error-kind prefix', () => {
+      // Not every surface wraps the probe error in `FFprobe error: ` before it
+      // reaches the UI, so the marker also has to be recognised at the very
+      // start of the message.
+      const result = getUserFriendlyError(
+        'FFprobe reported nothing about interview.mp4: FFmpeg operation timed out'
+      );
+      expect(result).toBe(
+        'FFprobe could not measure this file (it may be on a slow or disconnected drive). Try again once the file is reachable.'
+      );
+    });
+
+    it('should still blame the file when a verdict merely quotes the marker', () => {
+      // The marker means "no measurement happened", and the Rust side only
+      // means it when it writes it first. Here FFprobe did look and did have
+      // something to say, so telling the user to retry would send them back to
+      // a file that will fail the same way every time.
+      const result = getUserFriendlyError(
+        'FFprobe error: Invalid data found when processing input; the log says FFprobe reported nothing usable'
+      );
+      expect(result).toBe('Could not read media information. The file may be corrupted.');
+    });
+
     it('should point at the missing FFmpeg when FFprobe could not be run', () => {
       const result = getUserFriendlyError(
         'FFprobe could not be run: Failed to run ffprobe: The system cannot find the file specified. (os error 2)'

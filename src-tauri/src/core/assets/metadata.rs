@@ -28,7 +28,11 @@ use crate::core::{CoreError, CoreResult, Ratio};
 /// Two things read it. [`probe_measured_nothing`] is one. The other is the
 /// frontend: `src/utils/errorMessages.ts` matches this same wording to ask for
 /// a retry instead of blaming the file, so the prefix is user-visible text and
-/// changing it means changing that pattern and its test too.
+/// changing it means changing that pattern and its test too. That pattern is
+/// anchored and case-sensitive, for the reason this side matches on
+/// `starts_with`: it accepts the prefix at the start of the message, or
+/// directly after the `FFprobe error: ` that [`CoreError`]'s `Display` puts in
+/// front of it, and nowhere else.
 pub const PROBE_MEASURED_NOTHING_PREFIX: &str = "FFprobe reported nothing";
 
 /// Whether `error` means the probe finished without measuring anything.

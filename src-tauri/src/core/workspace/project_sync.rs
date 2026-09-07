@@ -4,6 +4,14 @@
 //! them in the operation log, so a session that watched a folder change ends
 //! up with the same state a reopen would replay.
 //!
+//! One mutation is deliberately exempt: the metadata top-up
+//! [`WorkspaceService::auto_register_discovered_files`] performs on assets that
+//! already exist writes no op. It copies a probe of a file on disk into a cache
+//! of that same file, so a reopen re-derives it from the same bytes instead of
+//! replaying it. Recording those top-ups as ops as well is tracked separately;
+//! until then the invariant above holds for asset creation, removal and
+//! reconnection, not for measurements read back off the disk.
+//!
 //! Kept out of the IPC layer deliberately. The watcher loop calls this while
 //! holding the project lock, so nothing here may emit Tauri events or grant
 //! asset-protocol access — those belong to the caller, after the lock is
