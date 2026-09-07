@@ -56,6 +56,7 @@ reachable directly.
 
 ```bash
 openreelio-cli command schema                                    # list all 80 types
+openreelio-cli command schema --type SetClipTransform            # that payload's JSON Schema
 openreelio-cli command validate --type RenameTrack --payload '{…}'
 openreelio-cli command execute  --path ./demo --type SplitClip \
   --payload '{"sequenceId":"…","trackId":"…","clipId":"…","splitTime":5}'
@@ -63,6 +64,12 @@ openreelio-cli command execute  --path ./demo --type SplitClip \
 
 Payloads are camelCase JSON objects matching the IPC payload format. Use
 `--payload-file <FILE>` when the JSON is large or shell quoting is awkward.
+Read `command schema --type <CommandType>` before composing a payload. It
+prints the JSON Schema derived from the payload type itself: property names in
+camelCase, types, `required`, enums, the alternative spellings a field also
+accepts, and `"additionalProperties": false` wherever an unknown field is a
+parse error. `--type` repeats and `--all` prints every command.
+
 `command validate` runs the same strict parser without touching the project —
 check before you execute.
 

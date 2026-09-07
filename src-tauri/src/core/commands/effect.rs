@@ -685,7 +685,7 @@ impl Command for PasteEffectsCommand {
 // =============================================================================
 
 /// Flags indicating which attributes to paste from the clipboard.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AttributeSelection {
     /// Indices of effects in the source list to paste (empty = no effects)
@@ -709,20 +709,37 @@ pub struct AttributeSelection {
 }
 
 /// Serialized clip attributes for paste operations.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipAttributeValues {
+    /// Source clip transform, pasted when `selection.transform` is set.
+    ///
+    /// Held as raw JSON so a stored attribute set survives a `Transform` field
+    /// being added; a value that does not parse is skipped rather than failing
+    /// the paste. The schema states the shape the paste reads.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<Transform>")]
     pub transform: Option<serde_json::Value>,
+    /// Source clip opacity (0.0-1.0), pasted when `selection.opacity` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opacity: Option<f32>,
+    /// Source clip blend mode, pasted when `selection.blendMode` is set.
+    ///
+    /// Raw JSON for the same forward-compatibility reason as `transform`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<BlendMode>")]
     pub blend_mode: Option<serde_json::Value>,
+    /// Source clip speed multiplier, pasted when `selection.speed` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<f32>,
+    /// Whether the source clip plays in reverse, pasted with `selection.speed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
+    /// Source clip audio settings, pasted when `selection.audioSettings` is set.
+    ///
+    /// Raw JSON for the same forward-compatibility reason as `transform`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AudioSettings>")]
     pub audio: Option<serde_json::Value>,
 }
 

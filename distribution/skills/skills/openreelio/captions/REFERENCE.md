@@ -79,6 +79,15 @@ writes. The same field is available on the backend commands as `stylePack`, so
 `command execute --type CreateCaption|UpdateCaption|ImportGeneratedCaptions`
 takes it too. An unknown id is rejected with the full list of valid ids.
 
+Before composing one of those payloads by hand, read its shape:
+`openreelio-cli command schema --type UpdateCaption` prints the JSON Schema
+derived from the payload type itself — which of `sequenceId`, `trackId` and
+`captionId` are required, that `text`, `startSec`, `endSec`, `style` and
+`position` are optional and keep their current value when omitted, and that
+`captionId` also answers to `clipId` while `startSec`/`endSec` also answer to
+`startTime`/`endTime`. The same holds for `CreateCaption`,
+`ImportGeneratedCaptions` and every other command type.
+
 ## Text overlays
 
 ```bash

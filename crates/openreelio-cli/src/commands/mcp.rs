@@ -601,6 +601,15 @@ impl std::error::Error for ToolError {}
 /// advertised list can be derived from it by removing these.
 const MUTATING_TOOL_NAMES: [&str; 2] = ["openreelio.media.insert", "openreelio.plan.apply"];
 
+/// How many payload schemas one `openreelio.command.schema` call may ask for.
+///
+/// A schema runs to a few thousand tokens, so a request for all eighty is not a
+/// lookup — it is a context window spent before the work starts. Ten covers
+/// composing a plan; past that the agent should fetch per command. The
+/// advertised `inputSchema` states the same number, from here, so the cap an
+/// agent reads cannot drift from the cap it hits.
+const MAX_COMMAND_SCHEMA_TYPES: usize = 10;
+
 /// The tools this server advertises to a client.
 ///
 /// The mutating pair is filtered out of [`all_tool_schemas`] rather than left
@@ -714,8 +723,24 @@ fn all_tool_schemas(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.command.schema",
             "OpenReelio command schema",
-            "Read the command schema, text/caption workflows, and payload conventions available to external agents.",
-            serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            "Read the command schema, text/caption workflows, and payload conventions available to external agents. Without arguments this lists the command names and the workflow hints. Pass commandType (one name or a list of at most ten) to get the JSON Schema of those payloads — field names, types, which are required, enums, and the alternative spellings each field accepts — and read it before composing a payload rather than guessing one and reading the parse error. Any spelling the parser takes works ('changeClipSpeed', 'freezeFrame', 'addTrack'), answered with the canonical command's schema and its canonicalType; two spellings of one command in the same list are answered once, so ask for ten distinct commands rather than ten spellings. A required field with more than one spelling is a 'oneOf' over them: send exactly one, because two spellings of one field are a duplicate-field parse error.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "commandType": {
+                        "description": "One backend command type, or a list of at most ten, to describe. Any spelling the parser accepts resolves to the canonical command. Omit for the name listing. Ask for the commands you are about to compose rather than the whole surface: each schema costs a few thousand tokens.",
+                        "anyOf": [
+                            { "type": "string" },
+                            {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "maxItems": MAX_COMMAND_SCHEMA_TYPES
+                            }
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            }),
         ),
         tool(
             "openreelio.command.validate",
@@ -1064,7 +1089,7 @@ fn plan_schema() -> Value {
                         },
                         "commandType": {
                             "type": "string",
-                            "description": "Backend command type, e.g. SplitClip. Call openreelio.command.schema for the supported list."
+                            "description": "Backend command type, e.g. SplitClip. Call openreelio.command.schema for the supported list, and again with commandType for that payload's JSON Schema."
                         },
                         "payload": {
                             "type": "object",
@@ -1179,7 +1204,7 @@ fn call_tool(
         .map_err(|error| ToolError::Execution(error.to_string()))?),
         "openreelio.transcription.generate" => generate_transcription(state, arguments),
         "openreelio.annotation.read" => build_annotation_read(state, arguments),
-        "openreelio.command.schema" => Ok(build_command_schema()),
+        "openreelio.command.schema" => read_command_schema(arguments),
         "openreelio.command.validate" => validate_command(arguments),
         "openreelio.plan.validate" => validate_plan(arguments),
         "openreelio.verify" => run_verify_tool(state, arguments),
@@ -1867,6 +1892,64 @@ fn text_preset_catalog_line() -> Vec<String> {
         .collect()
 }
 
+/// Answers `openreelio.command.schema`, with or without a `commandType`.
+///
+/// Without one this stays the surface listing it has always been, so an agent
+/// discovering the tools is not handed eighty payload schemas it did not ask
+/// for. With one — or a list — it returns the derived JSON Schema of those
+/// payloads in the same `{ commandType, schema }` entries the CLI prints, so
+/// the two surfaces answer the same question the same way.
+fn read_command_schema(arguments: Value) -> Result<Value, ToolError> {
+    let requested = match arguments.get("commandType") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::String(one)) => vec![one.clone()],
+        Some(Value::Array(many)) => many
+            .iter()
+            .map(|entry| {
+                entry.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                    ToolError::InvalidArguments("commandType entries must be strings".to_string())
+                })
+            })
+            .collect::<Result<Vec<String>, ToolError>>()?,
+        Some(_) => {
+            return Err(ToolError::InvalidArguments(
+                "commandType must be a string or an array of strings".to_string(),
+            ))
+        }
+    };
+
+    if requested.is_empty() {
+        return Ok(build_command_schema());
+    }
+
+    // The cap is counted on the list as it was sent, because that is the list
+    // the tool advertises a `maxItems` for: a validator reading the schema
+    // refuses an eleventh entry whatever it spells, and a handler that counted
+    // something else would accept requests the advertised schema forbids.
+    if requested.len() > MAX_COMMAND_SCHEMA_TYPES {
+        return Err(ToolError::InvalidArguments(format!(
+            "commandType names {} commands; at most {MAX_COMMAND_SCHEMA_TYPES} may be requested at once. \
+             Ask for the ones you are about to compose, not the whole surface.",
+            requested.len()
+        )));
+    }
+
+    // The same name twice is one lookup. The core lookup trims each name before
+    // resolving it, so the same name with a stray space around it has to be
+    // trimmed here too or it survives the dedup and fetches a schema twice.
+    // Two different spellings of one command are collapsed there rather than
+    // here, since only the core knows which spellings mean the same command.
+    let mut deduped: Vec<String> = Vec::with_capacity(requested.len());
+    for command_type in requested {
+        let command_type = command_type.trim().to_string();
+        if !deduped.contains(&command_type) {
+            deduped.push(command_type);
+        }
+    }
+
+    openreelio_core::ipc::command_payload_schemas(&deduped).map_err(ToolError::InvalidArguments)
+}
+
 fn build_command_schema() -> Value {
     // Read the curated ids from the core registries rather than restating them:
     // a pack added to core shows up in the hints, and a hint can never name an
@@ -1989,7 +2072,8 @@ fn build_command_schema() -> Value {
         },
         "payloadFormat": {
             "commandType": "PascalCase backend command type",
-            "payload": "camelCase JSON object matching the command payload"
+            "payload": "camelCase JSON object matching the command payload",
+            "schemaLookup": "Call this tool again with commandType (one name or a list) for the derived JSON Schema of those payloads: field names, types, which are required, enums, and the alternative spellings each field accepts. The payloadHints above cover the commands with workflow rules; the schema covers all of them."
         }
     })
 }
@@ -3574,6 +3658,209 @@ mod tests {
         assert!(names.contains(&"openreelio.command.schema"));
         assert!(!names.contains(&"openreelio.transcription.install_model"));
         assert!(!names.contains(&"openreelio.plan.apply"));
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: an agent asks for one command's payload shape
+    #[test]
+    fn should_return_a_payload_schema_when_command_schema_is_given_a_type() {
+        let result = read_command_schema(serde_json::json!({ "commandType": "UpdateCaption" }))
+            .expect("UpdateCaption has a schema");
+
+        assert_eq!(result["count"].as_u64(), Some(1));
+        assert_eq!(result["schemas"][0]["commandType"], "UpdateCaption");
+
+        let schema = &result["schemas"][0]["schema"];
+        assert_eq!(schema["title"], "UpdateCaption");
+        assert_eq!(schema["additionalProperties"], false);
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("a schema names what it requires")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(required, vec!["sequenceId", "trackId"]);
+
+        // The caption id is required through the group that also accepts its
+        // `clipId` spelling, so neither name is listed on its own. It is a
+        // `oneOf`: serde reads the second spelling as the same field twice.
+        let spellings: Vec<&str> = schema["allOf"][0]["oneOf"]
+            .as_array()
+            .expect("an aliased requirement is a oneOf of one-property groups")
+            .iter()
+            .filter_map(|option| option["required"][0].as_str())
+            .collect();
+        assert_eq!(spellings, vec!["captionId", "clipId"]);
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: an agent asks by a `commandType` spelling the parser accepts
+    #[test]
+    fn should_resolve_a_command_type_alias_to_its_canonical_schema() {
+        let result = read_command_schema(serde_json::json!({ "commandType": "freezeFrame" }))
+            .expect("freezeFrame is a command type the parser accepts");
+
+        assert_eq!(result["count"].as_u64(), Some(1));
+        assert_eq!(result["schemas"][0]["commandType"], "freezeFrame");
+        assert_eq!(result["schemas"][0]["canonicalType"], "CreateFreezeFrame");
+        assert_eq!(
+            result["schemas"][0]["schema"]["title"], "CreateFreezeFrame",
+            "the schema is titled by the name it is really for"
+        );
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: one command asked for several ways is answered once
+    ///
+    /// Padding is trimmed and an alternative spelling resolves to the same
+    /// command, so a list an agent assembled by hand does not pay for the same
+    /// schema twice. The cap itself counts the entries as sent, which is what
+    /// the advertised `maxItems` promises.
+    #[test]
+    fn should_answer_one_command_asked_for_several_ways_once() {
+        let requested: Vec<Value> = ["SplitClip", " SplitClip", "SplitClip\n", "splitClip"]
+            .iter()
+            .map(|name| Value::String((*name).to_string()))
+            .collect();
+        let result = read_command_schema(serde_json::json!({ "commandType": requested }))
+            .expect("one name four ways is one lookup");
+
+        assert_eq!(result["count"].as_u64(), Some(1));
+        assert_eq!(result["schemas"][0]["schema"]["title"], "SplitClip");
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: the cap counts the entries the caller sent
+    ///
+    /// The bug this replaces: the cap was counted after the list was deduped,
+    /// so an eleven-entry array carrying one repeat was accepted — while the
+    /// `maxItems` the tool advertises refuses it, and an agent validating its
+    /// own arguments against that schema would never have sent it.
+    #[test]
+    fn should_count_a_repeat_against_the_advertised_cap() {
+        let mut requested: Vec<Value> = CommandPayload::SUPPORTED_COMMAND_TYPES
+            .iter()
+            .take(MAX_COMMAND_SCHEMA_TYPES)
+            .map(|name| Value::String((*name).to_string()))
+            .collect();
+        requested.push(requested[0].clone());
+
+        read_command_schema(serde_json::json!({ "commandType": requested }))
+            .expect_err("eleven entries is past the maxItems the tool advertises");
+    }
+
+    /// The advertised cap and the enforced one are the same number.
+    #[test]
+    fn should_advertise_the_command_schema_cap_it_enforces() {
+        let state = McpServerState::default();
+        let response = handle_jsonrpc_request(&state, request("tools/list", serde_json::json!({})));
+        let schema = response["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|tool| tool["name"] == "openreelio.command.schema")
+            .map(|tool| tool["inputSchema"].clone())
+            .expect("the command schema tool is always advertised");
+
+        assert_eq!(
+            schema["properties"]["commandType"]["anyOf"][1]["maxItems"].as_u64(),
+            Some(MAX_COMMAND_SCHEMA_TYPES as u64),
+            "an agent reads the cap off the tool rather than by being refused: {schema}"
+        );
+
+        let too_many: Vec<Value> = CommandPayload::SUPPORTED_COMMAND_TYPES
+            .iter()
+            .take(MAX_COMMAND_SCHEMA_TYPES + 1)
+            .map(|name| Value::String((*name).to_string()))
+            .collect();
+        read_command_schema(serde_json::json!({ "commandType": too_many }))
+            .expect_err("past the cap the request is refused");
+    }
+
+    #[test]
+    fn should_return_the_surface_listing_when_command_schema_is_given_no_type() {
+        let result =
+            read_command_schema(serde_json::json!({})).expect("the bare listing always works");
+
+        assert!(
+            result["commands"].is_array(),
+            "the name listing is unchanged"
+        );
+        assert!(result["payloadHints"].is_object());
+        assert!(
+            result["payloadFormat"]["schemaLookup"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("commandType")),
+            "the listing must point at the payload-shape lookup"
+        );
+    }
+
+    #[test]
+    fn should_accept_a_list_of_command_types_and_refuse_an_unknown_one() {
+        let result =
+            read_command_schema(serde_json::json!({ "commandType": ["SplitClip", "AddMask"] }))
+                .expect("both are supported");
+        assert_eq!(result["count"].as_u64(), Some(2));
+        assert_eq!(result["schemas"][1]["commandType"], "AddMask");
+
+        let error = read_command_schema(serde_json::json!({ "commandType": "UpdateCaptions" }))
+            .expect_err("an unsupported type has no schema");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("UpdateCaption'"),
+            "the refusal must name the command the caller meant: {message}"
+        );
+
+        let error = read_command_schema(serde_json::json!({ "commandType": 7 }))
+            .expect_err("a number is not a command type");
+        assert!(format!("{error:?}").contains("commandType"));
+    }
+
+    /// Feature: derived command payload schemas over MCP
+    /// Scenario: a bulk request is refused rather than silently truncated
+    ///
+    /// Each schema is a few thousand tokens, so "give me all of them" is a
+    /// context window spent before the editing starts. The cap says so, and
+    /// names itself, instead of answering with an unreadable wall.
+    #[test]
+    fn should_cap_a_bulk_command_schema_request_and_count_a_repeat_once() {
+        let many: Vec<&str> = openreelio_core::ipc::CommandPayload::SUPPORTED_COMMAND_TYPES
+            .iter()
+            .take(11)
+            .copied()
+            .collect();
+        let error = read_command_schema(serde_json::json!({ "commandType": many }))
+            .expect_err("eleven schemas at once is a context dump, not a lookup");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("10"),
+            "the cap must name itself: {message}"
+        );
+
+        // The same command twice is one lookup and must not spend two slots.
+        let repeated = read_command_schema(
+            serde_json::json!({ "commandType": ["SplitClip", "SplitClip", "InsertClip"] }),
+        )
+        .expect("a repeat is not an error");
+        assert_eq!(repeated["count"].as_u64(), Some(2));
+    }
+
+    /// The unknown-argument guard reads the advertised schema, so `commandType`
+    /// has to be declared there or a call carrying it is rejected before it
+    /// reaches the handler.
+    #[test]
+    fn should_advertise_the_command_type_argument_on_the_schema_tool() {
+        let state = McpServerState::default();
+        let tool = build_tools(&state)
+            .into_iter()
+            .find(|tool| tool["name"] == "openreelio.command.schema")
+            .expect("the schema tool is advertised");
+
+        assert!(
+            tool["inputSchema"]["properties"]["commandType"].is_object(),
+            "commandType must be advertised: {tool}"
+        );
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]

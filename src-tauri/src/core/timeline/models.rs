@@ -113,7 +113,7 @@ impl Default for SequenceFormat {
 /// off by 30ppm, and nothing downstream would flag it. So the decimal form is
 /// accepted and snapped to the exact rational the caller meant; see
 /// [`FpsSpec::to_ratio`] for the rule.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum FpsSpec {
     /// An exact rational rate, e.g. `{"num": 30000, "den": 1001}`.
@@ -221,7 +221,9 @@ fn greatest_common_divisor(mut left: i32, mut right: i32) -> i32 {
 }
 
 /// Sequence-level HDR export mode.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum SequenceHdrMode {
     #[default]
@@ -231,7 +233,7 @@ pub enum SequenceHdrMode {
 }
 
 /// Sequence-level HDR export settings.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SequenceHdrSettings {
     pub hdr_mode: SequenceHdrMode,
@@ -310,7 +312,7 @@ impl Canvas {
 // =============================================================================
 
 /// Marker type enumeration
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum MarkerType {
     Generic,
@@ -572,7 +574,7 @@ impl Sequence {
 // =============================================================================
 
 /// Track type/kind enumeration
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum TrackKind {
     Video,
@@ -582,7 +584,9 @@ pub enum TrackKind {
 }
 
 /// Blend mode for video tracks and clips
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum BlendMode {
     #[default]
@@ -827,7 +831,7 @@ impl Default for ClipPlace {
 // =============================================================================
 
 /// 2D Transform for clips
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Transform {
     /// Position (normalized 0.0-1.0, center = 0.5, 0.5)
@@ -857,7 +861,7 @@ impl Default for Transform {
 
 /// Audio fade curve type for fade-in and fade-out effects.
 /// Each type produces a distinct gain curve shape.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum FadeType {
     /// Linear ramp (straight line)
@@ -887,7 +891,7 @@ impl FadeType {
 }
 
 /// Audio settings for clips
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
     /// Volume in dB (-60 to +6)
@@ -958,7 +962,7 @@ impl AudioSettings {
 // =============================================================================
 
 /// Interpolation method for time remap keyframes.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum KeyframeInterpolation {
     /// Constant speed between keyframes (linear source-time mapping)
@@ -980,7 +984,9 @@ pub enum KeyframeInterpolation {
 }
 
 /// Slow-motion interpolation mode used when a clip plays below real time.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum SlowMotionInterpolation {
     /// Duplicate/hold source frames. This is the fastest and preserves legacy behavior.
@@ -999,7 +1005,7 @@ impl SlowMotionInterpolation {
 }
 
 /// A single transform keyframe on a clip motion curve.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TransformKeyframe {
     /// Time offset from clip start in seconds (must be >= 0)
@@ -1015,7 +1021,7 @@ pub struct TransformKeyframe {
 ///
 /// Maps a timeline position to a source position: "at `timeline_time` seconds
 /// into the clip, show the frame from `source_time` seconds in the source."
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TimeRemapKeyframe {
     /// Position on the timeline (seconds from clip start, 0-based)
@@ -1032,7 +1038,7 @@ pub struct TimeRemapKeyframe {
 /// When active on a clip, this replaces the constant `speed` field.
 /// The curve defines a mapping from timeline time to source time via keyframes.
 /// Between keyframes, interpolation determines how source time progresses.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TimeRemapCurve {
     /// Ordered keyframes (must be sorted by `timeline_time`)
@@ -1192,7 +1198,7 @@ fn cubic_bezier_y(cp1y: f64, cp2y: f64, t: f64) -> f64 {
 /// Defines a volume value at a specific time offset from clip start.
 /// When multiple keyframes exist, the volume is interpolated between them
 /// using the specified interpolation method.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioKeyframe {
     /// Time offset from clip start in seconds (must be >= 0)

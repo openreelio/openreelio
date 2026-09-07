@@ -48,7 +48,9 @@ pub fn media_kind_from_extension(ext: &str) -> Option<AssetKind> {
 ///
 /// Tracks the lifecycle of proxy video generation for preview playback.
 /// Videos larger than 720p automatically trigger proxy generation on import.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum ProxyStatus {
     /// No proxy needed (video <= 720p or non-video asset)
@@ -84,7 +86,7 @@ pub fn requires_proxy(kind: &AssetKind, video_info: Option<&VideoInfo>) -> bool 
 }
 
 /// Video-specific metadata
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoInfo {
     /// Width in pixels
@@ -124,7 +126,7 @@ impl Default for VideoInfo {
 }
 
 /// Audio-specific metadata
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioInfo {
     /// Sample rate in Hz
@@ -150,7 +152,7 @@ impl Default for AudioInfo {
 }
 
 /// License source type
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum LicenseSource {
     User,
@@ -160,7 +162,7 @@ pub enum LicenseSource {
 }
 
 /// License type enumeration
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LicenseType {
     RoyaltyFree,
@@ -173,7 +175,7 @@ pub enum LicenseType {
 }
 
 /// License information for an asset
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LicenseInfo {
     /// Source of the asset

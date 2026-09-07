@@ -4225,29 +4225,11 @@ mod tests {
 
     /// Supported command types that `CommandExecutor::execute` still refuses.
     ///
-    /// Registering a command is only half of making it work: the op it appends
-    /// must also replay, and each of these needs more than an op-kind arm.
-    /// `SetTimeRemap`/`ClearTimeRemap` change a derived clip duration that the
-    /// payload does not carry; `RemoveAttributes`, `PasteEffects` and
-    /// `PasteAttributes` touch the effect registry and several clips at once;
-    /// `DetachAudio` and `CreateFreezeFrame` create clips (and possibly a
-    /// track) with runtime-generated ids their `to_json` drops;
-    /// `ApplyAudioDucking` drops its keyframes the same way. Registering them
-    /// without fixing the logged payload would trade a clean rejection for
-    /// silent data loss on the next reopen.
-    ///
-    /// This list may only shrink. Adding to it means shipping a command the
-    /// executor cannot run.
-    const KNOWN_UNREGISTERED_COMMAND_TYPES: &[&str] = &[
-        "ApplyAudioDucking",
-        "ClearTimeRemap",
-        "CreateFreezeFrame",
-        "DetachAudio",
-        "PasteAttributes",
-        "PasteEffects",
-        "RemoveAttributes",
-        "SetTimeRemap",
-    ];
+    /// The list itself lives beside the schemas, because an agent reading a
+    /// command's schema has to be told the same thing this guard knows: those
+    /// commands parse and validate but will not execute. See
+    /// [`crate::ipc::NON_EXECUTABLE_COMMAND_TYPES`] for why each one is here.
+    const KNOWN_UNREGISTERED_COMMAND_TYPES: &[&str] = crate::ipc::NON_EXECUTABLE_COMMAND_TYPES;
 
     /// Resolves a payload command type to the `type_name()` it executes under.
     fn executed_type_name(payload_type: &str) -> &str {
@@ -4295,6 +4277,75 @@ mod tests {
                 CommandExecutor::type_name_to_op_kind(executed_type_name(payload_type)).is_err(),
                 "'{payload_type}' is registered now — remove it from \
                  KNOWN_UNREGISTERED_COMMAND_TYPES so the list keeps shrinking"
+            );
+        }
+    }
+
+    /// A payload schema exists for exactly the commands the executor runs.
+    ///
+    /// The schema is what an agent composes a payload from, so the two lists
+    /// have to agree in both directions and nothing in the type system makes
+    /// them: a registered command with no schema is one an agent can only
+    /// guess at, and a schema that claims to be runnable for a command
+    /// `CommandExecutor::execute` refuses lets an agent compose a perfect
+    /// payload and still be rejected at execution.
+    ///
+    /// The `x-openreelio-executable` keyword is the label being checked. Its
+    /// absence means "runnable"; only the commands the executor refuses carry
+    /// it, and they carry it as `false`.
+    #[test]
+    fn a_payload_schema_exists_for_exactly_the_commands_the_executor_runs() {
+        let mut without_schema: Vec<&str> = Vec::new();
+        let mut mislabelled: Vec<String> = Vec::new();
+
+        for payload_type in crate::ipc::CommandPayload::SUPPORTED_COMMAND_TYPES {
+            let Some(schema) = crate::ipc::command_payload_schema(payload_type) else {
+                without_schema.push(payload_type);
+                continue;
+            };
+
+            let registered =
+                CommandExecutor::type_name_to_op_kind(executed_type_name(payload_type)).is_ok();
+            let advertised_runnable = schema
+                .get(crate::ipc::EXECUTABLE_KEYWORD)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+
+            if registered != advertised_runnable {
+                mislabelled.push(format!(
+                    "'{payload_type}' is {} with the executor but its schema says {}",
+                    if registered {
+                        "registered"
+                    } else {
+                        "unregistered"
+                    },
+                    if advertised_runnable {
+                        "it runs"
+                    } else {
+                        "it does not run"
+                    }
+                ));
+            }
+        }
+
+        assert!(
+            without_schema.is_empty(),
+            "these commands are advertised and executable but an agent has no schema to compose \
+             a payload from: {without_schema:?}. Add each to declare_command_payloads!."
+        );
+        assert!(
+            mislabelled.is_empty(),
+            "the schemas disagree with the executor about what will run: {mislabelled:#?}. Update \
+             crate::ipc::NON_EXECUTABLE_COMMAND_TYPES so both surfaces say the same thing."
+        );
+
+        // The other direction: a name the executor cannot run is not a command,
+        // and handing back a schema for one would invite a payload nothing
+        // accepts.
+        for absent in ["Bogus", "AddTextClips", "splitclip", ""] {
+            assert!(
+                crate::ipc::command_payload_schema(absent).is_none(),
+                "'{absent}' is not a supported command type and must not have a schema"
             );
         }
     }

@@ -48,7 +48,15 @@ pub enum CommandAction {
     },
 
     /// Print the backend command surface available to headless agents
-    Schema,
+    Schema {
+        /// Backend command type to describe, e.g. UpdateCaption (repeatable)
+        #[arg(long = "type", conflicts_with = "all")]
+        command_type: Vec<String>,
+
+        /// Describe every supported command instead of one
+        #[arg(long, conflicts_with = "command_type")]
+        all: bool,
+    },
 }
 
 pub fn execute(action: CommandAction) -> anyhow::Result<()> {
@@ -147,14 +155,36 @@ pub fn execute(action: CommandAction) -> anyhow::Result<()> {
             }))
         }
 
-        CommandAction::Schema => output::print_json_pretty(&serde_json::json!({
-            "commands": CommandPayload::SUPPORTED_COMMAND_TYPES,
-            "count": CommandPayload::SUPPORTED_COMMAND_TYPES.len(),
-            "payloadFormat": {
-                "commandType": "PascalCase backend command type",
-                "payload": "camelCase JSON object matching the command payload"
+        CommandAction::Schema { command_type, all } => {
+            // The bare listing is what an agent reads to discover the surface,
+            // so it stays exactly as it was. A payload shape is a second,
+            // heavier question and is only answered when it is asked.
+            let mut report = if all {
+                openreelio_core::ipc::all_command_payload_schemas()
+            } else if command_type.is_empty() {
+                serde_json::json!({
+                    "commands": CommandPayload::SUPPORTED_COMMAND_TYPES,
+                    "count": CommandPayload::SUPPORTED_COMMAND_TYPES.len(),
+                })
+            } else {
+                openreelio_core::ipc::command_payload_schemas(&command_type)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?
+            };
+
+            if let Some(object) = report.as_object_mut() {
+                object.insert(
+                    "payloadFormat".to_string(),
+                    serde_json::json!({
+                        "commandType": "PascalCase backend command type",
+                        "payload": "camelCase JSON object matching the command payload",
+                        "schemaLookup": "Run 'command schema --type <CommandType>' for one payload's \
+                                         JSON Schema, or '--all' for every one."
+                    }),
+                );
             }
-        })),
+
+            output::print_json_pretty(&report)
+        }
     }
 }
 

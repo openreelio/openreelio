@@ -36,8 +36,13 @@ fn generate_mask_id() -> MaskId {
 // =============================================================================
 
 /// A 2D point with normalized coordinates (0.0-1.0)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+// `crate::core::types::Point2D` is a different shape under the same short name,
+// and `schemars` keys `definitions` by that short name — two of them in one
+// schema would silently describe one point with the other's fields. The wire
+// name is unchanged; only the schema definition key is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[schemars(rename = "MaskPoint2D")]
 pub struct Point2D {
     /// X coordinate (0.0 = left, 1.0 = right)
     pub x: f64,
@@ -72,7 +77,7 @@ impl Default for Point2D {
 }
 
 /// Rectangle mask shape
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RectMask {
     /// Center X (normalized 0.0-1.0)
@@ -142,7 +147,7 @@ impl RectMask {
 }
 
 /// Ellipse mask shape
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EllipseMask {
     /// Center X (normalized 0.0-1.0)
@@ -206,7 +211,7 @@ impl EllipseMask {
 }
 
 /// Polygon mask shape (closed path of points)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PolygonMask {
     /// Polygon vertices (minimum 3)
@@ -259,7 +264,7 @@ impl PolygonMask {
 }
 
 /// Bezier control point for curve masks
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BezierPoint {
     /// Anchor point
@@ -293,7 +298,7 @@ impl BezierPoint {
 }
 
 /// Bezier curve mask shape
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BezierMask {
     /// Bezier control points
@@ -344,7 +349,9 @@ impl BezierMask {
 // =============================================================================
 
 /// Gradient type for gradient masks
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GradientType {
     /// Linear gradient along a line between start and end points
@@ -359,7 +366,7 @@ pub enum GradientType {
 /// Creates a smooth alpha transition between fully opaque and fully transparent.
 /// For linear gradients: alpha varies along the perpendicular to the start→end line.
 /// For radial gradients: alpha varies with distance from the start point.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GradientMask {
     /// Start point of the gradient (normalized 0.0-1.0)
@@ -417,7 +424,7 @@ impl GradientMask {
 // =============================================================================
 
 /// Mask shape types
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MaskShape {
     /// Rectangle mask
@@ -467,7 +474,9 @@ impl MaskShape {
 // =============================================================================
 
 /// Blend mode for mask edges
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, specta::Type)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, specta::Type, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MaskBlendMode {
     /// Add to existing mask
@@ -485,7 +494,7 @@ pub enum MaskBlendMode {
 ///
 /// Stores a complete mask shape snapshot at a point in time, enabling
 /// smooth interpolation between shapes across the clip duration.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MaskKeyframe {
     /// Time offset from clip start (seconds)

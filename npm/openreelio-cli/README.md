@@ -129,7 +129,16 @@ EditScript that can be fed straight back into `plan execute`.
 
 ## Use it from an agent
 
-Start with the machine-readable command schema, then drive the loop:
+Start with the machine-readable command schema, then drive the loop.
+`openreelio-cli command schema` lists the 80 backend command types;
+`command schema --type <CommandType>` (repeatable, or `--all`) prints the JSON
+Schema of that payload — fields, types, what is required, enums, and the
+alternative spellings each field accepts — so a payload is composed from the
+schema rather than guessed. Most verbs take `--path <PROJECT_DIR>`; the ones
+that describe the tool rather than a project (`command schema`,
+`command validate`, `ffmpeg info`, `help-json`, `mcp`, `packs list`,
+`plan template`, `render presets`, `transcription install`,
+`transcription status`) do not.
 
 ```bash
 openreelio-cli help-json          # full command surface as JSON
