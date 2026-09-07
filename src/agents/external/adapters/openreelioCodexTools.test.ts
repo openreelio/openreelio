@@ -308,7 +308,7 @@ describe('openreelio.render_proxy', () => {
     expect(result.nextStep).toContain('atCuts');
     expect(result.nextStep).toContain("grid: 'auto'");
     // Looking is only half of it: the draft is also what the QC pass measures.
-    expect(result.nextStep).toContain('openreelio.verify { file: outputPath }');
+    expect(result.nextStep).toContain('openreelio.verify { file: outputPath, fileRange:');
     expect(unlistened()).toBe(2);
   });
 
@@ -773,6 +773,7 @@ describe('openreelio.verify', () => {
 
     await callTool('verify', {
       file: 'D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4',
+      fileRange: [10, 40],
       structuralOnly: false,
       checks: ['audio.loudness'],
       skip: ['asset.license'],
@@ -786,6 +787,7 @@ describe('openreelio.verify', () => {
     expect(invoke).toHaveBeenCalledWith('verify_sequence', {
       request: {
         file: 'D:/projects/demo/.openreelio/cache/renders/agent/proxy-1.mp4',
+        fileRange: [10, 40],
         structuralOnly: false,
         checks: ['audio.loudness'],
         skip: ['asset.license'],
@@ -798,6 +800,20 @@ describe('openreelio.verify', () => {
     });
   });
 
+  it('should refuse a file range that names no stretch of timeline', async () => {
+    vi.mocked(invoke).mockResolvedValue({ payload: { status: 'ok', checks: [] }, exitCode: 0 });
+
+    const reversed = await callTool('verify', { file: 'proxy.mp4', fileRange: [40, 10] });
+    expect(reversed.success).toBe(false);
+    expect(JSON.parse(responseText(reversed)).message).toMatch(/before its end/);
+
+    const orphaned = await callTool('verify', { fileRange: [10, 40] });
+    expect(orphaned.success).toBe(false);
+    expect(JSON.parse(responseText(orphaned)).message).toMatch(/only means something with file/);
+
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('should send a complete structural request when the agent passes nothing', async () => {
     vi.mocked(invoke).mockResolvedValue({ payload: { status: 'ok', checks: [] }, exitCode: 0 });
 
@@ -806,6 +822,7 @@ describe('openreelio.verify', () => {
     expect(invoke).toHaveBeenCalledWith('verify_sequence', {
       request: {
         file: null,
+        fileRange: null,
         structuralOnly: false,
         checks: null,
         skip: null,
@@ -881,6 +898,72 @@ describe('openreelio.verify', () => {
         labelCells: true,
       }),
     ).toBeNull();
+  });
+
+  it('should prefer the per-cue windows a grouped caption finding publishes', async () => {
+    // One violation covering a whole track of captions: its own timeRange is
+    // the minute the track spans, which shows an agent nothing. The cues it
+    // grouped carry the windows worth looking at.
+    vi.mocked(invoke).mockResolvedValue({
+      payload: {
+        checks: [
+          {
+            id: 'caption.safe_area',
+            violations: [
+              {
+                id: 'safe-area-1',
+                severity: 'warning',
+                message: '3 caption(s) on this track sit outside the safe area',
+                timeRange: { startSec: 0, endSec: 60 },
+                metrics: {
+                  cueCount: 3,
+                  timeRanges: [
+                    { startSec: 1, endSec: 2 },
+                    { startSec: 20, endSec: 21.5 },
+                    { startSec: 58, endSec: 60 },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+      exitCode: 1,
+    });
+
+    const result = JSON.parse(responseText(await callTool('verify')));
+
+    expect(nextStepRanges(result.nextStep)).toEqual([
+      { startSec: 1, endSec: 2 },
+      { startSec: 20, endSec: 21.5 },
+      { startSec: 58, endSec: 60 },
+    ]);
+  });
+
+  it('should fall back to the violation timeRange when there are no per-cue windows', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      payload: {
+        checks: [
+          {
+            id: 'caption.safe_area',
+            violations: [
+              {
+                id: 'safe-area-1',
+                severity: 'warning',
+                message: 'One caption sits outside the safe area',
+                timeRange: { startSec: 4, endSec: 6 },
+                metrics: { cueCount: 1, timeRanges: [] },
+              },
+            ],
+          },
+        ],
+      },
+      exitCode: 1,
+    });
+
+    const result = JSON.parse(responseText(await callTool('verify')));
+
+    expect(nextStepRanges(result.nextStep)).toEqual([{ startSec: 4, endSec: 6 }]);
   });
 
   it('should name the suggested fix as something plan_apply applies after review', async () => {
@@ -1138,7 +1221,9 @@ describe('developer instructions', () => {
 
   it('should close the loop on a verified result before reporting done', () => {
     expect(instructions).toContain('openreelio.verify');
-    expect(instructions).toContain('openreelio.verify { file: outputPath }');
+    expect(instructions).toContain(
+      'openreelio.verify { file: outputPath, fileRange: [start, start + durationSec] }',
+    );
     expect(instructions).toContain('exitCode');
     expect(instructions).toContain('openreelio.plan_apply only after reviewing it');
   });
@@ -1326,7 +1411,9 @@ const INSTRUCTION_RECIPES: Array<{ text: string; request: FrameProbeRecipe }> = 
     },
   },
   {
-    text: "ranges: <the violation timeRanges>, grid: 'auto', labelCells: true",
+    text:
+      "ranges: <the violation's metrics.timeRanges when it carries them, otherwise its own " +
+      "timeRange>, grid: 'auto', labelCells: true",
     request: { ranges: [{ startSec: 2, endSec: 3.5 }], grid: 'auto', labelCells: true },
   },
 ];

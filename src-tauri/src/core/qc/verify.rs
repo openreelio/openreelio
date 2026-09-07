@@ -34,16 +34,20 @@
 //!
 //! # Timebases
 //!
-//! Measurement times are file-relative while structural findings are
-//! timeline-relative. The two are compared directly (see
-//! [`crossref_black_ranges_with_gaps`]), so a `file` is expected to be a render
-//! of the whole sequence from timeline zero; a partial render still measures
-//! correctly but its timestamps no longer line up with the timeline.
+//! The report speaks one clock: the timeline. Measurement times arrive
+//! file-relative, and a `file` is assumed to be a render of the whole sequence
+//! from timeline zero unless the caller says otherwise. A partial render says
+//! otherwise with `file_range` — the timeline seconds the file holds — and
+//! every detection span is translated by that offset before any rule sees it
+//! (see [`shift_measured_spans`]). Rendered checks then grade against the
+//! declared window instead of against the whole sequence, and every
+//! `timeRange` in the document is a timeline second whatever was rendered.
 
 use super::{
-    crossref_black_ranges_with_gaps, measure_rendered_file_detailed, MeasureOptions,
-    MeasurementReport, QCContext, QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleStatus,
-    Severity, ViolationFix,
+    crossref_black_ranges_with_gaps, measure_rendered_file_detailed, sample_caption_bands,
+    CaptionSampleOptions, ContrastThresholds, MeasureOptions, MeasuredWindow, MeasurementReport,
+    QCContext, QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleStatus, Severity,
+    ViolationFix, CAPTION_CONTRAST_CHECK_ID,
 };
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::project::ProjectState;
@@ -51,7 +55,7 @@ use crate::core::timeline::Sequence;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Exit code for a report that breached the `fail_on` threshold.
 pub const EXIT_THRESHOLD_BREACHED: u8 = 1;
@@ -62,7 +66,8 @@ pub const EXIT_TOOL_FAILURE: u8 = 2;
 /// Severity threshold applied when the caller names none.
 pub const DEFAULT_FAIL_ON: &str = "error";
 
-/// Timeout for the rendered-file measurement pass when the caller names none.
+/// Budget for the whole rendered-file measurement stage when the caller
+/// names none.
 pub const DEFAULT_MEASURE_TIMEOUT_SEC: u64 = 600;
 
 /// Checks that are disabled unless explicitly requested via `checks`.
@@ -167,6 +172,8 @@ pub struct VerifyArgumentNames {
     pub duration_tolerance_sec: &'static str,
     /// Name of the rendered-file argument.
     pub file: &'static str,
+    /// Name of the argument declaring which timeline seconds the file holds.
+    pub file_range: &'static str,
     /// Name of the structural-only switch.
     pub structural_only: &'static str,
     /// How to ask this surface for the rendered measurement pass, as a phrase
@@ -185,6 +192,7 @@ impl VerifyArgumentNames {
             max_true_peak: "--max-true-peak",
             duration_tolerance_sec: "--duration-tolerance-sec",
             file: "--file",
+            file_range: "--file-range",
             structural_only: "--structural-only",
             rendered_file_hint: "pass --file <RENDER> to run them",
         }
@@ -200,6 +208,7 @@ impl VerifyArgumentNames {
             max_true_peak: "maxTruePeak",
             duration_tolerance_sec: "durationToleranceSec",
             file: "file",
+            file_range: "fileRange",
             structural_only: "structuralOnly",
             rendered_file_hint: "name a rendered file (file) to run them",
         }
@@ -226,6 +235,11 @@ pub struct VerifyRequest {
     pub sequence: Option<String>,
     /// Rendered file to measure; without it only structural checks run.
     pub file: Option<PathBuf>,
+    /// Timeline seconds the rendered file holds, as `[start, end]`.
+    ///
+    /// Declared by the caller because nothing in a partial render says which
+    /// part of the edit it is. Same semantics as `frame extract --file-range`.
+    pub file_range: Option<Vec<f64>>,
     /// Run structural checks only and never touch FFmpeg.
     pub structural_only: bool,
     /// Run only these check IDs.
@@ -241,7 +255,10 @@ pub struct VerifyRequest {
     pub duration_tolerance_sec: Option<f64>,
     /// Lowest severity that fails the run: info, warning, error, critical.
     pub fail_on: String,
-    /// Timeout for the rendered-file measurement pass, in seconds.
+    /// Budget for the whole rendered-file measurement stage, in seconds.
+    ///
+    /// One deadline, not one per pass: the probe pass and the caption-band
+    /// pass share it, so a run cannot cost twice what the caller allowed.
     pub timeout_sec: u64,
     /// How the calling surface spells these arguments when it has to name one
     /// in a refusal or a warning.
@@ -253,6 +270,7 @@ impl Default for VerifyRequest {
         Self {
             sequence: None,
             file: None,
+            file_range: None,
             structural_only: false,
             checks: None,
             skip: None,
@@ -282,6 +300,7 @@ pub struct VerifyPlan {
     engine: QCEngine,
     config: QCEngineConfig,
     selected_ids: Vec<String>,
+    window: Option<MeasuredWindow>,
 }
 
 /// Printed by hand because [`QCEngine`] holds its rules as trait objects and
@@ -295,6 +314,7 @@ impl std::fmt::Debug for VerifyPlan {
             .field("request", &self.request)
             .field("fail_on", &self.fail_on)
             .field("selected_checks", &self.selected_ids)
+            .field("measured_window", &self.window)
             .finish_non_exhaustive()
     }
 }
@@ -321,6 +341,8 @@ impl VerifyPlan {
             )));
         }
 
+        let window = resolve_file_range(&request)?;
+
         let engine = QCEngine::new();
         let config = build_engine_config(&engine, &request)?;
         let selected_ids = enabled_check_ids(&engine, &config);
@@ -339,12 +361,18 @@ impl VerifyPlan {
             engine,
             config,
             selected_ids,
+            window,
         })
     }
 
     /// The severity at which a finding becomes a failing verdict.
     pub fn fail_on(&self) -> Severity {
         self.fail_on
+    }
+
+    /// The timeline window the rendered file was declared to hold, if any.
+    pub fn measured_window(&self) -> Option<MeasuredWindow> {
+        self.window
     }
 
     /// Whether running this plan will spawn FFmpeg.
@@ -365,12 +393,57 @@ impl VerifyPlan {
         &self.selected_ids
     }
 
+    /// How this run would bound the caption-band pass, or `None` to skip it.
+    ///
+    /// Decoding one frame per bare cue is the most expensive thing the
+    /// measurement stage does and it answers exactly one check, so a run that
+    /// did not select `caption.contrast` — or skipped it — must not pay for it.
+    ///
+    /// `remaining` is what is left of the run's single measurement budget once
+    /// the probe pass has taken its share: handing this pass the caller's whole
+    /// timeout again let one `--timeout-sec 600` run for twenty minutes. The
+    /// length the probe measured bounds which cues can honestly be aimed at:
+    /// seeking past the end of a file yields its last frame rather than nothing.
+    fn caption_sample_options(
+        &self,
+        file_duration_sec: f64,
+        remaining: Duration,
+    ) -> Option<CaptionSampleOptions> {
+        if !self
+            .selected_ids
+            .iter()
+            .any(|id| id == CAPTION_CONTRAST_CHECK_ID)
+        {
+            return None;
+        }
+
+        // The pass decides which cues never need a decode, and it can only do
+        // that against the thresholds the rule will grade the rest with: a run
+        // that raised `min_contrast` must not have boxes waved through against
+        // the default and then be told everything passed.
+        let thresholds = self
+            .engine
+            .get_rule_by_check_id(CAPTION_CONTRAST_CHECK_ID)
+            .map(|rule| ContrastThresholds::from_config(&self.config.get_rule_config(rule.name())))
+            .unwrap_or_default();
+
+        Some(CaptionSampleOptions {
+            run_timeout: remaining,
+            file_duration_sec: Some(file_duration_sec),
+            thresholds,
+            ..CaptionSampleOptions::default()
+        })
+    }
+
     /// Runs the checks and assembles the report.
     ///
     /// `runner` is required exactly when [`requires_ffmpeg`](Self::requires_ffmpeg)
     /// says so. A measurement that fails does not abandon the run: the
     /// structural half of the report is still worth emitting, and the failure
     /// is recorded in `errors` and in the exit code.
+    ///
+    /// A declared window the sequence does not contain is the one thing that
+    /// stops the run before it starts — see [`check_window_overlaps`].
     pub async fn run(
         &self,
         state: &ProjectState,
@@ -381,6 +454,7 @@ impl VerifyPlan {
             .sequences
             .get(&sequence_id)
             .ok_or_else(|| VerifyError::new(format!("Sequence '{}' not found", sequence_id)))?;
+        check_window_overlaps(self.window, sequence, self.request.names)?;
 
         self.engine.set_config(self.config.clone()).await;
 
@@ -394,14 +468,47 @@ impl VerifyPlan {
             // without a runner is a wiring bug rather than a missing install.
             let runner = runner
                 .ok_or_else(|| VerifyError::new("FFmpeg is required to measure a rendered file"))?;
+            // One deadline for everything FFmpeg is asked to do. The probe pass
+            // and the caption-band pass used to be handed the caller's whole
+            // timeout each, so a run could take twice what it was told it could.
+            let budget = Duration::from_secs(self.request.timeout_sec);
+            let deadline = Instant::now().checked_add(budget);
+            let remaining = || match deadline {
+                Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+                None => budget,
+            };
             let options = MeasureOptions {
-                timeout: Duration::from_secs(self.request.timeout_sec),
+                timeout: remaining(),
                 ..Default::default()
             };
 
             match measure_rendered_file_detailed(runner, file, &options).await {
-                Ok(report) => {
+                Ok(mut report) => {
                     warnings.extend(report.notes.iter().cloned());
+
+                    // Every rule downstream of here reads one clock: the
+                    // timeline. A whole-sequence render already agrees with it;
+                    // a declared window is the offset that makes a partial one
+                    // agree too.
+                    if let Some(window) = self.window {
+                        shift_measured_spans(&mut report, window.start_sec);
+                    }
+
+                    if let Some(options) =
+                        self.caption_sample_options(report.duration_sec, remaining())
+                    {
+                        let sampling_window = self
+                            .window
+                            .map(|window| (window.start_sec, window.end_sec))
+                            .unwrap_or((0.0, sequence.duration()));
+                        let sampling =
+                            sample_caption_bands(runner, file, sequence, sampling_window, &options)
+                                .await;
+                        warnings.extend(sampling.notes.iter().cloned());
+                        report.measurements.caption_band_samples = sampling.samples;
+                        report.measurements.caption_band_coverage = Some(sampling.coverage);
+                    }
+
                     measurement = Some(report);
                 }
                 Err(error) => {
@@ -412,21 +519,43 @@ impl VerifyPlan {
 
         let measurement_failed = self.request.file.is_some() && measurement.is_none();
 
-        let mut report = match measurement.as_ref() {
-            Some(measured) => {
-                self.engine
-                    .check_with_measurements(sequence, state, measured.measurements.clone())
-                    .await
+        // The tolerance is the same one the rules use, so it comes from the
+        // shared context rather than a second definition of "one frame".
+        let context = QCContext::from_sequence(sequence).with_measured_window(self.window);
+        let frame_duration_sec = context.frame_duration_sec();
+
+        // A declaration the file does not match offsets every rendered finding
+        // by the difference, which is worth saying even when the difference is
+        // too small for `render.duration_mismatch` to grade.
+        if let (Some(window), Some(measured)) = (self.window, measurement.as_ref()) {
+            let expected = window.clipped_to(sequence.output_duration()).duration_sec();
+            let delta = measured.duration_sec - expected;
+            if delta.is_finite() && delta.abs() > frame_duration_sec {
+                warnings.push(format!(
+                    "{} declares {:.2}s of timeline ({:.2}s-{:.2}s) but the file is {:.2}s long; \
+                     rendered findings are offset from the timeline by the difference",
+                    self.request.names.file_range,
+                    expected,
+                    window.start_sec,
+                    window.end_sec,
+                    measured.duration_sec
+                ));
             }
-            None => self.engine.check(sequence, state).await,
         }
-        .map_err(|error| VerifyError::new(error.to_string()))?;
+
+        let context = match measurement.as_ref() {
+            Some(measured) => context.with_measurements(measured.measurements.clone()),
+            None => context,
+        };
+
+        let mut report = self
+            .engine
+            .check_with_context(sequence, state, &context)
+            .await
+            .map_err(|error| VerifyError::new(error.to_string()))?;
 
         // Black pixels only become an error once they are known to sit over a
-        // hole in the timeline, which needs both halves of the report. The
-        // tolerance is the same one the rules use, so it comes from the shared
-        // context rather than a second definition of "one frame".
-        let frame_duration_sec = QCContext::from_sequence(sequence).frame_duration_sec();
+        // hole in the timeline, which needs both halves of the report.
         crossref_black_ranges_with_gaps(&mut report, sequence, frame_duration_sec);
 
         for failure in &report.errored_rules {
@@ -445,6 +574,7 @@ impl VerifyPlan {
                 selected_ids: &self.selected_ids,
                 measurement: measurement.as_ref(),
                 rendered_file: self.request.file.as_deref(),
+                measured_window: self.window,
                 structural_only: self.request.structural_only,
                 rendered_file_hint: self.request.names.rendered_file_hint,
             },
@@ -547,6 +677,120 @@ fn parse_severity(raw: &str, argument: &str) -> VerifyResult<Severity> {
             "Invalid value for {}: expected info, warning, error, or critical (got '{}')",
             argument, other
         ))),
+    }
+}
+
+/// Validates the declared window and turns it into a [`MeasuredWindow`].
+///
+/// Refused in the engine rather than at each surface so `--file-range 5 2` and
+/// `fileRange: [5, 2]` are rejected in the same words, in each caller's own
+/// vocabulary. The range must be a real span: a zero-width or reversed one is a
+/// typo the caller has to see rather than a silently swapped pair, and a
+/// negative start names timeline seconds that do not exist.
+fn resolve_file_range(request: &VerifyRequest) -> VerifyResult<Option<MeasuredWindow>> {
+    let names = request.names;
+    let Some(values) = request.file_range.as_deref() else {
+        return Ok(None);
+    };
+
+    if request.file.is_none() {
+        return Err(VerifyError::new(format!(
+            "{} declares which timeline seconds a rendered file covers, so it only means \
+             something with {}",
+            names.file_range, names.file
+        )));
+    }
+    if values.len() != 2 {
+        return Err(VerifyError::new(format!(
+            "Invalid value for {}: takes exactly two values, START END (got {})",
+            names.file_range,
+            values.len()
+        )));
+    }
+    if !values[0].is_finite() || !values[1].is_finite() {
+        return Err(VerifyError::new(format!(
+            "Invalid value for {}: both values must be finite numbers",
+            names.file_range
+        )));
+    }
+    if values[0] < 0.0 {
+        return Err(VerifyError::new(format!(
+            "Invalid value for {}: START must not be negative",
+            names.file_range
+        )));
+    }
+
+    MeasuredWindow::new(values[0], values[1])
+        .map(Some)
+        .ok_or_else(|| {
+            VerifyError::new(format!(
+                "Invalid value for {}: START must be less than END (got {} and {})",
+                names.file_range, values[0], values[1]
+            ))
+        })
+}
+
+/// Refuses a declared window that names timeline the sequence does not have.
+///
+/// `resolve_file_range` can only see the numbers; whether they exist is a
+/// question about the project, so it is asked here, once the sequence is known
+/// and before a frame is measured.
+///
+/// Clipping `--file-range 100 130` to a 90-second edit leaves nothing. Every
+/// rendered rule would then grade an empty span, find nothing, and report
+/// `passed` — a clean verdict on a file nobody looked at, and one that survives
+/// any `--fail-on` setting because there is no violation to grade. The window
+/// is the caller's own claim about the file, so a claim about seconds the
+/// timeline does not contain is a bad argument, refused in the same words and
+/// with the same exit code as `--file-range 5 2`.
+fn check_window_overlaps(
+    window: Option<MeasuredWindow>,
+    sequence: &Sequence,
+    names: VerifyArgumentNames,
+) -> VerifyResult<()> {
+    let Some(window) = window else {
+        return Ok(());
+    };
+
+    let output_duration = sequence.output_duration();
+    if !output_duration.is_finite() || output_duration <= 0.0 {
+        // An empty sequence is `sequence.empty`'s finding to report, and it is
+        // a structural one the caller should still get to read.
+        return Ok(());
+    }
+    if window.clipped_to(output_duration).duration_sec() > 0.0 {
+        return Ok(());
+    }
+
+    Err(VerifyError::new(format!(
+        "Invalid value for {}: the window {:.2}s-{:.2}s lies outside the sequence, which ends at \
+         {:.2}s. Nothing in the file can be graded against timeline the sequence does not \
+         contain, so declare the window in seconds it has.",
+        names.file_range, window.start_sec, window.end_sec, output_duration
+    )))
+}
+
+/// Moves every detection span from the file's own clock onto the timeline.
+///
+/// The measurement pass times its findings from the start of the file it was
+/// handed. For a partial render that is `window.start_sec` into the edit, so
+/// every rule downstream — and every `timeRange` an agent reads — would be
+/// wrong by exactly that offset unless it is added here, once.
+fn shift_measured_spans(report: &mut MeasurementReport, offset_sec: f64) {
+    if !offset_sec.is_finite() || offset_sec == 0.0 {
+        return;
+    }
+
+    let measurements = &mut report.measurements;
+    for spans in [
+        &mut measurements.black_ranges,
+        &mut measurements.freeze_ranges,
+        &mut measurements.silence_ranges,
+    ] {
+        for (start, end) in spans.iter_mut() {
+            *start += offset_sec;
+            *end += offset_sec;
+        }
     }
 }
 
@@ -816,6 +1060,7 @@ struct OutputInputs<'a> {
     selected_ids: &'a [String],
     measurement: Option<&'a MeasurementReport>,
     rendered_file: Option<&'a Path>,
+    measured_window: Option<MeasuredWindow>,
     structural_only: bool,
     /// How the calling surface asks for the rendered pass, for the warning
     /// that names the checks it skipped without one.
@@ -860,6 +1105,7 @@ fn build_output(inputs: OutputInputs<'_>, mut warnings: Vec<String>, errors: Vec
             "sequenceId": inputs.sequence_id,
             "sequenceName": inputs.sequence.name,
             "renderedFile": inputs.rendered_file.map(|path| path.display().to_string()),
+            "fileRange": window_json(inputs.measured_window),
             "measured": inputs.measurement.is_some(),
             "selectedChecks": inputs.selected_ids,
         },
@@ -871,7 +1117,11 @@ fn build_output(inputs: OutputInputs<'_>, mut warnings: Vec<String>, errors: Vec
             "skipped": skipped_count,
         },
         "checks": checks,
-        "measurements": build_measurements(inputs.measurement, inputs.rendered_file),
+        "measurements": build_measurements(
+            inputs.measurement,
+            inputs.rendered_file,
+            inputs.measured_window,
+        ),
         "warnings": warnings,
         "errors": errors,
     })
@@ -985,8 +1235,27 @@ fn build_checks(report: &QCReport, engine: &QCEngine) -> Vec<CheckEntry> {
         .collect()
 }
 
+/// The declared window as JSON, or `null` for a whole-sequence run.
+fn window_json(window: Option<MeasuredWindow>) -> Value {
+    match window {
+        Some(window) => serde_json::json!({
+            "startSec": window.start_sec,
+            "endSec": window.end_sec,
+        }),
+        None => Value::Null,
+    }
+}
+
 /// Serialises the measurement block, or records that nothing was measured.
-fn build_measurements(measurement: Option<&MeasurementReport>, file: Option<&Path>) -> Value {
+///
+/// Every span here is in TIMELINE seconds, including on a partial render: the
+/// declared window's offset is added before the rules run, so one clock reaches
+/// the report. `durationSec` is the length of the file and stays as measured.
+fn build_measurements(
+    measurement: Option<&MeasurementReport>,
+    file: Option<&Path>,
+    window: Option<MeasuredWindow>,
+) -> Value {
     let Some(report) = measurement else {
         return serde_json::json!({ "measured": false });
     };
@@ -995,6 +1264,8 @@ fn build_measurements(measurement: Option<&MeasurementReport>, file: Option<&Pat
     serde_json::json!({
         "measured": true,
         "file": file.map(|path| path.display().to_string()),
+        "fileRange": window_json(window),
+        "timebase": "timeline",
         "durationSec": report.duration_sec,
         "videoMeasured": report.video_measured,
         "audioMeasured": report.audio_measured,
@@ -1117,6 +1388,83 @@ mod tests {
         }
         sequence.add_track(track);
         sequence
+    }
+
+    /// The gap fixture with one bare caption cue on a caption track.
+    fn sequence_with_a_bare_caption() -> Sequence {
+        let mut sequence = sequence_with_gap();
+        let mut captions = Track::new_caption("Captions");
+        let mut clip = Clip::with_range("caption", 0.0, 2.0);
+        clip.place.timeline_in_sec = 0.0;
+        clip.place.duration_sec = 2.0;
+        clip.label = Some("Readable words".to_string());
+        captions.add_clip(clip);
+        sequence.add_track(captions);
+        sequence
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should report caption contrast as skipped whenever no file was measured
+    ///
+    /// The check used to answer a file-less run with `passed: false,
+    /// skipped: false` plus an `info` finding asking for a render. Under
+    /// `--structural-only` that asked the caller for the very thing it had just
+    /// declined, and made a deliberate structural run look like it had failed
+    /// something. Both file-less states are asserted, because they differ only
+    /// in whether the report adds its own nudge.
+    #[tokio::test]
+    async fn test_caption_contrast_should_be_skipped_when_no_render_was_measured() {
+        let mut state = ProjectState::new("Caption skip");
+        let sequence = sequence_with_a_bare_caption();
+        state.active_sequence_id = Some(sequence.id.clone());
+        state.sequences.insert(sequence.id.clone(), sequence);
+
+        for structural_only in [true, false] {
+            let plan = VerifyPlan::resolve(VerifyRequest {
+                structural_only,
+                ..Default::default()
+            })
+            .expect("plan resolves");
+            let report = plan.run(&state, None).await.expect("verification runs");
+            let payload = report.payload();
+
+            let check = payload["checks"]
+                .as_array()
+                .expect("checks array")
+                .iter()
+                .find(|check| check["id"] == CAPTION_CONTRAST_CHECK_ID)
+                .unwrap_or_else(|| panic!("the check must appear in the document: {payload}"));
+
+            assert_eq!(
+                check["status"], "skipped",
+                "structural_only={structural_only}: {check}"
+            );
+            assert_eq!(check["skipped"], true, "{check}");
+            assert_eq!(
+                check["violationCount"], 0,
+                "a skipped check must not also carry a finding: {check}"
+            );
+
+            let warnings = payload["warnings"]
+                .as_array()
+                .expect("warnings array")
+                .iter()
+                .filter_map(|warning| warning.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            if structural_only {
+                assert!(
+                    warnings.is_empty(),
+                    "a structural run asked for no render, so it is not nudged for one: \
+                     {warnings}"
+                );
+            } else {
+                assert!(
+                    warnings.contains("rendered check(s) were skipped"),
+                    "a run that could have measured is still told what it missed: {warnings}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1816,9 +2164,252 @@ mod tests {
 
     #[test]
     fn test_build_measurements_should_report_when_nothing_was_measured() {
-        let value = build_measurements(None, None);
+        let value = build_measurements(None, None, None);
 
         assert_eq!(value["measured"], false);
+    }
+
+    /// A request declaring `file_range` against a rendered file.
+    ///
+    /// Named in the command line's vocabulary, because the refusals these tests
+    /// read are built from the calling surface's own labels.
+    fn windowed_request(file_range: Vec<f64>) -> VerifyRequest {
+        VerifyRequest {
+            file: Some(PathBuf::from("excerpt.mp4")),
+            file_range: Some(file_range),
+            names: VerifyArgumentNames::cli(),
+            ..Default::default()
+        }
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should accept a window that names a real stretch of timeline
+    #[test]
+    fn test_file_range_should_resolve_to_the_declared_window() {
+        let window = resolve_file_range(&windowed_request(vec![10.0, 40.0]))
+            .expect("a real span is accepted")
+            .expect("a window was declared");
+
+        assert_eq!(window.start_sec, 10.0);
+        assert_eq!(window.end_sec, 40.0);
+        assert_eq!(
+            resolve_file_range(&VerifyRequest::default()).expect("no window is fine"),
+            None,
+            "a whole-sequence run declares nothing"
+        );
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should refuse a pair that does not describe a stretch
+    ///
+    /// A reversed or empty pair is a typo the caller has to see: silently
+    /// swapping it would grade the file against a window nobody asked for.
+    #[test]
+    fn test_file_range_should_refuse_a_pair_that_is_not_a_span() {
+        for pair in [
+            vec![40.0, 10.0],
+            vec![10.0, 10.0],
+            vec![-1.0, 10.0],
+            vec![10.0],
+            vec![f64::NAN, 10.0],
+        ] {
+            let error = resolve_file_range(&windowed_request(pair.clone()))
+                .expect_err("an unusable pair is refused");
+            assert!(
+                error.to_string().contains("--file-range"),
+                "the refusal must name the argument the caller typed, got: {error}"
+            );
+        }
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should refuse a window with no file to apply it to
+    #[test]
+    fn test_file_range_should_refuse_without_a_rendered_file() {
+        let request = VerifyRequest {
+            file_range: Some(vec![10.0, 40.0]),
+            names: VerifyArgumentNames::cli(),
+            ..Default::default()
+        };
+
+        let error = resolve_file_range(&request).expect_err("a window needs a file");
+        assert!(
+            error.to_string().contains("--file"),
+            "the refusal must name the missing argument, got: {error}"
+        );
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should refuse a window that names timeline the sequence lacks
+    ///
+    /// Regression: `--file-range 100 130` on a six-second edit clipped to
+    /// nothing, every rendered rule graded that empty span and reported
+    /// `passed`, and the run exited `0` on a file nobody looked at — a verdict
+    /// no `--fail-on` setting could have caught, because there was no violation
+    /// to grade. The window is an argument, so an impossible one is refused
+    /// like any other bad argument.
+    #[test]
+    fn test_a_window_outside_the_sequence_should_be_refused() {
+        let sequence = sequence_with_gap();
+        let names = VerifyArgumentNames::cli();
+
+        let error = check_window_overlaps(MeasuredWindow::new(100.0, 130.0), &sequence, names)
+            .expect_err("a window the edit does not contain is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("--file-range") && message.contains("lies outside the sequence"),
+            "the refusal must name the argument and what is wrong with it, got: {message}"
+        );
+
+        assert!(
+            check_window_overlaps(MeasuredWindow::new(4.0, 30.0), &sequence, names).is_ok(),
+            "a window that overhangs the end still holds real timeline, which is a warning"
+        );
+        assert!(
+            check_window_overlaps(None, &sequence, names).is_ok(),
+            "a whole-sequence run declares no window at all"
+        );
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should leave an empty edit to the structural checks
+    ///
+    /// Every window clips to nothing against an empty sequence. Refusing the
+    /// run would hide `sequence.empty`, which is the finding the caller needs.
+    #[test]
+    fn test_an_empty_sequence_should_not_turn_a_window_into_a_refusal() {
+        let sequence = Sequence::new("Empty", SequenceFormat::youtube_1080());
+
+        assert!(check_window_overlaps(
+            MeasuredWindow::new(10.0, 40.0),
+            &sequence,
+            VerifyArgumentNames::cli(),
+        )
+        .is_ok());
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should decode caption bands only for a run that grades them
+    ///
+    /// The pass spawns one FFmpeg seek per bare cue, which on a talk is
+    /// hundreds. A caller running `--checks timeline.gap`, or skipping
+    /// `caption.contrast`, was paying for all of them and reading none.
+    #[test]
+    fn test_caption_bands_should_be_sampled_only_when_the_check_is_selected() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let file = temp.path().join("render.mp4");
+        std::fs::write(&file, b"render").expect("write render");
+
+        let plan_for = |request: VerifyRequest| {
+            VerifyPlan::resolve(VerifyRequest {
+                file: Some(file.clone()),
+                ..request
+            })
+            .expect("the request is valid")
+        };
+
+        assert!(
+            plan_for(VerifyRequest::default())
+                .caption_sample_options(12.0, Duration::from_secs(600))
+                .is_some(),
+            "a default run grades caption contrast, so it has to measure it"
+        );
+        assert!(
+            plan_for(VerifyRequest {
+                skip: Some(vec![CAPTION_CONTRAST_CHECK_ID.to_string()]),
+                ..Default::default()
+            })
+            .caption_sample_options(12.0, Duration::from_secs(600))
+            .is_none(),
+            "a skipped check must not be paid for"
+        );
+        assert!(
+            plan_for(VerifyRequest {
+                checks: Some(vec!["timeline.gap".to_string()]),
+                ..Default::default()
+            })
+            .caption_sample_options(12.0, Duration::from_secs(600))
+            .is_none(),
+            "a selection that leaves the check out must not be paid for either"
+        );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should spend the caller's timeout once across both passes
+    ///
+    /// `--timeout-sec` is a budget for the run, not per pass. Handing the
+    /// caption pass the whole number again after the probe pass had already
+    /// been given it let one run take twice what the caller allowed, so the
+    /// pass is bounded by what is *left* of a single deadline.
+    #[test]
+    fn test_caption_sampling_should_take_its_budget_from_the_request() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let file = temp.path().join("render.mp4");
+        std::fs::write(&file, b"render").expect("write render");
+
+        let plan = VerifyPlan::resolve(VerifyRequest {
+            file: Some(file),
+            timeout_sec: 7,
+            ..Default::default()
+        })
+        .expect("the request is valid");
+
+        let spent = Duration::from_secs(5);
+        let options = plan
+            .caption_sample_options(12.5, Duration::from_secs(7) - spent)
+            .expect("the default run grades caption contrast");
+
+        assert_eq!(
+            options.run_timeout,
+            Duration::from_secs(2),
+            "the caption pass gets what the probe pass left, not the whole budget again"
+        );
+        assert_eq!(
+            options.file_duration_sec,
+            Some(12.5),
+            "the pass must know how much file there is to seek into"
+        );
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should move every detection span onto the timeline
+    ///
+    /// The measurement pass times its findings from the start of the file. A
+    /// report that mixes those with timeline-relative structural findings would
+    /// be wrong by exactly the window's offset.
+    #[test]
+    fn test_measured_spans_should_be_reported_in_timeline_seconds() {
+        let mut report = MeasurementReport {
+            measurements: RenderMeasurements {
+                black_ranges: vec![(0.0, 1.0)],
+                freeze_ranges: vec![(2.0, 3.0)],
+                silence_ranges: vec![(4.0, 5.0)],
+                ..Default::default()
+            },
+            duration_sec: 30.0,
+            video_measured: true,
+            audio_measured: true,
+            notes: Vec::new(),
+        };
+
+        shift_measured_spans(&mut report, 10.0);
+
+        assert_eq!(report.measurements.black_ranges, vec![(10.0, 11.0)]);
+        assert_eq!(report.measurements.freeze_ranges, vec![(12.0, 13.0)]);
+        assert_eq!(report.measurements.silence_ranges, vec![(14.0, 15.0)]);
+    }
+
+    /// Feature: Verifying a partial render
+    /// Scenario: should report the declared window back to the caller
+    #[test]
+    fn test_report_should_echo_the_declared_window() {
+        let window = MeasuredWindow::new(10.0, 40.0);
+
+        assert_eq!(
+            window_json(window),
+            serde_json::json!({ "startSec": 10.0, "endSec": 40.0 })
+        );
+        assert_eq!(window_json(None), Value::Null);
     }
 
     #[test]

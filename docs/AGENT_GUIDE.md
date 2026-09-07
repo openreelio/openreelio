@@ -800,6 +800,8 @@ first.
 ```bash
 openreelio-cli verify --path ./demo                          # structural only
 openreelio-cli verify --path ./demo --file ./proxy.mp4       # + rendered measurements
+openreelio-cli verify --path ./demo --file ./excerpt.mp4 \
+  --file-range 10 40                                         # a partial render
 openreelio-cli verify --path ./demo --file ./proxy.mp4 \
   --target-lufs=-14 --max-true-peak=-1 --fail-on error
 ```
@@ -807,7 +809,7 @@ openreelio-cli verify --path ./demo --file ./proxy.mp4 \
 Without `--file`, only structural checks run and FFmpeg is never invoked.
 `--structural-only` makes that explicit and conflicts with `--file`.
 
-Twenty-three checks in two categories. **structural**: `sequence.empty`,
+Twenty-four checks in two categories. **structural**: `sequence.empty`,
 `timeline.gap`, `clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`,
 `audio.silent_clip`, `caption.overlap`, `caption.reading_rate`,
 `caption.out_of_bounds`, `caption.safe_area`, `shot.length_stats`,
@@ -815,8 +817,9 @@ Twenty-three checks in two categories. **structural**: `sequence.empty`,
 `sequence.duration`.
 **rendered**: `render.duration_mismatch`, `render.missing_video`,
 `render.resolution_mismatch`, `render.black_frames`, `render.frozen`,
-`audio.peak`, `audio.clipping`, `audio.loudness`. The two opt-ins run only when
-named in `--checks`; narrow any run with `--checks a,b` or `--skip a,b`.
+`audio.peak`, `audio.clipping`, `audio.loudness`, `caption.contrast`. The two
+opt-ins run only when named in `--checks`; narrow any run with `--checks a,b`
+or `--skip a,b`.
 
 `render.duration_mismatch` asks the question the other rendered checks assume
 an answer to: is the measured file this sequence at all? A stale or truncated
@@ -846,6 +849,127 @@ pass by keeping each one short. `audio.clipping` reports the flat-topped
 samples `astats` measures, at warning: a master limited on purpose reads the
 same way.
 
+`caption.contrast` (warning) asks the question no structural check can: can the
+words be read? For each caption cue the file covers it decodes one frame at the
+cue's midpoint, measures the luminance of the band the words occupy and compares
+it with the text colour — measuring the rectangle the words occupy, both the
+band they sit on and the column they are drawn in, so a bright strip in a corner
+the line never reaches cannot decide the verdict. The band follows the style's
+`verticalAlign` as well as `captionPosition`, because the renderer does.
+
+A cue counts as already protected — and is never decoded — only where the export
+would actually draw the protection: an `outlineColor` with a non-zero width
+whose colour stands `minContrast` or more clear of the text colour at the alpha
+it is really painted at, or a `backgroundColor` whose own colour and alpha put
+*every* picture the shot could be clear of the text. A box is not protection because it is a box: white words
+on a 90%-opaque white box are as unreadable as white words on a white wall, so
+that cue is decoded and reported, while the same alpha in black is
+waved through. An `outlineWidth` with no colour renders bare, and so does a cue
+with no style at all, so both are graded like any other bare cue. Every other
+box is neither waved through nor ignored: it is composited over the band before
+the verdict, so the shot behind it still counts for what it shows through.
+Because a painted box replaces the outline in the burn-in, an outline behind one
+is not protection; a `backgroundColor` the renderer rounds away to nothing is no
+box at all, so the outline it would otherwise have replaced stays and counts.
+Every alpha here is the one the renderer paints with, layer opacity included: a
+style `opacity` and the clip's own opacity scale the box, the outline *and* the
+glyphs, so a faded caption separates from its background by that fraction of
+what its colours imply and a box that would protect an opaque cue does not
+protect a faded one. Nor does an outline, and an outline is graded on its colour
+too — by the same interval arithmetic as a box, because a stroke that is not
+opaque is not its own colour either: the viewer reads the ring as `alpha *
+outline + (1 - alpha) * picture`, so it can be anywhere on `[alpha * outline,
+alpha * outline + (1 - alpha)]` and the stroke is worth only the distance from
+the text to the *nearest* tone that interval can take, times the layer opacity.
+A stroke that comes in under `minContrast` on that measure is graded like any
+other bare cue rather than waved through unmeasured, so a white stroke around
+white words, a `#00000033` stroke, a half-alpha black stroke around `#CCCCCC`
+words and an opaque black stroke on a caption drawn at half opacity are all
+measured. Separation is the whole of the test for a stroke — it does not also
+have to be opaque — so a `#00000080` outline around white words is waved
+through: the ring can never be lighter than `0.498` and the glyphs clear it by
+`0.502`. A caption faded out entirely is not decoded at all; it is counted as
+unmeasured instead, with a `fadedOut` reason.
+
+Two numbers decide the verdict. A bare cue whose text sits within `0.35`
+luminance of the picture behind it is reported (`fault: "lowContrast"`), and so
+is one whose band varies by more than `0.2` (`fault: "mixedBackground"`) — a
+band that is half sky and half shadow has a comfortable mean and is still half
+unreadable. Both are graded after the cue's own box is composited over the band,
+so `bandLuminance` is the picture as measured while `contrast` is what was
+judged, and the two differ by whatever `boxAlpha` hides. Either finding carries
+`{bandLuminance, bandLuminanceStddev, textLuminance, contrast, minContrast,
+maxBandStddev, fault, hasBox, hasOutline}`, plus `boxAlpha` on a cue that
+carries a box and `layerOpacity` on a cue drawn at less than full opacity, and an `UpdateCaption` fix applying the `standard-outline` pack —
+not `boxed-contrast`, because an outline drawn at full opacity survives any
+background including a mixed one. On a cue too faded for any stroke to rescue
+the fix raises the opacity instead: the stroke fades with the glyphs, so a
+restyle that leaves `layerOpacity` where it is can separate them by at most
+`layerOpacity` squared, and below `sqrt(minContrast)` — about `0.6` at the
+default floor — an outline alone is advice that cannot work. Which command is
+offered depends on which half of `layerOpacity` carries the fade, read back off
+the timeline: `layerOpacity` is the caption style's own opacity folded together
+with the clip's — multiplied, except that a mirrored pair counts once, which is
+what the renderer does — so a faded clip under an opaque style gets a
+`SetClipOpacity` back to `1.0`, an opaque clip under a faded style gets the
+`standard-outline` restyle (the pack replaces the stored style, opacity
+included, so it is both the outline and the un-fading), and a cue faded on both
+halves gets the restyle at a lower confidence with `details` saying the clip's
+opacity still has to be raised as well. `SetClipOpacity` on a clip that is
+already opaque would be a fix that changes nothing, which is why the half is
+read rather than assumed; the `details` always name it. `hasBox: true` on a violation is normal and
+not a contradiction: whether a cue is protected is decided by the box's colour
+and alpha together,
+never by the presence of a box: a box is waved through unmeasured only where its
+own colour and alpha put every tone the band can take clear of the text by
+`minContrast` *and* the alpha leaves that band no more spread than
+`maxBandStddev`, because the band is measured *through* the box and skipping a
+translucent one would skip a reading the pass would otherwise have taken.
+`hasOutline` is the one flag that cannot appear
+on a violation, because it is only set where the stroke separates the words from
+every tone its ring can take by `minContrast` or better. That single clause is
+the whole test for a stroke — no spread clause applies, since a stroke is
+composited into no measurement, so the alternative to trusting one is a report
+on a cue nothing was measured about. A stroke that clears it reads over
+anything; one too faint, too translucent, or too close to the text's own colour
+leaves the flag `false` and the cue graded like any other bare one. `boxAlpha` is the alpha the box is actually painted at — the
+style's box alpha times the layer opacity —
+and it is absent, rather than `0`, where no box is painted. `layerOpacity` is
+the opacity the glyphs themselves are drawn at; `contrast` is already scaled by
+it, which is why it can be smaller than `textLuminance` and `bandLuminance`
+alone would suggest, and it is absent where the words are fully opaque.
+
+The pass is bounded: at most 60 frames per run (spread evenly across the file),
+whatever is left of `--timeout-sec` after the probe pass — the flag is one budget
+for the whole measurement stage, not one per pass — and no seek past the end of
+the file that was measured. Whatever it could not look at comes back as one
+`info` finding — "Caption contrast: N of M cue(s) not measured (…)" — so a run
+that decoded nothing is never reported as `passed`, and `warnings` says the same
+in prose. The decodes only happen when the check is selected, so `--skip
+caption.contrast` really does skip them. Without `--file` the check is reported
+as `skipped`, like every other rendered check, and the report's "N rendered
+check(s) were skipped" warning names the flag that would run it — except under
+`--structural-only`, which is the caller saying it already knows.
+
+The caption checks report **one violation per caption track**, not one per cue:
+`caption.safe_area`, `caption.out_of_bounds` and `caption.reading_rate` list
+every offending cue under `metrics.cues` (with `clipId`, `startSec`, `endSec`
+and that cue's own numbers) and in `entities`, publish those cue windows again
+as `metrics.timeRanges` — the violation's own `timeRange` spans the first cue to
+the last, which is usually the whole track, so hand `metrics.timeRanges` to
+`frame extract --ranges` instead — and their `suggestedFix`
+is a single plan repairing all of them. A machine transcript anchored two
+percent too low is one mistake, and this is what stops the fix loop from having
+to run once per caption. A plan is capped at 200 steps; beyond that the finding
+splits into several violations carrying `part`/`partCount`. `autoFixable` is
+true only when the steps finish the job — `caption.reading_rate` extends a cue
+into the following gap where the gap is long enough (`repair: "extend"`), and
+where it is not it proposes a split at the nearest word boundary
+(`repair: "split"`, a `UpdateCaption` + `CreateCaption` pair, the new half
+carrying the original cue's `style` and `position` so it is drawn the same way
+in the same place) which a human or model still has to accept, so the group
+reports `autoFixable: false`.
+
 The report always lists every check that ran, was skipped, or errored — so
 "checked and clean" is distinguishable from "never looked". Each entry carries
 `id`, `category`, `status`, `violationCount`, `timeRanges`, `metrics`,
@@ -865,9 +989,42 @@ warning/info issues), `failed` (ran, found error or critical), `skipped` or
 turns exit `0` into exit `1`. Taste-adjacent findings stay at warning/info;
 `error` is reserved for objectively broken output.
 
-Measured times are file-relative while structural findings are
-timeline-relative, so `--file` expects a render of the whole sequence from zero.
-A partial render still measures correctly, but its timestamps no longer line up.
+### Verifying a partial render
+
+`--file` alone expects a render of the whole sequence from timeline zero. For an
+excerpt — anything `render start --start/--end` or `openreelio.render.range`
+produced — add `--file-range START END`, the timeline seconds the file holds
+(the same pair `frame extract --file-range` takes):
+
+```bash
+openreelio-cli render start --path ./demo --proxy --start 10 --end 40 \
+  --output ./excerpt.mp4
+openreelio-cli verify --path ./demo --file ./excerpt.mp4 --file-range 10 40
+```
+
+The rendered checks then grade the file against that window instead of the whole
+sequence, and every detection span is translated before any check sees it, so
+**every `timeRange` in the report is a timeline second** whatever was rendered
+(`measurements.timebase` says `"timeline"`, and `measurements.fileRange` /
+`target.fileRange` repeat what was declared). Without it a 30-second excerpt of
+a 90-second edit reads as a truncated deliverable and `render.duration_mismatch`
+fails the run.
+
+`START` must be non-negative and less than `END`; anything else is exit `2`.
+`--file-range` requires `--file`. When the file's own length disagrees with the
+declared window by more than a frame the run adds a `warnings` line rather than
+failing: the window is the caller's claim about a file it rendered on purpose,
+and `render.duration_mismatch` grades a windowed run at warning for the same
+reason.
+
+A window lying entirely *past* the end of the edit is refused outright. It clips
+to nothing, so every rendered check would grade an empty span, report `passed`,
+and exit `0` on a file nobody looked at — a verdict no `--fail-on` setting could
+catch, because there is no violation to grade. It is an impossible claim about
+the file, so it is refused like any other bad argument: exit `2`, before a frame
+is measured, naming `--file-range` and saying the window "lies outside the
+sequence". A window that merely *overhangs* the end still holds real timeline
+and stays a `warnings` line.
 
 ### Feeding a fix back
 
@@ -938,7 +1095,12 @@ Packs are the quality floor — reach for free-form styling only when a pack
 cannot express the brief. Each pairs typography with an anchor and is verified to
 draw zero `caption.safe_area` violations on both 1920x1080 and 1080x1920 — the
 same check `verify` runs, measuring the text block against each canvas rather
-than only comparing margins.
+than only comparing margins. The guarantee is about the pack, not about any text
+you put in it: a wrapping subtitle pack holds a full sentence on either canvas,
+while `broadcast-lower` is a fixed-anchor plate that wraps only at the frame
+edge and is anchored at x=10 %, so a sentence-length line in one still runs off
+a vertical frame. Run `verify` after
+styling and read what it says rather than assuming the pack covers it.
 
 ```bash
 openreelio-cli packs list --kind caption
@@ -1318,11 +1480,14 @@ stats it, and media that is not readable on this machine is refused as missing.
 Neither error echoes the resolved path.
 
 **`openreelio.verify`** is read-only-safe and always advertised. It accepts
-`{sequenceId?, file?, structuralOnly?, checks?[], skip?[], failOn?, targetLufs?,
-maxTruePeak?, durationToleranceSec?, timeoutSec?}` and returns
+`{sequenceId?, file?, fileRange?: [start, end], structuralOnly?, checks?[],
+skip?[], failOn?, targetLufs?, maxTruePeak?, durationToleranceSec?,
+timeoutSec?}` and returns
 the same report document the CLI prints — so an MCP client gets the fix loop
 without shelling out. `file` must be inside the project directory, so render
-into the project before verifying.
+into the project before verifying. `fileRange` is `--file-range`: the timeline
+seconds a *partial* render holds, without which an excerpt reads as a truncated
+deliverable.
 
 **`openreelio.render.range`** draws the draft the judge loop looks at, over the
 same core path as `render start --proxy --start/--end`. It accepts
@@ -1335,7 +1500,8 @@ are kept, and one call may cover at most 300 s of timeline — see
 of the file with `frame.extract {file, between: [0, durationSec], grid: "4x3"}`,
 which always has something to show; `frame.extract {file, fileRange: [start,
 start + durationSec], atCuts: true, grid: "auto"}` when the rendered range holds
-cuts; and `verify {file}` for the measurements.
+cuts; and `verify {file, fileRange: [start, start + durationSec]}` for the
+measurements — a draft is an excerpt, so pass the range it covers.
 
 **`openreelio.frame.extract`** is the judge loop over MCP: it answers with the
 picture itself, as an MCP `image` content block, so a vision model can look at

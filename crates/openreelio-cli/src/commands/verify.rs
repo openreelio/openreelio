@@ -38,6 +38,11 @@ pub struct VerifyArgs {
     #[arg(long, conflicts_with = "structural_only")]
     pub file: Option<PathBuf>,
 
+    /// Timeline seconds --file holds, as two values START END; grades a partial
+    /// render against that window and reports findings in timeline seconds
+    #[arg(long, num_args = 2, value_names = ["START", "END"], requires = "file")]
+    pub file_range: Option<Vec<f64>>,
+
     /// Run structural checks only and never touch FFmpeg
     #[arg(long)]
     pub structural_only: bool,
@@ -67,7 +72,8 @@ pub struct VerifyArgs {
     #[arg(long, default_value = DEFAULT_FAIL_ON)]
     pub fail_on: String,
 
-    /// Timeout for the rendered-file measurement pass, in seconds
+    /// Budget for the whole rendered-file measurement stage, in seconds; the
+    /// probe pass and the caption-band pass share it rather than each taking it
     #[arg(long, default_value_t = DEFAULT_MEASURE_TIMEOUT_SEC)]
     pub timeout_sec: u64,
 
@@ -86,6 +92,7 @@ impl VerifyArgs {
             VerifyRequest {
                 sequence: self.sequence,
                 file: self.file,
+                file_range: self.file_range,
                 structural_only: self.structural_only,
                 checks: self.checks,
                 skip: self.skip,

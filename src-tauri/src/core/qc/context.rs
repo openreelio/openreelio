@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::caption_contrast::{CaptionBandSample, CaptionSampleCoverage};
 use crate::core::timeline::Sequence;
 
 /// Frame rate used when a sequence carries an unusable frame rate.
@@ -95,6 +96,22 @@ pub struct RenderMeasurements {
     /// skip rather than judge while this is `None`.
     #[serde(default)]
     pub streams: Option<MeasuredStreams>,
+    /// Luminance readings taken in the band each caption cue occupies.
+    ///
+    /// Empty when nothing was sampled, which is not the same as "every caption
+    /// is legible": a cue whose style already carries a box or an outline is
+    /// never decoded, because the mitigation settles the question before a
+    /// pixel is read. See [`crate::core::qc::caption_contrast`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caption_band_samples: Vec<CaptionBandSample>,
+    /// How much of the caption work the sampling pass actually got done.
+    ///
+    /// `None` means no sampling pass ran, which is not the same as "there was
+    /// nothing to sample": a run with a rendered file records the counts even
+    /// when every decode failed, so the rule can report unmeasured cues rather
+    /// than let an empty sample list read as a clean result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_band_coverage: Option<CaptionSampleCoverage>,
 }
 
 impl RenderMeasurements {
@@ -114,6 +131,60 @@ impl RenderMeasurements {
     }
 }
 
+/// The stretch of timeline a measured file was declared to hold.
+///
+/// A partial render — `render start --proxy --start 10 --end 40` — is a
+/// perfectly good thing to measure, but nothing in the file says which seconds
+/// of the timeline it is. The caller declares that, and every rendered rule
+/// grades the file against this window instead of against the whole sequence:
+/// without it a 30-second excerpt of a 90-second edit reads as a truncated
+/// render of the deliverable.
+///
+/// Detection times are translated into timeline seconds before the rules see
+/// them (see [`crate::core::qc::verify`]), so a rule reads one clock only.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredWindow {
+    /// First timeline second the file holds
+    pub start_sec: f64,
+    /// Timeline second the file ends on
+    pub end_sec: f64,
+}
+
+impl MeasuredWindow {
+    /// Builds a window, or `None` when the pair does not describe a real span.
+    ///
+    /// Surfaces validate their own arguments and refuse in their own words;
+    /// this is the last guard, so an unusable pair can never reach a rule as a
+    /// negative or infinite program length.
+    pub fn new(start_sec: f64, end_sec: f64) -> Option<Self> {
+        if !start_sec.is_finite() || !end_sec.is_finite() || end_sec <= start_sec {
+            return None;
+        }
+        Some(Self { start_sec, end_sec })
+    }
+
+    /// Length of the window in seconds.
+    pub fn duration_sec(&self) -> f64 {
+        self.end_sec - self.start_sec
+    }
+
+    /// Returns the window clipped to a program that ends at `output_duration`.
+    ///
+    /// A caller may declare a window that runs past the end of the edit — the
+    /// render then simply stops early — so the length a correct file is
+    /// expected to have is the overlap, not the declaration.
+    pub fn clipped_to(&self, output_duration_sec: f64) -> Self {
+        if !output_duration_sec.is_finite() || output_duration_sec <= 0.0 {
+            return *self;
+        }
+        Self {
+            start_sec: self.start_sec.clamp(0.0, output_duration_sec),
+            end_sec: self.end_sec.clamp(0.0, output_duration_sec),
+        }
+    }
+}
+
 /// Context handed to every QC rule for a single check run.
 #[derive(Debug, Clone)]
 pub struct QCContext {
@@ -125,6 +196,12 @@ pub struct QCContext {
     pub canvas_height: u32,
     /// Measurements from a rendered version of the sequence, when available
     pub measurements: Option<RenderMeasurements>,
+    /// The timeline stretch the measured file holds, for a partial render
+    ///
+    /// `None` means the file is expected to be the whole output from timeline
+    /// zero, which is what every rendered rule assumed before partial renders
+    /// could be verified at all.
+    pub measured_window: Option<MeasuredWindow>,
 }
 
 impl QCContext {
@@ -141,6 +218,7 @@ impl QCContext {
             canvas_width: sequence.format.canvas.width,
             canvas_height: sequence.format.canvas.height,
             measurements: None,
+            measured_window: None,
         }
     }
 
@@ -148,6 +226,34 @@ impl QCContext {
     pub fn with_measurements(mut self, measurements: RenderMeasurements) -> Self {
         self.measurements = Some(measurements);
         self
+    }
+
+    /// Declares which timeline seconds the measured file holds.
+    pub fn with_measured_window(mut self, window: Option<MeasuredWindow>) -> Self {
+        self.measured_window = window;
+        self
+    }
+
+    /// Returns the timeline span the measured file is graded against.
+    ///
+    /// The declared window clipped to the program for a partial render, and
+    /// the whole output otherwise. Rules use it for both halves of the same
+    /// question: how long the file should be, and which span a finding about
+    /// "the program" covers.
+    pub fn measured_span(&self, output_duration_sec: f64) -> (f64, f64) {
+        match self.measured_window {
+            Some(window) => {
+                let clipped = window.clipped_to(output_duration_sec);
+                (clipped.start_sec, clipped.end_sec)
+            }
+            None => (0.0, output_duration_sec),
+        }
+    }
+
+    /// Returns the running time a correct file covering this run would have.
+    pub fn expected_file_duration_sec(&self, output_duration_sec: f64) -> f64 {
+        let (start, end) = self.measured_span(output_duration_sec);
+        (end - start).max(0.0)
     }
 
     /// Returns the duration of a single frame in seconds.
@@ -206,5 +312,54 @@ mod tests {
         assert_eq!(measured.black_ranges, vec![(0.0, 0.5)]);
         assert_eq!(measured.true_peak_dbtp, Some(-0.5));
         assert!(measured.silence_ranges.is_empty());
+    }
+
+    /// Feature: Partial renders
+    /// Scenario: should grade a whole-sequence run against the whole sequence
+    #[test]
+    fn test_context_without_a_window_spans_the_whole_output() {
+        let sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let context = QCContext::from_sequence(&sequence);
+
+        assert_eq!(context.measured_span(90.0), (0.0, 90.0));
+        assert_eq!(context.expected_file_duration_sec(90.0), 90.0);
+    }
+
+    /// Feature: Partial renders
+    /// Scenario: should grade a declared window against the window's length
+    #[test]
+    fn test_context_with_a_window_spans_only_the_window() {
+        let sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let context = QCContext::from_sequence(&sequence)
+            .with_measured_window(MeasuredWindow::new(10.0, 40.0));
+
+        assert_eq!(context.measured_span(90.0), (10.0, 40.0));
+        assert_eq!(context.expected_file_duration_sec(90.0), 30.0);
+    }
+
+    /// Feature: Partial renders
+    /// Scenario: should expect only the seconds the edit actually has
+    ///
+    /// A caller may ask for more timeline than exists; the render stops at the
+    /// end of the program, so the expected length is the overlap.
+    #[test]
+    fn test_window_is_clipped_to_the_program() {
+        let sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let context = QCContext::from_sequence(&sequence)
+            .with_measured_window(MeasuredWindow::new(10.0, 40.0));
+
+        assert_eq!(context.measured_span(25.0), (10.0, 25.0));
+        assert_eq!(context.expected_file_duration_sec(25.0), 15.0);
+    }
+
+    /// Feature: Partial renders
+    /// Scenario: should refuse a pair that describes no span
+    #[test]
+    fn test_window_rejects_a_pair_that_is_not_a_span() {
+        assert!(MeasuredWindow::new(5.0, 2.0).is_none());
+        assert!(MeasuredWindow::new(2.0, 2.0).is_none());
+        assert!(MeasuredWindow::new(f64::NAN, 2.0).is_none());
+        assert!(MeasuredWindow::new(0.0, f64::INFINITY).is_none());
+        assert!(MeasuredWindow::new(0.0, 1.0).is_some());
     }
 }

@@ -37,9 +37,11 @@ even, and a canvas already inside the budget is left alone. 1920x1080 → 854x48
 640x360. A vertical edit is therefore never pillarboxed into a landscape frame.
 
 **`--start` / `--end`** limit the rendered range to timeline seconds. Combine
-with `--proxy` to review just the section you changed. Note that a partial render
-starts its own timebase at the range start, so `verify --file` on it will not
-line up with timeline timecodes — pass a full-sequence render to `verify`.
+with `--proxy` to review just the section you changed. A partial render starts
+its own timebase at the range start, so tell `verify` which seconds it holds:
+`verify --file excerpt.mp4 --file-range START END` grades the file against that
+window and reports every finding in timeline seconds. Without the range an
+excerpt reads as a truncated deliverable.
 
 **`--progress`** streams NDJSON to stderr:
 
@@ -99,7 +101,7 @@ Do not full-render to check an edit. In order of cost:
 1. `frame extract --time` / `--grid` — stills, near-instant, no encode.
 2. `render start --proxy --start A --end B` — 480p draft of just the range.
 3. `render start --proxy` — 480p draft of the whole sequence, and what
-   `verify --file` wants.
+   `verify --file` takes with no range to declare.
 4. `render start --preset <delivery>` — only when you are actually delivering.
 
 Renders honour Ctrl-C: the CLI wires the interrupt to the export engine's cancel

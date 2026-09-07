@@ -50,10 +50,17 @@ pub struct VerifySequenceRequestDto {
     /// Rendered video inside the project to measure.
     ///
     /// Without it only structural checks run and FFmpeg is never invoked.
-    /// Measured times are file-relative and compared against timeline times, so
-    /// this should be a render of the whole sequence from timeline zero.
+    /// A whole-sequence render from timeline zero needs nothing else; a partial
+    /// render must declare its span with [`file_range`](Self::file_range).
     #[serde(default)]
     pub file: Option<String>,
+    /// Timeline seconds `file` holds, as `[start, end]`.
+    ///
+    /// Same semantics as the frame probe's own `fileRange`: the rendered checks
+    /// grade the file against this window and every finding is reported in
+    /// timeline seconds.
+    #[serde(default)]
+    pub file_range: Option<Vec<f64>>,
     /// Run structural checks only and never touch FFmpeg.
     #[serde(default)]
     pub structural_only: bool,
@@ -76,7 +83,10 @@ pub struct VerifySequenceRequestDto {
     /// or `critical`.
     #[serde(default)]
     pub fail_on: Option<String>,
-    /// Timeout for the rendered-file measurement pass, in seconds.
+    /// Budget for the whole rendered-file measurement stage, in seconds.
+    ///
+    /// The probe pass and the caption-band pass share it rather than each
+    /// taking it, so a run cannot cost twice what the caller allowed.
     #[serde(default)]
     pub timeout_sec: Option<u64>,
 }
@@ -109,6 +119,7 @@ impl VerifySequenceRequestDto {
         VerifyRequest {
             sequence: self.sequence,
             file,
+            file_range: self.file_range,
             structural_only: self.structural_only,
             checks: self.checks,
             skip: self.skip,

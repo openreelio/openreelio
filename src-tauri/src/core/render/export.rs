@@ -15,8 +15,8 @@ use tokio::sync::mpsc::Sender;
 use crate::core::{
     assets::{Asset, AssetKind},
     captions::{
-        CAPTION_CUSTOM_DEFAULT_Y_PERCENT, CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
-        CAPTION_SIDE_MARGIN_PERCENT,
+        VerticalPosition, CAPTION_CUSTOM_DEFAULT_Y_PERCENT,
+        CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT, CAPTION_SIDE_MARGIN_PERCENT,
     },
     commands::TEXT_ASSET_PREFIX,
     effects::{
@@ -4566,7 +4566,18 @@ pub fn is_text_clip(clip: &Clip) -> bool {
     clip.asset_id.starts_with(TEXT_ASSET_PREFIX)
 }
 
-fn effective_text_layer_opacity(text_opacity: f64, clip_opacity: f32) -> f64 {
+/// Opacity a text or caption layer is actually drawn at.
+///
+/// The style's own opacity times the clip's, which is what every alpha the
+/// layer paints - the glyphs, the outline, the shadow, the background box - is
+/// scaled by on both render paths. Exposed to the crate because the QC contrast
+/// pass has to know how opaque a caption's box really is before it decides the
+/// box settles anything, and a second copy of this arithmetic is how the check
+/// and the renderer drift apart.
+///
+/// Two equal opacities are taken as one setting expressed twice rather than as
+/// a fade applied twice, so a clip and its style both at 50 % render at 50 %.
+pub(crate) fn effective_text_layer_opacity(text_opacity: f64, clip_opacity: f32) -> f64 {
     let clip_opacity = if clip_opacity.is_finite() {
         (clip_opacity as f64).clamp(0.0, 1.0)
     } else {
@@ -4755,6 +4766,50 @@ impl CaptionVertical {
             _ => Self::Bottom,
         }
     }
+
+    /// Reads the caption model's own vertical enum into the render-side one.
+    fn from_model(vertical: VerticalPosition) -> Self {
+        match vertical {
+            VerticalPosition::Top => Self::Top,
+            VerticalPosition::Center => Self::Center,
+            VerticalPosition::Bottom => Self::Bottom,
+        }
+    }
+
+    /// Writes the render-side enum back into the caption model's own.
+    fn to_model(self) -> VerticalPosition {
+        match self {
+            Self::Top => VerticalPosition::Top,
+            Self::Center => VerticalPosition::Center,
+            Self::Bottom => VerticalPosition::Bottom,
+        }
+    }
+}
+
+/// Margin a `verticalAlign` override holds its block off the named edge with,
+/// as a percentage of the canvas height.
+const CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT: f64 = 10.0;
+
+/// Reads the vertical axis a caption style's `verticalAlign` pins the block to.
+///
+/// Returns `None` when the style names nothing the renderer recognizes, in
+/// which case the stored `caption_position` decides the axis on its own.
+///
+/// Hoisted out of [`resolve_caption_anchor`] so the override is read in one
+/// place; callers outside this module ask [`caption_anchor_percent`] instead,
+/// which applies it exactly as the burn-in does.
+fn caption_style_vertical_align(style: Option<&Value>) -> Option<VerticalPosition> {
+    let raw = style
+        .and_then(Value::as_object)
+        .and_then(|object| get_json_field(object, &["verticalAlign", "vertical_align"]))
+        .and_then(Value::as_str)?;
+
+    match raw {
+        "top" => Some(VerticalPosition::Top),
+        "middle" | "center" => Some(VerticalPosition::Center),
+        "bottom" => Some(VerticalPosition::Bottom),
+        _ => None,
+    }
 }
 
 fn normalized_caption_margin_percent(margin_percent: f64) -> f64 {
@@ -4868,33 +4923,19 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
         }
     }
 
-    if let Some(style_object) = style.and_then(Value::as_object) {
-        if let Some(vertical_align) =
-            get_json_field(style_object, &["verticalAlign", "vertical_align"])
-                .and_then(Value::as_str)
-        {
-            let mapped = match vertical_align {
-                "top" => Some(CaptionVertical::Top),
-                "middle" | "center" => Some(CaptionVertical::Center),
-                "bottom" => Some(CaptionVertical::Bottom),
-                _ => None,
-            };
-
-            // The style's vertical alignment overrides only the vertical axis,
-            // so a custom anchor keeps the x its author chose.
-            if let Some(vertical) = mapped {
-                anchor = match anchor {
-                    CaptionAnchor::Custom { x, .. } => CaptionAnchor::Custom {
-                        x,
-                        y: vertical_position_to_y(vertical, 10.0),
-                    },
-                    CaptionAnchor::Preset { .. } => CaptionAnchor::Preset {
-                        vertical,
-                        margin_percent: 10.0,
-                    },
-                };
-            }
-        }
+    // The style's vertical alignment overrides only the vertical axis, so a
+    // custom anchor keeps the x its author chose.
+    if let Some(vertical) = caption_style_vertical_align(style).map(CaptionVertical::from_model) {
+        anchor = match anchor {
+            CaptionAnchor::Custom { x, .. } => CaptionAnchor::Custom {
+                x,
+                y: vertical_position_to_y(vertical, CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT),
+            },
+            CaptionAnchor::Preset { .. } => CaptionAnchor::Preset {
+                vertical,
+                margin_percent: CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT,
+            },
+        };
     }
 
     anchor
@@ -4912,6 +4953,71 @@ fn caption_anchor_position(anchor: CaptionAnchor, alignment: &str) -> (f64, f64)
             vertical_position_to_y(vertical, margin_percent),
         ),
         CaptionAnchor::Custom { x, y } => (x, y),
+    }
+}
+
+/// Where the renderer ends up drawing a caption, in canvas fractions.
+///
+/// The output of [`caption_anchor_percent`], and the only shape in which the
+/// renderer's anchor resolution leaves this module.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ResolvedCaptionAnchor {
+    /// Horizontal anchor as a fraction of the canvas width
+    pub x: f64,
+    /// Vertical anchor as a fraction of the canvas height
+    pub y: f64,
+    /// Vertical preset the block hangs off, or `None` for an explicit point
+    pub vertical: Option<VerticalPosition>,
+    /// Gap the preset holds between the block's near edge and the canvas edge,
+    /// as a percentage of the canvas height, or `None` for an explicit point
+    pub margin_percent: Option<f64>,
+}
+
+impl ResolvedCaptionAnchor {
+    /// Whether the renderer wraps this caption inside the event margins.
+    ///
+    /// A preset anchor becomes ASS margins, which libass wraps inside; a custom
+    /// one becomes `\pos`, which disables them.
+    pub fn is_preset(&self) -> bool {
+        self.vertical.is_some()
+    }
+}
+
+/// Resolves a stored caption position and style to the anchor the export draws.
+///
+/// The renderer's own resolution, exposed rather than restated: QC has to
+/// measure the band and the column the words are actually drawn in, and a
+/// mirror built on `serde` rejected shapes the renderer accepts - a bare
+/// `"bottom"` string, a `{"type":"preset","vertical":"top"}` with no
+/// `marginPercent` (which `caption add --position-json` writes), a `"Preset"`
+/// spelled in any other case - and so measured the wrong half of the frame for
+/// exactly the captions an agent creates from the command line.
+pub(crate) fn caption_anchor_percent(
+    position: Option<&Value>,
+    style: Option<&Value>,
+    alignment: &str,
+) -> ResolvedCaptionAnchor {
+    let anchor = resolve_caption_anchor(position, style);
+    let (x, y) = caption_anchor_position(anchor, alignment);
+
+    match anchor {
+        CaptionAnchor::Preset {
+            vertical,
+            margin_percent,
+        } => ResolvedCaptionAnchor {
+            x,
+            y,
+            vertical: Some(vertical.to_model()),
+            // The normalized margin, because that is the one the y above was
+            // built from; the raw number can be non-finite or out of range.
+            margin_percent: Some(normalized_caption_margin_percent(margin_percent)),
+        },
+        CaptionAnchor::Custom { .. } => ResolvedCaptionAnchor {
+            x,
+            y,
+            vertical: None,
+            margin_percent: None,
+        },
     }
 }
 
@@ -5520,6 +5626,15 @@ impl AssColor {
         }
     }
 
+    /// Whether this colour paints nothing at all.
+    ///
+    /// ASS stores alpha inverted - `0x00` is opaque and `0xFF` is fully
+    /// transparent - so a colour that reached full transparency here draws no
+    /// pixel whatever column it is written to.
+    fn is_invisible(self) -> bool {
+        self.alpha == 255
+    }
+
     fn ass_value(self) -> String {
         format!(
             "&H{:02X}{:02X}{:02X}{:02X}",
@@ -5629,7 +5744,11 @@ fn round_to_even(value: f64) -> u32 {
 }
 
 /// Returns the `PlayResX`/`PlayResY` an ASS script for this canvas is authored in.
-fn ass_play_resolution(canvas: &Canvas) -> (u32, u32) {
+///
+/// Shared with `core::qc::rules`, whose caption size estimate has to measure in
+/// the same space the script is written in: a width derived any other way is a
+/// safe-area verdict about a block libass never laid out.
+pub(crate) fn ass_play_resolution(canvas: &Canvas) -> (u32, u32) {
     let aspect = if canvas.is_valid() {
         canvas.aspect_ratio()
     } else {
@@ -5870,12 +5989,18 @@ fn append_ass_text_style_and_event(
     } else {
         0.0
     };
+    // A box the viewer cannot see is not a box. `BorderStyle: 3` replaces the
+    // outline with the box, so treating a fully transparent `backgroundColor`
+    // as one drew nothing *and* took the outline away with it: the caption
+    // burned in invisible while the QC pass still counted the outline as
+    // protection. An unpaintable box therefore selects no box at all.
     let background_color = ass_color_param(
         effect,
         "background_color",
         "#000000",
         decoration_alpha("background_opacity", 1.0),
-    );
+    )
+    .filter(|color| !color.is_invisible());
     let background_padding = effect_int_param(effect, "background_padding", 10).clamp(0, 500);
     let border_style = if background_color.is_some() { 3 } else { 1 };
     let style_outline_width = if background_color.is_some() {
@@ -8609,6 +8734,128 @@ mod tests {
         assert!((x - 0.8).abs() < 1e-9 && (y - 0.9).abs() < 1e-9);
     }
 
+    /// Feature: Caption anchoring
+    /// Scenario: should resolve every position shape the burn-in accepts
+    ///
+    /// The shapes here are the ones a `serde` mirror refuses and the renderer
+    /// draws anyway - a bare string, a preset with no margin (which
+    /// `caption add --position-json` writes), a `"Preset"` in the wrong case,
+    /// and a custom anchor naming only an x. QC measures the band and the
+    /// column from this helper precisely so it cannot judge one of them against
+    /// a part of the frame the words are nowhere near.
+    #[test]
+    fn caption_anchor_percent_reads_every_shape_the_renderer_accepts() {
+        let top_margin = CAPTION_VERTICAL_ALIGN_MARGIN_PERCENT / 100.0;
+
+        // A bare string names a preset, at the default margin.
+        let bare_string = caption_anchor_percent(Some(&serde_json::json!("top")), None, "center");
+        assert_eq!(bare_string.vertical, Some(VerticalPosition::Top));
+        assert_eq!(
+            bare_string.margin_percent,
+            Some(CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT)
+        );
+        assert!(
+            (bare_string.y - CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT / 100.0).abs() < 1e-9,
+            "got {}",
+            bare_string.y
+        );
+
+        // A preset object with no `marginPercent` takes the same default.
+        let no_margin = caption_anchor_percent(
+            Some(&serde_json::json!({ "type": "preset", "vertical": "top" })),
+            None,
+            "center",
+        );
+        assert_eq!(no_margin.vertical, Some(VerticalPosition::Top));
+        assert_eq!(
+            no_margin.margin_percent,
+            Some(CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT)
+        );
+
+        // And the type is matched without regard to case.
+        let shouted = caption_anchor_percent(
+            Some(
+                &serde_json::json!({ "type": "Preset", "vertical": "top", "marginPercent": 12.0 }),
+            ),
+            None,
+            "center",
+        );
+        assert_eq!(shouted.vertical, Some(VerticalPosition::Top));
+        assert_eq!(shouted.margin_percent, Some(12.0));
+        assert!((shouted.y - 0.12).abs() < 1e-9, "got {}", shouted.y);
+
+        // The style's `verticalAlign` moves a positionless caption to the top.
+        let aligned = caption_anchor_percent(
+            None,
+            Some(&serde_json::json!({ "verticalAlign": "top" })),
+            "center",
+        );
+        assert_eq!(aligned.vertical, Some(VerticalPosition::Top));
+        assert!((aligned.y - top_margin).abs() < 1e-9, "got {}", aligned.y);
+
+        // But a position that names a preset outright wins: that path returns
+        // before the override is read, so a `"bottom"` string stays at the
+        // bottom however the style is aligned.
+        let string_wins = caption_anchor_percent(
+            Some(&serde_json::json!("bottom")),
+            Some(&serde_json::json!({ "verticalAlign": "top" })),
+            "center",
+        );
+        assert_eq!(string_wins.vertical, Some(VerticalPosition::Bottom));
+        assert!(
+            string_wins.y > 0.9,
+            "a bare string outranks verticalAlign, got {}",
+            string_wins.y
+        );
+
+        // A custom anchor naming only an x keeps it, normalized, and is not a
+        // preset - the burn-in places it with `\pos` and it wraps nowhere.
+        let custom = caption_anchor_percent(
+            Some(&serde_json::json!({ "type": "custom", "xPercent": 0.5 })),
+            None,
+            "center",
+        );
+        assert!(!custom.is_preset());
+        assert_eq!(custom.vertical, None);
+        assert_eq!(custom.margin_percent, None);
+        assert!((custom.x - 0.5).abs() < 1e-9, "got {}", custom.x);
+        assert!(
+            (custom.y - CAPTION_CUSTOM_DEFAULT_Y_PERCENT / 100.0).abs() < 1e-9,
+            "got {}",
+            custom.y
+        );
+
+        // A percentage-shaped x means the same point as its fraction.
+        let percent_x = caption_anchor_percent(
+            Some(&serde_json::json!({ "type": "custom", "xPercent": 50.0 })),
+            None,
+            "center",
+        );
+        assert!((percent_x.x - 0.5).abs() < 1e-9, "got {}", percent_x.x);
+
+        // `verticalAlign` overrides only the vertical axis of a custom anchor:
+        // the point keeps the x its author chose, and it stays a custom anchor,
+        // so the burn-in still places it with `\pos` and wraps it nowhere.
+        let realigned_custom = caption_anchor_percent(
+            Some(&serde_json::json!({ "type": "custom", "xPercent": 20.0, "yPercent": 80.0 })),
+            Some(&serde_json::json!({ "verticalAlign": "top" })),
+            "center",
+        );
+        assert!(!realigned_custom.is_preset());
+        assert_eq!(realigned_custom.vertical, None);
+        assert_eq!(realigned_custom.margin_percent, None);
+        assert!(
+            (realigned_custom.x - 0.2).abs() < 1e-9,
+            "the override must leave x alone, got {}",
+            realigned_custom.x
+        );
+        assert!(
+            (realigned_custom.y - top_margin).abs() < 1e-9,
+            "the override moves the point up the frame, got {}",
+            realigned_custom.y
+        );
+    }
+
     #[test]
     fn bundled_font_is_embedded_in_the_script_that_uses_it() {
         use crate::core::timeline::{Clip, SequenceFormat, Track};
@@ -8868,6 +9115,38 @@ mod tests {
         assert!(
             script.contains(",1,4.00,0.00,"),
             "an outline must stay on BorderStyle 1. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn a_fully_transparent_box_keeps_the_outline_instead_of_erasing_it() {
+        // `BorderStyle: 3` replaces the outline with the box, and libass draws
+        // nothing at all for a box whose colour is fully transparent. Selecting
+        // it for a box the viewer cannot see therefore burned the caption in
+        // invisible - measured over a white background, the style row below
+        // produced zero non-white pixels while the outlined row produced
+        // thousands. An unpaintable box has to mean no box.
+        let script = caption_ass_script_for_style(serde_json::json!({
+            "color": "#FFFFFF",
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+            "backgroundColor": "#00000000",
+        }));
+
+        let columns = ass_style_columns(&script);
+        assert_eq!(
+            columns[ass_style_column::BORDER_STYLE],
+            "1",
+            "an invisible box must leave BorderStyle on the outline. Got: {script}"
+        );
+        let (border, _) = ass_border_and_back_colour(&script);
+        assert_eq!(
+            border, "&H00000000",
+            "the outline colour must keep the border column. Got: {script}"
+        );
+        assert!(
+            script.contains(",1,4.00,0.00,"),
+            "the outline must keep its own width. Got: {script}"
         );
     }
 
