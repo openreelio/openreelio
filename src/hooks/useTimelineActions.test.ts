@@ -12,6 +12,7 @@ import { useProjectStore } from '@/stores';
 import { _resetCommandQueueForTesting } from '@/stores/projectStore';
 import { useEditorToolStore } from '@/stores/editorToolStore';
 import { useTimelineStore } from '@/stores/timelineStore';
+import { useToastStore } from '@/hooks/useToast';
 import { probeMedia } from '@/utils/ffmpeg';
 import type { Sequence, Track, Clip, Asset } from '@/types';
 
@@ -3915,6 +3916,46 @@ describe('useTimelineActions', () => {
       expect(projectState.stateVersion).toBe(1);
       expect(projectState.activeSequenceId).toBe('seq_001');
       expect(projectState.sequences.get('seq_001')?.tracks[0]?.clips).toEqual([insertedClip]);
+    });
+
+    it('should show the operator why a clip took the default length when the edit warns', async () => {
+      const track = createMockTrack({ id: 'track_v1', kind: 'video', locked: false });
+      const sequence = createMockSequence({ id: 'seq_001', tracks: [track] });
+      const warning =
+        "FFprobe reported no usable duration for asset 'asset_001', so the clip takes the default length";
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'three_point_insert') {
+          return Promise.resolve({
+            clipId: 'clip_new',
+            assetId: 'asset_001',
+            sourceIn: 0.0,
+            sourceOut: 10.0,
+            timelinePosition: 0.0,
+            duration: 10.0,
+            editMode: 'insert',
+            warnings: [warning],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.resolve(null);
+      });
+
+      useToastStore.getState().clearToasts();
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleInsertEditFromSource();
+      });
+
+      expect(useToastStore.getState().toasts.map((toast) => toast.message)).toContain(warning);
     });
 
     it('should send the selected unlocked edit target track', async () => {

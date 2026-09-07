@@ -2980,10 +2980,16 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
 
             // An asset nothing had measured is probed before the edit is cut
             // from it, and a clip that fell back to the default length says so
-            // here. Reported separately from the success line so "why is this
-            // clip ten seconds" has an answer.
+            // here. Shown rather than only logged: "why is this clip ten
+            // seconds" is a question about the clip the operator is looking at,
+            // and a log file cannot answer it.
             for (const warning of result.data.warnings) {
               logger.warn(`3-point ${operationSuffix} edit: ${warning}`);
+              useToastStore.getState().addToast({
+                message: warning,
+                variant: 'warning',
+                duration: 6000,
+              });
             }
 
             logger.info(`3-point ${operationSuffix} edit completed`, {
