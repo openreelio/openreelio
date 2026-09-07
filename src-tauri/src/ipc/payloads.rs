@@ -2859,6 +2859,89 @@ mod tests {
         (state, sequence_id, video_track_id, caption_track_id)
     }
 
+    /// Feature: an unread asset is measured before a clip is cut from it
+    /// Scenario: a plan step written the way the app writes them
+    ///   Given a placement step naming its command in camelCase
+    ///   When the measurement pre-pass asks which asset it places from
+    ///   Then the asset is named, for every placement and either spelling
+    ///
+    /// The pre-pass used to match PascalCase names only, so it never fired on a
+    /// plan from the app — `normalizeToolNameForBackend` emits `insertClip` —
+    /// and every clip from an unprobed asset silently took the default length.
+    /// Asking the same parse the executor asks is what keeps the two in step.
+    #[test]
+    fn every_placement_names_its_asset_under_either_spelling() {
+        let placed_at_start = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_1",
+            "assetId": "asset_1",
+            "timelineStart": 0.0,
+        });
+        let placed_at_position = serde_json::json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_1",
+            "assetId": "asset_1",
+            "timelinePosition": 0.0,
+        });
+
+        for (pascal_case, camel_case, params) in [
+            ("InsertClip", "insertClip", &placed_at_start),
+            ("InsertMedia", "insertMedia", &placed_at_start),
+            ("InsertEdit", "insertEdit", &placed_at_position),
+            ("OverwriteEdit", "overwriteEdit", &placed_at_position),
+        ] {
+            for command_type in [pascal_case, camel_case] {
+                let payload = CommandPayload::parse(command_type.to_string(), params.clone())
+                    .unwrap_or_else(|error| panic!("{command_type} should parse: {error}"));
+
+                assert_eq!(
+                    payload.inserted_asset_id(),
+                    Some("asset_1"),
+                    "{command_type} places a clip and must name its asset"
+                );
+            }
+        }
+    }
+
+    /// An asset id that is still a `$fromStep` reference names nothing: the id
+    /// is not settled until the step it depends on has run, and the pre-pass
+    /// has to skip it rather than probe an object.
+    #[test]
+    fn an_unresolved_asset_reference_names_nothing_to_measure() {
+        let parsed = CommandPayload::parse(
+            "insertClip".to_string(),
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "assetId": { "$fromStep": "step-1", "$path": "createdIds.0" },
+                "timelineStart": 0.0,
+            }),
+        );
+
+        assert!(
+            parsed.is_err(),
+            "an unresolved reference is not an asset id, and must not be probed as one"
+        );
+    }
+
+    /// A command that places nothing has no asset to measure, so the pre-pass
+    /// makes no probe for it.
+    #[test]
+    fn a_command_that_places_nothing_names_no_asset() {
+        let payload = CommandPayload::parse(
+            "splitClip".to_string(),
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "clipId": "clip_1",
+                "splitTime": 1.0,
+            }),
+        )
+        .expect("payload should parse");
+
+        assert_eq!(payload.inserted_asset_id(), None);
+    }
+
     #[test]
     fn validate_project_state_rejects_import_generated_captions_on_video_track() {
         let (state, sequence_id, video_track_id, _) = state_with_video_and_caption_tracks();

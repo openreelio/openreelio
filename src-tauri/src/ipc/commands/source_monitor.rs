@@ -526,39 +526,42 @@ pub async fn three_point_insert(
     }; // source_monitor lock dropped
 
     // 2. Acquire project, resolve track, build command, execute
-    let mut project_guard = state.project.lock().await;
-    let project = project_guard
-        .as_mut()
-        .ok_or_else(|| "No project open".to_string())?;
-
-    let sequence = project
-        .state
-        .sequences
-        .get(&payload.sequence_id)
-        .ok_or_else(|| format!("Sequence '{}' not found", payload.sequence_id))?;
+    let project_guard = state.project.lock().await;
 
     // Resolve target track
-    let track_id = match payload.track_id {
-        Some(ref id) => {
-            let track = sequence
-                .tracks
-                .iter()
-                .find(|t| t.id == *id)
-                .ok_or_else(|| format!("Track '{}' not found", id))?;
-            if track.locked {
-                return Err(format!("Track '{}' is locked", id));
+    let track_id = {
+        let project = project_guard
+            .as_ref()
+            .ok_or_else(|| "No project open".to_string())?;
+
+        let sequence = project
+            .state
+            .sequences
+            .get(&payload.sequence_id)
+            .ok_or_else(|| format!("Sequence '{}' not found", payload.sequence_id))?;
+
+        match payload.track_id {
+            Some(ref id) => {
+                let track = sequence
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == *id)
+                    .ok_or_else(|| format!("Track '{}' not found", id))?;
+                if track.locked {
+                    return Err(format!("Track '{}' is locked", id));
+                }
+                id.clone()
             }
-            id.clone()
-        }
-        None => {
-            // Auto-detect: first unlocked video track
-            use crate::core::timeline::TrackKind;
-            sequence
-                .tracks
-                .iter()
-                .find(|t| t.kind == TrackKind::Video && !t.locked)
-                .map(|t| t.id.clone())
-                .ok_or_else(|| "No unlocked video track available".to_string())?
+            None => {
+                // Auto-detect: first unlocked video track
+                use crate::core::timeline::TrackKind;
+                sequence
+                    .tracks
+                    .iter()
+                    .find(|t| t.kind == TrackKind::Video && !t.locked)
+                    .map(|t| t.id.clone())
+                    .ok_or_else(|| "No unlocked video track available".to_string())?
+            }
         }
     };
 
@@ -567,9 +570,21 @@ pub async fn three_point_insert(
     // imported headlessly with `--no-probe`, or written before sound lengths
     // were recorded, is measured here — through the same shared back-fill
     // `execute_command` uses, so the app records one `UpdateAsset` op for the
-    // file whichever surface noticed it was unmeasured.
-    let warnings =
-        super::timeline::back_fill_asset_measurement(project, &asset_id, &ffmpeg_state).await;
+    // file whichever surface noticed it was unmeasured. FFprobe carries a
+    // two-minute watchdog, so the project lock is released around the reading
+    // and taken again to record it; nothing else that touches the project is
+    // made to wait on a measurement.
+    let (mut project_guard, warnings) = super::timeline::back_fill_asset_measurements(
+        project_guard,
+        &state.project,
+        std::iter::once(asset_id.as_str()),
+        &ffmpeg_state,
+    )
+    .await?;
+
+    let project = project_guard
+        .as_mut()
+        .ok_or_else(|| "No project open".to_string())?;
 
     // Resolve source range (None → use full asset). The default is read for the
     // *target track* by the same helper the insert command applies, so an mp4

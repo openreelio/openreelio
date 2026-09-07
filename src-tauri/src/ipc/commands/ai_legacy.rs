@@ -778,6 +778,7 @@ pub async fn create_proposal(
 pub async fn apply_edit_script(
     edit_script: EditScriptDto,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
 ) -> Result<ApplyEditScriptResult, String> {
     if legacy_ai_request_response_disabled() {
         return Err(legacy_ai_request_response_disabled_error(
@@ -812,21 +813,58 @@ pub async fn apply_edit_script(
         PasteEffectsCommand, RemoveAttributesCommand,
     };
 
-    let mut guard = state.project.lock().await;
-
-    let project = guard
-        .as_mut()
-        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    let guard = state.project.lock().await;
 
     let mut applied_op_ids: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
     // Get active sequence ID
-    let sequence_id = project
-        .state
-        .active_sequence_id
-        .clone()
-        .ok_or_else(|| "No active sequence".to_string())?;
+    let sequence_id = {
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        project
+            .state
+            .active_sequence_id
+            .clone()
+            .ok_or_else(|| "No active sequence".to_string())?
+    };
+
+    // Every asset this script places from that nothing has measured is read
+    // once, before the first command runs — the same pre-pass `execute_command`
+    // and `execute_agent_plan` make. Without it an EditScript was the last path
+    // that could land a ten-second clip from a file of a different length.
+    //
+    // The targets are picked out by the same parse the loop below applies, over
+    // the same defaulted payload, rather than by a list of command names kept
+    // here; a step whose params are not yet complete falls out and is left to
+    // the loop's own error reporting. The project lock is released around the
+    // probes: FFprobe's watchdog is two minutes each.
+    let measurement_targets: Vec<String> = edit_script
+        .commands
+        .iter()
+        .filter_map(|cmd| {
+            let mut payload = cmd.params.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                ensure_sequence_id(obj, cmd.command_type.as_str(), &sequence_id);
+            }
+            CommandPayload::parse(cmd.command_type.clone(), payload)
+                .ok()?
+                .inserted_asset_id()
+                .map(str::to_string)
+        })
+        .collect();
+    let (mut guard, _measurement_warnings) = super::timeline::back_fill_asset_measurements(
+        guard,
+        &state.project,
+        measurement_targets.iter().map(String::as_str),
+        &ffmpeg_state,
+    )
+    .await?;
+
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     // Helper for time validation (defined once, used in loop)
     let validate_time_sec = |field: &str, value: f64| -> Result<(), String> {

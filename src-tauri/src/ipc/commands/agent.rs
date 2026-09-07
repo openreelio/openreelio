@@ -34,6 +34,7 @@ use crate::core::{
     fs::{validate_path_id_component, write_bytes_atomic_no_symlink},
     CoreError,
 };
+use crate::ipc::payloads::CommandPayload;
 use crate::AppState;
 
 // =============================================================================
@@ -532,28 +533,49 @@ pub async fn execute_agent_plan(
     // as a second op would desynchronise it. A measurement is not part of the
     // edit anyway — how long a file on disk is stays true whether or not the
     // plan is rolled back.
-    let mut measured: Vec<String> = Vec::new();
-    for step in &plan.steps {
-        if !matches!(
-            step.tool_name.as_str(),
-            "InsertMedia" | "InsertClip" | "InsertEdit" | "OverwriteEdit"
-        ) {
-            continue;
-        }
-        // A `$fromStep` reference is an object rather than a string, so it
-        // falls out here: the id is not settled until the step it names has
-        // run, and the asset it will point at is created by this same plan.
-        let Some(asset_id) = step.params.get("assetId").and_then(|id| id.as_str()) else {
-            continue;
-        };
-        if measured.iter().any(|id| id == asset_id) {
-            continue;
-        }
-        measured.push(asset_id.to_string());
-        // Warnings go to the log: the plan result has no channel for them, and
-        // a probe that could not run leaves the plan exactly as valid as it was.
-        let _ =
-            super::timeline::back_fill_asset_measurement(project, asset_id, &ffmpeg_state).await;
+    //
+    // Which steps place a clip is decided by the same parse `execute_command`
+    // runs, not by a list of names kept here: the app emits camelCase tool
+    // names (`insertClip`), the canonical types are PascalCase, and a second
+    // list matched neither for long enough to make this pre-pass a no-op on
+    // every real plan. A step whose params carry an unresolved `$fromStep`
+    // reference fails to parse and falls out, which is right: the id it will
+    // name is not settled until the step it depends on has run.
+    let measurement_targets: Vec<String> = plan
+        .steps
+        .iter()
+        .filter_map(|step| {
+            CommandPayload::parse(step.tool_name.clone(), step.params.clone())
+                .ok()?
+                .inserted_asset_id()
+                .map(str::to_string)
+        })
+        .collect();
+    // Warnings go to the log: the plan result has no channel for them, and a
+    // probe that could not run leaves the plan exactly as valid as it was. The
+    // project lock is released around the probes — FFprobe's watchdog is two
+    // minutes each, and a plan inserting from several unread assets would
+    // otherwise hold every other IPC still for as many minutes.
+    let (mut guard, _warnings) = super::timeline::back_fill_asset_measurements(
+        guard,
+        &state.project,
+        measurement_targets.iter().map(String::as_str),
+        &ffmpeg_state,
+    )
+    .await?;
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    // The approval was granted against one project; the lock was released while
+    // the probes ran, so make sure it is still that project before the plan is
+    // applied to it.
+    if project.state.meta.id != approved_project_id {
+        return Ok(build_agent_plan_failure(
+            plan_id,
+            total_steps,
+            start,
+            "The open project changed while the plan's assets were being read",
+        ));
     }
 
     let reporter = TauriPlanStepReporter { app: &app };
