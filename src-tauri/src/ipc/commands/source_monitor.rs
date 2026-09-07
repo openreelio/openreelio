@@ -576,17 +576,35 @@ pub async fn three_point_insert(
         &payload.sequence_id,
         payload.track_id.as_deref(),
     )?;
-    if resolved_track_id != track_id {
-        // Only reachable on the auto-detected branch — an explicit track either
-        // resolves to itself or refuses above. The edit is still the one the
-        // operator asked for, but not on the track they were shown, so say so
-        // rather than let the clip appear a track away without explanation.
+    // A second resolution that disagrees is only reachable on the auto-detected
+    // branch — an explicit track either resolves to itself or refuses above —
+    // and it has two quite different causes. Adding a *new* top video track in
+    // the window moves the auto-detection to it while the track the operator
+    // was shown is still perfectly usable; only a track that was locked or
+    // deleted really became unavailable. Reporting both as "became unavailable"
+    // was untrue in the first case, and following the auto-detection there
+    // moved the edit a track away for no reason. So ask whether the first
+    // resolution still stands, and prefer it when it does.
+    let track_id = if resolved_track_id == track_id {
+        resolved_track_id
+    } else if crate::core::commands::resolve_three_point_track(
+        &project.state,
+        &payload.sequence_id,
+        Some(track_id.as_str()),
+    )
+    .is_ok()
+    {
+        track_id
+    } else {
+        // The edit is still the one the operator asked for, but not on the
+        // track they were shown, so say so rather than let the clip appear a
+        // track away without explanation.
         warnings.push(format!(
             "Track '{track_id}' became unavailable while the asset was read; \
              the edit was placed on '{resolved_track_id}' instead"
         ));
-    }
-    let track_id = resolved_track_id;
+        resolved_track_id
+    };
 
     // Resolve source range (None → use full asset). The default is read for the
     // *target track* by the same helper the insert command applies, so an mp4

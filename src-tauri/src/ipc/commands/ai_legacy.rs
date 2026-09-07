@@ -818,7 +818,16 @@ pub async fn apply_edit_script(
     let mut applied_op_ids: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    // Get active sequence ID
+    // Get active sequence ID.
+    //
+    // Deliberately read once, here, and kept across the measurement pass that
+    // releases the lock below: the script was authored against the sequence
+    // that was active when it was submitted, and every step it carries is
+    // defaulted to that one. Re-deriving the active sequence after re-entry
+    // would let a sequence switch made while the assets were read silently
+    // redirect the rest of the script into a timeline it was never written for.
+    // A sequence that is *gone* by then is reported by each command in the
+    // loop, which names it far better than a pre-check here could.
     let (sequence_id, expected_project_id) = {
         let project = guard
             .as_ref()
