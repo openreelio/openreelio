@@ -552,7 +552,8 @@ pub async fn execute_agent_plan(
         measured.push(asset_id.to_string());
         // Warnings go to the log: the plan result has no channel for them, and
         // a probe that could not run leaves the plan exactly as valid as it was.
-        let _ = super::timeline::back_fill_asset_measurement(project, asset_id, &ffmpeg_state).await;
+        let _ =
+            super::timeline::back_fill_asset_measurement(project, asset_id, &ffmpeg_state).await;
     }
 
     let reporter = TauriPlanStepReporter { app: &app };

@@ -145,7 +145,9 @@ pub(crate) async fn back_fill_asset_measurement(
     let warnings = match ensure_asset_measured(project, asset_id, move |_| probed) {
         Ok(warnings) => warnings,
         Err(error) => {
-            vec![format!("Recording the probed asset duration failed: {error}")]
+            vec![format!(
+                "Recording the probed asset duration failed: {error}"
+            )]
         }
     };
     for warning in &warnings {
