@@ -55,11 +55,41 @@ interface WorkspaceState {
   scanResult: WorkspaceScanResult | null;
   /** Error message from the last operation */
   error: string | null;
+  /**
+   * Why the last scan left some files out, or null when it left none out.
+   *
+   * Separate from {@link error}: the scan itself succeeded, and everything it
+   * could measure did land. This is the part of the result the user has to know
+   * about, because those files are on disk and in the tree but are not assets
+   * yet, so nothing in the app can put them on a timeline.
+   */
+  scanWarning: string | null;
+  /**
+   * How many files the external drops so far left out of the project.
+   *
+   * A drop reports those files as failures, not as imports: they are on disk
+   * but were never registered, usually because no probe could measure them.
+   * {@link WorkspaceScanResult.skippedFiles} does not see them - it counts only
+   * what a *scan* left out - so this is the other half of the "something is
+   * waiting for a probe" question {@link WorkspaceActions.rescanUnmeasuredFiles}
+   * asks.
+   */
+  unregisteredDropCount: number;
 }
 
 interface WorkspaceActions {
   /** Scan the project workspace for media files */
   scanWorkspace: () => Promise<void>;
+  /**
+   * Re-scan, but only when something is still waiting to be measured.
+   *
+   * Called when FFmpeg becomes available: the files a scan skipped, and the
+   * files a drop could not register, were left out because no probe could
+   * measure them - exactly the condition that just changed. When nothing is
+   * waiting there is nothing to pick up, and a scan of a whole workspace is not
+   * worth spending on an event that says nothing about its contents.
+   */
+  rescanUnmeasuredFiles: () => Promise<void>;
   /** Refresh the file tree from the backend */
   refreshTree: () => Promise<void>;
   /** Create a new folder in the workspace */
@@ -91,10 +121,30 @@ const initialState: WorkspaceState = {
   isWatching: false,
   scanResult: null,
   error: null,
+  scanWarning: null,
+  unregisteredDropCount: 0,
 };
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The warning a scan result carries, or null when it carries none.
+ *
+ * @param skippedFiles - How many files the scan could not measure.
+ */
+function unmeasuredFilesWarning(skippedFiles: number): string | null {
+  if (skippedFiles <= 0) {
+    return null;
+  }
+  // The backend leaves a file out whenever the probe measured nothing, which
+  // covers a probe that never started *and* one that ran and returned nothing
+  // readable. Naming only the first would tell someone with FFmpeg installed
+  // that it is not, and send them to fix what is not broken.
+  return `${skippedFiles.toLocaleString()} file${skippedFiles === 1 ? '' : 's'} could not be measured: FFprobe could not be launched, or returned nothing readable, so ${
+    skippedFiles === 1 ? 'it is' : 'they are'
+  } not available as media yet. Check FFmpeg is installed, then scan again.`;
 }
 
 /**
@@ -167,6 +217,9 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       set((state) => {
         state.isScanning = true;
         state.error = null;
+        // The warning describes the *last* scan. Clearing it here means a scan
+        // in flight never shows a stale count next to a fresh result.
+        state.scanWarning = null;
       });
 
       try {
@@ -175,10 +228,21 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           totalFiles: result.totalFiles,
           newFiles: result.newFiles,
           autoRegisteredFiles: result.autoRegisteredFiles,
+          skippedFiles: result.skippedFiles,
         });
 
+        const warning = unmeasuredFilesWarning(result.skippedFiles);
+        if (warning !== null) {
+          logger.warn('Workspace scan left files unmeasured', {
+            skippedFiles: result.skippedFiles,
+          });
+        }
+
+        // The warning is part of the result, so it lands with it: two writes
+        // would let a render in between show a result with no warning on it.
         set((state) => {
           state.scanResult = result;
+          state.scanWarning = warning;
           state.isScanning = false;
         });
 
@@ -200,6 +264,25 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
         set((state) => {
           state.isScanning = false;
           state.error = message;
+        });
+      }
+    },
+
+    rescanUnmeasuredFiles: async () => {
+      const { scanResult, unregisteredDropCount } = get();
+      if ((scanResult?.skippedFiles ?? 0) === 0 && unregisteredDropCount === 0) {
+        return;
+      }
+      logger.info('Re-scanning workspace: FFmpeg became available');
+      await get().scanWorkspace();
+
+      // The scan is the retry those dropped files were waiting for. Whatever it
+      // still could not measure is in the fresh `skippedFiles`, which is what
+      // the next event reads; leaving the drop count standing would re-scan the
+      // whole workspace on every later event forever.
+      if (get().error === null) {
+        set((state) => {
+          state.unregisteredDropCount = 0;
         });
       }
     },
@@ -310,17 +393,20 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           logger.warn(message, { failedFiles: result.failedFiles });
           set((state) => {
             state.error = message;
+            // Every entry here is a file that reached disk but not the project.
+            // A later scan is what picks it up, so remember that one is owed.
+            state.unregisteredDropCount += result.failedFiles.length;
           });
-
-          if (result.importedFiles.length === 0) {
-            throw new Error(message);
-          }
         } else {
           set((state) => {
             state.error = null;
           });
         }
 
+        // A drop where nothing landed still returns its result rather than
+        // throwing. Every failure in it is already reported per file, and
+        // throwing would replace those messages - the only place that says
+        // *why* each file was left out - with one generic error.
         return result;
       } catch (error) {
         const message = toErrorMessage(error);
@@ -410,12 +496,14 @@ export async function setupWorkspaceEventListeners(): Promise<void> {
           removedFiles: event.removedFiles,
           registeredFiles: event.registeredFiles,
           autoRegisteredFiles: event.autoRegisteredFiles,
+          skippedFiles: event.skippedFiles,
         });
 
         useWorkspaceStore.setState({
           scanResult: event,
           isScanning: false,
           error: null,
+          scanWarning: unmeasuredFilesWarning(event.skippedFiles),
         });
 
         scheduleWorkspaceTreeRefresh('workspace:scan-complete');

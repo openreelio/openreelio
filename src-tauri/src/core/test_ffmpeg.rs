@@ -96,6 +96,48 @@ pub(crate) fn require_or_skip_ffmpeg() -> Option<PathBuf> {
     }
 }
 
+/// An FFprobe binary that has been proven to launch, or `None` after recording a skip.
+///
+/// FFmpeg and FFprobe are separate binaries and are resolved separately: a test
+/// may hand the code under test an explicit FFmpeg while the FFprobe it reaches
+/// for comes from the app's own resolver. The transcription mixdown needs both —
+/// it measures audio presence with FFprobe — and without one it falls back to
+/// the stored asset metadata, reports the sequence as silent, and fails where it
+/// meant to skip.
+///
+/// Resolved exactly the way the code under test resolves it, so this cannot skip
+/// a test that would have run.
+///
+/// With `REQUIRE_FFMPEG_TESTS` set this panics instead of returning `None`, so
+/// the test cannot pass without having run.
+#[track_caller]
+pub(crate) fn require_or_skip_ffprobe() -> Option<PathBuf> {
+    let binary = crate::core::ffmpeg::resolved_ffprobe_path();
+
+    let mut cmd = std::process::Command::new(&binary);
+    crate::core::process::configure_std_command(&mut cmd);
+    let probe = cmd.args(["-hide_banner", "-version"]).output();
+
+    match probe {
+        Ok(output) if output.status.success() => Some(binary),
+        Ok(output) => {
+            skip_without_ffmpeg(&format!(
+                "`{} -version` exited with {}",
+                binary.display(),
+                output.status
+            ));
+            None
+        }
+        Err(error) => {
+            skip_without_ffmpeg(&format!(
+                "`{}` could not be launched: {error}",
+                binary.display()
+            ));
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

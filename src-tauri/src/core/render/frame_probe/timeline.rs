@@ -28,13 +28,14 @@ use crate::core::ffmpeg::{FFmpegRunner, FrameExtractOptions};
 use crate::core::render::cache::transition_effect_reach_sec;
 use crate::core::render::export::effective_blend_mode_for_clip;
 use crate::core::render::{
-    build_render_graph, build_render_plan, clip_needs_transform_composition, clip_source_time_at,
-    is_text_clip, manifest_for_profile, preview_profile_hash, probed_image_dimensions,
-    profile_cache_dir, refresh_manifest_plan_fingerprints, resolve_cached_segment_path,
-    scaled_frame_dimensions, source_dimensions_from_audio_info, source_durations_from_audio_info,
-    track_included_in_export, validate_export_settings_with_dimensions, ExportEngine,
-    ExportSettings, ExportValidation, FrameExportSettings, ImageFormat, RenderCacheConfig,
-    RenderCacheManifest, RenderCacheSegment, RenderGraph, SourceDimensionMap,
+    build_render_graph_with_audio_info, build_render_plan, clip_needs_transform_composition,
+    clip_source_time_at, is_text_clip, manifest_for_profile, preview_profile_hash,
+    probed_image_dimensions, profile_cache_dir, refresh_manifest_plan_fingerprints,
+    resolve_cached_segment_path, scaled_frame_dimensions, source_dimensions_from_audio_info,
+    source_durations_from_audio_info, track_included_in_export,
+    validate_export_settings_with_dimensions, AssetAudioInfo, ExportEngine, ExportSettings,
+    ExportValidation, FrameExportSettings, ImageFormat, RenderCacheConfig, RenderCacheManifest,
+    RenderCacheSegment, RenderGraph, SourceDimensionMap,
 };
 use crate::core::timeline::{BlendMode, Canvas, Clip, Sequence, TrackKind};
 use serde::Serialize;
@@ -417,6 +418,15 @@ struct TimelineFrameContext<'a> {
     /// shared measurement a 4x4 contact sheet over five assets meant 160 FFprobe
     /// spawns instead of five.
     source_dimensions: SourceDimensionMap,
+    /// Audio presence measured once for the whole invocation.
+    ///
+    /// The render graph decides whether a clip contributes sound from this. An
+    /// A/V file imported without a probe stores no audio metadata, so building
+    /// the graph without these measurements would describe a silent render of a
+    /// sequence the export gives sound to - the same divergence the graph and
+    /// the export builders were unified to end. Empty until
+    /// [`Self::measure_sources`] has run, which every entry point does first.
+    audio_info: HashMap<String, AssetAudioInfo>,
     /// Export validation for this sequence, run once for the whole invocation.
     ///
     /// Nothing validation inspects changes between frames of the same sequence,
@@ -452,6 +462,7 @@ impl<'a> TimelineFrameContext<'a> {
             graph: None,
             cache: None,
             source_dimensions: SourceDimensionMap::new(),
+            audio_info: HashMap::new(),
             validation: None,
             per_frame_warnings: Vec::new(),
         }
@@ -482,6 +493,7 @@ impl<'a> TimelineFrameContext<'a> {
             .await;
         self.source_dimensions = source_dimensions_from_audio_info(&audio_info);
         let source_durations = source_durations_from_audio_info(&audio_info);
+        self.audio_info = audio_info;
 
         // Validated against the profile the stills are actually produced with —
         // the lossless preview-cache profile at the sequence canvas — and with
@@ -519,12 +531,21 @@ impl<'a> TimelineFrameContext<'a> {
     }
 
     /// Builds the sequence's render graph, reusing it across frames.
+    ///
+    /// Built from the audio presence [`Self::measure_sources`] measured, so a
+    /// still and a render of the same sequence describe the same clips as
+    /// audible. Reading the stored asset metadata instead would report an
+    /// unprobed A/V import as silent here and as audible there.
     fn graph(&mut self) -> FrameProbeResult<&RenderGraph> {
         if self.graph.is_none() {
-            let graph =
-                build_render_graph(self.project.state, self.sequence_id).map_err(|error| {
-                    FrameProbeError::new(format!("Failed to build render graph: {}", error))
-                })?;
+            let graph = build_render_graph_with_audio_info(
+                self.project.state,
+                self.sequence_id,
+                &self.audio_info,
+            )
+            .map_err(|error| {
+                FrameProbeError::new(format!("Failed to build render graph: {}", error))
+            })?;
             self.graph = Some(graph);
         }
 
@@ -1219,6 +1240,7 @@ mod tests {
     use super::*;
     use crate::core::assets::VideoInfo;
     use crate::core::effects::{EffectType, ParamValue};
+    use crate::core::project::ProjectState;
     use crate::core::timeline::{SequenceFormat, Track};
 
     fn segment(index: u32, start_sec: f64, end_sec: f64) -> RenderCacheSegment {
@@ -1606,5 +1628,112 @@ mod tests {
             .reasons(),
             vec!["canvas fit"]
         );
+    }
+
+    /// An FFmpeg runner that is never asked to run anything.
+    ///
+    /// The graph is pure arithmetic over the project state; only the extraction
+    /// that follows it touches a binary.
+    fn unused_runner() -> FFmpegRunner {
+        FFmpegRunner::new(crate::core::ffmpeg::FFmpegInfo {
+            ffmpeg_path: PathBuf::from("ffmpeg"),
+            ffprobe_path: PathBuf::from("ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
+        })
+    }
+
+    /// A sequence whose only clip is an A/V file nobody probed.
+    ///
+    /// This is what the CLI's `asset import` records: the kind comes from the
+    /// extension and the file is never opened, so `asset.audio` is `None` even
+    /// though the file has a soundtrack.
+    fn state_with_an_unprobed_av_clip() -> ProjectState {
+        let mut state = ProjectState::new("Frame Probe Graph Test");
+        state.sequences.clear();
+
+        let mut asset = Asset::new_video("talk", "talk.mp4", VideoInfo::default());
+        asset.id = "asset-av".to_string();
+        assert!(asset.audio.is_none(), "the import never opened the file");
+        state.assets.insert(asset.id.clone(), asset);
+
+        let mut clip = crate::core::timeline::Clip::new("asset-av");
+        clip.id = "clip-av".to_string();
+        clip.place = crate::core::timeline::ClipPlace::new(0.0, 4.0);
+        clip.range = crate::core::timeline::ClipRange::new(0.0, 4.0);
+
+        let mut sequence =
+            crate::core::timeline::Sequence::new("Sequence", SequenceFormat::youtube_1080());
+        sequence.id = "seq-1".to_string();
+        let mut track = Track::new("Video 1", TrackKind::Video);
+        track.id = "video-track".to_string();
+        track.clips.push(clip);
+        sequence.tracks.push(track);
+
+        state.active_sequence_id = Some(sequence.id.clone());
+        state.sequences.insert(sequence.id.clone(), sequence);
+        state
+    }
+
+    /// Feature: stills describe the edit a render produces
+    /// Scenario: an A/V asset that was imported without a probe
+    ///
+    /// Given a sequence whose only clip is an unprobed A/V file
+    /// When the frame-probe context builds the graph it composites from
+    /// Then it is the same graph a render validates — audio layer and all —
+    /// rather than the silent one the stored asset metadata describes.
+    #[test]
+    fn the_frame_probe_graph_is_the_render_graph_for_an_unprobed_av_asset() {
+        let state = state_with_an_unprobed_av_clip();
+        let project = FrameProbeProject {
+            path: Path::new("."),
+            state: &state,
+        };
+        let sequence = state.sequences.get("seq-1").expect("sequence");
+
+        // What `measure_sources` stores after FFprobe has opened the file.
+        let mut measured = HashMap::new();
+        measured.insert(
+            "asset-av".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                source_dimensions: Some((1920, 1080)),
+                source_duration_sec: Some(4.0),
+            },
+        );
+
+        let runner = unused_runner();
+        let mut context = TimelineFrameContext::new(
+            &runner,
+            &project,
+            sequence,
+            "seq-1",
+            ImageFormat::Png,
+            1920,
+            TimelineMode::Composite,
+        );
+        context.audio_info = measured.clone();
+
+        let probed_graph =
+            crate::core::render::build_render_graph_with_audio_info(&state, "seq-1", &measured)
+                .expect("render graph");
+        assert_eq!(
+            context.graph().expect("frame probe graph"),
+            &probed_graph,
+            "a still and a render of one sequence must describe the same edit"
+        );
+        assert_eq!(
+            probed_graph.audio_layers.len(),
+            1,
+            "the clip's embedded audio is what the render carries"
+        );
+
+        // The measurement is what makes the difference: without it the same
+        // sequence reports silence, which is the graph this used to build.
+        assert!(crate::core::render::build_render_graph(&state, "seq-1")
+            .expect("render graph")
+            .audio_layers
+            .is_empty());
     }
 }

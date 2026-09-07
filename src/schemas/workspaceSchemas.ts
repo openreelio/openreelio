@@ -93,6 +93,7 @@ export const WorkspaceScanResultSchema = z
     removedFiles: WorkspaceScanCountSchema,
     registeredFiles: WorkspaceScanCountSchema,
     autoRegisteredFiles: WorkspaceScanCountSchema,
+    skippedFiles: WorkspaceScanCountSchema,
   })
   .strict() satisfies z.ZodType<WorkspaceScanResult>;
 

@@ -120,8 +120,19 @@ impl RenderPlanValidation {
         }
     }
 
+    /// Records one validation failure, once.
+    ///
+    /// A clip that is both a picture and a sound — an A/V file on a video track,
+    /// which is what every headless import produces — is built into a video
+    /// layer *and* an audio layer, and both walk the same clip's effect list. A
+    /// missing or unsupported effect on it therefore reached this twice, and the
+    /// report read as two problems where there is one. Identical messages
+    /// collapse; genuinely different ones do not.
     fn add_error(&mut self, error: impl Into<String>) {
-        self.errors.push(error.into());
+        let error = error.into();
+        if !self.errors.iter().any(|existing| existing == &error) {
+            self.errors.push(error);
+        }
         self.is_valid = false;
     }
 }
@@ -454,6 +465,37 @@ mod tests {
         assert_eq!(plan.video_layers[0].clip_id, "clip-1");
         assert_eq!(plan.video_layers[0].timeline_out_frame, 150);
         assert!(!plan.plan_hash.is_empty());
+    }
+
+    #[test]
+    fn render_plan_reports_one_clip_s_missing_effect_once() {
+        // An A/V clip on a video track becomes a video layer *and* an audio
+        // layer, and both walk the same effect list. The report has to describe
+        // one problem, not two.
+        let (mut state, mut assets) = graph_state();
+        let mut asset = video_asset("asset-1");
+        asset.audio = Some(crate::core::assets::AudioInfo::default());
+        assets.insert("asset-1".to_string(), asset.clone());
+        state.assets.insert("asset-1".to_string(), asset);
+        let sequence = state.sequences.get_mut("seq-1").expect("sequence");
+        sequence.tracks[0].clips[0]
+            .effects
+            .push("missing-effect".to_string());
+
+        let graph = build_render_graph(&state, "seq-1").expect("graph");
+        assert_eq!(graph.visual_layers.len(), 1);
+        assert_eq!(graph.audio_layers.len(), 1);
+
+        let plan = build_render_plan(&graph, &assets, &HashMap::new(), &ExportSettings::default());
+
+        assert!(!plan.validation.is_valid);
+        let mentions = plan
+            .validation
+            .errors
+            .iter()
+            .filter(|error| error.contains("missing-effect"))
+            .count();
+        assert_eq!(mentions, 1, "{:?}", plan.validation.errors);
     }
 
     #[test]

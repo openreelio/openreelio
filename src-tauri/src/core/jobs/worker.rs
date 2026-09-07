@@ -1237,8 +1237,9 @@ impl JobProcessor {
     async fn process_preview_render(&self, job: &Job) -> Result<serde_json::Value, String> {
         #[cfg(not(test))]
         use crate::core::render::{
-            build_render_graph, build_render_plan, validate_export_settings, ExportEngine,
-            ExportSettings,
+            build_render_graph_with_audio_info, build_render_plan, clear_transient_probes,
+            probe_assets_audio_info_off_runtime, sequence_probe_targets, validate_export_settings,
+            ExportEngine, ExportSettings,
         };
 
         // Validate required payload fields
@@ -1293,6 +1294,25 @@ impl JobProcessor {
 
         #[cfg(not(test))]
         {
+            // A render is something the user asked for once, not a status poll,
+            // so it must not be answered out of the window that suppresses
+            // re-probing after a failure that reached no verdict. A file that
+            // was locked or on a dropped share when the last poll ran is exactly
+            // what this render needs measured again.
+            clear_transient_probes();
+
+            // FFprobe is a process spawn, so the assets are read under the lock
+            // and measured after it is dropped. Every IPC command waits on this
+            // lock, and a preview render must not park them behind a child
+            // process.
+            let probe_targets = {
+                let app_state = self.app_handle.state::<crate::AppState>();
+                let guard = app_state.project.lock().await;
+                let project = guard.as_ref().ok_or("No project open")?;
+                sequence_probe_targets(&project.state, sequence_id)
+            };
+            let audio_probe = probe_assets_audio_info_off_runtime(probe_targets).await;
+
             let (sequence, assets, effects, render_graph) = {
                 // Get project state from AppState
                 let app_state = self.app_handle.state::<crate::AppState>();
@@ -1308,8 +1328,13 @@ impl JobProcessor {
 
                 // Clone required data to release the lock
                 let sequence = sequence.clone();
-                let render_graph = build_render_graph(&project.state, sequence_id)
-                    .map_err(|error| format!("Failed to build render graph: {}", error))?;
+                // Measurements the project still stands behind: an asset
+                // relinked while the probe ran is dropped rather than answered
+                // from the file it no longer points at.
+                let audio_info = audio_probe.measurements_for(&project.state);
+                let render_graph =
+                    build_render_graph_with_audio_info(&project.state, sequence_id, &audio_info)
+                        .map_err(|error| format!("Failed to build render graph: {}", error))?;
                 let assets = project.state.assets.clone();
                 let effects = project.state.effects.clone();
                 (sequence, assets, effects, render_graph)
@@ -1508,8 +1533,9 @@ impl JobProcessor {
         use crate::core::{
             fs::{export_allowed_roots, validate_scoped_output_path},
             render::{
-                build_render_graph, build_render_plan, validate_export_settings, ExportEngine,
-                ExportPreset, ExportSettings,
+                build_render_graph_with_audio_info, build_render_plan, clear_transient_probes,
+                probe_assets_audio_info_off_runtime, sequence_probe_targets,
+                validate_export_settings, ExportEngine, ExportPreset, ExportSettings,
             },
         };
 
@@ -1548,7 +1574,22 @@ impl JobProcessor {
 
         #[cfg(not(test))]
         {
+            // As in `process_preview_render`: an export is user-initiated, so
+            // the post-failure suppression window is dropped and every asset is
+            // asked about again.
+            clear_transient_probes();
+
             // 1. Get project state and validate inputs
+            // FFprobe is a process spawn: read the assets under the lock, then
+            // measure them after it is dropped. See `process_preview_render`.
+            let probe_targets = {
+                let app_state = self.app_handle.state::<crate::AppState>();
+                let guard = app_state.project.lock().await;
+                let project = guard.as_ref().ok_or("No project open")?;
+                sequence_probe_targets(&project.state, sequence_id)
+            };
+            let audio_probe = probe_assets_audio_info_off_runtime(probe_targets).await;
+
             let (sequence, assets, effects, render_graph, project_path) = {
                 let app_state = self.app_handle.state::<crate::AppState>();
                 let guard = app_state.project.lock().await;
@@ -1560,8 +1601,13 @@ impl JobProcessor {
                     .get(sequence_id)
                     .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
                     .clone();
-                let render_graph = build_render_graph(&project.state, sequence_id)
-                    .map_err(|error| format!("Failed to build render graph: {}", error))?;
+                // Measurements the project still stands behind: an asset
+                // relinked while the probe ran is dropped rather than answered
+                // from the file it no longer points at.
+                let audio_info = audio_probe.measurements_for(&project.state);
+                let render_graph =
+                    build_render_graph_with_audio_info(&project.state, sequence_id, &audio_info)
+                        .map_err(|error| format!("Failed to build render graph: {}", error))?;
 
                 // Clone needed data to release lock quickly
                 (

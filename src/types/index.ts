@@ -322,6 +322,11 @@ export interface WorkspaceScanResult {
   registeredFiles: number;
   /** Number of files auto-registered during this scan */
   autoRegisteredFiles: number;
+  /**
+   * Number of files left unregistered because FFprobe could not be launched to
+   * measure them. They stay in the index, so a later scan picks them up.
+   */
+  skippedFiles: number;
 }
 
 /** Result of registering a workspace file as a project asset */
@@ -354,6 +359,11 @@ export interface WorkspaceScanCompleteEvent {
   registeredFiles: number;
   /** Number of files auto-registered during this scan */
   autoRegisteredFiles: number;
+  /**
+   * Number of files left unregistered because FFprobe could not be launched to
+   * measure them.
+   */
+  skippedFiles: number;
 }
 
 // =============================================================================

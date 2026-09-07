@@ -4,6 +4,14 @@
 //! them in the operation log, so a session that watched a folder change ends
 //! up with the same state a reopen would replay.
 //!
+//! One mutation is deliberately exempt: the metadata top-up
+//! [`WorkspaceService::auto_register_discovered_files`] performs on assets that
+//! already exist writes no op. It copies a probe of a file on disk into a cache
+//! of that same file, so a reopen re-derives it from the same bytes instead of
+//! replaying it. Recording those top-ups as ops as well is tracked separately;
+//! until then the invariant above holds for asset creation, removal and
+//! reconnection, not for measurements read back off the disk.
+//!
 //! Kept out of the IPC layer deliberately. The watcher loop calls this while
 //! holding the project lock, so nothing here may emit Tauri events or grant
 //! asset-protocol access — those belong to the caller, after the lock is
@@ -95,6 +103,12 @@ pub fn apply_workspace_event_to_project(
                 }
             }
             // Auto-register any brand-new files
+            // Files the probe measured nothing about stay unregistered, and
+            // files it could not top up keep the metadata they already had;
+            // both are retried by the next pass, which sweeps the registered
+            // entries as well as the unregistered ones. The files that were
+            // registered still get their ops below. The pass logs those counts
+            // itself, so this caller does not repeat them.
             if let Err(e) = service.auto_register_discovered_files(&mut project.state, project_root)
             {
                 tracing::warn!(

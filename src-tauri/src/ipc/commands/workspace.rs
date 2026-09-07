@@ -59,6 +59,10 @@ pub struct WorkspaceScanResultDto {
     pub registered_files: usize,
     /// Number of files auto-registered during this scan
     pub auto_registered_files: usize,
+    /// Number of files left unregistered because the probe measured nothing
+    /// about them - FFprobe could not be launched, or it returned nothing
+    /// readable. They stay in the index, so a later scan picks them up.
+    pub skipped_files: usize,
 }
 
 /// A file imported into the workspace from an external OS file drop.
@@ -234,6 +238,8 @@ pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanR
         let auto_registered = service
             .auto_register_discovered_files(&mut project.state, &project_root)
             .map_err(|e| e.to_ipc_error())?;
+        let skipped_files = auto_registered.skipped.len();
+        let auto_registered = auto_registered.registered;
 
         let new_asset_ids: Vec<String> = project
             .state
@@ -262,6 +268,7 @@ pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanR
             removed = result.removed_files,
             registered = result.registered_files,
             auto_registered = auto_registered,
+            skipped = skipped_files,
             "Workspace scan completed"
         );
 
@@ -271,6 +278,7 @@ pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanR
             removed_files: result.removed_files,
             registered_files: result.registered_files,
             auto_registered_files: auto_registered,
+            skipped_files,
         };
     } // project lock released here
 
@@ -586,6 +594,10 @@ pub async fn import_external_files_to_workspace(
         let existing_asset_ids: HashSet<String> = project.state.assets.keys().cloned().collect();
         let service = WorkspaceService::open(project.path.clone()).map_err(|e| e.to_ipc_error())?;
 
+        // A file that could not be indexed is a failure, not an import.
+        // Leaving it in `imported_files` as well would have the caller count it
+        // twice and still report it as imported.
+        let mut unimported_relative_paths: HashSet<String> = HashSet::new();
         for imported_file in &result.imported_files {
             if let Err(error) = service.handle_event(&WorkspaceEvent::FileAdded(
                 imported_file.relative_path.clone(),
@@ -597,12 +609,58 @@ pub async fn import_external_files_to_workspace(
                         imported_file.relative_path, error
                     ),
                 });
+                unimported_relative_paths.insert(imported_file.relative_path.clone());
             }
         }
 
-        service
+        // Everything that reached the index is on disk and in the tree, so the
+        // explorer is told about all of it - including the files the probe then
+        // refuses to measure, which are real files the user can see.
+        let indexed_relative_paths: Vec<String> = result
+            .imported_files
+            .iter()
+            .filter(|file| !unimported_relative_paths.contains(&file.relative_path))
+            .map(|file| file.relative_path.clone())
+            .collect();
+
+        let auto_registered = service
             .auto_register_discovered_files(&mut project.state, &project.path)
             .map_err(|e| e.to_ipc_error())?;
+        // A dropped file the probe measured nothing about is copied into the
+        // workspace but not registered, so it has no asset id and nothing in
+        // the app can use it yet. Counting it as imported would report the drop
+        // green for a file that will not reach the project until something
+        // scans again, so it is reported as a failure carrying the one thing
+        // that is true: it is on disk, and a later scan picks it up. The rest
+        // of the drop still lands.
+        for skipped_path in &auto_registered.skipped {
+            // A file that already failed to index is already reported. It can
+            // reach this list too - an earlier pass may have indexed it - and
+            // one file must not cost the user two failure lines.
+            if unimported_relative_paths.contains(skipped_path) {
+                continue;
+            }
+
+            if let Some(imported_file) = result
+                .imported_files
+                .iter()
+                .find(|file| &file.relative_path == skipped_path)
+            {
+                result.failed_files.push(ExternalWorkspaceImportFailureDto {
+                    source_path: imported_file.source_path.clone(),
+                    message: format!(
+                        "'{}' was copied but could not be measured: FFprobe could not be \
+                         launched, or returned nothing readable; it registers on the next scan",
+                        skipped_path
+                    ),
+                });
+                unimported_relative_paths.insert(skipped_path.clone());
+            }
+        }
+
+        result
+            .imported_files
+            .retain(|file| !unimported_relative_paths.contains(&file.relative_path));
 
         let new_asset_ids: Vec<String> = project
             .state
@@ -632,11 +690,7 @@ pub async fn import_external_files_to_workspace(
             }
         }
 
-        imported_relative_paths = result
-            .imported_files
-            .iter()
-            .map(|file| file.relative_path.clone())
-            .collect();
+        imported_relative_paths = indexed_relative_paths;
     }
 
     drop(guard);

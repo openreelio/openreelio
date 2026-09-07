@@ -922,6 +922,30 @@ pub struct ImportGeneratedCaptionsPayload {
     /// Whether to clear the track's existing captions before importing.
     #[serde(default)]
     pub replace_existing: bool,
+    /// Whether cue boundaries are moved onto the sequence's frame grid.
+    ///
+    /// Defaults to `true`: a transcriber's millisecond times otherwise land
+    /// between frames and make every composite and render warn about each cue.
+    ///
+    /// Rounding alone moves each boundary by at most half a frame. A second
+    /// pass then restores the ordering rounding can break — these cues were
+    /// de-overlapped by the readability rules, and two of them a fraction of a
+    /// frame apart can round onto the same frame — by pushing the later cue
+    /// forward, which can move it by more than half a frame. That push is
+    /// bounded at two frames; a cue that would need more is dropped rather than
+    /// dragged further and further from the speech.
+    ///
+    /// Snapping rewrites times the caller supplied, so it is reported rather
+    /// than silent: the command answers with a `captionsSnappedToFrameGrid`
+    /// state change carrying how many cues moved and how many were dropped,
+    /// which is the GUI's cue to say so. No change is emitted when nothing
+    /// moved and nothing was dropped, or when this is `false`.
+    #[serde(default = "default_snap_to_frames")]
+    pub snap_to_frames: bool,
+}
+
+fn default_snap_to_frames() -> bool {
+    true
 }
 
 /// Payload for `DeleteCaption` (remove one caption line).
@@ -2430,7 +2454,8 @@ impl CommandPayload {
                     ImportGeneratedCaptionsCommand::new(&p.sequence_id, &p.track_id, segments)
                         .with_style(p.style)
                         .with_position(p.position)
-                        .replace_existing(p.replace_existing),
+                        .replace_existing(p.replace_existing)
+                        .snap_to_frames(p.snap_to_frames),
                 )
             }
             CommandPayload::DeleteCaption(p) => Box::new(DeleteCaptionCommand::new(

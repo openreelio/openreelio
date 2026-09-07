@@ -7,6 +7,7 @@
 //! - `export`: Video export engine and settings
 //! - `hdr`: HDR workflow support (color spaces, tonemapping, metadata)
 
+pub mod audio_presence;
 pub mod cache;
 pub mod executor;
 pub(crate) mod export;
@@ -48,6 +49,13 @@ pub mod smart;
 mod transform_layout;
 pub(crate) mod transition_stitch;
 
+#[cfg(test)]
+pub(crate) use audio_presence::probe_counter_guard;
+pub use audio_presence::{
+    clear_negative_probes, clear_transient_probes, clip_carries_audio, probe_assets_audio_info,
+    probe_assets_audio_info_off_runtime, probe_sequence_audio_info, sequence_probe_targets,
+    SequenceAudioProbe,
+};
 pub use executor::{
     execute_ffmpeg_invocation, execute_ffmpeg_output, FfmpegExecutionResult, FfmpegOutput,
 };
@@ -57,7 +65,8 @@ pub use ffmpeg_graph::{
     FfmpegInvocationError,
 };
 pub use graph::{
-    build_render_graph, AudioRenderLayer, RenderGraph, VisualRenderLayer, VisualRenderSource,
+    build_render_graph, build_render_graph_with_audio_info, AudioRenderLayer, RenderGraph,
+    VisualRenderLayer, VisualRenderSource,
 };
 pub use hardware::{
     detect_available_decoders, detect_available_encoders, is_hardware_encoder,

@@ -6437,7 +6437,28 @@ stylePack?: string | null;
 /**
  * Whether to clear the track's existing captions before importing.
  */
-replaceExisting?: boolean }
+replaceExisting?: boolean; 
+/**
+ * Whether cue boundaries are moved onto the sequence's frame grid.
+ * 
+ * Defaults to `true`: a transcriber's millisecond times otherwise land
+ * between frames and make every composite and render warn about each cue.
+ * 
+ * Rounding alone moves each boundary by at most half a frame. A second
+ * pass then restores the ordering rounding can break — these cues were
+ * de-overlapped by the readability rules, and two of them a fraction of a
+ * frame apart can round onto the same frame — by pushing the later cue
+ * forward, which can move it by more than half a frame. That push is
+ * bounded at two frames; a cue that would need more is dropped rather than
+ * dragged further and further from the speech.
+ * 
+ * Snapping rewrites times the caller supplied, so it is reported rather
+ * than silent: the command answers with a `captionsSnappedToFrameGrid`
+ * state change carrying how many cues moved and how many were dropped,
+ * which is the GUI's cue to say so. No change is emitted when nothing
+ * moved and nothing was dropped, or when this is `false`.
+ */
+snapToFrames?: boolean }
 /**
  * Payload for `InsertClip` (primitive placement at an exact timeline position).
  * 
@@ -9031,6 +9052,17 @@ export type StateChange =
  */
 { type: "sequenceModified"; sequence_id: string } | 
 /**
+ * Imported caption cues were moved onto the sequence's frame grid.
+ * 
+ * Reported so a GUI can say "41 cues were nudged onto the frame grid, 2
+ * dropped" rather than leaving a silent rewrite of the times the user
+ * handed over. `count` is how many cues moved and `dropped` how many were
+ * given up on because keeping them in order would have pushed them off
+ * their own time; the change is only emitted when at least one cue was
+ * moved or dropped.
+ */
+{ type: "captionsSnappedToFrameGrid"; count: number; dropped: number } | 
+/**
  * A new marker was created
  */
 { type: "markerCreated"; marker_id: string } | 
@@ -10979,7 +11011,13 @@ registeredFiles: number;
 /**
  * Number of files auto-registered during this scan
  */
-autoRegisteredFiles: number }
+autoRegisteredFiles: number; 
+/**
+ * Number of files left unregistered because the probe measured nothing
+ * about them - FFprobe could not be launched, or it returned nothing
+ * readable. They stay in the index, so a later scan picks them up.
+ */
+skippedFiles: number }
 
 /** tauri-specta globals **/
 

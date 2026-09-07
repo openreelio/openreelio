@@ -602,7 +602,7 @@ pub async fn transcribe_sequence(
     state: State<'_, AppState>,
 ) -> Result<TranscriptionResultDto, String> {
     use crate::core::captions::{
-        audio::{load_audio_samples, mix_sequence_audio_for_transcription},
+        audio::{load_audio_samples, mix_sequence_audio_for_transcription, AudioWindow},
         whisper::{subtitle_ready_segments, TranscriptionOptions, WhisperEngine},
     };
 
@@ -683,6 +683,9 @@ pub async fn transcribe_sequence(
             &project_state,
             &resolved_sequence_id,
             &audio_path,
+            // The GUI transcribes the whole sequence; only the CLI and MCP
+            // surfaces expose a range today.
+            AudioWindow::FULL,
             Some(ffmpeg_path.as_str()),
         )
         .map_err(|e| format!("Sequence audio mixdown failed: {}", e))?;

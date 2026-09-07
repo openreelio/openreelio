@@ -12,6 +12,50 @@ use crate::core::process::configure_std_command;
 use crate::core::{CoreError, CoreResult, Ratio};
 
 // =============================================================================
+// Probe Failure Classification
+// =============================================================================
+
+/// Marks the [`CoreError::FFprobeError`] a probe that reached no verdict carries.
+///
+/// FFprobe can exit successfully and still leave nothing to read - a truncated
+/// or empty stdout, output no version of the JSON schema this understands. That
+/// is not the same failure as FFprobe looking at a file and rejecting it: the
+/// second says something permanent about the bytes, the first says only that
+/// this run produced no measurement. Callers that would otherwise register an
+/// asset from defaults need to tell the two apart, so the message *starts* with
+/// this prefix.
+///
+/// Two things read it. [`probe_measured_nothing`] is one. The other is the
+/// frontend: `src/utils/errorMessages.ts` matches this same wording to ask for
+/// a retry instead of blaming the file, so the prefix is user-visible text and
+/// changing it means changing that pattern and its test too. That pattern is
+/// anchored and case-sensitive, for the reason this side matches on
+/// `starts_with`: it accepts the prefix at the start of the message, or
+/// directly after the `FFprobe error: ` that [`CoreError`]'s `Display` puts in
+/// front of it, and nowhere else.
+pub const PROBE_MEASURED_NOTHING_PREFIX: &str = "FFprobe reported nothing";
+
+/// Whether `error` means the probe finished without measuring anything.
+///
+/// True for a probe whose output could not be read (see
+/// [`PROBE_MEASURED_NOTHING_PREFIX`]) and for one that could not be launched at
+/// all: neither looked at the file, so neither licenses a caller to invent the
+/// frame size, duration or codec it failed to report. A failure FFprobe *did*
+/// reach about the content is not covered - something looked, and one
+/// unreadable file must not stop a workspace scan.
+///
+/// The prefix is matched at the start of the message, not anywhere in it: every
+/// producer writes it there, and a substring match would also fire on a verdict
+/// that merely quotes an inner error carrying the same words.
+pub fn probe_measured_nothing(error: &CoreError) -> bool {
+    match error {
+        CoreError::FFprobeUnavailable(_) => true,
+        CoreError::FFprobeError(message) => message.starts_with(PROBE_MEASURED_NOTHING_PREFIX),
+        _ => false,
+    }
+}
+
+// =============================================================================
 // Types
 // =============================================================================
 
@@ -129,13 +173,19 @@ impl MetadataExtractor {
             return Err(CoreError::FileNotFound(path.to_string_lossy().to_string()));
         }
 
-        // Run FFprobe
+        // Run FFprobe.
+        //
+        // `-v error` rather than `-v quiet`: the JSON still comes back on
+        // stdout, but a refusal now says *why* on stderr. Callers that decide
+        // whether a failure is worth remembering — see
+        // `crate::core::render::probe_asset_audio_info` — have nothing to
+        // classify when the message is empty.
         let mut command = Command::new(resolved_ffprobe_path());
         configure_std_command(&mut command);
         let output = command
             .args([
                 "-v",
-                "quiet",
+                "error",
                 "-print_format",
                 "json",
                 "-show_streams",
@@ -143,7 +193,7 @@ impl MetadataExtractor {
             ])
             .arg(path)
             .output()
-            .map_err(|e| CoreError::FFprobeError(format!("Failed to run ffprobe: {}", e)))?;
+            .map_err(|e| CoreError::FFprobeUnavailable(format!("Failed to run ffprobe: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -159,8 +209,15 @@ impl MetadataExtractor {
 
     /// Parse FFprobe JSON output into MediaMetadata
     fn parse_ffprobe_output(json: &str) -> CoreResult<MediaMetadata> {
+        // Unreadable output is not a verdict about the file: FFprobe exited
+        // successfully and still said nothing this can be built from. It is
+        // marked with `PROBE_MEASURED_NOTHING_PREFIX` so callers that would
+        // otherwise fall back to invented defaults can tell it apart from a
+        // refusal FFprobe actually reached about the bytes.
         let output: FFprobeOutput = serde_json::from_str(json).map_err(|e| {
-            CoreError::FFprobeError(format!("Failed to parse ffprobe output: {}", e))
+            CoreError::FFprobeError(format!(
+                "{PROBE_MEASURED_NOTHING_PREFIX}: failed to parse ffprobe output: {e}"
+            ))
         })?;
 
         let mut metadata = MediaMetadata::default();
@@ -372,7 +429,7 @@ impl MetadataExtractor {
             ])
             .arg(path)
             .output()
-            .map_err(|e| CoreError::FFprobeError(format!("Failed to run ffprobe: {}", e)))?;
+            .map_err(|e| CoreError::FFprobeUnavailable(format!("Failed to run ffprobe: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -705,6 +762,38 @@ mod tests {
         let json = "invalid json";
         let result = MetadataExtractor::parse_ffprobe_output(json);
         assert!(result.is_err());
+    }
+
+    /// Feature: probe failure classification
+    /// Scenario: FFprobe exits successfully with output nothing can be read from
+    ///
+    /// Given output that does not parse
+    /// When a caller asks whether the probe measured anything
+    /// Then it is told no, so it does not register an asset from defaults the
+    /// probe never reported; a verdict FFprobe did reach about the file is
+    /// still reported as a measurement that happened.
+    #[test]
+    fn a_probe_whose_output_cannot_be_read_measured_nothing() {
+        let unreadable = MetadataExtractor::parse_ffprobe_output("invalid json")
+            .expect_err("unreadable output is a failure");
+        assert!(probe_measured_nothing(&unreadable));
+
+        assert!(probe_measured_nothing(&CoreError::FFprobeUnavailable(
+            "Failed to run ffprobe: program not found".to_string()
+        )));
+        assert!(!probe_measured_nothing(&CoreError::FFprobeError(
+            "FFprobe failed: Invalid data found when processing input".to_string()
+        )));
+
+        // A verdict that merely quotes the marker further along is still a
+        // verdict: FFprobe looked at the file and had something to say about
+        // it, so the caller may keep the defaults.
+        assert!(
+            !probe_measured_nothing(&CoreError::FFprobeError(
+                "FFprobe failed: FFprobe reported nothing decodable".to_string()
+            )),
+            "the marker only marks when the message starts with it"
+        );
     }
 
     // -------------------------------------------------------------------------

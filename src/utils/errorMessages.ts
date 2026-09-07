@@ -72,6 +72,26 @@ const ERROR_PATTERNS: Array<{
     pattern: /File not found/i,
     message: () => 'The file could not be found. Please check if it exists.',
   },
+  // Ahead of the generic FFprobe entry: a probe that was killed by the watchdog
+  // or whose output could not be read reached no verdict about the file at all,
+  // so "the file may be corrupted" would be a guess. The file is usually fine
+  // and simply too slow to reach, which makes retrying the right next step.
+  // The retry is deliberately not named as an import: the same probe backs
+  // relinking, scanning and rendering, and telling someone whose export warned
+  // about this to import again sends them nowhere.
+  //
+  // Anchored, and case-sensitive, because this is one exact string the Rust
+  // side writes (`PROBE_MEASURED_NOTHING_PREFIX`) at the *start* of the probe
+  // error, not a phrase to hunt for: `^` catches the bare message and `: `
+  // catches it after the `FFprobe error: ` an inner `CoreError` is displayed
+  // behind. A loose match would also claim a verdict FFprobe did reach that
+  // happened to quote these words, and send the user off retrying a file that
+  // is genuinely broken.
+  {
+    pattern: /(^|: )FFprobe reported nothing/,
+    message: () =>
+      'FFprobe could not measure this file (it may be on a slow or disconnected drive). Try again once the file is reachable.',
+  },
   {
     pattern: /FFprobe error/i,
     message: () => 'Could not read media information. The file may be corrupted.',
@@ -156,6 +176,15 @@ const ERROR_PATTERNS: Array<{
   },
 
   // Permission Errors
+  // Ahead of every raw OS-error pattern: a failure to launch FFprobe surfaces
+  // as "FFprobe could not be run: ... (os error 2)" when the binary is gone and
+  // as "(os error 5)" / "(os error 13)" when something refuses to execute it.
+  // Matched later, those would send the user looking for their media or their
+  // folder permissions instead of FFmpeg.
+  {
+    pattern: /FFprobe could not be run/i,
+    message: () => 'FFmpeg is not installed. Export and preview features require FFmpeg.',
+  },
   {
     pattern: /Permission denied/i,
     message: () => 'Access denied. Check file permissions.',

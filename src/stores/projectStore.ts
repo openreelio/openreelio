@@ -42,6 +42,12 @@ import {
   parseExternalChangeEvent,
   type ExternalChangeNotice,
 } from '@/utils/externalChange';
+import {
+  CAPTION_SNAPPED_TO_FRAME_GRID_EVENT,
+  formatCaptionGridNotice,
+  parseCaptionGridNotice,
+} from '@/utils/captionGridNotice';
+import { useToastStore } from '@/hooks/useToast';
 import { useWorkspaceStore, setupWorkspaceEventListeners } from '@/stores/workspaceStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useCommandPaletteStore } from '@/stores/commandPaletteStore';
@@ -1361,6 +1367,8 @@ function isTauriRuntime(): boolean {
  * - asset:proxy-generating: Proxy generation started
  * - asset:proxy-ready: Proxy generation completed successfully
  * - asset:proxy-failed: Proxy generation failed
+ * - project:external-change: Another process appended to the project's op log
+ * - caption:snapped-to-frame-grid: An import moved cue times onto the frame grid
  */
 export async function setupProxyEventListeners(): Promise<void> {
   // Prevent re-entrant setup
@@ -1462,6 +1470,29 @@ export async function setupProxyEventListeners(): Promise<void> {
       newUnlisteners.push(unlistenExternalChange);
     } catch (error) {
       logger.error('Failed to setup project external-change listener', { error });
+    }
+
+    // Caption cue times the backend rewrote onto the sequence frame grid.
+    // Snapping is on by default, so without this the user's supplied times
+    // change under them - and a dropped cue disappears - with nothing said.
+    try {
+      const unlistenCaptionGrid = await listen<unknown>(
+        CAPTION_SNAPPED_TO_FRAME_GRID_EVENT,
+        (event) => {
+          const notice = parseCaptionGridNotice(event.payload);
+          if (!notice) {
+            return;
+          }
+          logger.info('Imported captions were moved onto the frame grid', { ...notice });
+          useToastStore.getState().addToast({
+            message: formatCaptionGridNotice(notice),
+            variant: notice.dropped > 0 ? 'warning' : 'info',
+          });
+        },
+      );
+      newUnlisteners.push(unlistenCaptionGrid);
+    } catch (error) {
+      logger.error('Failed to setup caption frame-grid listener', { error });
     }
 
     // Only assign after all setup attempts complete
