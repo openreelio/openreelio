@@ -259,7 +259,8 @@ jobs:
       # they need a binary, so the `Run tests` step above never ran them and the
       # properties they measure - zoom frame counts and geometry, still and
       # animated image handling, the adjustment-layer refusal, filtergraph
-      # injection - went unexercised in CI.
+      # injection, and the audio loudness/peak measurement against a synthesized
+      # tone of known level - went unexercised in CI.
       #
       # They run against the BUNDLED FFmpeg, not apt's: the assertions were
       # measured against the exact build the app ships (9.x), and most of them
@@ -275,6 +276,12 @@ jobs:
       #
       # `REQUIRE_FFMPEG_TESTS` turns their quiet skips into failures, so a missing
       # bundled binary fails the job instead of passing vacuously.
+      #
+      # Each module runs as its own invocation rather than as one call with
+      # three filters. libtest reports a filter that matches nothing as a pass,
+      # and with the modules pooled a rename in one of them was still covered by
+      # the other two: the run stayed green while a whole module went
+      # unexercised. Per-module runs move that guard onto each module.
       - name: Run src-tauri ffmpeg-backed tests
         working-directory: src-tauri
         shell: bash
@@ -283,12 +290,21 @@ jobs:
           OPENREELIO_FFMPEG_PATH: ${{ github.workspace }}/src-tauri/binaries/ffmpeg
           OPENREELIO_FFPROBE_PATH: ${{ github.workspace }}/src-tauri/binaries/ffprobe
         run: |
-          cargo test --locked --features dev-full --lib -- --ignored \
+          set -euo pipefail
+          for module in \
+            core::analysis::audio::tests:: \
             core::effects::filter_builder::tests:: \
-            core::render::export::tests:: 2>&1 | tee "${RUNNER_TEMP}/ffmpeg-tests.log"
-          # A renamed or moved test would leave the filters matching nothing,
-          # which libtest still reports as a pass. Require that something ran.
-          grep -qE 'test result: ok\. [1-9][0-9]* passed' "${RUNNER_TEMP}/ffmpeg-tests.log"
+            core::render::export::tests::
+          do
+            log="${RUNNER_TEMP}/ffmpeg-tests-$(echo "${module}" | tr ':' '-').log"
+            cargo test --locked --features dev-full --lib -- --ignored \
+              "${module}" 2>&1 | tee "${log}"
+            # A renamed or moved test would leave this filter matching nothing,
+            # which libtest still reports as a pass. Require that this module
+            # ran at least one test of its own.
+            grep -qE 'test result: ok\. [1-9][0-9]* passed' "${log}" \
+              || { echo "No ffmpeg-backed test ran for ${module}"; exit 1; }
+          done
 
   # ==========================================================================
   # Build Check

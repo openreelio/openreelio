@@ -193,7 +193,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli analysis silence --path ./project --id asset_001 --threshold-db -40 --min-duration 0.5"
             },
             "analysis.audio": {
-                "description": "Profile the audio track (silence regions, loudness curve, peak, BPM, speech regions) and cache it in the analysis bundle",
+                "description": "Profile the audio track (silence regions, loudness curve, peak, BPM, speech regions) and cache it in the analysis bundle; reports hasLoudnessMeasurement false with loudnessError and the loudness fields nulled when the meter could not measure",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Asset ID" }
@@ -201,7 +201,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli analysis audio --path ./project --id asset_001"
             },
             "analysis.run": {
-                "description": "Run the local analysis pipeline (shots, audio, segments, optional transcript and visual) and cache the resulting bundle; exits non-zero only when every enabled sub-job fails",
+                "description": "Run the local analysis pipeline (shots, audio, segments, optional transcript and visual) and cache the resulting bundle; exits non-zero only when every enabled sub-job failed and this run produced no result for any of them (a result cached by an earlier run does not count)",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Asset ID" },

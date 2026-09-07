@@ -595,13 +595,30 @@ openreelio-cli analysis report  --path ./demo --id <ASSET_ID>
   ``"no audio profile in bundle; run `analysis audio` first"``. The numbers are
   still correct — they just do not update the cache the GUI reads.
 - **`analysis audio`** runs the full profiler (silence, loudness curve, peak,
-  BPM, speech regions) and always persists into the bundle.
+  BPM, speech regions) and always persists into the bundle. It returns
+  `integratedLufs` and `loudnessRangeLu` (EBU R128) alongside `truePeakDbtp`.
+  **`peakDb` is a peak level in dB relative to full scale, not a loudness**: it
+  reports `truePeakDbtp` when the FFmpeg build measures true peak and the
+  `astats` sample peak (dBFS) otherwise. It used to be the maximum momentary
+  loudness in LUFS, so a `peakDb` read from a report written before this change
+  is a different quantity. `loudnessProfile` has one entry per second of audio,
+  including seconds of digital silence, which read `-90`; each entry averages
+  only the audible readings of its second, so the meter's 300 ms warm-up and the
+  windows around a silence do not drag a second down. A pass that measures
+  nothing reports `hasLoudnessMeasurement: false` with the loudness fields
+  nulled rather than publishing `-90 dB` as a level, and `status: partial` — the
+  silence and speech regions it did produce are still stored, and
+  `analysis run` still exits `0`. `analysis report` says
+  `coverage.loudness: false` whenever the numbers are absent or predate the
+  current measurement — rerun `analysis audio` when you see that.
 - **`analysis run`** drives the job runner with local-only providers.
   Transcript is off unless `--transcript` is passed, and fails fast with an
   `openreelio-cli transcription install` hint when no Whisper model is present.
   `--progress` streams `{"type":"progress","job","status","detail"}` NDJSON to
   stderr. Per-job failures appear in the `errors` object; the exit is non-zero
-  only if every enabled sub-job failed.
+  only if every enabled sub-job failed *and this run produced nothing* for any
+  of them. A result an earlier run cached does not rescue the exit code, so a
+  run fails or succeeds the same way on a warm cache and a cold one.
 
 Results land in the project's shared analysis bundle (`analysis report` reads it
 back), so the desktop app sees whatever the CLI computed.

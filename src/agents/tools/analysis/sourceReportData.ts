@@ -7,7 +7,7 @@
 
 import { createLogger } from '@/services/logger';
 import { invoke } from '@tauri-apps/api/core';
-import type { AnalysisBundle, AnalysisOptions, AssetAnnotation } from '@/bindings';
+import type { AnalysisBundle, AnalysisOptions, AssetAnnotation, AudioProfile } from '@/bindings';
 import { useProjectStore } from '@/stores/projectStore';
 import { getAssetSnapshotById } from '../storeAccessor';
 import {
@@ -1606,6 +1606,43 @@ export function formatProviderLabel(provider: unknown): string {
   return 'unknown';
 }
 
+/**
+ * Current loudness/peak measurement version, mirroring `AUDIO_MEASUREMENT_VERSION`.
+ *
+ * The backend stamps every profile it writes with this, and bumps it whenever a
+ * fix changes the numbers a profile reports. A profile below it was produced by
+ * a pass whose numbers are known to be wrong.
+ */
+const AUDIO_MEASUREMENT_VERSION = 1;
+
+/**
+ * Returns whether an audio profile's loudness numbers can be reported.
+ *
+ * Mirrors `AudioProfile::has_current_loudness` in the core and the identical
+ * check in the CLI report, so the same bundle reads the same way whichever
+ * surface an agent asks. Two things have to hold: the profile was stamped by
+ * the current measurement, and a pass actually filled the loudness fields in.
+ * The curve's length is deliberately not part of it — a silent asset, and any
+ * asset shorter than one meter window, has an empty curve from a pass that ran
+ * perfectly well.
+ *
+ * The regions in the same profile came from `silencedetect` and the VAD and are
+ * reported regardless of this.
+ *
+ * @param profile - Cached audio profile, if the bundle has one.
+ * @returns `true` when the loudness fields are safe to report as measured.
+ */
+function hasCurrentLoudness(profile: AudioProfile | null | undefined): boolean {
+  if (!profile) {
+    return false;
+  }
+
+  return (
+    (profile.measurementVersion ?? 0) >= AUDIO_MEASUREMENT_VERSION &&
+    (profile.loudnessMeasured ?? false)
+  );
+}
+
 export function bundleSatisfiesOptions(bundle: AnalysisBundle, options: AnalysisOptions): boolean {
   const frameObservations = bundle.frameObservations ?? [];
   const hasFrameAnalysis = (bundle.frameAnalysis?.length ?? 0) > 0;
@@ -2066,10 +2103,18 @@ export function buildSourceAnalysisReportPayload({
     warnings.push('Annotation data is missing. Object, face, and OCR summaries may be incomplete.');
   }
 
+  // The regions of an audio profile and its loudness numbers have separate
+  // coverage. A profile measured by a superseded pass, or one whose meter
+  // failed while `silencedetect` and the VAD succeeded, keeps usable regions
+  // while its levels are absent; reporting them would present the silence floor
+  // as a measured level. This mirrors the CLI report's rule exactly, so an
+  // agent does not have to know which surface wrote a report to read it.
+  const hasLoudnessMeasurement = hasCurrentLoudness(audioProfile);
   const coverage = {
     shots: shots.length > 0,
     transcript: transcriptSegments.length > 0 || Boolean(transcriptFullText),
     audio: hasValue(audioProfile),
+    loudness: hasLoudnessMeasurement,
     segments: segments.length > 0,
     visual: frameAnalysis.length > 0 || frameObservationItems.length > 0,
     annotation: Boolean(annotation),
@@ -2140,8 +2185,18 @@ export function buildSourceAnalysisReportPayload({
     },
     audio: {
       hasAudioProfile: hasValue(audioProfile),
+      hasLoudnessMeasurement,
       bpm: roundTo(audioProfile?.bpm),
-      peakDb: roundTo(audioProfile?.peakDb),
+      peakDb: hasLoudnessMeasurement ? roundTo(audioProfile?.peakDb) : null,
+      truePeakDbtp: hasLoudnessMeasurement
+        ? roundTo(audioProfile?.truePeakDbtp ?? undefined)
+        : null,
+      integratedLufs: hasLoudnessMeasurement
+        ? roundTo(audioProfile?.integratedLufs ?? undefined)
+        : null,
+      loudnessRangeLu: hasLoudnessMeasurement
+        ? roundTo(audioProfile?.loudnessRangeLu ?? undefined)
+        : null,
       spectralCentroidHz: roundTo(audioProfile?.spectralCentroidHz),
       silenceRegionCount: silenceRegions.length,
       silenceDurationSec: roundTo(silenceDurationSec) ?? 0,
@@ -2165,7 +2220,9 @@ export function buildSourceAnalysisReportPayload({
         endSec: roundTo(region.endSec),
         durationSec: roundTo(region.endSec - region.startSec),
       })),
-      loudnessSampleCount: audioProfile?.loudnessProfile.length ?? 0,
+      loudnessSampleCount: hasLoudnessMeasurement
+        ? (audioProfile?.loudnessProfile.length ?? 0)
+        : 0,
     },
     segments: {
       count: segments.length,

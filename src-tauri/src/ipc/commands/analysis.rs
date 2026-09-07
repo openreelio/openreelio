@@ -21,7 +21,7 @@
 //! - `search_clip_evidence`: Search cached clip-local semantic observations
 //! - `plan_semantic_clip_edit`: Plan temporal edit ranges from semantic evidence
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -48,10 +48,12 @@ use crate::core::analysis::diarization_import::{
 use crate::core::analysis::esd::{self, EditingStyleDocument, EsdGenerator, EsdSummary};
 use crate::core::analysis::style_planner::{StylePlanResult, StylePlanner, StylePlanningContext};
 use crate::core::analysis::{
+    claim_loudness_remeasure, AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata,
+};
+use crate::core::analysis::{
     plan_semantic_clip_edit as plan_semantic_clip_edit_bundle, SemanticTemporalEditAction,
     SemanticTemporalEditPlan, SemanticTemporalEditPlanOptions,
 };
-use crate::core::analysis::{AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata};
 use crate::core::commands::AddEffectCommand;
 #[cfg(feature = "ai-providers")]
 use crate::core::credentials::{CredentialType, CredentialVault};
@@ -582,14 +584,31 @@ pub async fn analyze_video_full(
 
 /// Retrieves a cached analysis bundle for an asset.
 ///
-/// Returns the previously computed bundle from disk without re-running analysis.
-/// Returns `Ok(None)` when no cached bundle exists yet.
+/// Returns the previously computed bundle from disk. Returns `Ok(None)` when no
+/// cached bundle exists yet.
+///
+/// The one thing this does compute is a missing loudness measurement. A bundle
+/// cached by the superseded audio pass comes back with its loudness fields
+/// cleared, and nothing else in the system would ever fill them in: the caller
+/// sees a bundle, so it does not ask for analysis, and the numbers it reads are
+/// simply absent. Rather than serve that, an audio-only pass is queued and
+/// awaited — see [`AnalysisOptions::audio_only`] for why the rest of the bundle
+/// is left alone. If the pass cannot be set up or fails, the cached bundle is
+/// returned as it is: a stale-loudness bundle is still better than no bundle,
+/// and `analysis report` marks the gap.
+///
+/// The pass is attempted **at most once per asset per session**, and not at all
+/// once the bundle records an `audio` failure. Re-measuring is a full FFmpeg
+/// decode of the asset; retrying it on every read of a bundle it cannot fix
+/// turns opening a project into a decode storm. See
+/// [`should_attempt_loudness_remeasure`].
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, ffmpeg_state))]
 pub async fn get_analysis_bundle(
     asset_id: String,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
 ) -> Result<Option<AnalysisBundle>, String> {
     let project_path = {
         let guard = state.project.lock().await;
@@ -601,9 +620,80 @@ pub async fn get_analysis_bundle(
 
     let runner = AnalysisJobRunner::new(&project_path);
 
-    runner
+    let Some(bundle) = runner
         .load_bundle_optional(&asset_id)
-        .map_err(|e| format!("Failed to load analysis bundle: {}", e))
+        .map_err(|e| format!("Failed to load analysis bundle: {}", e))?
+    else {
+        return Ok(None);
+    };
+
+    if !should_attempt_loudness_remeasure(&bundle, &state.loudness_remeasure_attempts).await {
+        return Ok(Some(bundle));
+    }
+
+    Ok(Some(
+        remeasure_audio_profile(&asset_id, bundle, &state, &ffmpeg_state).await,
+    ))
+}
+
+/// Decides whether reading `bundle` should queue a loudness re-measurement.
+///
+/// The decision itself is [`claim_loudness_remeasure`], in the analysis core
+/// beside the gate it wraps: is the measurement missing, is the recorded
+/// failure one that could clear, and has no pass been attempted for this asset
+/// in this session. All this layer adds is the lock the session set lives
+/// behind, held across the claim so two reads of the same asset that arrive
+/// together produce one job, not two.
+///
+/// The session set is what bounds the retry: a transient failure is tried again
+/// on the next launch, not on the next read. It is also cleared when the asset
+/// is relinked, since the new media is a new question.
+async fn should_attempt_loudness_remeasure(
+    bundle: &AnalysisBundle,
+    attempted: &tokio::sync::Mutex<HashSet<String>>,
+) -> bool {
+    let mut attempted = attempted.lock().await;
+    claim_loudness_remeasure(bundle, &mut attempted)
+}
+
+/// Re-runs the audio pass for a bundle whose loudness measurement is missing.
+///
+/// Returns the refreshed bundle, or `bundle` unchanged when the pass could not
+/// run. Failing here must not fail the caller: every reason the pass cannot run
+/// (the asset was removed from the project, the media file moved, FFmpeg is not
+/// resolvable) leaves the rest of the bundle perfectly usable.
+async fn remeasure_audio_profile(
+    asset_id: &str,
+    bundle: AnalysisBundle,
+    state: &State<'_, AppState>,
+    ffmpeg_state: &State<'_, SharedFFmpegState>,
+) -> AnalysisBundle {
+    let refreshed = async {
+        let asset_context = resolve_asset_context(asset_id, state, ffmpeg_state).await?;
+        submit_analysis_job_and_wait(
+            asset_id,
+            &asset_context.project_path,
+            &asset_context.asset_path,
+            &asset_context.metadata,
+            &AnalysisOptions::audio_only(),
+            state,
+        )
+        .await
+    }
+    .await;
+
+    match refreshed {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            tracing::warn!(
+                asset_id = %asset_id,
+                %error,
+                "Could not re-measure the audio profile; serving the cached bundle \
+                 with its loudness numbers missing"
+            );
+            bundle
+        }
+    }
 }
 
 /// Analyzes one timeline clip at clip-local frame sample granularity.
@@ -1142,19 +1232,30 @@ pub async fn apply_editing_style(
         .ok_or_else(|| format!("ESD not found: {}", esd_id))?;
 
     // Load the source analysis bundle, generating one when it does not exist yet.
+    //
+    // A bundle whose loudness numbers are missing counts as incomplete here
+    // rather than as a silent source: the style planner reads the per-second
+    // loudness curve to place cuts, so an empty curve would quietly produce a
+    // plan built on no audio evidence at all. That case only needs the audio
+    // pass, so the shots and segments this bundle already holds are kept.
     let runner = AnalysisJobRunner::new(&project_path);
     let source_bundle = match runner
         .load_bundle_optional(&source_asset_id)
         .map_err(|e| format!("Failed to load source analysis bundle: {}", e))?
     {
-        Some(bundle) => bundle,
-        None => {
+        Some(bundle) if !bundle.needs_loudness_measurement() => bundle,
+        cached => {
+            let options = if cached.is_some() {
+                AnalysisOptions::audio_only()
+            } else {
+                AnalysisOptions::default()
+            };
             submit_analysis_job_and_wait(
                 &source_asset_id,
                 &asset_context.project_path,
                 &asset_context.asset_path,
                 &asset_context.metadata,
-                &AnalysisOptions::default(),
+                &options,
                 &state,
             )
             .await?

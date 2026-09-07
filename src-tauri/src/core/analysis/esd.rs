@@ -12,6 +12,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+use super::loudness::audible_momentary_readings;
 use super::types::{AnalysisBundle, AudioProfile, ContentSegment, FrameAnalysis};
 use crate::core::annotations::models::ShotResult;
 use crate::core::{CoreError, CoreResult};
@@ -339,13 +340,24 @@ impl EsdGenerator {
             return Vec::new();
         }
 
-        // Threshold for significant audio events
-        let mean = compute_mean(loudness);
-        let std_dev = compute_std_dev(loudness, mean);
-        let median = compute_median(loudness);
+        // Threshold for significant audio events.
+        //
+        // Taken over the audible seconds only. A silent second holds the floor
+        // sentinel rather than a level, and including it pulls the median down
+        // and the standard deviation up together, so a file with pauses in it
+        // calls ordinary speech a "loudness peak" and syncs cuts to nothing.
+        let audible = audible_momentary_readings(loudness);
+        if audible.is_empty() {
+            return Vec::new();
+        }
+        let mean = compute_mean(&audible);
+        let std_dev = compute_std_dev(&audible, mean);
+        let median = compute_median(&audible);
         let threshold = median + std_dev;
 
-        // Find audio peaks (local maxima above threshold)
+        // Find audio peaks (local maxima above threshold). The scan stays on
+        // the full profile: its index is the second, which is what a sync point
+        // is expressed in.
         let mut peak_times: Vec<f64> = Vec::new();
         for i in 0..loudness.len() {
             if loudness[i] > threshold {
@@ -794,6 +806,49 @@ mod tests {
     // SyncPoint Tests
     // -------------------------------------------------------------------------
 
+    /// Feature: sync point detection
+    /// Scenario: the same peaks are measured with and without pauses around them
+    ///   Given a loudness profile whose peak aligns with a cut
+    ///   And the same profile with silent seconds appended
+    ///   When sync points are detected in each
+    ///   Then both find the cut
+    ///
+    /// The peak threshold is `median + std_dev` over the profile. Counting the
+    /// floor sentinel as a level moved both terms at once, so adding silence to
+    /// the end of a file changed which of its cuts were considered synced.
+    #[test]
+    fn should_not_let_silent_seconds_move_the_sync_threshold() {
+        let shots = vec![
+            ShotResult::new(0.0, 3.0, 0.9),
+            ShotResult::new(3.0, 6.0, 0.9),
+        ];
+        let audible = vec![-30.0, -29.0, -28.0, -10.0, -29.0, -30.0];
+        let mut padded = audible.clone();
+        padded.extend(vec![crate::core::analysis::types::SILENCE_FLOOR_DB; 6]);
+
+        let without_pauses = EsdGenerator::detect_sync_points(
+            &shots,
+            &AudioProfile {
+                loudness_profile: audible,
+                ..Default::default()
+            },
+        );
+        let with_pauses = EsdGenerator::detect_sync_points(
+            &shots,
+            &AudioProfile {
+                loudness_profile: padded,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(without_pauses.len(), 1, "the cut at 3 s sits on the peak");
+        assert_eq!(
+            with_pauses.len(),
+            without_pauses.len(),
+            "trailing silence must not change which cuts are synced"
+        );
+    }
+
     #[test]
     fn should_detect_sync_points_within_tolerance() {
         // Shots with cuts at 1.0s and 3.0s
@@ -811,6 +866,7 @@ mod tests {
             peak_db: -5.0,
             silence_regions: vec![],
             speech_regions: vec![SpeechRegion::new(0.0, 5.0)],
+            ..Default::default()
         };
 
         let sync = EsdGenerator::detect_sync_points(&shots, &audio);
@@ -837,6 +893,7 @@ mod tests {
             peak_db: -5.0,
             silence_regions: vec![],
             speech_regions: vec![SpeechRegion::new(0.0, 10.0)],
+            ..Default::default()
         };
 
         let sync = EsdGenerator::detect_sync_points(&shots, &audio);
@@ -854,6 +911,7 @@ mod tests {
             peak_db: -20.0,
             silence_regions: vec![],
             speech_regions: vec![SpeechRegion::new(0.0, 10.0)],
+            ..Default::default()
         };
 
         let sync = EsdGenerator::detect_sync_points(&shots, &audio);
@@ -910,6 +968,7 @@ mod tests {
             peak_db: -8.0,
             silence_regions: vec![],
             speech_regions: vec![SpeechRegion::new(0.0, 12.0)],
+            ..Default::default()
         });
         bundle
     }

@@ -282,6 +282,11 @@ fn resolved_cell() -> &'static RwLock<Option<ResolvedFFmpeg>> {
 ///
 /// Called by `FFmpegState::initialize` (GUI) and [`resolve_and_register`]
 /// (CLI) once detection succeeds. Overwrites any previously cached paths.
+///
+/// Also discards anything the process has cached *about* an FFmpeg build. The
+/// managed installer writes its new binaries and then re-initializes, so this
+/// is the one place every route to a different build passes through — including
+/// an install that lands at the same path the analysis latch already wrote off.
 pub fn set_resolved_paths(ffmpeg: PathBuf, ffprobe: PathBuf) {
     // A poisoned lock only means another thread panicked mid-write; the
     // stored Option is still valid, so recover the guard instead of panicking.
@@ -289,6 +294,9 @@ pub fn set_resolved_paths(ffmpeg: PathBuf, ffprobe: PathBuf) {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = Some(ResolvedFFmpeg { ffmpeg, ffprobe });
+    drop(guard);
+
+    crate::core::analysis::audio::clear_loudness_filter_latch();
 }
 
 /// Returns the globally resolved paths, running lazy detection if needed.
