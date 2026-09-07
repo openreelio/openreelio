@@ -885,8 +885,10 @@ A stroke that comes in under `minContrast` on that measure is graded like any
 other bare cue rather than waved through unmeasured, so a white stroke around
 white words, a `#00000033` stroke, a half-alpha black stroke around `#CCCCCC`
 words and an opaque black stroke on a caption drawn at half opacity are all
-measured; only an opaque stroke in a colour the words stand out against is waved
-through. A caption faded out entirely is not decoded at all; it is counted as
+measured. Separation is the whole of the test for a stroke — it does not also
+have to be opaque — so a `#00000080` outline around white words is waved
+through: the ring can never be lighter than `0.498` and the glyphs clear it by
+`0.502`. A caption faded out entirely is not decoded at all; it is counted as
 unmeasured instead, with a `fadedOut` reason.
 
 Two numbers decide the verdict. A bare cue whose text sits within `0.35`
@@ -900,15 +902,26 @@ judged, and the two differ by whatever `boxAlpha` hides. Either finding carries
 maxBandStddev, fault, hasBox, hasOutline}`, plus `boxAlpha` on a cue that
 carries a box and `layerOpacity` on a cue drawn at less than full opacity, and an `UpdateCaption` fix applying the `standard-outline` pack —
 not `boxed-contrast`, because an outline drawn at full opacity survives any
-background including a mixed one. `hasBox: true` on a violation is normal and
+background including a mixed one. On a cue too faded for any stroke to rescue
+the fix is a `SetClipOpacity` back to `1.0` instead: the stroke fades with the
+glyphs, so the most a restyle can separate them by is `layerOpacity` squared,
+and below `sqrt(minContrast)` — about `0.6` at the default floor — an outline is
+advice that cannot work. That fix carries a lower confidence, because
+`layerOpacity` is the style's opacity times the clip's and the command raises
+only the clip's half; the `details` say so. `hasBox: true` on a violation is normal and
 not a contradiction: whether a cue is protected is decided by the box's colour
 and alpha together,
-never by the presence of a box. `hasOutline` is the one flag that cannot appear
+never by the presence of a box: a box is waved through unmeasured only where its
+own colour and alpha put every tone the band can take clear of the text by
+`minContrast` *and* the alpha leaves that band no more spread than
+`maxBandStddev`, because the band is measured *through* the box and skipping a
+translucent one would skip a reading the pass would otherwise have taken.
+`hasOutline` is the one flag that cannot appear
 on a violation, because it is only set where the stroke separates the words from
-every tone its ring can take by `minContrast` or better — and, like a box, only
-where the ring is opaque enough to leave the band no more spread than
-`maxBandStddev`, since a stroke the shot shows through settles a mixed
-background no better than a wash does. A stroke that clears both reads over
+every tone its ring can take by `minContrast` or better. That single clause is
+the whole test for a stroke — no spread clause applies, since a stroke is
+composited into no measurement, so the alternative to trusting one is a report
+on a cue nothing was measured about. A stroke that clears it reads over
 anything; one too faint, too translucent, or too close to the text's own colour
 leaves the flag `false` and the cue graded like any other bare one. `boxAlpha` is the alpha the box is actually painted at — the
 style's box alpha times the layer opacity —

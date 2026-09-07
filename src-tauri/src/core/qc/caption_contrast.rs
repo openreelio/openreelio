@@ -45,7 +45,10 @@
 //!   the text's own colour, or one washed out by its alpha, separates nothing.
 //!   A stroke that is not opaque is graded against the ring the viewer sees,
 //!   `alpha * outline + (1 - alpha) * picture`, by the same interval arithmetic
-//!   a box is graded by, not against the colour the style authored.
+//!   a box's separation is graded by ([`decoration_separation`]), not against
+//!   the colour the style authored. Separation is all a stroke is asked for:
+//!   the box's second clause, on the spread the band keeps, belongs to the box
+//!   because the box is what the band is measured through.
 //! * **Box** — same shape for `backgroundColor`/`background_color`. A box the
 //!   renderer quantises away — both paths round the alpha before they draw, so
 //!   anything under half a step of it paints nothing — selects no box at all,
@@ -505,10 +508,15 @@ const MAX_POSSIBLE_BAND_STDDEV: f64 = 0.5;
 /// needs to be - [`CaptionPaint::draws_text`] takes those cues out of the pass
 /// before this is asked.
 ///
-/// A stroke is the same arithmetic with the ring in the box's place, so
-/// [`CaptionPaint::outline_protects`] calls this with the stroke's painted
-/// alpha and colour rather than repeating it; `box_*` names the caller it was
-/// written for, not the only decoration it grades.
+/// A stroke measures its separation the same way — see
+/// [`decoration_separation`], which both decorations share — but it is held to
+/// that clause alone. The spread clause belongs to the box because the box is
+/// what the band is *measured through*: a cue carrying one is graded on
+/// [`CaptionBandSample::effective_band_stddev`], so waving a translucent box
+/// through unmeasured would skip a reading the pass would otherwise have taken.
+/// A stroke is never composited into the measurement at all, so holding it to a
+/// clause the measurement path cannot answer only turns strokes that do protect
+/// the words into reports - see [`CaptionPaint::outline_protects`].
 fn box_guarantees_legibility(
     text_luminance: f64,
     box_alpha: f64,
@@ -517,21 +525,59 @@ fn box_guarantees_legibility(
     thresholds: ContrastThresholds,
 ) -> bool {
     let alpha = box_alpha.clamp(0.0, 1.0);
-    let lowest = alpha * box_luminance.clamp(0.0, 1.0);
+    let separation = decoration_separation(text_luminance, alpha, box_luminance);
+
+    separation * layer_opacity.clamp(0.0, 1.0) >= thresholds.min_contrast
+        && (1.0 - alpha) * MAX_POSSIBLE_BAND_STDDEV <= thresholds.max_band_stddev
+}
+
+/// Distance from the text to the nearest tone a decoration can leave behind it.
+///
+/// A decoration painted at `alpha` in `decoration_luminance` is only its own
+/// colour where it is opaque; below that the viewer reads
+/// `alpha * decoration + (1 - alpha) * picture`, and the picture is somewhere
+/// on 0–1, so the band the decoration leaves lies on
+/// `[alpha * decoration, alpha * decoration + (1 - alpha)]`. What the
+/// decoration is worth is the distance from the text to the *nearest* tone that
+/// interval can take, which is zero whenever some picture makes the two the
+/// same tone.
+///
+/// Both decorations are graded on this one number - the box in
+/// [`box_guarantees_legibility`] and the stroke in
+/// [`CaptionPaint::outline_protects`] - so a box and a stroke of the same
+/// colour and alpha are worth the same separation, and only what each of them
+/// has to clear differs. The result is on 0–1 and is not yet scaled by the
+/// layer opacity; the callers do that, because the glyphs are faded by the
+/// layer as well as the decoration is.
+fn decoration_separation(text_luminance: f64, alpha: f64, decoration_luminance: f64) -> f64 {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let lowest = alpha * decoration_luminance.clamp(0.0, 1.0);
     let highest = lowest + (1.0 - alpha);
 
-    // Distance from the text to the nearest band the picture could produce;
-    // zero whenever some picture makes the two the same tone.
-    let separation = if text_luminance < lowest {
+    if text_luminance < lowest {
         lowest - text_luminance
     } else if text_luminance > highest {
         text_luminance - highest
     } else {
         0.0
-    };
+    }
+}
 
-    separation * layer_opacity.clamp(0.0, 1.0) >= thresholds.min_contrast
-        && (1.0 - alpha) * MAX_POSSIBLE_BAND_STDDEV <= thresholds.max_band_stddev
+/// The most separation any stroke could reach at a given layer opacity, 0–1.
+///
+/// The layer fades the stroke as well as the glyphs. At opacity `L` even an
+/// authored-opaque stroke reaches the picture at alpha `L`, so by
+/// [`decoration_separation`] the band it leaves is `(1 - L)` wide and the
+/// furthest the text can possibly sit from that band is `L` — whatever colours
+/// the style picks, and whichever side of the band the text is on. The glyphs
+/// are drawn at `L` too, so what the viewer reads is at most `L * L`.
+///
+/// Below `sqrt(min_contrast)` that ceiling is under the floor, which means no
+/// restyling can rescue the cue and the `standard-outline` fix would be advice
+/// that cannot work. The rule offers the opacity instead.
+fn best_outline_separation(layer_opacity: f64) -> f64 {
+    let opacity = layer_opacity.clamp(0.0, 1.0);
+    opacity * opacity
 }
 
 /// What a cue's style says about the words themselves.
@@ -626,15 +672,22 @@ impl CaptionPaint {
     /// shot the ring is 0.498 and the words clear it by 0.302 — under the
     /// default floor, and waved through unmeasured.
     ///
-    /// So the ring is graded by exactly the arithmetic a box is graded by, and
-    /// [`box_guarantees_legibility`] is called with the stroke's painted alpha
-    /// and colour in the box's place. The stddev clause comes with it and is
-    /// right for a ring too: what makes a stroke protection is that it stands
-    /// between the glyphs and *whatever* the shot does, and a translucent one
-    /// lets the shot's own variation through the ring, so it no longer settles
-    /// [`ContrastFault::MixedBackground`] either. Only an opaque stroke flattens
-    /// the picture behind the glyph edge completely, and only an opaque stroke
-    /// is waved through on that clause.
+    /// So the ring's separation is measured by exactly the arithmetic a box's
+    /// is - [`decoration_separation`], with the stroke's painted alpha and
+    /// colour in the box's place - and that separation, scaled by the layer
+    /// opacity, is the whole of the test. The box's second clause, on
+    /// [`ContrastThresholds::max_band_stddev`], is deliberately not applied
+    /// here. A box is what the band is *measured through*
+    /// ([`CaptionBandSample::effective_band_stddev`]), so a translucent one
+    /// waved through unmeasured would skip a reading the pass would otherwise
+    /// have taken; a stroke is composited into no measurement at all, so the
+    /// alternative to trusting it is not a better reading but a report on a
+    /// cue nothing was measured about. Holding the ring to the spread clause
+    /// too reported strokes that plainly do protect the words: a `#00000080`
+    /// outline around white words leaves a ring no lighter than 0.498, which
+    /// the glyphs clear by 0.502, and it was still called `lowContrast` over a
+    /// white shot because half an alpha cannot flatten a hypothetical worst-case
+    /// picture.
     ///
     /// Both halves matter and neither is enough on its own: a white stroke
     /// around white words at full opacity separates nothing, and a black stroke
@@ -649,15 +702,11 @@ impl CaptionPaint {
     /// the check had it been measured.
     fn outline_protects(&self, thresholds: ContrastThresholds) -> bool {
         let painted_alpha = (self.outline_alpha * self.layer_opacity).clamp(0.0, 1.0);
+        let separation =
+            decoration_separation(self.text_luminance, painted_alpha, self.outline_luminance);
 
         self.draws_outline()
-            && box_guarantees_legibility(
-                self.text_luminance,
-                painted_alpha,
-                self.outline_luminance,
-                self.layer_opacity,
-                thresholds,
-            )
+            && separation * self.layer_opacity.clamp(0.0, 1.0) >= thresholds.min_contrast
     }
 
     /// Whether the style already protects the words from their background.
@@ -1397,6 +1446,24 @@ impl CaptionContrastRule {
         })
     }
 
+    /// The command that puts the caption clip back to full opacity.
+    ///
+    /// Offered in place of [`Self::restyle_fix`] on a cue whose layer opacity
+    /// is already too low for any stroke to lift it over the floor - see
+    /// [`best_outline_separation`]. The layer opacity is the style's opacity
+    /// times the clip's, and this is the clip's half of it, which is why the
+    /// fix carries a lower confidence than the restyle does and the details say
+    /// what to do when the style is the faded one.
+    fn opacity_fix(sequence_id: &str, sample: &CaptionBandSample) -> serde_json::Value {
+        serde_json::json!({
+            "type": "SetClipOpacity",
+            "sequenceId": sequence_id,
+            "trackId": sample.track_id,
+            "clipId": sample.clip_id,
+            "opacity": 1.0,
+        })
+    }
+
     /// Whether any caption cue exists at all in the sequence.
     fn has_caption_cues(sequence: &Sequence) -> bool {
         sequence
@@ -1602,11 +1669,28 @@ impl QCRule for CaptionContrastRule {
                 String::new()
             };
 
+            // An outline is only worth suggesting where the layer leaves room
+            // for one. The stroke is faded with the glyphs, so the most any
+            // stroke can separate them by is the layer opacity squared; under
+            // the floor, the `standard-outline` pack is advice that cannot
+            // work, and the opacity is the thing to raise instead.
+            let outline_can_rescue = best_outline_separation(sample.layer_opacity) >= min_contrast;
+            let remedy = if outline_can_rescue {
+                "Give the cue an outline so it reads over any background.".to_string()
+            } else {
+                format!(
+                    "At {:.0}% layer opacity no outline can reach {min_contrast:.2} separation - \
+                     the stroke fades with the glyphs - so raise the caption's opacity first. The \
+                     layer opacity is the style's opacity times the clip's, so raise the style's \
+                     too if the clip is already opaque.",
+                    sample.layer_opacity * 100.0
+                )
+            };
+
             let details = match fault {
                 ContrastFault::LowContrast => format!(
                     "Measured at {:.2}s: the band the words occupy averages {:.2} luminance \
-                     (spread {:.2}) and the text is {:.2}.{blended}{faded} Give the cue an \
-                     outline so it reads over any background.",
+                     (spread {:.2}) and the text is {:.2}.{blended}{faded} {remedy}",
                     sample.sampled_at_sec,
                     sample.band_luminance,
                     sample.band_luminance_stddev,
@@ -1615,8 +1699,7 @@ impl QCRule for CaptionContrastRule {
                 ContrastFault::MixedBackground => format!(
                     "Measured at {:.2}s: the band the words occupy averages {:.2} luminance but \
                      varies by {:.2} across its width, so text at {:.2} clears part of it and \
-                     disappears into the rest.{blended}{faded} Give the cue an outline so it \
-                     reads over any background.",
+                     disappears into the rest.{blended}{faded} {remedy}",
                     sample.sampled_at_sec,
                     sample.band_luminance,
                     sample.band_luminance_stddev,
@@ -1673,18 +1756,28 @@ impl QCRule for CaptionContrastRule {
                 );
             }
 
+            let fix = if outline_can_rescue {
+                ViolationFix::new(
+                    format!("Restyle the caption with the '{CONTRAST_STYLE_PACK}' pack"),
+                    vec![Self::restyle_fix(&sequence.id, sample)],
+                )
+                // The measurement is certain; that an outline is the style the
+                // edit wants is not.
+                .with_confidence(0.8)
+            } else {
+                ViolationFix::new(
+                    "Raise the caption clip back to full opacity",
+                    vec![Self::opacity_fix(&sequence.id, sample)],
+                )
+                // Lower still: the clip is only one of the two opacities that
+                // multiply into the layer's, so this can be the wrong half.
+                .with_confidence(0.5)
+            };
+
             violations.push(
                 violation
                     .with_metric("trackId", sample.track_id.clone())
-                    .with_fix(
-                        ViolationFix::new(
-                            format!("Restyle the caption with the '{CONTRAST_STYLE_PACK}' pack"),
-                            vec![Self::restyle_fix(&sequence.id, sample)],
-                        )
-                        // The measurement is certain; that an outline is the
-                        // style the edit wants is not.
-                        .with_confidence(0.8),
-                    ),
+                    .with_fix(fix),
             );
         }
 
@@ -1855,6 +1948,69 @@ mod tests {
         let fix = violations[0].suggested_fix.as_ref().expect("a fix");
         assert_eq!(fix.commands[0]["type"], "UpdateCaption");
         assert_eq!(fix.commands[0]["stylePack"], CONTRAST_STYLE_PACK);
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should offer the opacity, not an outline, on a faded cue
+    ///
+    /// The `standard-outline` pack was suggested whatever the cue's opacity
+    /// was, and on a caption drawn at three tenths it is advice that cannot
+    /// work: the stroke fades with the glyphs, so the most any restyle can
+    /// separate them by is 0.09 and the floor is 0.35. The report now names
+    /// the thing that would actually help.
+    #[tokio::test]
+    async fn should_offer_the_opacity_when_no_outline_could_rescue_the_cue() {
+        let mut clip = caption_clip("Barely there", 1.0, 3.0, Some(bare_white_style()));
+        clip.opacity = 0.3;
+        let sequence = sequence_with_captions(vec![clip]);
+        let faded = CaptionBandSample {
+            layer_opacity: 0.3,
+            ..sample(0.97, 1.0)
+        };
+        let measurements = RenderMeasurements {
+            caption_band_samples: vec![faded],
+            ..Default::default()
+        };
+
+        let violations = run_rule(&sequence, Some(measurements)).await;
+
+        assert_eq!(violations.len(), 1);
+        let fix = violations[0].suggested_fix.as_ref().expect("a fix");
+        assert_eq!(fix.commands.len(), 1);
+        assert_eq!(fix.commands[0]["type"], "SetClipOpacity");
+        assert_eq!(fix.commands[0]["opacity"], 1.0);
+        assert!(
+            violations[0]
+                .details
+                .as_ref()
+                .expect("details")
+                .contains("no outline can reach"),
+            "the report says why the outline it usually suggests is not offered"
+        );
+
+        // The outline is still the fix wherever one could clear the floor: at
+        // eight tenths a stroke is worth up to 0.64.
+        let workable = CaptionBandSample {
+            layer_opacity: 0.8,
+            ..sample(0.97, 1.0)
+        };
+        let violations = run_rule(
+            &sequence,
+            Some(RenderMeasurements {
+                caption_band_samples: vec![workable],
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0]
+                .suggested_fix
+                .as_ref()
+                .expect("a fix")
+                .commands[0]["type"],
+            "UpdateCaption"
+        );
     }
 
     /// Feature: Caption legibility
@@ -2431,6 +2587,54 @@ mod tests {
         assert!(
             opaque.outline_protects(thresholds_default()),
             "an opaque stroke leaves the shot no way through to the glyph edge"
+        );
+    }
+
+    /// Feature: Caption legibility
+    /// Scenario: should trust a translucent stroke the words clear the ring of
+    ///
+    /// The separation the ring leaves is the whole of the stroke's test. Held
+    /// to the box's spread clause as well, a `#00000080` outline around white
+    /// words was refused: the ring can never be lighter than 0.498 and the
+    /// glyphs clear it by 0.502, but half an alpha cannot flatten a worst-case
+    /// picture, so the cue was decoded and reported `lowContrast` over a white
+    /// shot. Nothing on the stroke path ever measures that spread, so the
+    /// clause could only ever cost real strokes their credit.
+    #[test]
+    fn should_trust_a_translucent_stroke_the_ring_separates() {
+        let half_alpha_stroke = paint_of(Some(&serde_json::json!({
+            "color": "#FFFFFF",
+            "outlineColor": "#00000080",
+            "outlineWidth": 4,
+        })));
+        assert!(half_alpha_stroke.draws_outline());
+        assert!(
+            half_alpha_stroke.outline_protects(thresholds_default()),
+            "white words clear the lightest tone a half-alpha black ring can take by 0.502"
+        );
+
+        // The separation itself was not loosened: the same stroke around
+        // light-grey words is worth 0.302 and is still measured.
+        let grey_words = paint_of(Some(&serde_json::json!({
+            "color": "#CCCCCC",
+            "outlineColor": "#00000080",
+            "outlineWidth": 4,
+        })));
+        assert!(
+            !grey_words.outline_protects(thresholds_default()),
+            "0.302 of separation does not clear a floor of {DEFAULT_MIN_CONTRAST}"
+        );
+
+        // And the box keeps both clauses, because the band is measured
+        // *through* a box: a wash at the same alpha is decoded, not skipped.
+        let washed_box = paint_of(Some(&serde_json::json!({
+            "color": "#FFFFFF",
+            "backgroundColor": "#00000080",
+        })));
+        assert!(washed_box.paints_box());
+        assert!(
+            !washed_box.protects_with_box(thresholds_default()),
+            "a box the shot shows through is graded on the band it leaves"
         );
     }
 
