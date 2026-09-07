@@ -535,18 +535,28 @@ impl AudioProfiler {
                 return Err(FilterPassFailure::NoAudioStream);
             }
 
-            let stderr_tail = capture.stderr_tail(STDERR_TAIL_SIZE);
             // Decided here, over raw FFmpeg stderr, because this is the last
             // place the two are still separable: once the tail is formatted
             // into a message, a media path or a caption quoting the words
             // would read back as a missing filter.
             if has_missing_filter_indicator(&capture.stderr) {
-                return Err(FilterPassFailure::MissingFilter { stderr_tail });
+                // Carried the same way it was detected: over the whole
+                // capture, not over the last `STDERR_TAIL_SIZE` lines. A
+                // diagnostic followed by enough output to push it out of the
+                // tail is still a missing filter, and the tail alone would
+                // then say nothing about the filter at all — leaving this
+                // asset's message describing some unrelated line while the
+                // latch, filtering that same tail, kept only the sentinel.
+                // Filtering at the source is what makes the message the first
+                // asset sees the one every later asset is replayed.
+                return Err(FilterPassFailure::MissingFilter {
+                    stderr_tail: missing_filter_diagnostics(&capture.stderr),
+                });
             }
 
             return Err(FilterPassFailure::Failed {
                 exit_code: capture.exit_code.unwrap_or(-1),
-                stderr_tail,
+                stderr_tail: capture.stderr_tail(STDERR_TAIL_SIZE),
             });
         }
 
@@ -649,9 +659,14 @@ fn line_reports_missing_filter(line: &str) -> bool {
 ///
 /// What is dropped is the point: the rest of an FFmpeg capture is about the
 /// asset the pass happened to be running over — its path, its streams, its
-/// tags — and [`latch_missing_loudness_filter`] replays what it keeps against
+/// tags — and [`latch_missing_loudness_filter`] replays what survives against
 /// every later asset. Only the filter graph's own lines say something about the
 /// binary, and only those survive.
+///
+/// Applied by [`AudioProfiler::run_ffmpeg_filter`] to the *whole* capture, at
+/// the point the refusal is recognised, so that the narrowing sees every line
+/// detection saw. Reading a retained tail instead would lose a diagnostic that
+/// a long pass had scrolled past, and lose it only sometimes.
 fn missing_filter_diagnostics(stderr: &str) -> String {
     let diagnostics: Vec<&str> = stderr
         .lines()
@@ -762,16 +777,25 @@ fn clear_missing_loudness_filter(latch: &Mutex<Option<MissingLoudnessFilter>>) {
 ///
 /// A poisoned latch answers `None`: paying for a decode is the safe direction
 /// when the record cannot be read.
+///
+/// The binary is stat'ed before the latch is taken, so the one blocking
+/// filesystem call never happens under the mutex — an FFmpeg on a cold network
+/// path would otherwise hold every other profiler out of the short circuit for
+/// the length of that `stat`. Reading the fingerprint outside the lock leaves a
+/// window in which the binary is replaced between the two, and it is harmless
+/// in both directions: a replacement seen too early costs one extra decode, and
+/// one seen too late replays the refusal for one more asset before the next
+/// pass stats the new file and asks it.
 fn latched_missing_loudness_filter(
     latch: &Mutex<Option<MissingLoudnessFilter>>,
     ffmpeg_path: &Path,
 ) -> Option<FilterPassFailure> {
+    let fingerprint = binary_fingerprint(ffmpeg_path);
+
     let latched = latch.lock().ok()?;
     let recorded = latched.as_ref()?;
 
-    if recorded.ffmpeg_path.as_path() != ffmpeg_path
-        || recorded.fingerprint != binary_fingerprint(ffmpeg_path)
-    {
+    if recorded.ffmpeg_path.as_path() != ffmpeg_path || recorded.fingerprint != fingerprint {
         return None;
     }
 
@@ -782,23 +806,31 @@ fn latched_missing_loudness_filter(
 
 /// Records that `ffmpeg_path` could not build the loudness filter chain.
 ///
-/// Only the filter graph's own diagnostic lines are kept
-/// ([`missing_filter_diagnostics`]); the rest of `stderr_tail` describes the
-/// asset this pass happened to be running over, and the record is replayed
-/// against every later one.
+/// `diagnostics` is stored verbatim, because it already *is* the filter graph's
+/// own lines: [`AudioProfiler::run_ffmpeg_filter`] narrows the capture with
+/// [`missing_filter_diagnostics`] before it ever builds a
+/// [`FilterPassFailure::MissingFilter`], so the message this asset reports and
+/// the message replayed to every later one are the same string. Narrowing again
+/// here would be a no-op on that text and would only hide a caller that had
+/// handed over a whole capture.
 ///
 /// Replaces any earlier record: only the binary a pass just ran against is
 /// worth short-circuiting, and the previous one may well be gone.
+///
+/// The binary is stat'ed before the latch is taken, for the reasons — and with
+/// the same harmless race — described on [`latched_missing_loudness_filter`].
 fn latch_missing_loudness_filter(
     latch: &Mutex<Option<MissingLoudnessFilter>>,
     ffmpeg_path: &Path,
-    stderr_tail: &str,
+    diagnostics: &str,
 ) {
+    let fingerprint = binary_fingerprint(ffmpeg_path);
+
     if let Ok(mut latched) = latch.lock() {
         *latched = Some(MissingLoudnessFilter {
             ffmpeg_path: ffmpeg_path.to_path_buf(),
-            fingerprint: binary_fingerprint(ffmpeg_path),
-            diagnostics: missing_filter_diagnostics(stderr_tail),
+            fingerprint,
+            diagnostics: diagnostics.to_string(),
         });
     }
 }
@@ -975,7 +1007,13 @@ pub(crate) enum FilterPassFailure {
     NoAudioStream,
     /// This FFmpeg build does not have the filter the pass asked for.
     MissingFilter {
-        /// Tail of the FFmpeg stderr, for the message.
+        /// The filter graph's own diagnostic lines, for the message.
+        ///
+        /// Narrowed to those lines at the point of capture
+        /// ([`missing_filter_diagnostics`]) rather than to the stderr tail: the
+        /// rest of the capture describes the asset the pass happened to run
+        /// over, and this text is what [`latch_missing_loudness_filter`] keeps
+        /// and replays against every later asset.
         stderr_tail: String,
     },
     /// FFmpeg ran and exited non-zero for some other reason.
@@ -2244,7 +2282,8 @@ lavfi.aspectralstats.1.centroid=2800.0
     ///
     /// The record is replayed against every later asset, so keeping the whole
     /// captured tail made the second asset's failure quote the first one's path
-    /// and streams.
+    /// and streams. The narrowing now happens in `run_ffmpeg_filter`, which is
+    /// what this test stands in for by latching what that function would build.
     #[test]
     fn should_replay_a_missing_filter_refusal_for_the_binary_that_gave_it() {
         let latch = Mutex::new(None);
@@ -2254,7 +2293,11 @@ lavfi.aspectralstats.1.centroid=2800.0
         assert!(latched_missing_loudness_filter(&latch, bundled).is_none());
 
         let diagnostic = "[AVFilterGraph @ 0000020e8f0e0cc0] No such filter: 'nosuchfilter123'";
-        latch_missing_loudness_filter(&latch, bundled, MISSING_FILTER_STDERR);
+        latch_missing_loudness_filter(
+            &latch,
+            bundled,
+            &missing_filter_diagnostics(MISSING_FILTER_STDERR),
+        );
 
         assert_eq!(
             latched_missing_loudness_filter(&latch, bundled),
@@ -2280,6 +2323,66 @@ lavfi.aspectralstats.1.centroid=2800.0
         assert!(
             latched_missing_loudness_filter(&latch, system).is_none(),
             "a freshly resolved FFmpeg must be asked again, not written off"
+        );
+    }
+
+    /// Feature: missing-filter short circuit
+    /// Scenario: the diagnostic scrolls out of the retained stderr tail
+    ///   Given a capture whose missing-filter line is followed by 30 more lines
+    ///   When the refusal is classified and then latched
+    ///   Then the first asset's message carries the filter graph's own line
+    ///   And every later asset is replayed that same line
+    ///
+    /// Detection reads the whole capture, so a pass that printed enough after
+    /// the diagnostic was still classified as a missing filter — but the
+    /// message was built from the last [`STDERR_TAIL_SIZE`] lines, which by
+    /// then held nothing of it. The first asset reported some unrelated tail
+    /// while the latch, narrowing that same tail, found no diagnostic and fell
+    /// back to the sentinel: two different messages for one refusal, and which
+    /// one an asset got depended on how chatty its pass happened to be.
+    #[test]
+    fn should_keep_the_diagnostic_when_it_scrolls_out_of_the_retained_tail() {
+        let mut stderr = MISSING_FILTER_STDERR.to_string();
+        for frame in 0..30 {
+            stderr.push_str(&format!(
+                "[Parsed_ametadata_1 @ 0x1] frame:{frame} pts:{frame} pts_time:{frame}\n"
+            ));
+        }
+        let capture = crate::core::ffmpeg::FilterCapture {
+            stderr,
+            success: false,
+            exit_code: Some(1),
+            truncated: false,
+            saw_info_output: true,
+        };
+
+        let diagnostic = "[AVFilterGraph @ 0000020e8f0e0cc0] No such filter: 'nosuchfilter123'";
+        assert!(
+            has_missing_filter_indicator(&capture.stderr),
+            "the filter graph's own line is the diagnostic wherever it sits in the capture"
+        );
+        assert!(
+            !capture.stderr_tail(STDERR_TAIL_SIZE).contains(diagnostic),
+            "this test is only about a diagnostic the retained tail has lost"
+        );
+
+        // What `run_ffmpeg_filter` now puts in the failure the first asset sees.
+        let reported = missing_filter_diagnostics(&capture.stderr);
+        assert_eq!(
+            reported, diagnostic,
+            "the message must be read from the whole capture, as detection was"
+        );
+
+        // And what every asset after it is handed, without decoding anything.
+        let latch = Mutex::new(None);
+        let ffmpeg = Path::new("/opt/openreelio/ffmpeg");
+        latch_missing_loudness_filter(&latch, ffmpeg, &reported);
+        assert_eq!(
+            latched_missing_loudness_filter(&latch, ffmpeg),
+            Some(FilterPassFailure::MissingFilter {
+                stderr_tail: diagnostic.to_string(),
+            }),
+            "one refusal must not read two ways depending on which asset hit it"
         );
     }
 
@@ -2825,9 +2928,23 @@ lavfi.aspectralstats.1.centroid=2800.0
             .await
             .expect_err("a filter this build lacks must fail the pass");
 
+        let FilterPassFailure::MissingFilter { stderr_tail } = &failure else {
+            panic!("the filter graph's own diagnostic must be recognised, got {failure:?}");
+        };
+        // Narrowed at the point of capture, so the message this asset reports
+        // is the one the latch replays to every later asset — nothing of this
+        // pass's own input, and nothing lost to the retained-tail window.
         assert!(
-            matches!(failure, FilterPassFailure::MissingFilter { .. }),
-            "the filter graph's own diagnostic must be recognised, got {failure:?}"
+            stderr_tail.contains(&format!("No such filter: '{NONEXISTENT_FILTER}'")),
+            "the reported failure must carry the diagnostic itself: {stderr_tail}"
+        );
+        assert!(
+            !stderr_tail.contains("sine_stereo.wav"),
+            "and nothing of the asset it happened to run over: {stderr_tail}"
+        );
+        assert!(
+            stderr_tail.lines().all(line_reports_missing_filter),
+            "every retained line must be one of the filter graph's own: {stderr_tail}"
         );
     }
 
