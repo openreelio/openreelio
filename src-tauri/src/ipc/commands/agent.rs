@@ -477,11 +477,12 @@ fn plan_requires_backend_approval_proof(plan: &AgentPlan) -> bool {
 /// live in the Tauri-free runner.
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(app, state), fields(plan_id = %plan.id))]
+#[tracing::instrument(skip(app, state, ffmpeg_state), fields(plan_id = %plan.id))]
 pub async fn execute_agent_plan(
     app: tauri::AppHandle,
     plan: AgentPlan,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
 ) -> Result<AgentPlanResult, String> {
     let start = std::time::Instant::now();
     let plan_id = plan.id.clone();
@@ -522,6 +523,36 @@ pub async fn execute_agent_plan(
     if let Err(error) = consume_agent_plan_approval_proof(&plan, &approved_project_id, &state).await
     {
         return Ok(build_agent_plan_failure(plan_id, total_steps, start, error));
+    }
+
+    // Every asset the plan inserts that nothing has measured is read once,
+    // before the first step runs — the same pre-pass the CLI's `plan execute`
+    // makes. It sits outside the steps deliberately: rollback undoes exactly
+    // one operation per succeeded step, so a step that emitted the measurement
+    // as a second op would desynchronise it. A measurement is not part of the
+    // edit anyway — how long a file on disk is stays true whether or not the
+    // plan is rolled back.
+    let mut measured: Vec<String> = Vec::new();
+    for step in &plan.steps {
+        if !matches!(
+            step.tool_name.as_str(),
+            "InsertMedia" | "InsertClip" | "InsertEdit" | "OverwriteEdit"
+        ) {
+            continue;
+        }
+        // A `$fromStep` reference is an object rather than a string, so it
+        // falls out here: the id is not settled until the step it names has
+        // run, and the asset it will point at is created by this same plan.
+        let Some(asset_id) = step.params.get("assetId").and_then(|id| id.as_str()) else {
+            continue;
+        };
+        if measured.iter().any(|id| id == asset_id) {
+            continue;
+        }
+        measured.push(asset_id.to_string());
+        // Warnings go to the log: the plan result has no channel for them, and
+        // a probe that could not run leaves the plan exactly as valid as it was.
+        let _ = super::timeline::back_fill_asset_measurement(project, asset_id, &ffmpeg_state).await;
     }
 
     let reporter = TauriPlanStepReporter { app: &app };

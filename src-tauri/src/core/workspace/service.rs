@@ -926,11 +926,11 @@ mod tests {
     use crate::core::CoreError;
 
     /// An index entry for a file the scanner claims to have found.
-    fn index_entry(relative_path: &str, kind: AssetKind) -> IndexEntry {
+    fn index_entry(relative_path: &str, kind: AssetKind, file_size: u64) -> IndexEntry {
         IndexEntry {
             relative_path: relative_path.to_string(),
             kind,
-            file_size: 1024,
+            file_size,
             modified_at: 0,
             asset_id: None,
             indexed_at: 0,
@@ -950,7 +950,7 @@ mod tests {
     #[test]
     fn a_workspace_file_is_not_registered_when_ffprobe_cannot_be_launched() {
         for kind in [AssetKind::Video, AssetKind::Image, AssetKind::Audio] {
-            let entry = index_entry("footage/subject.mp4", kind.clone());
+            let entry = index_entry("footage/subject.mp4", kind.clone(), 1_024);
             let built = build_workspace_asset_with(
                 &entry,
                 std::path::Path::new("/workspace/footage/subject.mp4"),
@@ -977,7 +977,7 @@ mod tests {
     /// because something did look: one unreadable file must not stop a scan.
     #[test]
     fn a_file_ffprobe_refused_is_still_registered_from_the_index_entry() {
-        let entry = index_entry("footage/broken.mp4", AssetKind::Video);
+        let entry = index_entry("footage/broken.mp4", AssetKind::Video, 1_024);
         let built = build_workspace_asset_with(
             &entry,
             std::path::Path::new("/workspace/footage/broken.mp4"),
@@ -1004,7 +1004,7 @@ mod tests {
     /// frame size and duration the defaults would supply are still invented.
     #[test]
     fn a_workspace_file_is_not_registered_when_the_probe_measured_nothing() {
-        let entry = index_entry("footage/subject.mp4", AssetKind::Video);
+        let entry = index_entry("footage/subject.mp4", AssetKind::Video, 1_024);
         let built = build_workspace_asset_with(
             &entry,
             std::path::Path::new("/workspace/footage/subject.mp4"),
@@ -1027,6 +1027,7 @@ mod tests {
         crate::core::assets::MediaMetadata {
             duration_sec: 12.0,
             video_duration_sec: Some(12.0),
+            audio_duration_sec: None,
             file_size: 1024,
             video: Some(crate::core::assets::VideoInfo::default()),
             audio: None,
@@ -1262,6 +1263,7 @@ mod tests {
                 Ok(crate::core::assets::MediaMetadata {
                     duration_sec: 0.0,
                     video_duration_sec: None,
+                    audio_duration_sec: None,
                     file_size: 0,
                     video: None,
                     audio: None,
@@ -1304,6 +1306,7 @@ mod tests {
         let still_metadata = crate::core::assets::MediaMetadata {
             duration_sec: 0.0,
             video_duration_sec: None,
+            audio_duration_sec: None,
             file_size: 1024,
             video: Some(crate::core::assets::VideoInfo {
                 width: 1920,
@@ -1346,6 +1349,7 @@ mod tests {
         crate::core::assets::MediaMetadata {
             duration_sec: 0.0,
             video_duration_sec: None,
+            audio_duration_sec: None,
             file_size: 1024,
             video: Some(crate::core::assets::VideoInfo {
                 width: 1920,
@@ -1524,18 +1528,6 @@ mod tests {
         std::fs::write(dir.join("audio/bgm.wav"), "a").unwrap();
     }
 
-    fn index_entry(relative_path: &str, kind: AssetKind, file_size: u64) -> IndexEntry {
-        IndexEntry {
-            relative_path: relative_path.to_string(),
-            kind,
-            file_size,
-            modified_at: 0,
-            asset_id: None,
-            indexed_at: 0,
-            metadata_extracted: true,
-        }
-    }
-
     /// Feature: a scan re-probes only what it is missing
     /// Scenario: a still already carrying its size and dimensions
     ///   Given a registered image asset, whose duration is legitimately unknown
@@ -1554,7 +1546,9 @@ mod tests {
             &mut asset,
             &index_entry("cover.png", AssetKind::Image, 1_234),
             std::path::Path::new("/nowhere/cover.png"),
-        );
+            |_| panic!("a still with nothing missing must not be re-probed"),
+        )
+        .expect("a refresh that does not run cannot fail");
 
         assert_eq!(asset.video.as_ref().map(|video| video.width), Some(400));
         assert_eq!(asset.file_size, 1_234);
@@ -1575,7 +1569,9 @@ mod tests {
             &mut asset,
             &index_entry("cover.png", AssetKind::Image, 16),
             &path,
-        );
+            |_| Ok(probed_metadata()),
+        )
+        .expect("the probe measured the file");
 
         assert!(asset.file_size > 0, "the missing size is filled in");
     }
@@ -1602,7 +1598,12 @@ mod tests {
             &mut asset,
             &index_entry("clip.mp4", AssetKind::Video, 2_048),
             std::path::Path::new("/nowhere/clip.mp4"),
-        );
+            // FFprobe looked and refused, which is a verdict about the
+            // file rather than a probe that measured nothing, so the
+            // refresh runs and finds no length to record.
+            |_| Err(CoreError::FFprobeError("no such file".to_string())),
+        )
+        .expect("a file FFprobe refused is not a refresh failure");
 
         // The probe found nothing behind the path, so the duration is still
         // unknown — what matters is that the refresh was attempted and left the

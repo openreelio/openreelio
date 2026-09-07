@@ -178,6 +178,12 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
                     // so the MCP `plan.validate` envelope, which can be handed
                     // no project at all, is the same shape.
                     "mediaLengthChecked": true,
+                    // The companion field, and always `null` on this verb: the
+                    // reason only exists when the pass could *not* run. Present
+                    // rather than absent so a caller reading one schema can
+                    // read both surfaces — an agent that has to test for a
+                    // missing key on one of them will get it wrong on the other.
+                    "mediaLengthReason": serde_json::Value::Null,
                 }))
             } else {
                 output::print_json(&serde_json::json!({
@@ -187,6 +193,7 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
                     "stepsWithReferences": validation.steps_with_references,
                     "uncheckedSteps": media_length.unchecked_steps,
                     "mediaLengthChecked": true,
+                    "mediaLengthReason": serde_json::Value::Null,
                 }))
             }
         }

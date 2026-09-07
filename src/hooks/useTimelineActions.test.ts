@@ -3882,6 +3882,7 @@ describe('useTimelineActions', () => {
             timelinePosition: 10.0,
             duration: 6.0,
             editMode: 'insert',
+            warnings: [],
           });
         }
         if (cmd === 'get_project_state') {
@@ -3941,6 +3942,7 @@ describe('useTimelineActions', () => {
             timelinePosition: 0.0,
             duration: 60.0,
             editMode: 'insert',
+            warnings: [],
           });
         }
         if (cmd === 'get_project_state') {
@@ -3994,6 +3996,7 @@ describe('useTimelineActions', () => {
             timelinePosition: 0.0,
             duration: 60.0,
             editMode: 'insert',
+            warnings: [],
           });
         }
         if (cmd === 'get_project_state') {
@@ -4047,6 +4050,7 @@ describe('useTimelineActions', () => {
             timelinePosition: 0.0,
             duration: 60.0,
             editMode: 'insert',
+            warnings: [],
           });
         }
         if (cmd === 'get_project_state') {
@@ -4104,6 +4108,7 @@ describe('useTimelineActions', () => {
             timelinePosition: 5.0,
             duration: 60.0,
             editMode: 'overwrite',
+            warnings: [],
           });
         }
         if (cmd === 'get_project_state') {

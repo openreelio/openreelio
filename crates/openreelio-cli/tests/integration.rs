@@ -5890,6 +5890,16 @@ fn test_plan_validate_names_the_trims_it_could_not_measure() {
         vec!["step_trim"],
         "only the trim whose clip does not exist yet is unmeasured: {result}"
     );
+    // Same envelope as the MCP `plan.validate` tool. This verb takes a `--path`
+    // and so always has a project to measure against, which makes the reason
+    // null — but present, not absent, so one reader works on both surfaces.
+    assert_eq!(result["mediaLengthChecked"], true, "{result}");
+    assert!(
+        result
+            .get("mediaLengthReason")
+            .is_some_and(serde_json::Value::is_null),
+        "the reason is reported as null rather than omitted: {result}"
+    );
 }
 
 /// Feature: validate never refuses a plan execute would run

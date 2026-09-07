@@ -562,6 +562,19 @@ A profile decides pace. Nothing else.
 recent operations, `state dump` the full derived state, `state snapshot` forces
 a snapshot write.
 
+> **Undo steps per operation, and a lazy probe is its own operation.** Placing
+> from an asset nothing had measured — one imported with `--no-probe`, or
+> written before sound lengths were recorded — logs two ops: the `UpdateAsset`
+> that records what ffprobe read, then the placement. One `timeline undo` takes
+> the clip away and *leaves the measured duration recorded*, which is the
+> intent: the file's length did not stop being true because the edit was
+> reverted, and re-inserting will not pay for the same reading again. Undo a
+> second time only if you actually want the asset back to unmeasured. The two
+> ops are deliberately not batched — `plan execute` unwinds exactly one
+> operation per succeeded step, so a step that emitted two would desynchronise
+> its rollback, which is why `plan execute` measures every asset it inserts in
+> one pass *before* the first step runs.
+
 `state history` lists the persisted history as one index space —
 `{appliedCount, redoCount, currentIndex, entries:[{index, opId, commandType,
 timestamp}]}` — and `state jump --index N` repositions history after entry `N`

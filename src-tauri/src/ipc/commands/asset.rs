@@ -384,6 +384,14 @@ pub async fn relink_asset(
         let mut command = UpdateAssetCommand::new(&asset_id)
             .with_uri(&resolved_uri)
             .with_duration_sec(replacement.duration_sec)
+            // Carried from the same probe as the picture length, and carried
+            // even when they are `None`: a relink whose probe could not run
+            // must clear the previous file's sound length and probe marker
+            // rather than leave the asset claiming a reading of media it no
+            // longer points at. `None` for the marker is what makes the next
+            // insert re-measure the new file — see `needs_probe_refresh`.
+            .with_audio_duration_sec(replacement.audio_duration_sec)
+            .with_probe_version(replacement.probe_version)
             .with_file_size(replacement.file_size)
             .with_video(replacement.video.clone())
             .with_audio(replacement.audio.clone())

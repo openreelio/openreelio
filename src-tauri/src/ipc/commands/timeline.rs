@@ -99,13 +99,15 @@ fn execute_recorded(
 ///
 /// Never an error: a probe that cannot run leaves the placement exactly as
 /// valid as it was, just at the default length, and failing the edit over it
-/// would be worse than the length. Warnings go to the log because
-/// `execute_command` has no channel to report them on.
-async fn back_fill_asset_measurement(
+/// would be worse than the length. Every warning is logged here, and the same
+/// lines are returned so a surface that *does* have a channel to report on —
+/// `three_point_insert` answers with `warnings[]` — can hand them to the
+/// caller instead of leaving "why is this clip ten seconds" in a log file.
+pub(crate) async fn back_fill_asset_measurement(
     project: &mut ActiveProject,
     asset_id: &str,
     ffmpeg_state: &State<'_, crate::core::ffmpeg::SharedFFmpegState>,
-) {
+) -> Vec<String> {
     use crate::core::commands::{
         asset_needs_measurement, asset_source_path, ensure_asset_measured,
     };
@@ -116,38 +118,41 @@ async fn back_fill_asset_measurement(
         .get(asset_id)
         .is_some_and(asset_needs_measurement);
     if !needs_measurement {
-        return;
+        return Vec::new();
     }
-    let Some(source_path) = asset_source_path(&project.state, &project.path, asset_id) else {
-        return;
-    };
 
-    let probed = {
-        let ffmpeg_guard = ffmpeg_state.read().await;
-        match ffmpeg_guard.runner() {
-            Some(runner) => runner.probe(&source_path).await.map_err(|error| {
-                format!(
-                    "FFprobe could not read '{}': {error}",
-                    source_path.display()
-                )
-            }),
-            None => Err("FFmpeg could not be resolved, so the asset was not re-probed".to_string()),
-        }
-    };
-
-    match ensure_asset_measured(project, asset_id, move |_| probed) {
-        Ok(warnings) => {
-            for warning in warnings {
-                tracing::warn!(asset_id = %asset_id, "{warning}");
+    let probed = match asset_source_path(&project.state, &project.path, asset_id) {
+        Some(source_path) => {
+            let ffmpeg_guard = ffmpeg_state.read().await;
+            match ffmpeg_guard.runner() {
+                Some(runner) => runner.probe(&source_path).await.map_err(|error| {
+                    format!(
+                        "FFprobe could not read '{}': {error}",
+                        source_path.display()
+                    )
+                }),
+                None => {
+                    Err("FFmpeg could not be resolved, so the asset was not re-probed".to_string())
+                }
             }
         }
+        // The shared helper resolves the path itself and names its absence
+        // better than this branch could, so it is left to do so: the closure
+        // below is never reached when the file is gone.
+        None => Err("the asset's file could not be located".to_string()),
+    };
+
+    let warnings = match ensure_asset_measured(project, asset_id, move |_| probed) {
+        Ok(warnings) => warnings,
         Err(error) => {
-            tracing::warn!(
-                asset_id = %asset_id,
-                "Recording the probed asset duration failed: {error}"
-            );
+            vec![format!("Recording the probed asset duration failed: {error}")]
         }
+    };
+    for warning in &warnings {
+        tracing::warn!(asset_id = %asset_id, "{warning}");
     }
+
+    warnings
 }
 
 impl CommandResultDto {
@@ -325,7 +330,10 @@ pub async fn execute_command(
     // from it. Recorded as its own `UpdateAsset` op ahead of the placement, the
     // way every headless surface records it.
     if let Some(asset_id) = typed_command.inserted_asset_id().map(str::to_string) {
-        back_fill_asset_measurement(project, &asset_id, &ffmpeg_state).await;
+        // `execute_command` answers with a `CommandResultDto` and has no
+        // channel to report warnings on, so the helper's logging is the whole
+        // report here.
+        let _ = back_fill_asset_measurement(project, &asset_id, &ffmpeg_state).await;
     }
 
     // Build the Command trait object from the validated payload

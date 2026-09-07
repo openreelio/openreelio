@@ -673,7 +673,7 @@ impl InsertClipCommand {
 /// — an unmeasured asset, a still, or a sequence or track that does not exist.
 /// The last of those is not this function's to report: every caller resolves the
 /// track itself a few lines later and fails there with the right error.
-fn default_source_duration_sec(
+pub(crate) fn default_source_duration_sec(
     state: &ProjectState,
     asset: &crate::core::assets::Asset,
     sequence_id: &str,

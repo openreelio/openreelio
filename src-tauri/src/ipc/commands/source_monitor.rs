@@ -487,6 +487,13 @@ pub struct ThreePointEditResult {
     pub duration: f64,
     /// Edit mode that was applied.
     pub edit_mode: ThreePointEditMode,
+    /// Lines worth showing the operator, empty on the ordinary path.
+    ///
+    /// An asset nothing had measured is probed before the edit is cut from it,
+    /// and this is where that reading — or the reason it could not be taken —
+    /// is reported. Without it a clip that fell back to the default length
+    /// looked exactly like one whose media really is that long.
+    pub warnings: Vec<String>,
 }
 
 /// Performs an atomic 3-point edit: reads source monitor In/Out, resolves the
@@ -496,7 +503,7 @@ pub struct ThreePointEditResult {
 /// edit that occur when the frontend orchestrates these as separate IPC calls.
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(state), fields(
+#[tracing::instrument(skip(state, ffmpeg_state), fields(
     seq = %payload.sequence_id,
     mode = ?payload.edit_mode,
     pos = payload.timeline_position,
@@ -504,6 +511,7 @@ pub struct ThreePointEditResult {
 pub async fn three_point_insert(
     payload: ThreePointEditPayload,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
 ) -> Result<ThreePointEditResult, String> {
     let timeline_position = validate_time_sec("timelinePosition", payload.timeline_position)?;
 
@@ -554,13 +562,32 @@ pub async fn three_point_insert(
         }
     };
 
-    // Resolve source range (None → use full asset)
+    // A 3-point edit with no Out point runs to the end of the media, so the
+    // asset has to have been read before that end can be named. An asset
+    // imported headlessly with `--no-probe`, or written before sound lengths
+    // were recorded, is measured here — through the same shared back-fill
+    // `execute_command` uses, so the app records one `UpdateAsset` op for the
+    // file whichever surface noticed it was unmeasured.
+    let warnings =
+        super::timeline::back_fill_asset_measurement(project, &asset_id, &ffmpeg_state).await;
+
+    // Resolve source range (None → use full asset). The default is read for the
+    // *target track* by the same helper the insert command applies, so an mp4
+    // whose sound outlasts its pictures is not cut short on an audio track and
+    // this result cannot disagree with the clip that was actually placed. An
+    // asset no probe could measure still falls back to the default length —
+    // `warnings` says so rather than letting the number pass for a reading.
     let asset = project
         .state
         .assets
         .get(&asset_id)
         .ok_or_else(|| format!("Asset '{}' not found in project", asset_id))?;
-    let asset_duration = asset.duration_sec.unwrap_or(10.0);
+    let asset_duration = crate::core::commands::default_source_duration_sec(
+        &project.state,
+        asset,
+        &payload.sequence_id,
+        &track_id,
+    );
 
     let source_in = in_point.unwrap_or(0.0);
     let source_out = out_point.unwrap_or(asset_duration);
@@ -629,6 +656,7 @@ pub async fn three_point_insert(
         timeline_position,
         duration: clip_duration,
         edit_mode,
+        warnings,
     })
 }
 

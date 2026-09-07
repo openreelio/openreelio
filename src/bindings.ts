@@ -9764,7 +9764,16 @@ duration: number;
 /**
  * Edit mode that was applied.
  */
-editMode: ThreePointEditMode }
+editMode: ThreePointEditMode; 
+/**
+ * Lines worth showing the operator, empty on the ordinary path.
+ * 
+ * An asset nothing had measured is probed before the edit is cut from it,
+ * and this is where that reading — or the reason it could not be taken —
+ * is reported. Without it a clip that fell back to the default length
+ * looked exactly like one whose media really is that long.
+ */
+warnings: string[] }
 /**
  * Time range
  */

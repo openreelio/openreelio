@@ -2978,6 +2978,14 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
               throw new Error(errorMessage);
             }
 
+            // An asset nothing had measured is probed before the edit is cut
+            // from it, and a clip that fell back to the default length says so
+            // here. Reported separately from the success line so "why is this
+            // clip ten seconds" has an answer.
+            for (const warning of result.data.warnings) {
+              logger.warn(`3-point ${operationSuffix} edit: ${warning}`);
+            }
+
             logger.info(`3-point ${operationSuffix} edit completed`, {
               clipId: result.data.clipId,
               duration: result.data.duration,
