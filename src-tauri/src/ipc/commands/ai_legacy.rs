@@ -819,15 +819,16 @@ pub async fn apply_edit_script(
     let mut errors: Vec<String> = Vec::new();
 
     // Get active sequence ID
-    let sequence_id = {
+    let (sequence_id, expected_project_id) = {
         let project = guard
             .as_ref()
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-        project
+        let sequence_id = project
             .state
             .active_sequence_id
             .clone()
-            .ok_or_else(|| "No active sequence".to_string())?
+            .ok_or_else(|| "No active sequence".to_string())?;
+        (sequence_id, project.state.meta.id.clone())
     };
 
     // Every asset this script places from that nothing has measured is read
@@ -857,6 +858,7 @@ pub async fn apply_edit_script(
     let (mut guard, _measurement_warnings) = super::timeline::back_fill_asset_measurements(
         guard,
         &state.project,
+        &expected_project_id,
         measurement_targets.iter().map(String::as_str),
         &ffmpeg_state,
     )

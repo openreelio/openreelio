@@ -529,40 +529,17 @@ pub async fn three_point_insert(
     let project_guard = state.project.lock().await;
 
     // Resolve target track
-    let track_id = {
+    let (track_id, expected_project_id) = {
         let project = project_guard
             .as_ref()
             .ok_or_else(|| "No project open".to_string())?;
 
-        let sequence = project
-            .state
-            .sequences
-            .get(&payload.sequence_id)
-            .ok_or_else(|| format!("Sequence '{}' not found", payload.sequence_id))?;
-
-        match payload.track_id {
-            Some(ref id) => {
-                let track = sequence
-                    .tracks
-                    .iter()
-                    .find(|t| t.id == *id)
-                    .ok_or_else(|| format!("Track '{}' not found", id))?;
-                if track.locked {
-                    return Err(format!("Track '{}' is locked", id));
-                }
-                id.clone()
-            }
-            None => {
-                // Auto-detect: first unlocked video track
-                use crate::core::timeline::TrackKind;
-                sequence
-                    .tracks
-                    .iter()
-                    .find(|t| t.kind == TrackKind::Video && !t.locked)
-                    .map(|t| t.id.clone())
-                    .ok_or_else(|| "No unlocked video track available".to_string())?
-            }
-        }
+        let track_id = crate::core::commands::resolve_three_point_track(
+            &project.state,
+            &payload.sequence_id,
+            payload.track_id.as_deref(),
+        )?;
+        (track_id, project.state.meta.id.clone())
     };
 
     // A 3-point edit with no Out point runs to the end of the media, so the
@@ -574,9 +551,10 @@ pub async fn three_point_insert(
     // two-minute watchdog, so the project lock is released around the reading
     // and taken again to record it; nothing else that touches the project is
     // made to wait on a measurement.
-    let (mut project_guard, warnings) = super::timeline::back_fill_asset_measurements(
+    let (mut project_guard, mut warnings) = super::timeline::back_fill_asset_measurements(
         project_guard,
         &state.project,
+        &expected_project_id,
         std::iter::once(asset_id.as_str()),
         &ffmpeg_state,
     )
@@ -585,6 +563,29 @@ pub async fn three_point_insert(
     let project = project_guard
         .as_mut()
         .ok_or_else(|| "No project open".to_string())?;
+
+    // The track was resolved under a guard that has since been released, and
+    // `track_id` is a plain String that says nothing about whether the track is
+    // still there or still unlocked. The operator can lock it — or delete it,
+    // or the whole sequence — while the probe runs, and a refusal that was
+    // correct to make before the probe is just as correct to make after it. So
+    // resolve again, and refuse in the same words.
+    let resolved_track_id = crate::core::commands::resolve_three_point_track(
+        &project.state,
+        &payload.sequence_id,
+        payload.track_id.as_deref(),
+    )?;
+    if resolved_track_id != track_id {
+        // Only reachable on the auto-detected branch — an explicit track either
+        // resolves to itself or refuses above. The edit is still the one the
+        // operator asked for, but not on the track they were shown, so say so
+        // rather than let the clip appear a track away without explanation.
+        warnings.push(format!(
+            "Track '{track_id}' became unavailable while the asset was read; \
+             the edit was placed on '{resolved_track_id}' instead"
+        ));
+    }
+    let track_id = resolved_track_id;
 
     // Resolve source range (None → use full asset). The default is read for the
     // *target track* by the same helper the insert command applies, so an mp4

@@ -674,6 +674,166 @@ where
     Ok(measurement.warnings)
 }
 
+// =============================================================================
+// Off-lock measurement passes
+// =============================================================================
+
+/// Refusal raised when the open project changed while its assets were probed.
+///
+/// Shared so every surface that releases the project lock for a measurement
+/// reports the same reason, and so a test can pin it without copying a string.
+pub const PROJECT_CHANGED_DURING_PROBE: &str =
+    "The open project changed while its assets were being read";
+
+/// Refuses to record readings against a project the caller never decided about.
+///
+/// The measurement cycle releases the project lock, and the operator can close
+/// project A and open project B in that window. Nothing else catches it: B has
+/// its own ops-log watermark, so the external-change check passes, and an asset
+/// id that exists in both would take an `UpdateAsset` derived from A's path
+/// resolution — appended to B's log behind no plan, no validation and no
+/// approval. So identity is asked first, on the way back in, and asked for
+/// every surface rather than only the one that remembered to.
+pub fn ensure_probed_project_unchanged(
+    state: &ProjectState,
+    expected_project_id: &str,
+) -> Result<(), String> {
+    if state.meta.id != expected_project_id {
+        return Err(PROJECT_CHANGED_DURING_PROBE.to_string());
+    }
+    Ok(())
+}
+
+/// Takes an *owned* copy of the shared FFmpeg runner, holding the read lock
+/// only for as long as the copy takes.
+///
+/// The return type is the whole point: an `Option<&FFmpegRunner>` borrowed from
+/// the guard would keep the guard alive for as long as the caller used the
+/// runner, and tokio's `RwLock` is write-preferring — a single queued
+/// `initialize_shared_ffmpeg` writer would then park every later FFmpeg reader
+/// behind however long the borrower runs. Returning an owned runner makes that
+/// impossible to write by accident rather than merely discouraged.
+async fn ffmpeg_runner_snapshot(
+    ffmpeg_state: &crate::core::ffmpeg::SharedFFmpegState,
+) -> Option<crate::core::ffmpeg::FFmpegRunner> {
+    ffmpeg_state.read().await.runner().cloned()
+}
+
+/// One asset a placement is about to cut from that nothing has measured yet.
+///
+/// Carries the file the collect pass resolved for it, so the probe itself can
+/// run with no project lock held. See [`collect_unmeasured_assets`].
+pub struct UnmeasuredAsset {
+    asset_id: String,
+    /// `None` when the asset resolves to no file on this machine.
+    source_path: Option<PathBuf>,
+}
+
+/// One asset, and what reading it off the lock produced.
+pub struct PendingAssetMeasurement {
+    /// The asset the reading belongs to.
+    pub asset_id: String,
+    /// `None` when no probe was attempted, because the collect pass found no
+    /// file to read. The apply pass still asks [`ensure_asset_measured`], which
+    /// resolves the path itself and names its absence better than this could.
+    pub probed: Option<Result<MediaInfo, String>>,
+}
+
+/// Picks out the assets a placement is about to take a length from unread.
+///
+/// The CLI probes lazily before every placement, so a project imported with
+/// `asset import --no-probe`, or one written before `audioDurationSec` was
+/// recorded, is corrected the first time a clip is cut from it. Nothing in the
+/// app did: it probes on import and never again, so opening such a project in
+/// the GUI and dragging the asset onto the timeline landed a clip of the
+/// default length — the very case the CLI back-fill exists to stop.
+///
+/// This is the first of three passes, and the only one that needs the project.
+/// FFprobe carries a two-minute watchdog, and running it while the project
+/// mutex is held blocks every other project-touching IPC for as long as it
+/// takes — a plan inserting from ten unread assets would hold the app still for
+/// twenty minutes. So the lock is used to *decide* here, dropped, and taken
+/// again only to record the readings. Duplicates are dropped, because a plan
+/// that inserts five clips from one asset should pay for one probe.
+pub fn collect_unmeasured_assets<'a, I>(
+    state: &ProjectState,
+    project_root: &Path,
+    asset_ids: I,
+) -> Vec<UnmeasuredAsset>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut collected: Vec<UnmeasuredAsset> = Vec::new();
+    for asset_id in asset_ids {
+        if collected.iter().any(|target| target.asset_id == asset_id) {
+            continue;
+        }
+        let needs_measurement = state
+            .assets
+            .get(asset_id)
+            .is_some_and(asset_needs_measurement);
+        if !needs_measurement {
+            continue;
+        }
+        collected.push(UnmeasuredAsset {
+            asset_id: asset_id.to_string(),
+            source_path: asset_source_path(state, project_root, asset_id),
+        });
+    }
+
+    collected
+}
+
+/// Reads each collected file. Must run with no project lock held.
+///
+/// FFprobe runs on the app's own `FFmpegRunner` rather than on a runtime of its
+/// own, which is why the probe is taken here and handed to
+/// [`ensure_asset_measured`] rather than being called from inside it. A probe
+/// that cannot run is carried as its reason rather than raised: the placement
+/// it precedes is still valid, it just takes the default length, and failing
+/// the edit over the measurement would be worse than the length.
+///
+/// The runner is *cloned* out of the shared FFmpeg state by
+/// [`ffmpeg_runner_snapshot`] and the read guard dropped before the first probe
+/// runs. Holding the guard across the batch would be as bad as holding the
+/// project lock: tokio's `RwLock` is write-preferring, so one queued
+/// `initialize_shared_ffmpeg` writer parks every later reader behind a batch
+/// that can take two minutes per asset.
+pub async fn probe_unmeasured_assets(
+    targets: Vec<UnmeasuredAsset>,
+    ffmpeg_state: &crate::core::ffmpeg::SharedFFmpegState,
+) -> Vec<PendingAssetMeasurement> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+
+    let runner = ffmpeg_runner_snapshot(ffmpeg_state).await;
+
+    let mut measurements = Vec::with_capacity(targets.len());
+    for target in targets {
+        let probed = match (&target.source_path, runner.as_ref()) {
+            (Some(source_path), Some(runner)) => {
+                Some(runner.probe(source_path).await.map_err(|error| {
+                    format!(
+                        "FFprobe could not read '{}': {error}",
+                        source_path.display()
+                    )
+                }))
+            }
+            (Some(_), None) => Some(Err(
+                "FFmpeg could not be resolved, so the asset was not re-probed".to_string(),
+            )),
+            (None, _) => None,
+        };
+        measurements.push(PendingAssetMeasurement {
+            asset_id: target.asset_id,
+            probed,
+        });
+    }
+
+    measurements
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1343,5 +1503,220 @@ mod tests {
                 "{accepted} must be accepted"
             );
         }
+    }
+
+    // =========================================================================
+    // Off-lock measurement passes
+    // =========================================================================
+
+    /// A project holding one asset nothing has read, backed by a real file.
+    fn state_with_unmeasured_asset(root: &Path) -> (ProjectState, String) {
+        let mut state = ProjectState::new("Unmeasured Test");
+        let media = root.join("clip.mp4");
+        std::fs::write(&media, b"not really an mp4").expect("the fixture file must be written");
+
+        let asset = Asset::new_video("clip.mp4", &media.to_string_lossy(), VideoInfo::default());
+        assert!(
+            asset_needs_measurement(&asset),
+            "an asset with no probe marker is what this pass exists to find"
+        );
+        let asset_id = asset.id.clone();
+        state.assets.insert(asset_id.clone(), asset);
+        (state, asset_id)
+    }
+
+    /// Feature: reading a placement's asset off the project lock
+    /// Scenario: the same unread asset is placed five times in one plan
+    ///   Given a plan that inserts five clips cut from one unread asset
+    ///   When the collect pass picks out what has to be read
+    ///   Then the asset is listed once, with the file it resolves to
+    ///
+    /// Each probe carries a two-minute watchdog, so a repeated asset costing a
+    /// probe apiece is the difference between one wait and five.
+    #[test]
+    fn should_list_a_repeated_asset_once() {
+        let dir = tempfile::tempdir().expect("a temp project root");
+        let (state, asset_id) = state_with_unmeasured_asset(dir.path());
+
+        let targets = collect_unmeasured_assets(
+            &state,
+            dir.path(),
+            std::iter::repeat_n(asset_id.as_str(), 5),
+        );
+
+        assert_eq!(targets.len(), 1, "one asset is one probe");
+        assert_eq!(targets[0].asset_id, asset_id);
+        assert_eq!(
+            targets[0].source_path,
+            Some(dir.path().join("clip.mp4")),
+            "the path is resolved under the lock, so the probe needs none"
+        );
+    }
+
+    /// An asset already read under the current rules, a still (which has no
+    /// length to measure), and an id the project does not hold are all left
+    /// alone — so the ordinary edit, where everything is measured, releases no
+    /// lock and pays for no probe.
+    #[test]
+    fn should_list_nothing_when_every_named_asset_is_already_measured() {
+        let dir = tempfile::tempdir().expect("a temp project root");
+        let (mut state, measured_id) = state_with_unmeasured_asset(dir.path());
+        state
+            .assets
+            .get_mut(&measured_id)
+            .expect("the fixture asset")
+            .probe_version = Some(ASSET_PROBE_VERSION);
+
+        let still = Asset::new_image("frame.png", "/nowhere/frame.png", 1920, 1080);
+        let still_id = still.id.clone();
+        state.assets.insert(still_id.clone(), still);
+
+        let targets = collect_unmeasured_assets(
+            &state,
+            dir.path(),
+            [measured_id.as_str(), still_id.as_str(), "no-such-asset"],
+        );
+
+        assert!(
+            targets.is_empty(),
+            "nothing to read means the caller never releases the project lock"
+        );
+    }
+
+    /// An asset whose file is gone is still listed, carrying no path: the
+    /// placement is not refused over a missing measurement, and the apply pass
+    /// names the absence better than the collect pass could.
+    #[test]
+    fn should_list_an_unmeasured_asset_whose_file_is_missing_with_no_path() {
+        let dir = tempfile::tempdir().expect("a temp project root");
+        let mut state = ProjectState::new("Missing File Test");
+        let asset = Asset::new_video("gone.mp4", "/nowhere/gone.mp4", VideoInfo::default());
+        let asset_id = asset.id.clone();
+        state.assets.insert(asset_id.clone(), asset);
+
+        let targets = collect_unmeasured_assets(&state, dir.path(), [asset_id.as_str()]);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].source_path, None);
+    }
+
+    /// Feature: readings are recorded against the project they were decided for
+    /// Scenario: the operator swaps projects while the assets are read
+    ///   Given a caller that decided what to probe against project A
+    ///   When project B is open by the time the readings come back
+    ///   Then recording them is refused
+    ///
+    /// B has its own ops-log watermark, so the external-change check passes,
+    /// and an asset id both projects hold would take an `UpdateAsset` derived
+    /// from A's paths — appended to B's log behind nothing at all.
+    #[test]
+    fn should_refuse_to_record_readings_against_a_project_that_was_swapped() {
+        let decided_against = ProjectState::new("Project A");
+        let now_open = ProjectState::new("Project B");
+        assert_ne!(
+            decided_against.meta.id, now_open.meta.id,
+            "two projects are two identities"
+        );
+
+        assert_eq!(
+            ensure_probed_project_unchanged(&decided_against, &decided_against.meta.id),
+            Ok(()),
+            "the ordinary path is the same project coming back"
+        );
+        assert_eq!(
+            ensure_probed_project_unchanged(&now_open, &decided_against.meta.id),
+            Err(PROJECT_CHANGED_DURING_PROBE.to_string())
+        );
+    }
+
+    /// Feature: the probe batch must not park FFmpeg's other readers
+    /// Scenario: the runner is taken out of the shared state
+    ///   Given the shared FFmpeg state
+    ///   When the batch takes the runner it is about to probe with
+    ///   Then the read lock is already free
+    ///
+    /// The batch used to hold this guard for its whole run, because the runner
+    /// was borrowed from it. Tokio's `RwLock` is write-preferring, so one
+    /// queued `initialize_shared_ffmpeg` writer then parked every later FFmpeg
+    /// reader behind a batch that can take two minutes per asset. The owned
+    /// return type is what makes that unwritable; this pins the behaviour.
+    #[tokio::test]
+    async fn should_release_the_ffmpeg_read_lock_when_the_runner_is_taken() {
+        let ffmpeg_state = crate::core::ffmpeg::create_ffmpeg_state();
+
+        let runner = ffmpeg_runner_snapshot(&ffmpeg_state).await;
+
+        assert!(runner.is_none(), "nothing initialised this state");
+        assert!(
+            ffmpeg_state.try_write().is_ok(),
+            "a writer must not be made to wait on the batch that follows"
+        );
+    }
+
+    /// Feature: reading a placement's asset off the project lock
+    /// Scenario: FFmpeg could not be resolved on this machine
+    ///   Given a batch of one asset with a file and one without
+    ///   When the probe pass runs with no runner available
+    ///   Then each asset comes back in order, the one with a file carrying the
+    ///   reason it was not read and the one without carrying no attempt
+    ///
+    /// A probe that cannot run must not fail the edit: the placement is still
+    /// valid, it just takes the default length.
+    #[tokio::test]
+    async fn should_carry_an_unresolvable_ffmpeg_as_a_reason_rather_than_a_failure() {
+        let ffmpeg_state = crate::core::ffmpeg::create_ffmpeg_state();
+        let targets = vec![
+            UnmeasuredAsset {
+                asset_id: "with-file".to_string(),
+                source_path: Some(PathBuf::from("/nowhere/clip.mp4")),
+            },
+            UnmeasuredAsset {
+                asset_id: "without-file".to_string(),
+                source_path: None,
+            },
+        ];
+
+        let measurements = probe_unmeasured_assets(targets, &ffmpeg_state).await;
+
+        assert_eq!(
+            measurements
+                .iter()
+                .map(|measurement| measurement.asset_id.as_str())
+                .collect::<Vec<_>>(),
+            ["with-file", "without-file"],
+            "every asset comes back, in the order it was collected"
+        );
+        let reason = measurements[0]
+            .probed
+            .as_ref()
+            .expect("a file was there to read")
+            .as_ref()
+            .expect_err("no runner could read it");
+        assert!(
+            reason.contains("FFmpeg could not be resolved"),
+            "unexpected reason: {reason}"
+        );
+        assert!(
+            measurements[1].probed.is_none(),
+            "no file means no probe was attempted"
+        );
+        assert!(
+            ffmpeg_state.try_write().is_ok(),
+            "the batch leaves no reader behind"
+        );
+    }
+
+    /// Nothing to read is the ordinary case, and it must not even touch the
+    /// FFmpeg lock — the caller has not released the project lock for it, so a
+    /// writer holding the FFmpeg state cannot stall it.
+    #[tokio::test]
+    async fn should_probe_nothing_when_no_asset_needs_reading() {
+        let ffmpeg_state = crate::core::ffmpeg::create_ffmpeg_state();
+        let held = ffmpeg_state.write().await;
+
+        let measurements = probe_unmeasured_assets(Vec::new(), &ffmpeg_state).await;
+
+        assert!(measurements.is_empty());
+        drop(held);
     }
 }

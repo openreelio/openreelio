@@ -9,11 +9,12 @@ use tauri::State;
 use crate::core::{
     analysis::ducking::{generate_duck_keyframes, AudioDuckingParams, SpeechRegion},
     commands::{
-        infer_sequence_id, payload_string, ApplyAudioDuckingCommand, CommandResult,
-        CreateAdjustmentLayerCommand, CreateCompoundClipCommand, CreateSequenceCommand,
-        EditRecording, RecordSource, UnnestCompoundClipCommand,
+        collect_unmeasured_assets, ensure_asset_measured, ensure_probed_project_unchanged,
+        infer_sequence_id, payload_string, probe_unmeasured_assets, ApplyAudioDuckingCommand,
+        CommandResult, CreateAdjustmentLayerCommand, CreateCompoundClipCommand,
+        CreateSequenceCommand, EditRecording, PendingAssetMeasurement, RecordSource,
+        UnnestCompoundClipCommand,
     },
-    ffmpeg::MediaInfo,
     timeline::Sequence,
     CoreError, TimeRange,
 };
@@ -82,116 +83,6 @@ fn execute_recorded(
     Ok((result, ranges))
 }
 
-/// One asset a placement is about to cut from that nothing has measured yet.
-///
-/// Carries the file the collect pass resolved for it, so the probe itself can
-/// run with no project lock held. See [`collect_unmeasured_assets`].
-pub(crate) struct UnmeasuredAsset {
-    asset_id: String,
-    /// `None` when the asset resolves to no file on this machine.
-    source_path: Option<std::path::PathBuf>,
-}
-
-/// One asset, and what reading it off the lock produced.
-pub(crate) struct PendingAssetMeasurement {
-    asset_id: String,
-    /// `None` when no probe was attempted, because the collect pass found no
-    /// file to read. The apply pass still asks the shared helper, which
-    /// resolves the path itself and names its absence better than this could.
-    probed: Option<Result<MediaInfo, String>>,
-}
-
-/// Picks out the assets a placement is about to take a length from unread.
-///
-/// The CLI probes lazily before every placement, so a project imported with
-/// `asset import --no-probe`, or one written before `audioDurationSec` was
-/// recorded, is corrected the first time a clip is cut from it. Nothing in the
-/// app did: it probes on import and never again, so opening such a project in
-/// the GUI and dragging the asset onto the timeline landed a clip of the
-/// default length — the very case the CLI back-fill exists to stop.
-///
-/// This is the first of three passes, and the only one that needs the project.
-/// FFprobe carries a two-minute watchdog, and running it while the project
-/// mutex is held blocks every other project-touching IPC for as long as it
-/// takes — a plan inserting from ten unread assets would hold the app still for
-/// twenty minutes. So the lock is used to *decide* here, dropped, and taken
-/// again only to record the readings. Duplicates are dropped, because a plan
-/// that inserts five clips from one asset should pay for one probe.
-pub(crate) fn collect_unmeasured_assets<'a, I>(
-    project: &ActiveProject,
-    asset_ids: I,
-) -> Vec<UnmeasuredAsset>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    use crate::core::commands::{asset_needs_measurement, asset_source_path};
-
-    let mut collected: Vec<UnmeasuredAsset> = Vec::new();
-    for asset_id in asset_ids {
-        if collected.iter().any(|target| target.asset_id == asset_id) {
-            continue;
-        }
-        let needs_measurement = project
-            .state
-            .assets
-            .get(asset_id)
-            .is_some_and(asset_needs_measurement);
-        if !needs_measurement {
-            continue;
-        }
-        collected.push(UnmeasuredAsset {
-            asset_id: asset_id.to_string(),
-            source_path: asset_source_path(&project.state, &project.path, asset_id),
-        });
-    }
-
-    collected
-}
-
-/// Reads each collected file. Must run with no project lock held.
-///
-/// FFprobe runs on the app's own `FFmpegRunner` rather than on a runtime of its
-/// own, which is why the probe is taken here and handed to the shared helper
-/// rather than being called from inside it. A probe that cannot run is carried
-/// as its reason rather than raised: the placement it precedes is still valid,
-/// it just takes the default length, and failing the edit over the measurement
-/// would be worse than the length.
-pub(crate) async fn probe_unmeasured_assets(
-    targets: Vec<UnmeasuredAsset>,
-    ffmpeg_state: &State<'_, crate::core::ffmpeg::SharedFFmpegState>,
-) -> Vec<PendingAssetMeasurement> {
-    if targets.is_empty() {
-        return Vec::new();
-    }
-
-    let ffmpeg_guard = ffmpeg_state.read().await;
-    let runner = ffmpeg_guard.runner();
-
-    let mut measurements = Vec::with_capacity(targets.len());
-    for target in targets {
-        let probed = match (&target.source_path, runner) {
-            (Some(source_path), Some(runner)) => {
-                Some(runner.probe(source_path).await.map_err(|error| {
-                    format!(
-                        "FFprobe could not read '{}': {error}",
-                        source_path.display()
-                    )
-                }))
-            }
-            (Some(_), None) => Some(Err(
-                "FFmpeg could not be resolved, so the asset was not re-probed".to_string(),
-            )),
-            (None, _) => None,
-        };
-        measurements.push(PendingAssetMeasurement {
-            asset_id: target.asset_id,
-            probed,
-        });
-    }
-
-    measurements
-}
-
 /// Records the readings the off-lock pass took, under the project lock again.
 ///
 /// Recorded through the shared
@@ -209,8 +100,6 @@ pub(crate) fn apply_asset_measurements(
     project: &mut ActiveProject,
     measurements: Vec<PendingAssetMeasurement>,
 ) -> Vec<String> {
-    use crate::core::commands::ensure_asset_measured;
-
     let mut warnings = Vec::new();
     for measurement in measurements {
         let asset_id = measurement.asset_id;
@@ -248,7 +137,17 @@ pub(crate) fn apply_asset_measurements(
 /// and a fresh one handed back, so the compiler — rather than a comment —
 /// enforces that no probe runs while the project is held.
 ///
-/// `Err` only when the project went away while the lock was released, or when
+/// `expected_project_id` is the `meta.id` the caller decided against under the
+/// first guard. The operator can close that project and open another one while
+/// the probes run, and a different project can hold an asset of the same id —
+/// `ensure_no_external_changes` would pass, against the *new* project's own
+/// watermark, and this pass would append an `UpdateAsset` derived from the old
+/// project's path resolution to a log no caller ever judged. So identity is
+/// re-checked here, before anything is applied, for every surface rather than
+/// only the one that remembered to.
+///
+/// `Err` only when the project went away while the lock was released, when the
+/// open project is no longer the one the caller decided against, or when
 /// another process appended to the ops log in the same window; the caller
 /// surfaces that the way it surfaces any other refusal to append. The guard is
 /// lost with the error, which is what every such caller wants: there is no
@@ -256,8 +155,9 @@ pub(crate) fn apply_asset_measurements(
 pub(crate) async fn back_fill_asset_measurements<'guard, 'a, I>(
     guard: tokio::sync::MutexGuard<'guard, Option<ActiveProject>>,
     project_mutex: &'guard tokio::sync::Mutex<Option<ActiveProject>>,
+    expected_project_id: &str,
     asset_ids: I,
-    ffmpeg_state: &State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    ffmpeg_state: &crate::core::ffmpeg::SharedFFmpegState,
 ) -> Result<
     (
         tokio::sync::MutexGuard<'guard, Option<ActiveProject>>,
@@ -271,7 +171,7 @@ where
     let project = guard
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-    let targets = collect_unmeasured_assets(project, asset_ids);
+    let targets = collect_unmeasured_assets(&project.state, &project.path, asset_ids);
     if targets.is_empty() {
         return Ok((guard, Vec::new()));
     }
@@ -285,6 +185,10 @@ where
     let project = guard
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    // A *different* project may be open now, and `ensure_no_external_changes`
+    // would happily pass against its watermark. Identity first, so nothing is
+    // written to a project the caller never decided against.
+    ensure_probed_project_unchanged(&project.state, expected_project_id)?;
     // The project may have moved on while the probe ran; the same refusal the
     // caller made before releasing the lock applies again on the way back in.
     project
@@ -433,7 +337,7 @@ pub async fn execute_command(
 
     let mut guard = state.project.lock().await;
 
-    let typed_command = {
+    let (typed_command, expected_project_id) = {
         let project = guard
             .as_ref()
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
@@ -461,7 +365,7 @@ pub async fn execute_command(
             &project.state,
         )?;
 
-        typed_command
+        (typed_command, project.state.meta.id.clone())
     };
 
     // A command that resolves the active sequence itself — `SetSequenceFormat`
@@ -483,11 +387,29 @@ pub async fn execute_command(
         let (reacquired, _warnings) = back_fill_asset_measurements(
             guard,
             &state.project,
+            &expected_project_id,
             std::iter::once(asset_id.as_str()),
             &ffmpeg_state,
         )
         .await?;
         guard = reacquired;
+
+        // The payload was judged against the state held under the *first*
+        // guard, and the back-fill released it. Judge it again against the
+        // state it is about to execute against, so the validator's verdict is
+        // never older than the state it was a verdict about. Today every
+        // command that gets here takes the validator's catch-all arm, which is
+        // exactly why this is worth spending: the day a placement gains a
+        // project-state arm, that arm is already correct rather than silently
+        // evaluated against a stale snapshot.
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        validate_command_payload_against_project_state(
+            &command_type_for_log,
+            &typed_command,
+            &project.state,
+        )?;
     }
 
     let project = guard

@@ -556,27 +556,30 @@ pub async fn execute_agent_plan(
     // project lock is released around the probes — FFprobe's watchdog is two
     // minutes each, and a plan inserting from several unread assets would
     // otherwise hold every other IPC still for as many minutes.
-    let (mut guard, _warnings) = super::timeline::back_fill_asset_measurements(
+    //
+    // The approval token has already been consumed at this point, so a failure
+    // here has to answer in the shape the caller models — a failed
+    // `AgentPlanResult`, like every other post-approval refusal in this command
+    // — rather than as a raw `Err`. The back-fill can refuse because no project
+    // is open, because another process appended to the ops log, or because the
+    // project the approval was granted against is no longer the open one: it is
+    // handed `approved_project_id` and enforces that identity itself, before it
+    // writes anything.
+    let back_filled = super::timeline::back_fill_asset_measurements(
         guard,
         &state.project,
+        &approved_project_id,
         measurement_targets.iter().map(String::as_str),
         &ffmpeg_state,
     )
-    .await?;
+    .await;
+    let (mut guard, _warnings) = match back_filled {
+        Ok(back_filled) => back_filled,
+        Err(error) => return Ok(build_agent_plan_failure(plan_id, total_steps, start, error)),
+    };
     let project = guard
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-    // The approval was granted against one project; the lock was released while
-    // the probes ran, so make sure it is still that project before the plan is
-    // applied to it.
-    if project.state.meta.id != approved_project_id {
-        return Ok(build_agent_plan_failure(
-            plan_id,
-            total_steps,
-            start,
-            "The open project changed while the plan's assets were being read",
-        ));
-    }
 
     let reporter = TauriPlanStepReporter { app: &app };
     Ok(execute_prepared_plan(

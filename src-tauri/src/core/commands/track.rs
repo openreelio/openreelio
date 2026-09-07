@@ -981,6 +981,57 @@ impl Command for ToggleTrackVisibilityCommand {
 }
 
 // =============================================================================
+// Track resolution
+// =============================================================================
+
+/// Resolves the track a 3-point edit lands on, and refuses if it cannot.
+///
+/// A named `requested_track_id` is honoured when it exists and is unlocked;
+/// otherwise the first unlocked video track of the sequence is taken.
+///
+/// It lives here, apart from the IPC command that asks it, because it has to be
+/// answered *twice*. The project lock is released while the source asset is
+/// probed — FFprobe carries a two-minute watchdog — and a track that was
+/// unlocked when the edit was accepted can be locked, or deleted with its whole
+/// sequence, before the command is built. The resolved `TrackId` is a plain
+/// `String` and carries none of that, so the question is asked again against
+/// the state the edit actually executes against.
+///
+/// The refusals are `String` rather than [`CoreError`] because they are the
+/// operator-facing lines the source monitor already answered with, and the
+/// wording is what the frontend matches on.
+pub fn resolve_three_point_track(
+    state: &ProjectState,
+    sequence_id: &str,
+    requested_track_id: Option<&str>,
+) -> Result<TrackId, String> {
+    let sequence = state
+        .sequences
+        .get(sequence_id)
+        .ok_or_else(|| format!("Sequence '{}' not found", sequence_id))?;
+
+    match requested_track_id {
+        Some(id) => {
+            let track = sequence
+                .tracks
+                .iter()
+                .find(|track| track.id == id)
+                .ok_or_else(|| format!("Track '{}' not found", id))?;
+            if track.locked {
+                return Err(format!("Track '{}' is locked", id));
+            }
+            Ok(id.to_string())
+        }
+        None => sequence
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video && !track.locked)
+            .map(|track| track.id.clone())
+            .ok_or_else(|| "No unlocked video track available".to_string()),
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -1340,5 +1391,134 @@ mod tests {
         toggle_cmd.undo(&mut state).unwrap();
         let track = &state.sequences[&seq_id].tracks[0];
         assert!(track.visible);
+    }
+
+    // =========================================================================
+    // resolve_three_point_track
+    // =========================================================================
+
+    /// A sequence carrying V1, V2 and A1, with every track unlocked.
+    fn state_with_three_tracks() -> (ProjectState, String, Vec<String>) {
+        let mut state = create_test_state();
+        let sequence_id = state
+            .active_sequence_id
+            .clone()
+            .expect("the fixture sequence is active");
+
+        let mut track_ids = Vec::new();
+        for (name, kind) in [
+            ("V1", TrackKind::Video),
+            ("V2", TrackKind::Video),
+            ("A1", TrackKind::Audio),
+        ] {
+            let mut add = AddTrackCommand::new(&sequence_id, name, kind);
+            track_ids.push(
+                add.execute(&mut state)
+                    .expect("the track must be added")
+                    .created_ids
+                    .first()
+                    .cloned()
+                    .expect("AddTrack reports its track"),
+            );
+        }
+
+        (state, sequence_id, track_ids)
+    }
+
+    fn lock_track(state: &mut ProjectState, sequence_id: &str, track_id: &str) {
+        state
+            .sequences
+            .get_mut(sequence_id)
+            .expect("the fixture sequence")
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .expect("the fixture track")
+            .locked = true;
+    }
+
+    /// Feature: a 3-point edit re-checks its track after the source is probed
+    /// Scenario: the named track is locked while the asset is read
+    ///   Given a 3-point edit accepted against an unlocked V1
+    ///   When the operator locks V1 while the project lock is released
+    ///   Then resolving again refuses in the words the first pass would have
+    ///
+    /// The resolved id is a plain `String` and outlives the guard it was
+    /// resolved under, so without the second question a locked track took the
+    /// edit anyway.
+    #[test]
+    fn should_refuse_a_named_track_that_was_locked_after_it_was_resolved() {
+        let (mut state, sequence_id, track_ids) = state_with_three_tracks();
+        let named = track_ids[0].clone();
+        assert_eq!(
+            resolve_three_point_track(&state, &sequence_id, Some(&named)),
+            Ok(named.clone()),
+            "the track is the operator's while it is unlocked"
+        );
+
+        lock_track(&mut state, &sequence_id, &named);
+
+        assert_eq!(
+            resolve_three_point_track(&state, &sequence_id, Some(&named)),
+            Err(format!("Track '{named}' is locked"))
+        );
+    }
+
+    /// The auto-detected branch answers the same question again rather than
+    /// trusting its earlier answer: V1 having been locked, the edit lands on
+    /// the next unlocked video track instead of on a locked one.
+    #[test]
+    fn should_pick_the_next_unlocked_video_track_when_the_detected_one_is_locked() {
+        let (mut state, sequence_id, track_ids) = state_with_three_tracks();
+        assert_eq!(
+            resolve_three_point_track(&state, &sequence_id, None),
+            Ok(track_ids[0].clone()),
+            "the first unlocked video track is taken"
+        );
+
+        lock_track(&mut state, &sequence_id, &track_ids[0]);
+
+        assert_eq!(
+            resolve_three_point_track(&state, &sequence_id, None),
+            Ok(track_ids[1].clone())
+        );
+    }
+
+    /// An audio track is never auto-detected, so locking every video track
+    /// refuses rather than quietly placing pictures on A1.
+    #[test]
+    fn should_refuse_when_every_video_track_is_locked() {
+        let (mut state, sequence_id, track_ids) = state_with_three_tracks();
+        lock_track(&mut state, &sequence_id, &track_ids[0]);
+        lock_track(&mut state, &sequence_id, &track_ids[1]);
+
+        assert_eq!(
+            resolve_three_point_track(&state, &sequence_id, None),
+            Err("No unlocked video track available".to_string())
+        );
+    }
+
+    /// A track deleted while the asset was read is refused by name, and a
+    /// sequence deleted with it is refused before any track is looked at.
+    #[test]
+    fn should_refuse_a_track_or_sequence_that_went_away() {
+        let (mut state, sequence_id, track_ids) = state_with_three_tracks();
+        let named = track_ids[0].clone();
+
+        let mut remove = RemoveTrackCommand::new(&sequence_id, &named);
+        remove
+            .execute(&mut state)
+            .expect("the track must be removed");
+
+        assert_eq!(
+            resolve_three_point_track(&state, &sequence_id, Some(&named)),
+            Err(format!("Track '{named}' not found"))
+        );
+
+        state.sequences.remove(&sequence_id);
+        assert_eq!(
+            resolve_three_point_track(&state, &sequence_id, Some(&named)),
+            Err(format!("Sequence '{sequence_id}' not found"))
+        );
     }
 }
