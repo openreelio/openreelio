@@ -855,7 +855,7 @@ pub async fn apply_edit_script(
                 .map(str::to_string)
         })
         .collect();
-    let (mut guard, _measurement_warnings) = super::timeline::back_fill_asset_measurements(
+    let (mut guard, _back_filled) = crate::core::commands::back_fill_asset_measurements(
         guard,
         &state.project,
         &expected_project_id,

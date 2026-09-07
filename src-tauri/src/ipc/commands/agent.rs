@@ -565,7 +565,7 @@ pub async fn execute_agent_plan(
     // project the approval was granted against is no longer the open one: it is
     // handed `approved_project_id` and enforces that identity itself, before it
     // writes anything.
-    let back_filled = super::timeline::back_fill_asset_measurements(
+    let back_filled = crate::core::commands::back_fill_asset_measurements(
         guard,
         &state.project,
         &approved_project_id,
@@ -573,7 +573,7 @@ pub async fn execute_agent_plan(
         &ffmpeg_state,
     )
     .await;
-    let (mut guard, _warnings) = match back_filled {
+    let (mut guard, _back_filled) = match back_filled {
         Ok(back_filled) => back_filled,
         Err(error) => return Ok(build_agent_plan_failure(plan_id, total_steps, start, error)),
     };

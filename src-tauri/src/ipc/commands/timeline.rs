@@ -9,11 +9,9 @@ use tauri::State;
 use crate::core::{
     analysis::ducking::{generate_duck_keyframes, AudioDuckingParams, SpeechRegion},
     commands::{
-        collect_unmeasured_assets, ensure_asset_measured, ensure_probed_project_unchanged,
-        infer_sequence_id, payload_string, probe_unmeasured_assets, ApplyAudioDuckingCommand,
+        back_fill_asset_measurements, infer_sequence_id, payload_string, ApplyAudioDuckingCommand,
         CommandResult, CreateAdjustmentLayerCommand, CreateCompoundClipCommand,
-        CreateSequenceCommand, EditRecording, PendingAssetMeasurement, RecordSource,
-        UnnestCompoundClipCommand,
+        CreateSequenceCommand, EditRecording, RecordSource, UnnestCompoundClipCommand,
     },
     timeline::Sequence,
     CoreError, TimeRange,
@@ -81,122 +79,6 @@ fn execute_recorded(
     let ranges = recording.finish(&project.path, &project.state);
 
     Ok((result, ranges))
-}
-
-/// Records the readings the off-lock pass took, under the project lock again.
-///
-/// Recorded through the shared
-/// [`ensure_asset_measured`](crate::core::commands::ensure_asset_measured), so
-/// the app logs the same `UpdateAsset` op for the same file as the CLI. That
-/// helper re-checks whether the asset still needs measuring, so re-taking the
-/// lock is idempotent: an asset another caller measured in the gap is left
-/// alone.
-///
-/// Never an error. Every warning is logged here, and the same lines are
-/// returned so a surface that *does* have a channel to report on —
-/// `three_point_insert` answers with `warnings[]` — can hand them to the caller
-/// instead of leaving "why is this clip ten seconds" in a log file.
-pub(crate) fn apply_asset_measurements(
-    project: &mut ActiveProject,
-    measurements: Vec<PendingAssetMeasurement>,
-) -> Vec<String> {
-    let mut warnings = Vec::new();
-    for measurement in measurements {
-        let asset_id = measurement.asset_id;
-        let probed = measurement.probed;
-        let recorded = ensure_asset_measured(project, &asset_id, move |source_path| {
-            // Reached only when the file appeared between the collect pass and
-            // this one — the helper resolves the path itself, and skips this
-            // closure entirely when it still resolves to nothing.
-            probed.unwrap_or_else(|| {
-                Err(format!(
-                    "'{}' was not read before this edit",
-                    source_path.display()
-                ))
-            })
-        });
-        let recorded = match recorded {
-            Ok(recorded) => recorded,
-            Err(error) => vec![format!(
-                "Recording the probed asset duration failed: {error}"
-            )],
-        };
-        for warning in &recorded {
-            tracing::warn!(asset_id = %asset_id, "{warning}");
-        }
-        warnings.extend(recorded);
-    }
-
-    warnings
-}
-
-/// Reads the assets a caller is about to place from, off the project lock.
-///
-/// The whole three-pass cycle for a caller holding the project lock: collect
-/// under it, *release* it, probe, take it again. The guard is taken by value
-/// and a fresh one handed back, so the compiler — rather than a comment —
-/// enforces that no probe runs while the project is held.
-///
-/// `expected_project_id` is the `meta.id` the caller decided against under the
-/// first guard. The operator can close that project and open another one while
-/// the probes run, and a different project can hold an asset of the same id —
-/// `ensure_no_external_changes` would pass, against the *new* project's own
-/// watermark, and this pass would append an `UpdateAsset` derived from the old
-/// project's path resolution to a log no caller ever judged. So identity is
-/// re-checked here, before anything is applied, for every surface rather than
-/// only the one that remembered to.
-///
-/// `Err` only when the project went away while the lock was released, when the
-/// open project is no longer the one the caller decided against, or when
-/// another process appended to the ops log in the same window; the caller
-/// surfaces that the way it surfaces any other refusal to append. The guard is
-/// lost with the error, which is what every such caller wants: there is no
-/// project left to go on editing.
-pub(crate) async fn back_fill_asset_measurements<'guard, 'a, I>(
-    guard: tokio::sync::MutexGuard<'guard, Option<ActiveProject>>,
-    project_mutex: &'guard tokio::sync::Mutex<Option<ActiveProject>>,
-    expected_project_id: &str,
-    asset_ids: I,
-    ffmpeg_state: &crate::core::ffmpeg::SharedFFmpegState,
-) -> Result<
-    (
-        tokio::sync::MutexGuard<'guard, Option<ActiveProject>>,
-        Vec<String>,
-    ),
-    String,
->
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let project = guard
-        .as_ref()
-        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-    let targets = collect_unmeasured_assets(&project.state, &project.path, asset_ids);
-    if targets.is_empty() {
-        return Ok((guard, Vec::new()));
-    }
-
-    // Every FFprobe below carries a two-minute watchdog. Nothing else that
-    // touches the project may be made to wait on it.
-    drop(guard);
-    let measurements = probe_unmeasured_assets(targets, ffmpeg_state).await;
-
-    let mut guard = project_mutex.lock().await;
-    let project = guard
-        .as_mut()
-        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-    // A *different* project may be open now, and `ensure_no_external_changes`
-    // would happily pass against its watermark. Identity first, so nothing is
-    // written to a project the caller never decided against.
-    ensure_probed_project_unchanged(&project.state, expected_project_id)?;
-    // The project may have moved on while the probe ran; the same refusal the
-    // caller made before releasing the lock applies again on the way back in.
-    project
-        .ensure_no_external_changes()
-        .map_err(|e| e.to_ipc_error())?;
-
-    let warnings = apply_asset_measurements(project, measurements);
-    Ok((guard, warnings))
 }
 
 impl CommandResultDto {
@@ -384,7 +266,7 @@ pub async fn execute_command(
         // `execute_command` answers with a `CommandResultDto` and has no
         // channel to report warnings on, so the helper's logging is the whole
         // report here.
-        let (reacquired, _warnings) = back_fill_asset_measurements(
+        let (reacquired, back_filled) = back_fill_asset_measurements(
             guard,
             &state.project,
             &expected_project_id,
@@ -395,21 +277,27 @@ pub async fn execute_command(
         guard = reacquired;
 
         // The payload was judged against the state held under the *first*
-        // guard, and the back-fill released it. Judge it again against the
-        // state it is about to execute against, so the validator's verdict is
-        // never older than the state it was a verdict about. Today every
-        // command that gets here takes the validator's catch-all arm, which is
-        // exactly why this is worth spending: the day a placement gains a
-        // project-state arm, that arm is already correct rather than silently
-        // evaluated against a stale snapshot.
-        let project = guard
-            .as_ref()
-            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-        validate_command_payload_against_project_state(
-            &command_type_for_log,
-            &typed_command,
-            &project.state,
-        )?;
+        // guard. If the back-fill released it, judge it again against the state
+        // it is about to execute against, so the validator's verdict is never
+        // older than the state it was a verdict about. Today every command that
+        // gets here takes the validator's catch-all arm, which is exactly why
+        // this is worth spending: the day a placement gains a project-state
+        // arm, that arm is already correct rather than silently evaluated
+        // against a stale snapshot.
+        //
+        // Gated on the release, because a placement from an already-measured
+        // asset — the common case — never lets the guard go, and re-judging
+        // state that provably has not changed is pure cost on every insert.
+        if back_filled.released_lock {
+            let project = guard
+                .as_ref()
+                .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+            validate_command_payload_against_project_state(
+                &command_type_for_log,
+                &typed_command,
+                &project.state,
+            )?;
+        }
     }
 
     let project = guard

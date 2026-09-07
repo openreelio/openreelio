@@ -733,10 +733,57 @@ pub struct UnmeasuredAsset {
 pub struct PendingAssetMeasurement {
     /// The asset the reading belongs to.
     pub asset_id: String,
+    /// The file the reading was taken from, as the collect pass resolved it.
+    ///
+    /// Carried so the apply pass can tell whether it is still the same file —
+    /// see [`reading_for_resolved_path`]. `None` when the collect pass found no
+    /// file at all, which is also when `probed` is `None`.
+    pub source_path: Option<PathBuf>,
     /// `None` when no probe was attempted, because the collect pass found no
     /// file to read. The apply pass still asks [`ensure_asset_measured`], which
     /// resolves the path itself and names its absence better than this could.
     pub probed: Option<Result<MediaInfo, String>>,
+}
+
+/// The reading to record for the file the apply pass resolved, or why not.
+///
+/// The probe runs with the project lock released, and an `UpdateAsset` or a
+/// relink can move the asset's `uri` in that window — up to two minutes of it.
+/// The apply pass re-resolves the path, but the reading in hand was taken from
+/// whatever the *collect* pass resolved, so handing it over regardless would
+/// commit the old file's duration, codec and dimensions against the new uri and
+/// stamp the probe marker so nothing ever re-reads it: a wrong length, cut from
+/// the wrong file, permanently.
+///
+/// So the two paths are compared, and a reading taken from a different file is
+/// discarded. That downgrades the race to the warning-and-default-length this
+/// path already takes for every other unreadable case, which the next placement
+/// then corrects by probing the file that is actually there.
+pub fn reading_for_resolved_path(
+    asset_id: &str,
+    probed_path: Option<&Path>,
+    probed: Option<Result<MediaInfo, String>>,
+    resolved_path: &Path,
+) -> Result<MediaInfo, String> {
+    if let Some(probed_path) = probed_path {
+        if probed_path != resolved_path {
+            return Err(format!(
+                "Asset '{asset_id}' was relinked from '{}' to '{}' while it was being read, so the reading was discarded",
+                probed_path.display(),
+                resolved_path.display()
+            ));
+        }
+    }
+
+    probed.unwrap_or_else(|| {
+        // Reached only when the file appeared between the collect pass and this
+        // one: the collect pass resolved nothing, so there is no path to
+        // disagree with and nothing was read.
+        Err(format!(
+            "'{}' was not read before this edit",
+            resolved_path.display()
+        ))
+    })
 }
 
 /// Picks out the assets a placement is about to take a length from unread.
@@ -827,11 +874,159 @@ pub async fn probe_unmeasured_assets(
         };
         measurements.push(PendingAssetMeasurement {
             asset_id: target.asset_id,
+            source_path: target.source_path,
             probed,
         });
     }
 
     measurements
+}
+
+/// What a back-fill pass did, beside the lines it produced.
+pub struct BackFilledMeasurements {
+    /// Whether the project lock was released for a probe.
+    ///
+    /// `false` on the ordinary path, where every named asset had already been
+    /// read: nothing was probed, the guard was never let go, and the state a
+    /// caller judged its payload against is still the state it is about to
+    /// execute against. A caller that re-judges after the back-fill — see
+    /// `execute_command` — reads this rather than paying for a second
+    /// validation of unchanged state on every placement.
+    pub released_lock: bool,
+    /// Lines worth showing the operator, empty on the ordinary path.
+    pub warnings: Vec<String>,
+}
+
+/// Records the readings the off-lock pass took, under the project lock again.
+///
+/// Recorded through the shared [`ensure_asset_measured`], so the app logs the
+/// same `UpdateAsset` op for the same file as the CLI. That helper re-checks
+/// whether the asset still needs measuring, so re-taking the lock is
+/// idempotent: an asset another caller measured in the gap is left alone. It
+/// also re-resolves the source path, which is what makes the identity check in
+/// [`reading_for_resolved_path`] possible.
+///
+/// Never an error. Every warning is logged here, and the same lines are
+/// returned so a surface that *does* have a channel to report on —
+/// `three_point_insert` answers with `warnings[]` — can hand them to the caller
+/// instead of leaving "why is this clip ten seconds" in a log file.
+pub fn apply_asset_measurements(
+    project: &mut ActiveProject,
+    measurements: Vec<PendingAssetMeasurement>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for measurement in measurements {
+        let PendingAssetMeasurement {
+            asset_id,
+            source_path,
+            probed,
+        } = measurement;
+        let probed_asset_id = asset_id.clone();
+        let recorded = ensure_asset_measured(project, &asset_id, move |resolved_path| {
+            reading_for_resolved_path(
+                &probed_asset_id,
+                source_path.as_deref(),
+                probed,
+                resolved_path,
+            )
+        });
+        let recorded = match recorded {
+            Ok(recorded) => recorded,
+            Err(error) => vec![format!(
+                "Recording the probed asset duration failed: {error}"
+            )],
+        };
+        for warning in &recorded {
+            tracing::warn!(asset_id = %asset_id, "{warning}");
+        }
+        warnings.extend(recorded);
+    }
+
+    warnings
+}
+
+/// Reads the assets a caller is about to place from, off the project lock.
+///
+/// The whole three-pass cycle for a caller holding the project lock: collect
+/// under it, *release* it, probe, take it again. The guard is taken by value
+/// and a fresh one handed back, so the compiler — rather than a comment —
+/// enforces that no probe runs while the project is held.
+///
+/// The order on the way back in is load-bearing, and
+/// `should_refuse_a_swapped_project_before_asking_about_external_changes` pins
+/// it: release, then re-lock, then *identity*, then external changes, then
+/// apply. `expected_project_id` is the `meta.id` the caller decided against
+/// under the first guard. The operator can close that project and open another
+/// one while the probes run, and a different project can hold an asset of the
+/// same id — `ensure_no_external_changes` would pass, against the *new*
+/// project's own watermark, and this pass would append an `UpdateAsset` derived
+/// from the old project's path resolution to a log no caller ever judged. So
+/// identity is asked first, for every surface rather than only the one that
+/// remembered to.
+///
+/// `Err` only when the project went away while the lock was released, when the
+/// open project is no longer the one the caller decided against, or when
+/// another process appended to the ops log in the same window; the caller
+/// surfaces that the way it surfaces any other refusal to append. The guard is
+/// lost with the error, which is what every such caller wants: there is no
+/// project left to go on editing.
+pub async fn back_fill_asset_measurements<'guard, 'a, I>(
+    guard: tokio::sync::MutexGuard<'guard, Option<ActiveProject>>,
+    project_mutex: &'guard tokio::sync::Mutex<Option<ActiveProject>>,
+    expected_project_id: &str,
+    asset_ids: I,
+    ffmpeg_state: &crate::core::ffmpeg::SharedFFmpegState,
+) -> Result<
+    (
+        tokio::sync::MutexGuard<'guard, Option<ActiveProject>>,
+        BackFilledMeasurements,
+    ),
+    String,
+>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    let targets = collect_unmeasured_assets(&project.state, &project.path, asset_ids);
+    if targets.is_empty() {
+        return Ok((
+            guard,
+            BackFilledMeasurements {
+                released_lock: false,
+                warnings: Vec::new(),
+            },
+        ));
+    }
+
+    // Every FFprobe below carries a two-minute watchdog. Nothing else that
+    // touches the project may be made to wait on it.
+    drop(guard);
+    let measurements = probe_unmeasured_assets(targets, ffmpeg_state).await;
+
+    let mut guard = project_mutex.lock().await;
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    // A *different* project may be open now, and `ensure_no_external_changes`
+    // would happily pass against its watermark. Identity first, so nothing is
+    // written to a project the caller never decided against.
+    ensure_probed_project_unchanged(&project.state, expected_project_id)?;
+    // The project may have moved on while the probe ran; the same refusal the
+    // caller made before releasing the lock applies again on the way back in.
+    project
+        .ensure_no_external_changes()
+        .map_err(|e| e.to_ipc_error())?;
+
+    let warnings = apply_asset_measurements(project, measurements);
+    Ok((
+        guard,
+        BackFilledMeasurements {
+            released_lock: true,
+            warnings,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -1629,30 +1824,6 @@ mod tests {
         );
     }
 
-    /// Feature: the probe batch must not park FFmpeg's other readers
-    /// Scenario: the runner is taken out of the shared state
-    ///   Given the shared FFmpeg state
-    ///   When the batch takes the runner it is about to probe with
-    ///   Then the read lock is already free
-    ///
-    /// The batch used to hold this guard for its whole run, because the runner
-    /// was borrowed from it. Tokio's `RwLock` is write-preferring, so one
-    /// queued `initialize_shared_ffmpeg` writer then parked every later FFmpeg
-    /// reader behind a batch that can take two minutes per asset. The owned
-    /// return type is what makes that unwritable; this pins the behaviour.
-    #[tokio::test]
-    async fn should_release_the_ffmpeg_read_lock_when_the_runner_is_taken() {
-        let ffmpeg_state = crate::core::ffmpeg::create_ffmpeg_state();
-
-        let runner = ffmpeg_runner_snapshot(&ffmpeg_state).await;
-
-        assert!(runner.is_none(), "nothing initialised this state");
-        assert!(
-            ffmpeg_state.try_write().is_ok(),
-            "a writer must not be made to wait on the batch that follows"
-        );
-    }
-
     /// Feature: reading a placement's asset off the project lock
     /// Scenario: FFmpeg could not be resolved on this machine
     ///   Given a batch of one asset with a file and one without
@@ -1665,10 +1836,11 @@ mod tests {
     #[tokio::test]
     async fn should_carry_an_unresolvable_ffmpeg_as_a_reason_rather_than_a_failure() {
         let ffmpeg_state = crate::core::ffmpeg::create_ffmpeg_state();
+        let probed_path = PathBuf::from("/nowhere/clip.mp4");
         let targets = vec![
             UnmeasuredAsset {
                 asset_id: "with-file".to_string(),
-                source_path: Some(PathBuf::from("/nowhere/clip.mp4")),
+                source_path: Some(probed_path.clone()),
             },
             UnmeasuredAsset {
                 asset_id: "without-file".to_string(),
@@ -1696,14 +1868,16 @@ mod tests {
             reason.contains("FFmpeg could not be resolved"),
             "unexpected reason: {reason}"
         );
+        assert_eq!(
+            measurements[0].source_path.as_deref(),
+            Some(probed_path.as_path()),
+            "the file the reading belongs to travels with it"
+        );
         assert!(
             measurements[1].probed.is_none(),
             "no file means no probe was attempted"
         );
-        assert!(
-            ffmpeg_state.try_write().is_ok(),
-            "the batch leaves no reader behind"
-        );
+        assert_eq!(measurements[1].source_path, None);
     }
 
     /// Nothing to read is the ordinary case, and it must not even touch the
@@ -1718,5 +1892,195 @@ mod tests {
 
         assert!(measurements.is_empty());
         drop(held);
+    }
+
+    /// Feature: a reading belongs to the file it was taken from
+    /// Scenario: the asset is relinked while it is being read
+    ///   Given a reading taken from the file the collect pass resolved
+    ///   When the apply pass resolves a *different* file for the same asset
+    ///   Then the reading is discarded rather than recorded against the new one
+    ///
+    /// The probe carries a two-minute watchdog and runs with the project lock
+    /// released, so an `UpdateAsset` or a relink can move the asset's `uri` in
+    /// the window. Recording the old file's length, codec and dimensions
+    /// against the new uri — and stamping the probe marker, so nothing ever
+    /// re-reads it — is a wrong-length cut from the wrong file, forever. A
+    /// discarded reading is only the default length, which the next placement
+    /// corrects by probing the file that is really there.
+    #[test]
+    fn should_discard_a_reading_taken_from_a_file_the_asset_no_longer_points_at() {
+        let probed_path = PathBuf::from("/media/original.mp4");
+        let relinked_path = PathBuf::from("/media/replacement.mp4");
+
+        let reading = reading_for_resolved_path(
+            "asset-1",
+            Some(probed_path.as_path()),
+            Some(Ok(media_info(4.0))),
+            &relinked_path,
+        );
+
+        let reason = reading.expect_err("a reading of another file must not be recorded");
+        assert!(
+            reason.contains("was relinked from")
+                && reason.contains("original.mp4")
+                && reason.contains("replacement.mp4"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    /// The ordinary path: the same file both times, so the reading stands.
+    /// Paired with the test above so a comparison that refused *everything*
+    /// would not read as a pass.
+    #[test]
+    fn should_record_a_reading_taken_from_the_file_the_asset_still_points_at() {
+        let path = PathBuf::from("/media/original.mp4");
+
+        let reading = reading_for_resolved_path(
+            "asset-1",
+            Some(path.as_path()),
+            Some(Ok(media_info(4.0))),
+            &path,
+        );
+
+        assert_eq!(
+            reading
+                .expect("the same file's reading must be recorded")
+                .duration_sec,
+            4.0
+        );
+    }
+
+    /// An asset the collect pass could resolve no file for has no path to
+    /// disagree with: the file appeared in the window, and the apply pass says
+    /// so rather than claiming a relink.
+    #[test]
+    fn should_report_an_unread_file_rather_than_a_relink_when_nothing_was_resolved() {
+        let appeared = PathBuf::from("/media/appeared.mp4");
+
+        let reading = reading_for_resolved_path("asset-1", None, None, &appeared);
+
+        let reason = reading.expect_err("nothing was read for this asset");
+        assert!(
+            reason.contains("was not read before this edit"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    /// Feature: readings are recorded in an order that cannot be reordered
+    /// Scenario: the project is swapped *and* its log grew while assets were read
+    ///   Given a caller that decided what to probe against another project
+    ///   And an ops log that grew underneath the open one in the same window
+    ///   When the readings come back
+    ///   Then the swap is what the caller is told about
+    ///
+    /// Pins the whole way back in: the guard is handed over by value and the
+    /// mutex re-locked inside, so reaching an answer at all proves the lock was
+    /// released before anything was applied — holding it would deadlock here.
+    /// And with both refusals available, the identity one is the one raised,
+    /// which is the order that matters: `ensure_no_external_changes` measures
+    /// the *newly open* project's own watermark, so it can pass while the
+    /// readings in hand belong to a project nobody decided about.
+    #[tokio::test]
+    async fn should_refuse_a_swapped_project_before_asking_about_external_changes() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("a temp project root");
+        let mut project = ActiveProject::create("Order Test", dir.path().to_path_buf())
+            .expect("project creation must succeed");
+
+        // One asset nothing has read, so the pass really does release the lock.
+        let media = dir.path().join("clip.mp4");
+        std::fs::write(&media, b"not really an mp4").expect("the fixture file must be written");
+        let asset = Asset::new_video("clip.mp4", &media.to_string_lossy(), VideoInfo::default());
+        let asset_id = asset.id.clone();
+        project.state.assets.insert(asset_id.clone(), asset);
+
+        // Another writer appended to the log, so the external-change check
+        // would refuse too — if it were ever reached.
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(project.ops_log.path())
+            .expect("the ops log must be open-able");
+        writeln!(log, "{{\"someone\":\"else\"}}").expect("the foreign append must be written");
+        drop(log);
+
+        let project_mutex = tokio::sync::Mutex::new(Some(project));
+        let ffmpeg_state = crate::core::ffmpeg::create_ffmpeg_state();
+        let guard = project_mutex.lock().await;
+
+        let refusal = back_fill_asset_measurements(
+            guard,
+            &project_mutex,
+            "a-project-nobody-here-is",
+            std::iter::once(asset_id.as_str()),
+            &ffmpeg_state,
+        )
+        .await
+        .err()
+        .expect("a swapped project must not be written to");
+
+        assert_eq!(
+            refusal, PROJECT_CHANGED_DURING_PROBE,
+            "identity is asked before the watermark, which belongs to the wrong project"
+        );
+    }
+
+    /// Feature: readings are recorded in an order that cannot be reordered
+    /// Scenario: the same project comes back
+    ///   Given the project the caller decided against is still the open one
+    ///   When the readings come back
+    ///   Then they are applied, and the caller is told the lock was released
+    ///
+    /// The `released_lock` half is what `execute_command` gates its second
+    /// validation on: a placement from an already-measured asset never lets the
+    /// guard go, and must not pay to re-judge state that provably has not
+    /// changed.
+    #[tokio::test]
+    async fn should_report_whether_the_project_lock_was_released() {
+        let dir = tempfile::tempdir().expect("a temp project root");
+        let mut project = ActiveProject::create("Release Test", dir.path().to_path_buf())
+            .expect("project creation must succeed");
+        let expected_project_id = project.state.meta.id.clone();
+
+        let media = dir.path().join("clip.mp4");
+        std::fs::write(&media, b"not really an mp4").expect("the fixture file must be written");
+        let asset = Asset::new_video("clip.mp4", &media.to_string_lossy(), VideoInfo::default());
+        let asset_id = asset.id.clone();
+        project.state.assets.insert(asset_id.clone(), asset);
+
+        let project_mutex = tokio::sync::Mutex::new(Some(project));
+        let ffmpeg_state = crate::core::ffmpeg::create_ffmpeg_state();
+
+        let guard = project_mutex.lock().await;
+        let (guard, back_filled) = back_fill_asset_measurements(
+            guard,
+            &project_mutex,
+            &expected_project_id,
+            std::iter::once(asset_id.as_str()),
+            &ffmpeg_state,
+        )
+        .await
+        .expect("the same project coming back is the ordinary path");
+        assert!(
+            back_filled.released_lock,
+            "an unread asset is read, and reading it means letting the guard go"
+        );
+
+        // Nothing left to read: no probe, no release, no warnings.
+        let (guard, back_filled) = back_fill_asset_measurements(
+            guard,
+            &project_mutex,
+            &expected_project_id,
+            std::iter::once("no-such-asset"),
+            &ffmpeg_state,
+        )
+        .await
+        .expect("an asset the project does not hold is not a refusal");
+        assert!(
+            !back_filled.released_lock,
+            "nothing to read must not release the lock the caller judged under"
+        );
+        assert!(back_filled.warnings.is_empty());
+        drop(guard);
     }
 }

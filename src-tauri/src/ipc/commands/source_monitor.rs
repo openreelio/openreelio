@@ -551,7 +551,7 @@ pub async fn three_point_insert(
     // two-minute watchdog, so the project lock is released around the reading
     // and taken again to record it; nothing else that touches the project is
     // made to wait on a measurement.
-    let (mut project_guard, mut warnings) = super::timeline::back_fill_asset_measurements(
+    let (mut project_guard, back_filled) = crate::core::commands::back_fill_asset_measurements(
         project_guard,
         &state.project,
         &expected_project_id,
@@ -559,6 +559,7 @@ pub async fn three_point_insert(
         &ffmpeg_state,
     )
     .await?;
+    let mut warnings = back_filled.warnings;
 
     let project = project_guard
         .as_mut()
