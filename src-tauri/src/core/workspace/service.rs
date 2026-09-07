@@ -277,6 +277,18 @@ fn apply_probed_durations(asset: &mut Asset, metadata: &MediaMetadata) {
 /// [`build_workspace_asset_with`] does: with no measurement, the "refreshed"
 /// asset is all defaults, and copying those over a real codec or frame size is
 /// worse than leaving the gaps alone.
+///
+/// The lengths are the one pair that is *replaced* rather than gap-filled, and
+/// only when the refresh ran because the asset was read under older rules (see
+/// [`needs_probe_refresh`]). Gap-filling is right for an asset that never had a
+/// length; it is wrong for one whose recorded length is the reading this pass
+/// exists to correct. An mp4 whose AAC outlasts its pictures was registered at
+/// its *container* length before those rules, so keeping the old value here
+/// discarded the corrected picture length while still stamping the marker —
+/// making the too-long reading permanent, because every later check
+/// ([`workspace_asset_needs_metadata_refresh`],
+/// [`asset_needs_measurement`](crate::core::commands::asset_needs_measurement))
+/// then reads the asset as already measured.
 fn refresh_existing_workspace_asset_metadata<F>(
     asset: &mut Asset,
     entry: &IndexEntry,
@@ -290,13 +302,31 @@ where
         return Ok(());
     }
 
+    // Read before the refresh overwrites the marker it is judged by. A still is
+    // exempt for the reason it is exempt everywhere else: it records no length,
+    // so there is nothing for a re-read to supersede.
+    let read_under_older_rules =
+        !matches!(asset.kind, AssetKind::Image) && needs_probe_refresh(asset);
+
     let refreshed = build_workspace_asset_with(entry, absolute_path, extract)?;
-    asset.duration_sec = asset.duration_sec.or(refreshed.duration_sec);
+    if read_under_older_rules && refreshed.probe_version.is_some() {
+        // A reading taken under the current rules supersedes the older one.
+        // Still `or`-ed on the picture length: a probe that ran but measured no
+        // usable duration must not erase a length the asset already had.
+        asset.duration_sec = refreshed.duration_sec.or(asset.duration_sec);
+        // Assigned outright rather than `or`-ed, because `None` is a *reading*
+        // here — it says the sound does not outlast the picture — and a stale
+        // value left in place would bound a linked audio clip by a file the
+        // asset no longer claims to be.
+        asset.audio_duration_sec = refreshed.audio_duration_sec;
+    } else {
+        asset.duration_sec = asset.duration_sec.or(refreshed.duration_sec);
+        // The sound's own length travels with the picture's: an asset refreshed
+        // into a duration but left without one would bound its linked audio
+        // clip by the pictures again.
+        asset.audio_duration_sec = asset.audio_duration_sec.or(refreshed.audio_duration_sec);
+    }
     asset.probe_version = refreshed.probe_version.or(asset.probe_version);
-    // The sound's own length travels with the picture's: an asset refreshed
-    // into a duration but left without one would bound its linked audio clip
-    // by the pictures again.
-    asset.audio_duration_sec = asset.audio_duration_sec.or(refreshed.audio_duration_sec);
     if refreshed.file_size > 0 {
         asset.file_size = refreshed.file_size;
     }
@@ -1610,6 +1640,130 @@ mod tests {
         // recorded stream metadata alone.
         assert_eq!(asset.duration_sec, None);
         assert_eq!(asset.video.as_ref().map(|video| video.width), Some(640));
+    }
+
+    /// Feature: a scan re-reads what older rules measured wrongly
+    /// Scenario: an mp4 whose AAC outlasts its pictures
+    ///   Given a video registered before the picture length was the recorded
+    ///   one, carrying its 6s container length and no probe marker
+    ///   When the workspace refreshes it under the current rules
+    ///   Then it records the 4s its video stream really runs for, plus the
+    ///   6s its sound runs for, and is stamped as read
+    ///
+    /// Gap-filling the length here would keep the 6s reading *and* stamp the
+    /// marker, so nothing would ever look at the file again: the refresh check
+    /// and `asset_needs_measurement` would both report it as measured, and
+    /// every clip cut from it would carry a two-second black tail forever.
+    #[test]
+    fn should_replace_a_container_length_recorded_before_the_current_probe_rules() {
+        let mut asset = Asset::new_video(
+            "interview.mp4",
+            "/nowhere/interview.mp4",
+            crate::core::assets::VideoInfo {
+                width: 1920,
+                height: 1080,
+                codec: "h264".to_string(),
+                ..Default::default()
+            },
+        )
+        .with_file_size(4_096)
+        .with_relative_path("interview.mp4");
+        // What a pre-`audioDurationSec` scan recorded: the container length,
+        // which is the longest stream rather than the picture's own.
+        asset.duration_sec = Some(6.0);
+        assert_eq!(asset.probe_version, None, "read under the older rules");
+        assert!(
+            workspace_asset_needs_metadata_refresh(&asset),
+            "a stale marker is what makes this asset worth re-reading"
+        );
+
+        refresh_existing_workspace_asset_metadata(
+            &mut asset,
+            &index_entry("interview.mp4", AssetKind::Video, 4_096),
+            std::path::Path::new("/nowhere/interview.mp4"),
+            |_| {
+                Ok(crate::core::assets::MediaMetadata {
+                    duration_sec: 6.0,
+                    video_duration_sec: Some(4.0),
+                    audio_duration_sec: Some(6.0),
+                    file_size: 4_096,
+                    video: Some(crate::core::assets::VideoInfo {
+                        width: 1920,
+                        height: 1080,
+                        codec: "h264".to_string(),
+                        ..Default::default()
+                    }),
+                    audio: Some(crate::core::assets::AudioInfo::default()),
+                    format: "mov,mp4,m4a,3gp,3g2,mj2".to_string(),
+                    rotation_deg: 0.0,
+                })
+            },
+        )
+        .expect("the probe measured the file");
+
+        assert_eq!(
+            asset.duration_sec,
+            Some(4.0),
+            "the picture's own length replaces the container length"
+        );
+        assert_eq!(
+            asset.audio_duration_sec,
+            Some(6.0),
+            "the sound past the last frame is recorded rather than lost"
+        );
+        assert_eq!(
+            asset.probe_version,
+            Some(ASSET_PROBE_VERSION),
+            "the reading is stamped, so the next pass leaves the file alone"
+        );
+        assert!(
+            !workspace_asset_needs_metadata_refresh(&asset),
+            "a corrected asset settles instead of being re-probed forever"
+        );
+    }
+
+    /// The gap-fill arm is untouched: a refresh that runs only because a length
+    /// is missing must not let a probe with nothing to say erase what is there.
+    #[test]
+    fn should_keep_a_recorded_length_when_an_already_stamped_asset_is_refreshed() {
+        let mut asset = Asset::new_video(
+            "clip.mp4",
+            "/nowhere/clip.mp4",
+            crate::core::assets::VideoInfo::default(),
+        )
+        .with_relative_path("clip.mp4");
+        asset.duration_sec = Some(4.0);
+        asset.probe_version = Some(ASSET_PROBE_VERSION);
+        // Only the missing codec and size make this one worth refreshing.
+        assert!(workspace_asset_needs_metadata_refresh(&asset));
+
+        refresh_existing_workspace_asset_metadata(
+            &mut asset,
+            &index_entry("clip.mp4", AssetKind::Video, 2_048),
+            std::path::Path::new("/nowhere/clip.mp4"),
+            |_| {
+                Ok(crate::core::assets::MediaMetadata {
+                    duration_sec: 0.0,
+                    video_duration_sec: None,
+                    audio_duration_sec: None,
+                    file_size: 2_048,
+                    video: Some(crate::core::assets::VideoInfo {
+                        codec: "h264".to_string(),
+                        ..Default::default()
+                    }),
+                    audio: None,
+                    format: "mov,mp4,m4a,3gp,3g2,mj2".to_string(),
+                    rotation_deg: 0.0,
+                })
+            },
+        )
+        .expect("the probe measured the file");
+
+        assert_eq!(
+            asset.duration_sec,
+            Some(4.0),
+            "a probe carrying no usable length leaves the recorded one alone"
+        );
     }
 
     #[test]
