@@ -1722,6 +1722,68 @@ mod tests {
         );
     }
 
+    /// Feature: a scan re-reads what older rules measured wrongly
+    /// Scenario: the re-read is attempted but FFprobe refuses the file
+    ///   Given a video carrying a stale marker and both recorded lengths
+    ///   When the refresh runs and the probe fails with a verdict about the
+    ///   file — not with a probe that measured nothing
+    ///   Then both lengths survive and the marker is *not* stamped
+    ///
+    /// The supersede arm assigns `audio_duration_sec` outright, because `None`
+    /// is a reading there. It must only be reached when a reading was actually
+    /// taken. A refusal FFprobe reached about the file is carried as "no
+    /// metadata" rather than raised, so it would otherwise walk into that arm
+    /// and erase the sound length on the strength of a probe that never ran —
+    /// and, worse, stamp the marker, so no later pass would look again.
+    #[test]
+    fn should_keep_both_lengths_when_a_stale_asset_is_refreshed_and_the_probe_refuses() {
+        let mut asset = Asset::new_video(
+            "interview.mp4",
+            "/nowhere/interview.mp4",
+            crate::core::assets::VideoInfo {
+                width: 1920,
+                height: 1080,
+                codec: "h264".to_string(),
+                ..Default::default()
+            },
+        )
+        .with_file_size(4_096)
+        .with_relative_path("interview.mp4");
+        asset.duration_sec = Some(4.0);
+        asset.audio_duration_sec = Some(6.0);
+        assert_eq!(asset.probe_version, None, "read under the older rules");
+        assert!(workspace_asset_needs_metadata_refresh(&asset));
+
+        refresh_existing_workspace_asset_metadata(
+            &mut asset,
+            &index_entry("interview.mp4", AssetKind::Video, 4_096),
+            std::path::Path::new("/nowhere/interview.mp4"),
+            // A verdict about the file, not a probe that measured nothing, so
+            // the refresh completes with no metadata rather than failing.
+            |_| Err(CoreError::FFprobeError("moov atom not found".to_string())),
+        )
+        .expect("a file FFprobe refused is not a refresh failure");
+
+        assert_eq!(
+            asset.duration_sec,
+            Some(4.0),
+            "a probe that never read the file cannot supersede the picture length"
+        );
+        assert_eq!(
+            asset.audio_duration_sec,
+            Some(6.0),
+            "nor can it erase the sound length by reporting one it never measured"
+        );
+        assert_eq!(
+            asset.probe_version, None,
+            "an unread file stays unread, so a later pass still tries"
+        );
+        assert!(
+            workspace_asset_needs_metadata_refresh(&asset),
+            "the asset is still owed a reading"
+        );
+    }
+
     /// The gap-fill arm is untouched: a refresh that runs only because a length
     /// is missing must not let a probe with nothing to say erase what is there.
     #[test]
@@ -1733,6 +1795,7 @@ mod tests {
         )
         .with_relative_path("clip.mp4");
         asset.duration_sec = Some(4.0);
+        asset.audio_duration_sec = Some(6.0);
         asset.probe_version = Some(ASSET_PROBE_VERSION);
         // Only the missing codec and size make this one worth refreshing.
         assert!(workspace_asset_needs_metadata_refresh(&asset));
@@ -1763,6 +1826,11 @@ mod tests {
             asset.duration_sec,
             Some(4.0),
             "a probe carrying no usable length leaves the recorded one alone"
+        );
+        assert_eq!(
+            asset.audio_duration_sec,
+            Some(6.0),
+            "the sound length is gap-filled too, not assigned over"
         );
     }
 
