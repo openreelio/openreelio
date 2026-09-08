@@ -171,6 +171,15 @@ pub fn bundled_family_faces(family: &str) -> Vec<&'static BundledFont> {
         .collect()
 }
 
+/// Returns every face compiled into the binary, in a stable order.
+///
+/// Exposed so a consumer that has to look at each face's own bytes - glyph
+/// coverage among them - reads the same registry the resolver does instead of
+/// keeping a second list of what ships.
+pub fn bundled_faces() -> &'static [BundledFont] {
+    BUNDLED_FONTS
+}
+
 /// Returns the distinct family names compiled into the binary.
 pub fn bundled_font_families() -> Vec<&'static str> {
     let mut families: Vec<&'static str> = Vec::new();
