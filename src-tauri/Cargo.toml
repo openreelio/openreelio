@@ -93,6 +93,12 @@ regex = "1"
 # caption burn-in check asks; this is the segmentation that keeps them whole.
 unicode-segmentation = "1.12"
 dirs = "5.0"
+# Font metadata and cmap coverage. A safe, zero-allocation, zero-dependency
+# TrueType/OpenType parser; it replaces the hand-rolled `name`/`OS-2` table
+# reader so every call site reads font identity the same way. Default
+# features are off: only the `name`, `OS/2`, `head` and `cmap` tables are
+# read, so the layout, variation and glyph-name tables stay out of the binary.
+ttf-parser = { version = "0.25.1", default-features = false, features = ["std"] }
 fs2 = "0.4"
 hostname = "0.4"
 

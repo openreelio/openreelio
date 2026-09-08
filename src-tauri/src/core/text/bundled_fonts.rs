@@ -309,6 +309,24 @@ mod tests {
     }
 
     #[test]
+    fn a_known_face_reports_the_family_and_weight_its_file_declares() {
+        // Pins one face's metadata to exact values rather than to a property,
+        // so a change in how the `name` and `OS/2` tables are read shows up
+        // here as a diff instead of passing whatever it happens to produce.
+        let bold = bundled_family_faces("Poppins")
+            .into_iter()
+            .find(|font| font.file_name == "Poppins-Bold")
+            .expect("Poppins ships a bold face");
+        let info = super::super::fonts::font_face_info(bold.bytes);
+
+        assert!(info.family_names.contains(&"Poppins".to_string()));
+        assert!(info.full_names.contains(&"Poppins Bold".to_string()));
+        assert_eq!(info.weight_class, Some(700));
+        assert!(info.declares_bold());
+        assert!(info.matches_family("poppins"));
+    }
+
+    #[test]
     fn variable_font_instances_are_shipped_at_a_readable_weight() {
         // The upstream variable files default to their lightest instance
         // (Montserrat Thin, TikTok Sans Light). Shipping those verbatim would
