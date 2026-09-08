@@ -1536,20 +1536,26 @@ impl QCRule for AudioClippingRule {
 /// came out twice as wide as libass draws them. That is not a safe direction to
 /// be wrong in: it hands the contrast pass a column wider than the words, so
 /// the band it measures takes in picture the caption never covered.
-const WIDE_SCRIPT_RANGES: [(u32, u32); 15] = [
-    (0x1100, 0x11FF),   // Hangul Jamo
-    (0x2E80, 0x2FFF),   // CJK radicals, Kangxi radicals, ideographic description
-    (0x3000, 0x303F),   // CJK symbols and punctuation
-    (0x3040, 0x30FF),   // Hiragana and Katakana
-    (0x3100, 0x312F),   // Bopomofo
-    (0x3130, 0x318F),   // Hangul compatibility Jamo
-    (0x3190, 0x33FF),   // Kanbun, CJK strokes, enclosed CJK, CJK compatibility
-    (0x3400, 0x4DBF),   // CJK Unified Ideographs Extension A
-    (0x4E00, 0x9FFF),   // CJK Unified Ideographs
-    (0xAC00, 0xD7AF),   // Hangul syllables
-    (0xF900, 0xFAFF),   // CJK compatibility ideographs
-    (0xFF00, 0xFF60),   // Fullwidth forms
-    (0xFFE0, 0xFFE6),   // Fullwidth currency and bar signs
+const WIDE_SCRIPT_RANGES: [(u32, u32); 16] = [
+    (0x1100, 0x11FF), // Hangul Jamo
+    (0x2E80, 0x2FFF), // CJK radicals, Kangxi radicals, ideographic description
+    (0x3000, 0x303F), // CJK symbols and punctuation
+    (0x3040, 0x30FF), // Hiragana and Katakana
+    (0x3100, 0x312F), // Bopomofo
+    (0x3130, 0x318F), // Hangul compatibility Jamo
+    (0x3190, 0x33FF), // Kanbun, CJK strokes, enclosed CJK, CJK compatibility
+    (0x3400, 0x4DBF), // CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF), // CJK Unified Ideographs
+    (0xAC00, 0xD7AF), // Hangul syllables
+    (0xF900, 0xFAFF), // CJK compatibility ideographs
+    (0xFF00, 0xFF60), // Fullwidth forms
+    (0xFFE0, 0xFFE6), // Fullwidth currency and bar signs
+    // Regional indicators, the letters a country flag is spelled with. They
+    // sit far below the pictographs, so a table starting at U+1F300 missed
+    // them and charged a line of flags the Latin half-em - the same
+    // understatement, and the same wrongly narrow contrast band, that the CJK
+    // ranges above are here to prevent.
+    (0x1F1E6, 0x1F1FF), // Regional indicator symbols (flags)
     (0x1F300, 0x1FAFF), // Emoji and pictographs
     (0x20000, 0x2FA1F), // CJK Unified Ideographs Extensions B-G and supplement
 ];
