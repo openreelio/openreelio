@@ -13,6 +13,8 @@
 
 use crate::core::assets::{Asset, AudioInfo, VideoInfo};
 use crate::core::captions::CaptionPosition;
+use crate::core::commands::TEXT_ASSET_PREFIX;
+use crate::core::effects::{Effect, EffectType, ParamValue};
 use crate::core::project::ProjectState;
 use crate::core::qc::caption_contrast::CaptionBandSample;
 use crate::core::qc::context::RenderMeasurements;
@@ -34,6 +36,7 @@ const EXPECTED_FIX_COMMAND_TYPES: &[&str] = &[
     "SetMasterVolume",
     "TrimClip",
     "UpdateCaption",
+    "UpdateTextClip",
 ];
 
 /// Label of the fixture's faded caption cue.
@@ -107,6 +110,7 @@ fn video_clip(asset_id: &str, timeline_in_sec: f64, duration_sec: f64) -> Clip {
 /// * a caption pinned to the very bottom of the canvas — `UpdateCaption`
 /// * a caption that reads too fast with no gap to grow into — `CreateCaption`
 /// * a caption carrying an emoji the burn-in cannot draw — `UpdateCaption`
+/// * a title card carrying one — `UpdateTextClip`
 /// * a caption clip faded too far for any outline to rescue — `SetClipOpacity`
 /// * black at the head of a clip whose source has room — `TrimClip`
 /// * a clipped, over-loud mix — `SetMasterVolume`
@@ -182,7 +186,32 @@ fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
         .assets
         .insert(ASSET_ID.to_string(), fixture_asset(ASSET_ID));
 
+    // A title card carrying the same emoji, on a track of its own so it adds no
+    // gap and no overlap for the other rules to find. The emoji rule repairs a
+    // text overlay with `UpdateTextClip`, whose payload is a whole
+    // `TextClipData` block rather than a handful of ids - the one fix in the
+    // module that has to survive the strict parser as a nested struct.
+    let mut titles = Track::new_video("V2");
+    let (title, title_effect) = text_overlay_clip("Big sale \u{1F389} today", 0.0, 4.0);
+    titles.add_clip(title);
+    state.effects.insert(title_effect.id.clone(), title_effect);
+    sequence.add_track(titles);
+
     (sequence, state)
+}
+
+/// Builds a text-overlay clip and the effect that carries its words.
+fn text_overlay_clip(text: &str, timeline_in_sec: f64, duration_sec: f64) -> (Clip, Effect) {
+    let mut clip = Clip::with_range("placeholder", 0.0, duration_sec);
+    clip.asset_id = format!("{TEXT_ASSET_PREFIX}{}", clip.id);
+    clip.place.timeline_in_sec = timeline_in_sec;
+    clip.place.duration_sec = duration_sec;
+
+    let mut effect = Effect::new(EffectType::TextOverlay);
+    effect.set_param("text", ParamValue::String(text.to_string()));
+    clip.effects.push(effect.id.clone());
+
+    (clip, effect)
 }
 
 /// The band sample that reports the fixture's faded caption cue.

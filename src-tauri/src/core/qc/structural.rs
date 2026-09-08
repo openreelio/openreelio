@@ -1352,6 +1352,13 @@ impl EmojiRenderCapability {
         }
 
         match self {
+            // Nothing today constructs this variant, and the blanket `None` is
+            // only defensible while nothing does. A colour-emoji layer draws
+            // what the font it is given has: a subdivision flag whose tag
+            // sequence the font never shipped, or a ZWJ combination assigned
+            // after the font was built, still falls back to its parts. Whoever
+            // turns the capability on has to decide which classes stay
+            // findings under it rather than inherit this line.
             EmojiRenderCapability::ColorOverlay => None,
             EmojiRenderCapability::MonochromeOnly => Some(match class {
                 EmojiClass::TagFlag => {
@@ -1414,9 +1421,11 @@ const EMOJI_DETAILS: &str = "Each listed cue names its own clusters under `cues[
                              as an untinted base, `tagFlag` as a plain black flag. The fix \
                              deletes the offending clusters and closes the whitespace they leave \
                              behind, which is a content decision rather than a repair, so it is \
-                             a proposal to read and the group is never automatically fixable. \
-                             Text-overlay clips are reported without a fix: no command in the QC \
-                             vocabulary rewrites one.";
+                             a proposal to read and the group is never automatically fixable. A \
+                             caption cue is rewritten with `UpdateCaption`, a text-overlay clip \
+                             with `UpdateTextClip` carrying the clip's own `textData` with only \
+                             its `content` replaced; a cue whose text would be left empty \
+                             carries no command at all.";
 
 impl CaptionEmojiRule {
     /// Creates a new CaptionEmojiRule
@@ -1452,53 +1461,99 @@ impl CaptionEmojiRule {
 
     /// `text` with the offending clusters cut out and the seams closed.
     ///
+    /// Only the seams. The whitespace a removal actually leaves behind — the
+    /// run on either side of the deleted cluster — collapses to one separator,
+    /// and everything else is copied through byte for byte. Collapsing the
+    /// whole cue instead rewrote text the emoji had nothing to do with: an
+    /// authored blank line between two sentences became a single break, and a
+    /// non-breaking space three words away became an ordinary one. A proposal
+    /// that quietly reflows the caption is not the proposal the report claims
+    /// to be making.
+    ///
+    /// A seam holding a line break closes to one newline and every other seam
+    /// to one space, so deleting an emoji from the end of a line does not join
+    /// it to the next; a seam at either end of the cue closes to nothing.
+    ///
     /// Returns `None` when nothing readable is left: proposing an empty caption
     /// would trade a mis-drawn line for a blank one.
     fn stripped_text(text: &str, clusters: &[(EmojiCluster<'_>, &'static str)]) -> Option<String> {
-        let mut kept = String::with_capacity(text.len());
+        let mut out = String::with_capacity(text.len());
+        // Byte offset of the first character not yet copied or consumed.
         let mut cursor = 0usize;
+        // `Some(has_newline)` while a seam is owed before the next literal
+        // text. Held rather than written so two removals separated by nothing
+        // but whitespace close to one separator instead of two, and so a seam
+        // at the very end of the cue is simply dropped.
+        let mut seam: Option<bool> = None;
 
-        // `scan` reports clusters in order and they never overlap, so a single
+        // `scan` reports clusters in order and they never overlap, so one
         // forward pass copies everything between them.
         for (cluster, _) in clusters {
-            kept.push_str(&text[cursor..cluster.byte_range.start]);
-            cursor = cluster.byte_range.end;
-        }
-        kept.push_str(&text[cursor..]);
+            let cut_start = cluster.byte_range.start;
+            let leading = whitespace_run_start(text, cursor, cut_start);
+            let literal = &text[cursor..leading];
+            if !literal.is_empty() {
+                push_seam(&mut out, seam.take());
+                out.push_str(literal);
+            }
 
-        let collapsed = collapse_whitespace(&kept);
-        if collapsed.is_empty() {
+            let trailing = whitespace_run_end(text, cluster.byte_range.end);
+            let adjacent = &text[leading..cut_start];
+            let following = &text[cluster.byte_range.end..trailing];
+            if !adjacent.is_empty() || !following.is_empty() {
+                let has_newline = holds_line_break(adjacent) || holds_line_break(following);
+                seam = Some(seam.unwrap_or(false) || has_newline);
+            }
+            cursor = trailing;
+        }
+
+        let tail = &text[cursor..];
+        if !tail.is_empty() {
+            push_seam(&mut out, seam);
+            out.push_str(tail);
+        }
+
+        if out.is_empty() {
             None
         } else {
-            Some(collapsed)
+            Some(out)
         }
     }
 }
 
-/// Collapses whitespace runs left behind by a deletion, keeping line structure.
+/// Writes the separator a closed seam stands for, if anything precedes it.
 ///
-/// A run holding a newline collapses to one newline and every other run to one
-/// space, so removing an emoji from the end of a caption's first line does not
-/// silently join it to the second. Leading and trailing whitespace is dropped.
-fn collapse_whitespace(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut pending: Option<bool> = None;
-
-    for character in text.chars() {
-        if character.is_whitespace() {
-            let has_newline = character == '\n' || character == '\r';
-            pending = Some(pending.unwrap_or(false) || has_newline);
-            continue;
+/// A seam before the first surviving character has nothing to join, so it is
+/// dropped rather than left as leading whitespace.
+fn push_seam(out: &mut String, seam: Option<bool>) {
+    if let Some(has_newline) = seam {
+        if !out.is_empty() {
+            out.push(if has_newline { '\n' } else { ' ' });
         }
-        if let Some(has_newline) = pending.take() {
-            if !out.is_empty() {
-                out.push(if has_newline { '\n' } else { ' ' });
-            }
-        }
-        out.push(character);
     }
+}
 
-    out
+/// Whether a whitespace run holds a line break.
+fn holds_line_break(run: &str) -> bool {
+    run.contains('\n') || run.contains('\r')
+}
+
+/// Start of the whitespace run ending at `end`, floored at `floor`.
+fn whitespace_run_start(text: &str, floor: usize, end: usize) -> usize {
+    text[floor..end]
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| character.is_whitespace())
+        .last()
+        .map_or(end, |(offset, _)| floor + offset)
+}
+
+/// End of the whitespace run beginning at `start`.
+fn whitespace_run_end(text: &str, start: usize) -> usize {
+    text[start..]
+        .char_indices()
+        .find(|(_, character)| !character.is_whitespace())
+        .map_or(text.len(), |(offset, _)| start + offset)
 }
 
 #[async_trait]
@@ -1547,14 +1602,25 @@ impl QCRule for CaptionEmojiRule {
                     continue;
                 }
 
-                let owned = if captions {
-                    clip.label.clone().unwrap_or_default()
+                // Kept whole rather than reduced to its `content`: rewriting a
+                // text overlay means handing `UpdateTextClip` the entire block
+                // back with one field changed, so the style, position, shadow
+                // and outline the author set have to survive the read.
+                let text_data = if captions {
+                    None
                 } else if is_text_clip(clip) {
                     get_text_data(clip, state)
-                        .map(|data| data.content)
-                        .unwrap_or_default()
                 } else {
                     continue;
+                };
+
+                let owned = if captions {
+                    clip.label.clone().unwrap_or_default()
+                } else {
+                    text_data
+                        .as_ref()
+                        .map(|data| data.content.clone())
+                        .unwrap_or_default()
                 };
                 let text = owned.trim();
                 if text.is_empty() {
@@ -1591,26 +1657,33 @@ impl QCRule for CaptionEmojiRule {
                     })
                     .collect();
 
-                // Only a caption cue can be addressed by a command in the QC
-                // vocabulary. A text-overlay clip is still reported — a check
-                // that can describe a defect it cannot repair has to say so —
-                // but it carries no steps.
-                let stripped = if captions {
-                    Self::stripped_text(text, &clusters)
-                } else {
-                    None
-                };
-                let (commands, repair) = match stripped {
-                    Some(stripped) => (
-                        vec![serde_json::json!({
-                            "type": "UpdateCaption",
-                            "sequenceId": sequence.id,
-                            "trackId": track.id,
-                            "clipId": clip.id,
-                            "text": stripped,
-                        })],
-                        "strip",
-                    ),
+                // Both surfaces have a command that rewrites them: a cue takes
+                // `UpdateCaption`, a title card takes `UpdateTextClip` with the
+                // whole `TextClipData` block and only its `content` replaced,
+                // so nothing else the author set is disturbed.
+                let (commands, repair) = match Self::stripped_text(text, &clusters) {
+                    Some(stripped) => {
+                        let command = match text_data {
+                            None => serde_json::json!({
+                                "type": "UpdateCaption",
+                                "sequenceId": sequence.id,
+                                "trackId": track.id,
+                                "clipId": clip.id,
+                                "text": stripped,
+                            }),
+                            Some(mut data) => {
+                                data.content = stripped;
+                                serde_json::json!({
+                                    "type": "UpdateTextClip",
+                                    "sequenceId": sequence.id,
+                                    "trackId": track.id,
+                                    "clipId": clip.id,
+                                    "textData": serde_json::to_value(&data)?,
+                                })
+                            }
+                        };
+                        (vec![command], "strip")
+                    }
                     None => (Vec::new(), "none"),
                 };
 
@@ -1620,7 +1693,10 @@ impl QCRule for CaptionEmojiRule {
                         clip.place.timeline_in_sec,
                         clip.timeline_end(),
                     )
-                    .with_metric("emojiCount", clusters.len())
+                    // The clusters this renderer cannot draw, not every emoji
+                    // in the cue: one that renders correctly is not a finding
+                    // and must not inflate the number the report is read on.
+                    .with_metric("unsupportedCount", clusters.len())
                     .with_metric("worstClass", worst.as_str())
                     .with_metric("kind", if captions { "caption" } else { "textOverlay" })
                     .with_metric("repair", repair)
@@ -1638,9 +1714,9 @@ impl QCRule for CaptionEmojiRule {
                     severity,
                     track_id: &track.id,
                     details: EMOJI_DETAILS.to_string(),
-                    fix_description:
-                        "Remove the emoji the burn-in cannot draw from every listed caption"
-                            .to_string(),
+                    fix_description: format!(
+                        "Remove the emoji the burn-in cannot draw from every listed {noun}"
+                    ),
                     confidence: Self::FIX_CONFIDENCE,
                 },
                 findings,
@@ -3363,7 +3439,7 @@ mod tests {
         assert_eq!(violations[0].metrics["cueCount"], 1);
 
         let cue = first_cue(&violations[0]);
-        assert_eq!(cue["emojiCount"], 1);
+        assert_eq!(cue["unsupportedCount"], 1);
         assert_eq!(cue["worstClass"], "presentation");
         assert_eq!(cue["kind"], "caption");
 
@@ -3414,7 +3490,7 @@ mod tests {
 
         assert_eq!(violations.len(), 1);
         let cue = first_cue(&violations[0]);
-        assert_eq!(cue["emojiCount"], 1, "a joined family is one emoji");
+        assert_eq!(cue["unsupportedCount"], 1, "a joined family is one emoji");
         assert_eq!(cue["worstClass"], "zwjSequence");
 
         let clusters = cue_clusters(&violations[0]);
@@ -3487,7 +3563,7 @@ mod tests {
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
         let cue = first_cue(&violations[0]);
-        assert_eq!(cue["emojiCount"], 1);
+        assert_eq!(cue["unsupportedCount"], 1);
 
         let clusters = cue_clusters(&violations[0]);
         assert_eq!(clusters.len(), 1);
@@ -3524,6 +3600,60 @@ mod tests {
             command["text"], "Ship it today",
             "the gap the emoji left behind is closed"
         );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should rewrite only the whitespace the removal left behind
+    ///
+    /// The proposal is "delete these clusters", and it has to be only that.
+    /// Collapsing the whole cue reflowed text the emoji never touched: an
+    /// authored blank line between two sentences came back as a single break,
+    /// and a non-breaking space elsewhere in the line came back as an ordinary
+    /// one - changes nobody asked for, in a command offered as a repair.
+    #[tokio::test]
+    async fn test_emoji_rule_should_only_close_the_gap_the_emoji_left() {
+        let cases = [
+            // A blank line the author put between two sentences survives.
+            ("Line one\n\nLine two \u{1F389}", "Line one\n\nLine two"),
+            // A non-breaking space nowhere near the deletion survives.
+            ("Ship\u{00A0}it \u{1F389} today", "Ship\u{00A0}it today"),
+            // The seam itself closes: a line break at the seam stays a break
+            // rather than joining the lines.
+            ("First \u{1F389}\nSecond", "First\nSecond"),
+            // Two removals with only a space between them close to one seam.
+            ("Live \u{1F389} \u{1F38A} tonight", "Live tonight"),
+            // A removal at either end leaves no stray space.
+            ("\u{1F389} Sale", "Sale"),
+        ];
+
+        for (written, expected) in cases {
+            let sequence = sequence_with_caption(written);
+
+            let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+            let fix = violations[0].suggested_fix.as_ref().expect("a proposal");
+            assert_eq!(
+                fix.commands[0]["text"], expected,
+                "{written:?} must only lose the clusters and their own seams"
+            );
+        }
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should keep reporting an emoji that FE0E cannot rescue
+    ///
+    /// Appending `U+FE0E` is the obvious wrong answer to a finding here, and it
+    /// only works for the bases Unicode gives a text-style sequence. Everywhere
+    /// else the renderer ignores the selector and draws the colour emoji, so
+    /// going quiet on it would confirm a repair that changed nothing.
+    #[tokio::test]
+    async fn test_emoji_rule_should_still_report_an_ignored_text_selector() {
+        let sequence = sequence_with_caption("Ship it \u{1F389}\u{FE0E}");
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(first_cue(&violations[0])["worstClass"], "presentation");
     }
 
     /// Feature: Emoji the burn-in cannot render
@@ -3580,10 +3710,54 @@ mod tests {
         let cue = first_cue(&violations[0]);
         assert_eq!(cue["clipId"], clip_id);
         assert_eq!(cue["kind"], "textOverlay");
-        assert_eq!(cue["repair"], "none");
+        assert_eq!(cue["repair"], "strip");
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should propose an UpdateTextClip that strips a title's emoji
+    ///
+    /// A text overlay is as repairable as a cue: `UpdateTextClip` takes the
+    /// clip's whole `TextClipData` back, so the proposal is that block with one
+    /// field rewritten and everything the author styled left where it was.
+    #[tokio::test]
+    async fn test_emoji_rule_should_emit_an_update_text_clip_fix_for_an_overlay() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        let (clip, effect) = text_overlay_clip("Big sale \u{1F389} today", 0.0, 4.0);
+        let clip_id = clip.id.clone();
+        track.add_clip(clip);
+        let track_id = track.id.clone();
+        sequence.add_track(track);
+
+        let mut state = ProjectState::new("p");
+        state.effects.insert(effect.id.clone(), effect);
+
+        let violations = emoji_violations(&sequence, &state).await;
+
+        let fix = violations[0].suggested_fix.as_ref().expect("a proposal");
+        assert_eq!(fix.commands.len(), 1);
+
+        let command = &fix.commands[0];
+        assert_eq!(command["type"], "UpdateTextClip");
+        assert_eq!(command["sequenceId"], sequence.id);
+        assert_eq!(command["trackId"], track_id);
+        assert_eq!(command["clipId"], clip_id);
+        assert_eq!(
+            command["textData"]["content"], "Big sale today",
+            "the gap the emoji left behind is closed"
+        );
+
+        // The rest of the block is the clip's own, not a default one built
+        // around the new content.
+        let original = crate::core::commands::get_text_data(&sequence.tracks[0].clips[0], &state)
+            .expect("the overlay carries its text data");
+        let mut expected = serde_json::to_value(&original).expect("text data serialises");
+        expected["content"] = serde_json::Value::String("Big sale today".to_string());
+        assert_eq!(command["textData"], expected);
+
         assert!(
-            violations[0].suggested_fix.is_none(),
-            "no command in the QC vocabulary rewrites a text clip"
+            !violations[0].auto_fixable,
+            "deleting an author's emoji is a content decision, not a repair"
         );
     }
 
@@ -3611,7 +3785,7 @@ mod tests {
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
         let cue = first_cue(&violations[0]);
-        assert_eq!(cue["emojiCount"], 2);
+        assert_eq!(cue["unsupportedCount"], 2);
         assert_eq!(
             cue["worstClass"], "regionalFlag",
             "a flag reading as its letters beats a picture reading as an outline"

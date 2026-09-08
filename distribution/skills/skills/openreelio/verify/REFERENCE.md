@@ -90,16 +90,18 @@ to the caller, because the material to do it with is a judgement call.
 `render.frozen`, `audio.peak`, `audio.clipping`, `audio.loudness`,
 `caption.contrast`.
 
-The caption checks report **one violation per caption track**, not one per cue.
+The caption checks report **one violation per track**, not one per cue.
 `caption.safe_area`, `caption.out_of_bounds`, `caption.reading_rate` and
 `caption.emoji_unsupported` list every offending cue under `metrics.cues`
-(`clipId`, `startSec`, `endSec` and that cue's own numbers) and in `entities`, publish those cue windows again as
-`metrics.timeRanges` (the violation's own `timeRange` spans the first cue to the
-last, which is usually the whole track - hand `metrics.timeRanges` to
-`frame extract --ranges` instead), and their `suggestedFix` is a single
-plan that repairs all of them - a machine transcript anchored two percent too
-low is one mistake, not forty-one, and the fix loop runs once instead of once
-per caption. A plan is capped at 200 steps; past that the finding splits into
+(`clipId`, `startSec`, `endSec` and that cue's own numbers) and in `entities`,
+publish those cue windows again as `metrics.timeRanges` (the violation's own
+`timeRange` spans the first cue to the last, which is usually the whole track -
+hand `metrics.timeRanges` to `frame extract --ranges` instead), and their
+`suggestedFix` is a single plan that repairs all of them. The track is a caption
+track for the first three; `caption.emoji_unsupported` also reads text overlays,
+so it groups those per video track. A machine transcript anchored two percent
+too low is one mistake, not forty-one, and the fix loop runs once instead of
+once per caption. A plan is capped at 200 steps; past that the finding splits into
 violations carrying `part`/`partCount`. `autoFixable` is true only when the
 steps finish the job: `caption.reading_rate` extends a cue into the following
 gap when the gap is long enough (`repair: "extend"`), and otherwise proposes a
@@ -113,12 +115,15 @@ burn-in cannot draw as written: libass paints monochrome outlines, so a colour
 emoji lands as a flat shape or tofu, a flag as its two letters ("KR"), a keycap
 as a digit plus a box, a ZWJ family as the people it was joined from. Each cue
 lists its `clusters` (`text`, `class`, `codepoints`, `sequenceKey`, `reason`),
-`emojiCount` and `worstClass`. A caption cue carries an `UpdateCaption` that
-strips the clusters and closes the gap - a proposal, never `autoFixable`, since
-deleting an author's emoji is a content decision. Each cue's `kind` names the
-surface: a `textOverlay` cue is reported without a fix, because no QC command
-rewrites a text clip, and those group per video track rather than per caption
-track.
+`unsupportedCount` - the clusters the renderer cannot draw, not every emoji in
+the cue - and `worstClass`. Each cue's `kind` names the surface, and both are
+repairable: a `caption` cue carries an `UpdateCaption` with the rewritten
+`text`, a `textOverlay` cue an `UpdateTextClip` carrying that clip's own
+`textData` with only `content` replaced. Stripping closes the whitespace the
+clusters leave behind and touches nothing else in the line; a cue left with no
+text carries no command (`repair: "none"`). Every fix is a proposal, never
+`autoFixable`, since deleting an author's emoji is a content decision. Text
+overlays group per video track rather than per caption track.
 
 `render.duration_mismatch` compares the measured file against the length a
 full-range render of the sequence writes — clips the export drops (disabled, or
