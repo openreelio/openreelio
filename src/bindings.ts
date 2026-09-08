@@ -20,7 +20,14 @@ async appCleanup() : Promise<Result<AppCleanupResult, string>> {
 }
 },
 /**
- * Lists installed system font family names for text editing controls.
+ * Lists the font families a text editing control should offer.
+ * 
+ * This is the picker's list: everything installed on this host plus a curated
+ * suggestion set, so the dropdown still names the families a project is likely
+ * to carry. It is deliberately *not* a statement about what is installed - the
+ * renderer asks `system_font_family_installed` for that, and conflating the
+ * two is what used to make caption burn-in depend on the host's font set. The
+ * command keeps its name so the frontend contract is unchanged.
  */
 async listSystemFontFamilies() : Promise<Result<string[], string>> {
     try {
