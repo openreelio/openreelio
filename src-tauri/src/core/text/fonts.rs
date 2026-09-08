@@ -4,6 +4,11 @@
 //! resolve those names at preview/export time. This module provides a lightweight
 //! local catalog by reading TrueType/OpenType name tables from standard OS font
 //! directories without pulling in a shaping engine.
+//!
+//! `ttf-parser` locates and bounds-checks the tables. Every question about a
+//! font's identity - the catalog's family names and [`font_face_info`]'s
+//! libass-facing fields alike - goes through [`for_each_face_name`], so no two
+//! call sites can disagree about what a file declares.
 
 use std::{
     collections::BTreeSet,
@@ -12,6 +17,7 @@ use std::{
     sync::OnceLock,
 };
 
+use ttf_parser::{name, name_id, os2, PlatformId, RawFace, Tag};
 use walkdir::WalkDir;
 
 const MAX_FONT_FILES_TO_SCAN: usize = 4096;
@@ -39,11 +45,20 @@ const DEFAULT_FONT_FAMILIES: &[&str] = &[
 
 static SYSTEM_FONT_FAMILY_CACHE: OnceLock<Vec<String>> = OnceLock::new();
 
-/// `OS/2` `fsSelection` bit 5: the face declares itself bold.
-const FS_SELECTION_BOLD: u16 = 1 << 5;
-
 /// `head` `macStyle` bit 0: the face declares itself bold.
+///
+/// Read by hand because `ttf-parser` skips `macStyle` while parsing `head`, and
+/// libass consults it alongside the `OS/2` bit when it ranks a family's weights.
 const MAC_STYLE_BOLD: u16 = 1 << 0;
+
+/// Byte offset of `macStyle` within the `head` table.
+const HEAD_MAC_STYLE_OFFSET: usize = 44;
+
+/// Upper bound on the faces read out of one font collection.
+///
+/// A `ttcf` header can claim any member count; capping it keeps a corrupt or
+/// hostile file from turning directory scanning into an unbounded parse.
+const MAX_COLLECTION_FACES: u32 = 256;
 
 /// Returns the cached catalog of installed font family names.
 fn system_font_families() -> &'static [String] {
@@ -270,209 +285,119 @@ impl FontFaceInfo {
 }
 
 /// Reads the name-table identity and weight bits of an in-memory font.
+///
+/// Reads the first face of a collection, matching what a renderer handed the
+/// file without an index would resolve.
 pub fn font_face_info(bytes: &[u8]) -> FontFaceInfo {
-    let font_offset = if bytes.starts_with(b"ttcf") {
-        read_u32(bytes, 12).unwrap_or(0) as usize
-    } else {
-        0
-    };
-
     let mut info = FontFaceInfo::default();
 
-    if let Some((table_offset, table_length)) = find_table(bytes, font_offset, b"name") {
-        for_each_name_record(bytes, table_offset, table_length, |name_id, name| {
-            let bucket = match name_id {
-                1 => &mut info.family_names,
-                4 => &mut info.full_names,
-                16 => &mut info.typographic_family_names,
-                _ => return,
-            };
-            if !bucket.contains(&name) {
-                bucket.push(name);
-            }
-        });
+    let Ok(face) = RawFace::parse(bytes, 0) else {
+        return info;
+    };
+
+    for_each_face_name(&face, |name_id, name| {
+        let bucket = match name_id {
+            name_id::FAMILY => &mut info.family_names,
+            name_id::FULL_NAME => &mut info.full_names,
+            name_id::TYPOGRAPHIC_FAMILY => &mut info.typographic_family_names,
+            _ => return,
+        };
+        if !bucket.contains(&name) {
+            bucket.push(name);
+        }
+    });
+
+    if let Some(os2) = face_table(&face, b"OS/2").and_then(os2::Table::parse) {
+        info.weight_class = Some(os2.weight().to_number());
+        info.fs_selection_bold = os2.is_bold();
     }
 
-    if let Some((table_offset, _)) = find_table(bytes, font_offset, b"OS/2") {
-        info.weight_class = read_u16(bytes, table_offset + 4);
-        info.fs_selection_bold =
-            read_u16(bytes, table_offset + 62).is_some_and(|bits| bits & FS_SELECTION_BOLD != 0);
-    }
-
-    if let Some((table_offset, _)) = find_table(bytes, font_offset, b"head") {
-        info.mac_style_bold =
-            read_u16(bytes, table_offset + 44).is_some_and(|bits| bits & MAC_STYLE_BOLD != 0);
-    }
+    info.mac_style_bold = face_table(&face, b"head")
+        .and_then(|head| read_u16(head, HEAD_MAC_STYLE_OFFSET))
+        .is_some_and(|bits| bits & MAC_STYLE_BOLD != 0);
 
     info
 }
 
-/// Returns the offset and length of `tag`'s table in the font at `font_offset`.
-fn find_table(bytes: &[u8], font_offset: usize, tag: &[u8; 4]) -> Option<(usize, usize)> {
-    if font_offset + 12 > bytes.len() {
-        return None;
-    }
+/// Returns the raw bytes of `tag`'s table in `face`.
+fn face_table<'a>(face: &RawFace<'a>, tag: &[u8; 4]) -> Option<&'a [u8]> {
+    face.table(Tag::from_bytes(tag))
+}
 
-    let signature = &bytes[font_offset..font_offset + 4];
-    if !matches!(signature, b"\x00\x01\x00\x00" | b"OTTO" | b"true" | b"typ1") {
-        return None;
-    }
+/// Returns how many faces `bytes` holds - a collection's members, or the one
+/// face of a plain font file.
+fn face_count(bytes: &[u8]) -> u32 {
+    ttf_parser::fonts_in_collection(bytes)
+        .unwrap_or(1)
+        .min(MAX_COLLECTION_FACES)
+}
 
-    let table_count = read_u16(bytes, font_offset + 4)?;
-    for table_index in 0..table_count as usize {
-        let record_offset = font_offset + 12 + table_index * 16;
-        if record_offset + 16 > bytes.len() {
-            return None;
-        }
+/// Calls `visit` with every decodable `(name ID, value)` pair of one face.
+///
+/// Walks the records by index instead of iterating the table. `NamesIter`
+/// signals a record it cannot decode - an unknown platform ID, a string offset
+/// that runs past the storage area - by yielding `None`, which *ends* a `for`
+/// loop rather than skipping that record. One malformed entry would therefore
+/// hide every entry after it, and the Windows family name a font declares
+/// usually sits behind the Macintosh records that precede it.
+fn for_each_face_name(face: &RawFace<'_>, mut visit: impl FnMut(u16, String)) {
+    let Some(table) = face_table(face, b"name").and_then(name::Table::parse) else {
+        return;
+    };
 
-        if &bytes[record_offset..record_offset + 4] != tag {
+    let names = table.names;
+    for index in 0..names.len() {
+        let Some(record) = names.get(index) else {
             continue;
+        };
+
+        if let Some(value) = decode_font_name(
+            platform_id_number(record.platform_id),
+            record.encoding_id,
+            record.name,
+        ) {
+            visit(record.name_id, value);
         }
-
-        return Some((
-            read_u32(bytes, record_offset + 8)? as usize,
-            read_u32(bytes, record_offset + 12)? as usize,
-        ));
     }
+}
 
-    None
+/// Returns the on-disk number of a parsed platform ID.
+///
+/// `decode_font_name` picks an encoding from the raw pair a `name` record
+/// stores, so the enum has to go back to the number it was read from.
+fn platform_id_number(platform_id: PlatformId) -> u16 {
+    match platform_id {
+        PlatformId::Unicode => 0,
+        PlatformId::Macintosh => 1,
+        PlatformId::Iso => 2,
+        PlatformId::Windows => 3,
+        PlatformId::Custom => 4,
+    }
 }
 
 fn parse_font_families(bytes: &[u8]) -> Vec<String> {
     let mut families = BTreeSet::new();
 
-    if bytes.starts_with(b"ttcf") {
-        if bytes.len() < 12 {
-            return Vec::new();
-        }
-        let font_count = read_u32(bytes, 8).unwrap_or(0).min(256);
-        for index in 0..font_count as usize {
-            let Some(offset) = read_u32(bytes, 12 + index * 4) else {
-                continue;
-            };
-            parse_sfnt_font(bytes, offset as usize, &mut families);
-        }
-    } else {
-        parse_sfnt_font(bytes, 0, &mut families);
+    for index in 0..face_count(bytes) {
+        let Ok(face) = RawFace::parse(bytes, index) else {
+            continue;
+        };
+
+        for_each_face_name(&face, |name_id, name| {
+            if name_id == name_id::FAMILY || name_id == name_id::TYPOGRAPHIC_FAMILY {
+                families.insert(name);
+            }
+        });
     }
 
     families.into_iter().collect()
 }
 
-fn parse_sfnt_font(bytes: &[u8], font_offset: usize, families: &mut BTreeSet<String>) {
-    if font_offset + 12 > bytes.len() {
-        return;
-    }
-
-    let signature = &bytes[font_offset..font_offset + 4];
-    if !matches!(signature, b"\x00\x01\x00\x00" | b"OTTO" | b"true" | b"typ1") {
-        return;
-    }
-
-    let Some(table_count) = read_u16(bytes, font_offset + 4) else {
-        return;
-    };
-    let record_start = font_offset + 12;
-    for table_index in 0..table_count as usize {
-        let record_offset = record_start + table_index * 16;
-        if record_offset + 16 > bytes.len() {
-            return;
-        }
-
-        if &bytes[record_offset..record_offset + 4] != b"name" {
-            continue;
-        }
-
-        let Some(table_offset) = read_u32(bytes, record_offset + 8) else {
-            continue;
-        };
-        let Some(table_length) = read_u32(bytes, record_offset + 12) else {
-            continue;
-        };
-
-        parse_name_table(
-            bytes,
-            table_offset as usize,
-            table_length as usize,
-            families,
-        );
-
-        let relative_table_offset = font_offset.saturating_add(table_offset as usize);
-        if relative_table_offset != table_offset as usize {
-            parse_name_table(
-                bytes,
-                relative_table_offset,
-                table_length as usize,
-                families,
-            );
-        }
-        return;
-    }
-}
-
-fn parse_name_table(
-    bytes: &[u8],
-    table_offset: usize,
-    table_length: usize,
-    families: &mut BTreeSet<String>,
-) {
-    for_each_name_record(bytes, table_offset, table_length, |name_id, name| {
-        if name_id == 1 || name_id == 16 {
-            families.insert(name);
-        }
-    });
-}
-
-/// Calls `visit` with every decodable `(name ID, value)` pair in a name table.
-fn for_each_name_record(
-    bytes: &[u8],
-    table_offset: usize,
-    table_length: usize,
-    mut visit: impl FnMut(u16, String),
-) {
-    if table_offset + table_length > bytes.len() || table_length < 6 {
-        return;
-    }
-
-    let Some(record_count) = read_u16(bytes, table_offset + 2) else {
-        return;
-    };
-    let Some(storage_offset) = read_u16(bytes, table_offset + 4) else {
-        return;
-    };
-
-    let storage_start = table_offset + storage_offset as usize;
-    let table_end = table_offset + table_length;
-    if storage_start > table_end {
-        return;
-    }
-
-    for record_index in 0..record_count as usize {
-        let record_offset = table_offset + 6 + record_index * 12;
-        if record_offset + 12 > table_end {
-            return;
-        }
-
-        let platform_id = read_u16(bytes, record_offset).unwrap_or(0);
-        let encoding_id = read_u16(bytes, record_offset + 2).unwrap_or(0);
-        let name_id = read_u16(bytes, record_offset + 6).unwrap_or(0);
-
-        let length = read_u16(bytes, record_offset + 8).unwrap_or(0) as usize;
-        let string_offset = read_u16(bytes, record_offset + 10).unwrap_or(0) as usize;
-        let string_start = storage_start + string_offset;
-        let string_end = string_start + length;
-        if string_start > table_end || string_end > table_end {
-            continue;
-        }
-
-        if let Some(name) =
-            decode_font_name(platform_id, encoding_id, &bytes[string_start..string_end])
-        {
-            visit(name_id, name);
-        }
-    }
-}
-
+/// Decodes one `name` record's bytes.
+///
+/// `ttf-parser` decodes only Unicode-platform records and drops every other
+/// one, which would lose the Macintosh-platform names that are still the only
+/// spelling some installed fonts carry - so the encoding choice stays here.
 fn decode_font_name(platform_id: u16, encoding_id: u16, bytes: &[u8]) -> Option<String> {
     let is_utf16_name =
         platform_id == 0 || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
@@ -513,12 +438,6 @@ fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
         .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    bytes
-        .get(offset..offset + 4)
-        .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,13 +450,55 @@ mod tests {
         bytes.extend_from_slice(&value.to_be_bytes());
     }
 
-    fn make_test_font(family: &str) -> Vec<u8> {
-        let family_utf16 = family
-            .encode_utf16()
-            .flat_map(u16::to_be_bytes)
-            .collect::<Vec<_>>();
-        let name_table_offset = 28u32;
-        let name_table_length = 18u32 + family_utf16.len() as u32;
+    /// Byte offset of the `name` table record's `offset` field in a font built
+    /// by [`make_test_font`]: 12-byte header, then tag (4) and checksum (4).
+    const TEST_NAME_RECORD_OFFSET_FIELD: usize = 20;
+
+    /// Byte offset of the `name` table inside a font built by
+    /// [`make_test_font`]: 12-byte header plus one 16-byte table record.
+    const TEST_NAME_TABLE_OFFSET: u32 = 28;
+
+    /// Byte length of a `name` table header: format, count, storage offset.
+    const NAME_TABLE_HEADER_LEN: u16 = 6;
+
+    /// Byte length of one `name` table record.
+    const NAME_RECORD_LEN: u16 = 12;
+
+    /// One record to write into a fixture's `name` table.
+    ///
+    /// The value is always stored as UTF-16BE, whatever `platform_id` says, so
+    /// a record can be given a platform the reader is expected to reject
+    /// without the fixture having to model that platform's encoding too.
+    struct TestNameRecord<'a> {
+        platform_id: u16,
+        encoding_id: u16,
+        name_id: u16,
+        value: &'a str,
+    }
+
+    /// Builds a single-face font whose only table is the given `name` records.
+    fn make_test_font_with_names(records: &[TestNameRecord<'_>]) -> Vec<u8> {
+        let storage_offset = NAME_TABLE_HEADER_LEN + NAME_RECORD_LEN * records.len() as u16;
+
+        let mut record_bytes = Vec::new();
+        let mut storage: Vec<u8> = Vec::new();
+        for record in records {
+            let value = record
+                .value
+                .encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect::<Vec<_>>();
+
+            push_u16(&mut record_bytes, record.platform_id);
+            push_u16(&mut record_bytes, record.encoding_id);
+            push_u16(&mut record_bytes, 0x0409);
+            push_u16(&mut record_bytes, record.name_id);
+            push_u16(&mut record_bytes, value.len() as u16);
+            push_u16(&mut record_bytes, storage.len() as u16);
+            storage.extend_from_slice(&value);
+        }
+
+        let name_table_length = u32::from(storage_offset) + storage.len() as u32;
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"\x00\x01\x00\x00");
@@ -548,20 +509,24 @@ mod tests {
 
         bytes.extend_from_slice(b"name");
         push_u32(&mut bytes, 0);
-        push_u32(&mut bytes, name_table_offset);
+        push_u32(&mut bytes, TEST_NAME_TABLE_OFFSET);
         push_u32(&mut bytes, name_table_length);
 
         push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 1);
-        push_u16(&mut bytes, 18);
-        push_u16(&mut bytes, 3);
-        push_u16(&mut bytes, 1);
-        push_u16(&mut bytes, 0x0409);
-        push_u16(&mut bytes, 1);
-        push_u16(&mut bytes, family_utf16.len() as u16);
-        push_u16(&mut bytes, 0);
-        bytes.extend_from_slice(&family_utf16);
+        push_u16(&mut bytes, records.len() as u16);
+        push_u16(&mut bytes, storage_offset);
+        bytes.extend_from_slice(&record_bytes);
+        bytes.extend_from_slice(&storage);
         bytes
+    }
+
+    fn make_test_font(family: &str) -> Vec<u8> {
+        make_test_font_with_names(&[TestNameRecord {
+            platform_id: 3,
+            encoding_id: 1,
+            name_id: name_id::FAMILY,
+            value: family,
+        }])
     }
 
     #[test]
@@ -573,19 +538,87 @@ mod tests {
     }
 
     #[test]
-    fn parse_font_families_deduplicates_ttc_members() {
-        let font = make_test_font("OpenReelio Sans");
-        let first_offset = 20u32;
-        let second_offset = first_offset + font.len() as u32;
+    fn parse_font_families_skips_an_undecodable_record_and_keeps_reading() {
+        // Platform ID 9 is not one `ttf-parser` knows, so the record fails to
+        // parse and the table iterator reports the end of the list there.
+        // Reading past it is what keeps the Windows family name - which real
+        // fonts place after their Macintosh records - visible.
+        let bytes = make_test_font_with_names(&[
+            TestNameRecord {
+                platform_id: 9,
+                encoding_id: 0,
+                name_id: name_id::FAMILY,
+                value: "Unreadable Platform",
+            },
+            TestNameRecord {
+                platform_id: 3,
+                encoding_id: 1,
+                name_id: name_id::FAMILY,
+                value: "OpenReelio Sans",
+            },
+        ]);
+
+        assert_eq!(
+            parse_font_families(&bytes),
+            vec!["OpenReelio Sans".to_string()]
+        );
+    }
+
+    /// Packs `members` into a `ttcf` collection.
+    ///
+    /// A collection's table records hold offsets from the start of the file,
+    /// not from the start of the member, so each member's `name` record is
+    /// rebased as it is placed. Emitting member-relative offsets instead would
+    /// make the fixture a malformed collection no conforming parser can read.
+    fn make_test_collection(members: &[Vec<u8>]) -> Vec<u8> {
+        let header_length = 12 + 4 * members.len();
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"ttcf");
         push_u32(&mut bytes, 0x0001_0000);
-        push_u32(&mut bytes, 2);
-        push_u32(&mut bytes, first_offset);
-        push_u32(&mut bytes, second_offset);
-        bytes.extend_from_slice(&font);
-        bytes.extend_from_slice(&font);
+        push_u32(&mut bytes, members.len() as u32);
+
+        let mut member_offset = header_length as u32;
+        for member in members {
+            push_u32(&mut bytes, member_offset);
+            member_offset += member.len() as u32;
+        }
+
+        for member in members {
+            let base = bytes.len() as u32;
+            let mut member = member.clone();
+            let field = TEST_NAME_RECORD_OFFSET_FIELD;
+            member[field..field + 4]
+                .copy_from_slice(&(base + TEST_NAME_TABLE_OFFSET).to_be_bytes());
+            bytes.extend_from_slice(&member);
+        }
+
+        bytes
+    }
+
+    #[test]
+    fn parse_font_families_reads_each_ttc_member_at_its_own_offset() {
+        // Distinct families on purpose: with the same family in both members
+        // this would still pass if the parser read member 0 twice, which is
+        // exactly the per-member offset resolution it is meant to pin.
+        let bytes = make_test_collection(&[
+            make_test_font("OpenReelio Sans"),
+            make_test_font("OpenReelio Serif"),
+        ]);
+
+        assert_eq!(
+            parse_font_families(&bytes),
+            vec![
+                "OpenReelio Sans".to_string(),
+                "OpenReelio Serif".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_font_families_deduplicates_ttc_members() {
+        let font = make_test_font("OpenReelio Sans");
+        let bytes = make_test_collection(&[font.clone(), font]);
 
         assert_eq!(
             parse_font_families(&bytes),

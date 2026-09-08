@@ -171,6 +171,15 @@ pub fn bundled_family_faces(family: &str) -> Vec<&'static BundledFont> {
         .collect()
 }
 
+/// Returns every face compiled into the binary, in a stable order.
+///
+/// Exposed so a consumer that has to look at each face's own bytes - glyph
+/// coverage among them - reads the same registry the resolver does instead of
+/// keeping a second list of what ships.
+pub fn bundled_faces() -> &'static [BundledFont] {
+    BUNDLED_FONTS
+}
+
 /// Returns the distinct family names compiled into the binary.
 pub fn bundled_font_families() -> Vec<&'static str> {
     let mut families: Vec<&'static str> = Vec::new();
@@ -306,6 +315,24 @@ mod tests {
                 font.file_name,
             );
         }
+    }
+
+    #[test]
+    fn a_known_face_reports_the_family_and_weight_its_file_declares() {
+        // Pins one face's metadata to exact values rather than to a property,
+        // so a change in how the `name` and `OS/2` tables are read shows up
+        // here as a diff instead of passing whatever it happens to produce.
+        let bold = bundled_family_faces("Poppins")
+            .into_iter()
+            .find(|font| font.file_name == "Poppins-Bold")
+            .expect("Poppins ships a bold face");
+        let info = super::super::fonts::font_face_info(bold.bytes);
+
+        assert!(info.family_names.contains(&"Poppins".to_string()));
+        assert!(info.full_names.contains(&"Poppins Bold".to_string()));
+        assert_eq!(info.weight_class, Some(700));
+        assert!(info.declares_bold());
+        assert!(info.matches_family("poppins"));
     }
 
     #[test]
