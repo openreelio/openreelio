@@ -13,12 +13,11 @@
 
 use crate::core::assets::{Asset, AudioInfo, VideoInfo};
 use crate::core::captions::CaptionPosition;
-use crate::core::commands::TEXT_ASSET_PREFIX;
-use crate::core::effects::{Effect, EffectType, ParamValue};
 use crate::core::project::ProjectState;
 use crate::core::qc::caption_contrast::CaptionBandSample;
 use crate::core::qc::context::RenderMeasurements;
 use crate::core::qc::engine::QCEngine;
+use crate::core::qc::test_support::text_overlay_clip;
 use crate::core::qc::violation::QCViolation;
 use crate::core::timeline::{Clip, Sequence, SequenceFormat, Track};
 use crate::ipc::CommandPayload;
@@ -198,20 +197,6 @@ fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
     sequence.add_track(titles);
 
     (sequence, state)
-}
-
-/// Builds a text-overlay clip and the effect that carries its words.
-fn text_overlay_clip(text: &str, timeline_in_sec: f64, duration_sec: f64) -> (Clip, Effect) {
-    let mut clip = Clip::with_range("placeholder", 0.0, duration_sec);
-    clip.asset_id = format!("{TEXT_ASSET_PREFIX}{}", clip.id);
-    clip.place.timeline_in_sec = timeline_in_sec;
-    clip.place.duration_sec = duration_sec;
-
-    let mut effect = Effect::new(EffectType::TextOverlay);
-    effect.set_param("text", ParamValue::String(text.to_string()));
-    clip.effects.push(effect.id.clone());
-
-    (clip, effect)
 }
 
 /// The band sample that reports the fixture's faded caption cue.

@@ -21,6 +21,7 @@ use crate::core::commands::{find_gaps, get_text_data, is_text_clip};
 use crate::core::project::ProjectState;
 use crate::core::render::transition_stitch::plan_sequence_transitions;
 use crate::core::text::emoji::{self, EmojiClass, EmojiCluster};
+use crate::core::text::TextClipData;
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::CoreResult;
 
@@ -1412,6 +1413,25 @@ impl EmojiRenderCapability {
 #[derive(Debug, Default)]
 pub struct CaptionEmojiRule;
 
+/// The surface one emoji finding sits on, and what it takes to rewrite it.
+///
+/// The two surfaces take different commands, and the choice used to be inferred
+/// downstream from whether a [`TextClipData`] had been read — correct, but only
+/// for as long as three separate guards agreed with each other. Deciding it once,
+/// where the clip is classified, keeps the routing next to its reason.
+enum CaptionSurface {
+    /// A caption cue, whose words live in the clip label and are rewritten with
+    /// `UpdateCaption`.
+    Caption,
+    /// A text-overlay clip, rewritten with `UpdateTextClip` carrying the whole
+    /// block back so the read and the write stay symmetrical.
+    ///
+    /// Boxed because the block is two orders of magnitude wider than the cue
+    /// variant, and every caption clip on the timeline would otherwise pay for
+    /// it on the stack.
+    TextOverlay(Box<TextClipData>),
+}
+
 /// Prose carried by every grouped emoji violation.
 const EMOJI_DETAILS: &str = "Each listed cue names its own clusters under `cues[].clusters`, with \
                              the class that explains the symptom: `presentation` draws as a flat \
@@ -1470,9 +1490,10 @@ impl CaptionEmojiRule {
     /// that quietly reflows the caption is not the proposal the report claims
     /// to be making.
     ///
-    /// A seam holding a line break closes to one newline and every other seam
-    /// to one space, so deleting an emoji from the end of a line does not join
-    /// it to the next; a seam at either end of the cue closes to nothing.
+    /// A seam holding a line break closes to that break — the same sequence it
+    /// held, `\r\n` included — and every other seam to one space, so deleting
+    /// an emoji from the end of a line does not join it to the next; a seam at
+    /// either end of the text closes to nothing.
     ///
     /// Returns `None` when nothing readable is left: proposing an empty caption
     /// would trade a mis-drawn line for a blank one.
@@ -1480,11 +1501,12 @@ impl CaptionEmojiRule {
         let mut out = String::with_capacity(text.len());
         // Byte offset of the first character not yet copied or consumed.
         let mut cursor = 0usize;
-        // `Some(has_newline)` while a seam is owed before the next literal
-        // text. Held rather than written so two removals separated by nothing
-        // but whitespace close to one separator instead of two, and so a seam
-        // at the very end of the cue is simply dropped.
-        let mut seam: Option<bool> = None;
+        // `Some(line_break)` while a seam is owed before the next literal text,
+        // carrying the break sequence to close it with or `None` for a space.
+        // Held rather than written so two removals separated by nothing but
+        // whitespace close to one separator instead of two, and so a seam at
+        // the very end of the cue is simply dropped.
+        let mut seam: Option<Option<&str>> = None;
 
         // `scan` reports clusters in order and they never overlap, so one
         // forward pass copies everything between them.
@@ -1501,8 +1523,10 @@ impl CaptionEmojiRule {
             let adjacent = &text[leading..cut_start];
             let following = &text[cluster.byte_range.end..trailing];
             if !adjacent.is_empty() || !following.is_empty() {
-                let has_newline = holds_line_break(adjacent) || holds_line_break(following);
-                seam = Some(seam.unwrap_or(false) || has_newline);
+                // A break already owed is never downgraded to a space by a
+                // second, break-less seam merging into it.
+                let found = line_break_in(adjacent).or_else(|| line_break_in(following));
+                seam = Some(seam.flatten().or(found));
             }
             cursor = trailing;
         }
@@ -1525,17 +1549,48 @@ impl CaptionEmojiRule {
 ///
 /// A seam before the first surviving character has nothing to join, so it is
 /// dropped rather than left as leading whitespace.
-fn push_seam(out: &mut String, seam: Option<bool>) {
-    if let Some(has_newline) = seam {
+fn push_seam(out: &mut String, seam: Option<Option<&str>>) {
+    if let Some(line_break) = seam {
         if !out.is_empty() {
-            out.push(if has_newline { '\n' } else { ' ' });
+            out.push_str(line_break.unwrap_or(" "));
         }
     }
 }
 
-/// Whether a whitespace run holds a line break.
-fn holds_line_break(run: &str) -> bool {
-    run.contains('\n') || run.contains('\r')
+/// Puts `original`'s leading and trailing whitespace back around `stripped`.
+///
+/// The emoji scan runs over the trimmed span, so what comes back out of
+/// [`CaptionEmojiRule::stripped_text`] has lost whatever padded the original.
+/// For a text overlay that padding is layout — a title card authored as
+/// `"  Big sale \u{1F389}\n"` is two lines placed deliberately — and returning
+/// `"Big sale"` for it would move the block, which is not what a proposal
+/// described as closing the seams around a deleted emoji is allowed to do.
+fn restore_padding(original: &str, stripped: &str) -> String {
+    let leading = &original[..original.len() - original.trim_start().len()];
+    let trailing = &original[original.trim_end().len()..];
+    format!("{leading}{stripped}{trailing}")
+}
+
+/// The first line break in a whitespace run, as the exact sequence that wrote it.
+///
+/// `char::is_whitespace` is true for more line terminators than `\n` and `\r`:
+/// `U+0085` NEL and the `U+2028`/`U+2029` separators end a line too, so a run
+/// made only of those used to read as ordinary whitespace and close to a space,
+/// joining two lines the author had kept apart.
+///
+/// The sequence is returned rather than a flag so the break is reproduced as it
+/// was found: a `\r\n` seam closes back to `\r\n` instead of leaving the lone
+/// `\n` half of it in a cue written with the pair.
+fn line_break_in(run: &str) -> Option<&str> {
+    for (offset, character) in run.char_indices() {
+        let width = match character {
+            '\r' if run[offset + 1..].starts_with('\n') => 2,
+            '\r' | '\n' | '\u{0085}' | '\u{2028}' | '\u{2029}' => character.len_utf8(),
+            _ => continue,
+        };
+        return Some(&run[offset..offset + width]);
+    }
+    None
 }
 
 /// Start of the whitespace run ending at `end`, floored at `floor`.
@@ -1602,25 +1657,27 @@ impl QCRule for CaptionEmojiRule {
                     continue;
                 }
 
-                // Kept whole rather than reduced to its `content`: rewriting a
-                // text overlay means handing `UpdateTextClip` the entire block
-                // back with one field changed, so the style, position, shadow
-                // and outline the author set have to survive the read.
-                let text_data = if captions {
-                    None
+                // The overlay block is kept whole rather than reduced to its
+                // `content`: rewriting a text overlay means handing
+                // `UpdateTextClip` the entire block back with one field
+                // changed, so the style, position, shadow and outline the
+                // author set have to survive the read.
+                let surface = if captions {
+                    CaptionSurface::Caption
                 } else if is_text_clip(clip) {
-                    get_text_data(clip, state)
+                    match get_text_data(clip, state) {
+                        Some(data) => CaptionSurface::TextOverlay(Box::new(data)),
+                        // A text clip whose overlay effect is gone carries no
+                        // words to check.
+                        None => continue,
+                    }
                 } else {
                     continue;
                 };
 
-                let owned = if captions {
-                    clip.label.clone().unwrap_or_default()
-                } else {
-                    text_data
-                        .as_ref()
-                        .map(|data| data.content.clone())
-                        .unwrap_or_default()
+                let owned = match &surface {
+                    CaptionSurface::Caption => clip.label.clone().unwrap_or_default(),
+                    CaptionSurface::TextOverlay(data) => data.content.clone(),
                 };
                 let text = owned.trim();
                 if text.is_empty() {
@@ -1659,20 +1716,29 @@ impl QCRule for CaptionEmojiRule {
 
                 // Both surfaces have a command that rewrites them: a cue takes
                 // `UpdateCaption`, a title card takes `UpdateTextClip` with the
-                // whole `TextClipData` block and only its `content` replaced,
-                // so nothing else the author set is disturbed.
+                // whole `TextClipData` block and only its `content` replaced.
+                // The rest of the block is carried straight back from the read —
+                // including the position and opacity `get_text_data` folds in
+                // off the clip, which `UpdateTextClip` writes out again as it
+                // found them — so the proposal changes the words and re-states
+                // everything else rather than re-authoring it.
                 let (commands, repair) = match Self::stripped_text(text, &clusters) {
                     Some(stripped) => {
-                        let command = match text_data {
-                            None => serde_json::json!({
+                        let command = match surface {
+                            CaptionSurface::Caption => serde_json::json!({
                                 "type": "UpdateCaption",
                                 "sequenceId": sequence.id,
                                 "trackId": track.id,
                                 "clipId": clip.id,
                                 "text": stripped,
                             }),
-                            Some(mut data) => {
-                                data.content = stripped;
+                            CaptionSurface::TextOverlay(mut data) => {
+                                // A title card's block is laid out literally, so
+                                // the padding around it is the author's spacing
+                                // rather than slack to tidy: the emoji seams are
+                                // closed inside the trimmed span and the outer
+                                // whitespace is handed back untouched.
+                                data.content = restore_padding(&owned, &stripped);
                                 serde_json::json!({
                                     "type": "UpdateTextClip",
                                     "sequenceId": sequence.id,
@@ -2429,6 +2495,7 @@ mod tests {
     use super::*;
     use crate::core::assets::{Asset, AudioInfo, VideoInfo};
     use crate::core::qc::context::RenderMeasurements;
+    use crate::core::qc::test_support::text_overlay_clip;
     use crate::core::timeline::SequenceFormat;
 
     // ========================================================================
@@ -3406,26 +3473,6 @@ mod tests {
             .expect("a cue lists the clusters it was reported for")
     }
 
-    /// Builds a text-overlay clip and the effect that carries its words.
-    fn text_overlay_clip(
-        text: &str,
-        timeline_in: f64,
-        duration: f64,
-    ) -> (Clip, crate::core::effects::Effect) {
-        use crate::core::effects::{Effect, EffectType, ParamValue};
-
-        let mut clip = Clip::with_range("placeholder", 0.0, duration);
-        clip.asset_id = format!("__text__{}", clip.id);
-        clip.place.timeline_in_sec = timeline_in;
-        clip.place.duration_sec = duration;
-
-        let mut effect = Effect::new(EffectType::TextOverlay);
-        effect.set_param("text", ParamValue::String(text.to_string()));
-        clip.effects.push(effect.id.clone());
-
-        (clip, effect)
-    }
-
     /// Feature: Emoji the burn-in cannot render
     /// Scenario: should report a colour emoji in a cue
     #[tokio::test]
@@ -3620,6 +3667,13 @@ mod tests {
             // The seam itself closes: a line break at the seam stays a break
             // rather than joining the lines.
             ("First \u{1F389}\nSecond", "First\nSecond"),
+            // `U+2028` ends a line as surely as `\n` does, and `is_whitespace`
+            // is true for it, so reading only `\n` and `\r` closed this seam to
+            // a space and joined two lines the author had kept apart.
+            ("a\u{2028}\u{1F389}\u{2028}b", "a\u{2028}b"),
+            // A CRLF seam closes back to CRLF rather than leaving the lone
+            // `\n` half of it in a cue written with the pair.
+            ("First \u{1F389}\r\nSecond", "First\r\nSecond"),
             // Two removals with only a space between them close to one seam.
             ("Live \u{1F389} \u{1F38A} tonight", "Live tonight"),
             // A removal at either end leaves no stray space.
@@ -3758,6 +3812,34 @@ mod tests {
         assert!(
             !violations[0].auto_fixable,
             "deleting an author's emoji is a content decision, not a repair"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should keep a title card's own padding around the stripped text
+    ///
+    /// A text overlay is placed as a block, so the whitespace around its words
+    /// is layout the author wrote: an indent positions the line and a trailing
+    /// break holds the second line of a two-line card open. Trimming it while
+    /// closing the emoji's seam moved the card, which is not what a proposal
+    /// described as deleting the clusters and closing their seams may do.
+    #[tokio::test]
+    async fn test_emoji_rule_should_keep_a_title_cards_outer_whitespace() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        let (clip, effect) = text_overlay_clip("  Big sale \u{1F389}\n", 0.0, 4.0);
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let mut state = ProjectState::new("p");
+        state.effects.insert(effect.id.clone(), effect);
+
+        let violations = emoji_violations(&sequence, &state).await;
+
+        let fix = violations[0].suggested_fix.as_ref().expect("a proposal");
+        assert_eq!(
+            fix.commands[0]["textData"]["content"], "  Big sale\n",
+            "only the seam the emoji left is closed; the author's padding stays"
         );
     }
 
