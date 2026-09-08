@@ -1053,9 +1053,13 @@ mod tests {
             ("TEXT_VARIATION_BASES", TEXT_VARIATION_BASES.as_slice()),
         ] {
             for window in ranges.windows(2) {
+                // A gap, not merely no overlap: `(A, B), (B + 1, C)` is
+                // disjoint but should have been generated as one range, and
+                // letting it through would have hidden a generator that had
+                // stopped merging. Requiring a gap enforces the merge.
                 assert!(
-                    window[0].1 < window[1].0,
-                    "{label} must be sorted and disjoint at {window:?}"
+                    window[0].1 + 1 < window[1].0,
+                    "{label} must be sorted, disjoint and merged at {window:?}"
                 );
             }
             for (first, last) in ranges {
