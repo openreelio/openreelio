@@ -71,8 +71,9 @@ Exit `2` is never "the video is bad" — it means the verdict is unknown.
 **structural** — `sequence.empty`, `timeline.gap`, `clip.orphan`,
 `clip.missing_asset`, `clip.aspect_ratio`, `audio.silent_clip`,
 `caption.overlap`, `caption.reading_rate`, `caption.out_of_bounds`,
-`caption.safe_area`, `shot.length_stats`, `shot.cut_rhythm`,
-`transition.no_handles`, plus opt-in `asset.license` and `sequence.duration`.
+`caption.safe_area`, `caption.emoji_unsupported`, `shot.length_stats`,
+`shot.cut_rhythm`, `transition.no_handles`, plus opt-in `asset.license` and
+`sequence.duration`.
 
 `transition.no_handles` (warning) reports every stored dissolve, wipe or slide
 the render will degrade to a hard cut, and why — a boundary that is not a
@@ -90,9 +91,9 @@ to the caller, because the material to do it with is a judgement call.
 `caption.contrast`.
 
 The caption checks report **one violation per caption track**, not one per cue.
-`caption.safe_area`, `caption.out_of_bounds` and `caption.reading_rate` list
-every offending cue under `metrics.cues` (`clipId`, `startSec`, `endSec` and
-that cue's own numbers) and in `entities`, publish those cue windows again as
+`caption.safe_area`, `caption.out_of_bounds`, `caption.reading_rate` and
+`caption.emoji_unsupported` list every offending cue under `metrics.cues`
+(`clipId`, `startSec`, `endSec` and that cue's own numbers) and in `entities`, publish those cue windows again as
 `metrics.timeRanges` (the violation's own `timeRange` spans the first cue to the
 last, which is usually the whole track - hand `metrics.timeRanges` to
 `frame extract --ranges` instead), and their `suggestedFix` is a single
@@ -106,6 +107,18 @@ split at the nearest word boundary (`repair: "split"`, an `UpdateCaption` +
 `CreateCaption` pair whose new half carries the original cue's `style` and
 `position`) that a human still has to accept - so that group reports
 `autoFixable: false` while still carrying the plan to read.
+
+`caption.emoji_unsupported` (warning) reports caption and text-overlay text the
+burn-in cannot draw as written: libass paints monochrome outlines, so a colour
+emoji lands as a flat shape or tofu, a flag as its two letters ("KR"), a keycap
+as a digit plus a box, a ZWJ family as the people it was joined from. Each cue
+lists its `clusters` (`text`, `class`, `codepoints`, `sequenceKey`, `reason`),
+`emojiCount` and `worstClass`. A caption cue carries an `UpdateCaption` that
+strips the clusters and closes the gap - a proposal, never `autoFixable`, since
+deleting an author's emoji is a content decision. Each cue's `kind` names the
+surface: a `textOverlay` cue is reported without a fix, because no QC command
+rewrites a text clip, and those group per video track rather than per caption
+track.
 
 `render.duration_mismatch` compares the measured file against the length a
 full-range render of the sequence writes — clips the export drops (disabled, or

@@ -838,12 +838,12 @@ openreelio-cli verify --path ./demo --file ./proxy.mp4 \
 Without `--file`, only structural checks run and FFmpeg is never invoked.
 `--structural-only` makes that explicit and conflicts with `--file`.
 
-Twenty-four checks in two categories. **structural**: `sequence.empty`,
+Twenty-five checks in two categories. **structural**: `sequence.empty`,
 `timeline.gap`, `clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`,
 `audio.silent_clip`, `caption.overlap`, `caption.reading_rate`,
-`caption.out_of_bounds`, `caption.safe_area`, `shot.length_stats`,
-`shot.cut_rhythm`, `transition.no_handles`, plus the opt-in `asset.license` and
-`sequence.duration`.
+`caption.out_of_bounds`, `caption.safe_area`, `caption.emoji_unsupported`,
+`shot.length_stats`, `shot.cut_rhythm`, `transition.no_handles`, plus the opt-in
+`asset.license` and `sequence.duration`.
 **rendered**: `render.duration_mismatch`, `render.missing_video`,
 `render.resolution_mismatch`, `render.black_frames`, `render.frozen`,
 `audio.peak`, `audio.clipping`, `audio.loudness`, `caption.contrast`. The two
@@ -981,9 +981,9 @@ check(s) were skipped" warning names the flag that would run it — except under
 `--structural-only`, which is the caller saying it already knows.
 
 The caption checks report **one violation per caption track**, not one per cue:
-`caption.safe_area`, `caption.out_of_bounds` and `caption.reading_rate` list
-every offending cue under `metrics.cues` (with `clipId`, `startSec`, `endSec`
-and that cue's own numbers) and in `entities`, publish those cue windows again
+`caption.safe_area`, `caption.out_of_bounds`, `caption.reading_rate` and
+`caption.emoji_unsupported` list every offending cue under `metrics.cues` (with
+`clipId`, `startSec`, `endSec` and that cue's own numbers) and in `entities`, publish those cue windows again
 as `metrics.timeRanges` — the violation's own `timeRange` spans the first cue to
 the last, which is usually the whole track, so hand `metrics.timeRanges` to
 `frame extract --ranges` instead — and their `suggestedFix`
@@ -998,6 +998,20 @@ where it is not it proposes a split at the nearest word boundary
 carrying the original cue's `style` and `position` so it is drawn the same way
 in the same place) which a human or model still has to accept, so the group
 reports `autoFixable: false`.
+
+`caption.emoji_unsupported` (warning) reports caption and text-overlay text the
+burn-in cannot draw as written. libass paints one monochrome outline per glyph,
+so a colour emoji comes out as a flat shape or a tofu box, a flag as its two
+letters ("KR"), a keycap as the digit plus a box, and a ZWJ family as the people
+it was joined from. The render still succeeds, which is why nothing else
+notices. Each cue lists its `clusters` (`text`, `class`, `codepoints`,
+`sequenceKey`, `reason`) plus `emojiCount` and `worstClass`; a caption cue
+carries an `UpdateCaption` that deletes the clusters and closes the gap they
+leave, offered as a proposal (`autoFixable: false`) because removing an author's
+emoji is a content decision. Each cue's `kind` says which surface it came
+from. Text-overlay clips (`kind: "textOverlay"`) are reported with no fix — no
+command in the QC vocabulary rewrites one — and are grouped per video track
+rather than per caption track.
 
 The report always lists every check that ran, was skipped, or errored — so
 "checked and clean" is distinguishable from "never looked". Each entry carries

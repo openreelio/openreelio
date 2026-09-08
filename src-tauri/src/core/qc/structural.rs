@@ -17,9 +17,10 @@ use super::engine::QCReport;
 use super::rules::{QCRule, RuleConfig};
 use super::violation::{merged_span_duration_sec, QCViolation, Severity, ViolationFix};
 use crate::core::captions::{CaptionPosition, CaptionStyle, VerticalPosition};
-use crate::core::commands::find_gaps;
+use crate::core::commands::{find_gaps, get_text_data, is_text_clip};
 use crate::core::project::ProjectState;
 use crate::core::render::transition_stitch::plan_sequence_transitions;
+use crate::core::text::emoji::{self, EmojiClass, EmojiCluster};
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::CoreResult;
 
@@ -1315,6 +1316,341 @@ impl CaptionReadingRateRule {
             ],
             resolved: false,
         }
+    }
+}
+
+// =============================================================================
+// CaptionEmojiRule
+// =============================================================================
+
+/// What the burn-in path can do with a colour emoji.
+///
+/// An enum rather than a boolean because the answer is a property of the
+/// *renderer*, and there is more than one in play: libass as it is configured
+/// today, libass with a colour-emoji layer over it, and the `drawtext` fallback
+/// the export drops to where no subtitle filter is available. Which one is in
+/// force is [`CaptionEmojiRule::RENDER_CAPABILITY`]'s business; the mapping from
+/// renderer to failure lives here, so teaching the rule about real render state
+/// later changes that one constant and nothing else about the check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmojiRenderCapability {
+    /// Colour emoji are drawn as their own layer over the text.
+    ColorOverlay,
+    /// One monochrome outline per glyph, which is what libass draws.
+    MonochromeOnly,
+    /// No subtitle renderer at all: `drawtext` with a single text font.
+    DrawtextFallback,
+}
+
+impl EmojiRenderCapability {
+    /// Why this renderer cannot draw `class`, or `None` when it can.
+    pub fn unsupported_reason(self, class: EmojiClass) -> Option<&'static str> {
+        // U+FE0E asks for monochrome text, which is what every path here
+        // draws, so the one explicitly text-presented class is never a finding.
+        if class == EmojiClass::TextPresentation {
+            return None;
+        }
+
+        match self {
+            EmojiRenderCapability::ColorOverlay => None,
+            EmojiRenderCapability::MonochromeOnly => Some(match class {
+                EmojiClass::TagFlag => {
+                    "the subdivision tags after the base flag have no glyphs, so the burn-in \
+                     draws a plain black flag or nothing at all"
+                }
+                EmojiClass::RegionalFlag => {
+                    "the burn-in has no flag ligature, so the regional indicator pair draws as \
+                     its two letters"
+                }
+                EmojiClass::Keycap => {
+                    "the combining enclosing keycap has no outline, so the burn-in draws the \
+                     digit followed by a tofu box"
+                }
+                EmojiClass::ZwjSequence => {
+                    "the zero width joiner is not honoured, so the burn-in draws each emoji the \
+                     sequence was joined from side by side"
+                }
+                EmojiClass::SkinToneModified => {
+                    "the skin tone modifier has no outline of its own, so the burn-in draws the \
+                     base emoji untinted and the modifier as tofu"
+                }
+                EmojiClass::Presentation => {
+                    "the burn-in draws one monochrome outline per glyph, so the colour emoji \
+                     comes out as its flat base shape in the text colour, or as tofu where the \
+                     colour font carries no base outline"
+                }
+                // Answered above; repeated only so the match stays exhaustive
+                // without a wildcard that would swallow a future variant.
+                EmojiClass::TextPresentation => return None,
+            }),
+            EmojiRenderCapability::DrawtextFallback => Some(
+                "the drawtext fallback draws from one text font with no emoji coverage, so the \
+                 cluster comes out as tofu",
+            ),
+        }
+    }
+}
+
+/// Rule that reports caption and title text the burn-in cannot draw as written
+///
+/// Reads timeline text alone, so it is structural: nothing here needs a render.
+/// It covers both surfaces the export burns through the same subtitles node —
+/// caption cues and text-overlay clips — because a title card with a flag in it
+/// fails in exactly the way a caption with a flag in it does.
+///
+/// Findings stay at warning level. The render succeeds and the file plays; what
+/// is wrong is that the frame does not say what the project says, which is a
+/// thing to look at rather than a broken deliverable, and `--fail-on error`
+/// must not start failing on it.
+#[derive(Debug, Default)]
+pub struct CaptionEmojiRule;
+
+/// Prose carried by every grouped emoji violation.
+const EMOJI_DETAILS: &str = "Each listed cue names its own clusters under `cues[].clusters`, with \
+                             the class that explains the symptom: `presentation` draws as a flat \
+                             monochrome shape or tofu, `regionalFlag` as its two letters (a \
+                             Korean flag reads KR), `keycap` as the digit plus a tofu box, \
+                             `zwjSequence` as the emoji it was joined from, `skinToneModified` \
+                             as an untinted base, `tagFlag` as a plain black flag. The fix \
+                             deletes the offending clusters and closes the whitespace they leave \
+                             behind, which is a content decision rather than a repair, so it is \
+                             a proposal to read and the group is never automatically fixable. \
+                             Text-overlay clips are reported without a fix: no command in the QC \
+                             vocabulary rewrites one.";
+
+impl CaptionEmojiRule {
+    /// Creates a new CaptionEmojiRule
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// What the burn-in can currently do with emoji.
+    ///
+    /// Constant on purpose. The export writes an ASS script for libass, which
+    /// paints monochrome outlines, and no code path today asks for anything
+    /// else — so deriving this from state would be a lie dressed as a lookup.
+    /// When a colour path exists, this is the line that changes.
+    const RENDER_CAPABILITY: EmojiRenderCapability = EmojiRenderCapability::MonochromeOnly;
+
+    /// Confidence carried by the strip proposal.
+    ///
+    /// Middling by design: that the cluster will be mis-drawn is certain, that
+    /// deleting it is what the author wants is not.
+    const FIX_CONFIDENCE: f32 = 0.5;
+
+    /// The clusters in `text` this renderer cannot draw, each with why.
+    fn unsupported_clusters(text: &str) -> Vec<(EmojiCluster<'_>, &'static str)> {
+        emoji::scan(text)
+            .into_iter()
+            .filter_map(|cluster| {
+                Self::RENDER_CAPABILITY
+                    .unsupported_reason(cluster.class)
+                    .map(|reason| (cluster, reason))
+            })
+            .collect()
+    }
+
+    /// `text` with the offending clusters cut out and the seams closed.
+    ///
+    /// Returns `None` when nothing readable is left: proposing an empty caption
+    /// would trade a mis-drawn line for a blank one.
+    fn stripped_text(text: &str, clusters: &[(EmojiCluster<'_>, &'static str)]) -> Option<String> {
+        let mut kept = String::with_capacity(text.len());
+        let mut cursor = 0usize;
+
+        // `scan` reports clusters in order and they never overlap, so a single
+        // forward pass copies everything between them.
+        for (cluster, _) in clusters {
+            kept.push_str(&text[cursor..cluster.byte_range.start]);
+            cursor = cluster.byte_range.end;
+        }
+        kept.push_str(&text[cursor..]);
+
+        let collapsed = collapse_whitespace(&kept);
+        if collapsed.is_empty() {
+            None
+        } else {
+            Some(collapsed)
+        }
+    }
+}
+
+/// Collapses whitespace runs left behind by a deletion, keeping line structure.
+///
+/// A run holding a newline collapses to one newline and every other run to one
+/// space, so removing an emoji from the end of a caption's first line does not
+/// silently join it to the second. Leading and trailing whitespace is dropped.
+fn collapse_whitespace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending: Option<bool> = None;
+
+    for character in text.chars() {
+        if character.is_whitespace() {
+            let has_newline = character == '\n' || character == '\r';
+            pending = Some(pending.unwrap_or(false) || has_newline);
+            continue;
+        }
+        if let Some(has_newline) = pending.take() {
+            if !out.is_empty() {
+                out.push(if has_newline { '\n' } else { ' ' });
+            }
+        }
+        out.push(character);
+    }
+
+    out
+}
+
+#[async_trait]
+impl QCRule for CaptionEmojiRule {
+    fn name(&self) -> &str {
+        "CaptionEmojiRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "caption.emoji_unsupported"
+    }
+
+    fn description(&self) -> &str {
+        "Reports caption and text-overlay emoji the burn-in cannot draw as written"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        state: &ProjectState,
+        config: &RuleConfig,
+        _context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let severity = config.severity_override.unwrap_or(self.default_severity());
+        let mut violations = Vec::new();
+
+        for track in &sequence.tracks {
+            // Nothing hidden or muted is laid onto the output, so nothing on it
+            // is burned in and nothing on it can be mis-drawn.
+            if !track.contributes_to_output() {
+                continue;
+            }
+            let captions = track.is_caption();
+            if !captions && !track.is_video() {
+                continue;
+            }
+
+            let mut findings: Vec<CaptionFinding> = Vec::new();
+
+            for clip in &track.clips {
+                if !clip.enabled {
+                    continue;
+                }
+
+                let owned = if captions {
+                    clip.label.clone().unwrap_or_default()
+                } else if is_text_clip(clip) {
+                    get_text_data(clip, state)
+                        .map(|data| data.content)
+                        .unwrap_or_default()
+                } else {
+                    continue;
+                };
+                let text = owned.trim();
+                if text.is_empty() {
+                    continue;
+                }
+
+                let clusters = Self::unsupported_clusters(text);
+                if clusters.is_empty() {
+                    continue;
+                }
+
+                // `EmojiClass` is declared worst-first, so the minimum is the
+                // class that explains what the frame will look like.
+                let worst = clusters
+                    .iter()
+                    .map(|(cluster, _)| cluster.class)
+                    .min()
+                    .unwrap_or(EmojiClass::Presentation);
+
+                let listed: Vec<serde_json::Value> = clusters
+                    .iter()
+                    .map(|(cluster, reason)| {
+                        serde_json::json!({
+                            "text": cluster.text,
+                            "class": cluster.class.as_str(),
+                            "codepoints": cluster
+                                .codepoints
+                                .iter()
+                                .map(|codepoint| format!("{:x}", *codepoint as u32))
+                                .collect::<Vec<_>>(),
+                            "sequenceKey": cluster.sequence_key,
+                            "reason": reason,
+                        })
+                    })
+                    .collect();
+
+                // Only a caption cue can be addressed by a command in the QC
+                // vocabulary. A text-overlay clip is still reported — a check
+                // that can describe a defect it cannot repair has to say so —
+                // but it carries no steps.
+                let stripped = if captions {
+                    Self::stripped_text(text, &clusters)
+                } else {
+                    None
+                };
+                let (commands, repair) = match stripped {
+                    Some(stripped) => (
+                        vec![serde_json::json!({
+                            "type": "UpdateCaption",
+                            "sequenceId": sequence.id,
+                            "trackId": track.id,
+                            "clipId": clip.id,
+                            "text": stripped,
+                        })],
+                        "strip",
+                    ),
+                    None => (Vec::new(), "none"),
+                };
+
+                findings.push(
+                    CaptionFinding::new(
+                        clip.id.clone(),
+                        clip.place.timeline_in_sec,
+                        clip.timeline_end(),
+                    )
+                    .with_metric("emojiCount", clusters.len())
+                    .with_metric("worstClass", worst.as_str())
+                    .with_metric("kind", if captions { "caption" } else { "textOverlay" })
+                    .with_metric("repair", repair)
+                    .with_metric("clusters", serde_json::Value::Array(listed))
+                    // Never resolved: deleting an author's emoji is a content
+                    // decision, so the group stays a proposal to read.
+                    .with_commands(commands, false),
+                );
+            }
+
+            let noun = if captions { "caption" } else { "text clip" };
+            violations.extend(group_caption_findings(
+                CaptionGroup {
+                    rule_name: self.name(),
+                    severity,
+                    track_id: &track.id,
+                    details: EMOJI_DETAILS.to_string(),
+                    fix_description:
+                        "Remove the emoji the burn-in cannot draw from every listed caption"
+                            .to_string(),
+                    confidence: Self::FIX_CONFIDENCE,
+                },
+                findings,
+                |count| {
+                    format!("{count} {noun}(s) contain emoji the burn-in cannot render as written")
+                },
+            ));
+        }
+
+        Ok(violations)
     }
 }
 
@@ -2960,6 +3296,326 @@ mod tests {
 
         assert!(fix.commands[1].get("style").is_none());
         assert!(fix.commands[1].get("position").is_none());
+    }
+
+    // ========================================================================
+    // CaptionEmojiRule
+    // ========================================================================
+
+    /// Runs the emoji rule over a sequence and returns its violations.
+    async fn emoji_violations(sequence: &Sequence, state: &ProjectState) -> Vec<QCViolation> {
+        let context = context_for(sequence);
+        CaptionEmojiRule::new()
+            .check(sequence, state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs")
+    }
+
+    /// A sequence holding one caption track with a single four-second cue.
+    ///
+    /// Long enough that neither the reading-rate nor the safe-area rule would
+    /// have anything to say about it, so a finding here is about the emoji.
+    fn sequence_with_caption(text: &str) -> Sequence {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_caption("C1");
+        track.add_clip(caption_clip(text, 0.0, 4.0));
+        sequence.add_track(track);
+        sequence
+    }
+
+    /// The cluster list reported for the first cue of a grouped violation.
+    fn cue_clusters(violation: &QCViolation) -> &Vec<serde_json::Value> {
+        first_cue(violation)["clusters"]
+            .as_array()
+            .expect("a cue lists the clusters it was reported for")
+    }
+
+    /// Builds a text-overlay clip and the effect that carries its words.
+    fn text_overlay_clip(
+        text: &str,
+        timeline_in: f64,
+        duration: f64,
+    ) -> (Clip, crate::core::effects::Effect) {
+        use crate::core::effects::{Effect, EffectType, ParamValue};
+
+        let mut clip = Clip::with_range("placeholder", 0.0, duration);
+        clip.asset_id = format!("__text__{}", clip.id);
+        clip.place.timeline_in_sec = timeline_in;
+        clip.place.duration_sec = duration;
+
+        let mut effect = Effect::new(EffectType::TextOverlay);
+        effect.set_param("text", ParamValue::String(text.to_string()));
+        clip.effects.push(effect.id.clone());
+
+        (clip, effect)
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should report a colour emoji in a cue
+    #[tokio::test]
+    async fn test_emoji_rule_should_report_a_color_emoji_in_a_cue() {
+        let sequence = sequence_with_caption("Ship it \u{1F389}");
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert_eq!(violations[0].metrics["cueCount"], 1);
+
+        let cue = first_cue(&violations[0]);
+        assert_eq!(cue["emojiCount"], 1);
+        assert_eq!(cue["worstClass"], "presentation");
+        assert_eq!(cue["kind"], "caption");
+
+        let clusters = cue_clusters(&violations[0]);
+        assert_eq!(clusters[0]["text"], "\u{1F389}");
+        assert_eq!(clusters[0]["class"], "presentation");
+        assert_eq!(clusters[0]["codepoints"], serde_json::json!(["1f389"]));
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should report a regional indicator flag as a flag class
+    #[tokio::test]
+    async fn test_emoji_rule_should_report_a_regional_indicator_flag_as_a_flag_class() {
+        let sequence = sequence_with_caption("Live from \u{1F1F0}\u{1F1F7}");
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(violations.len(), 1);
+        let cue = first_cue(&violations[0]);
+        assert_eq!(cue["worstClass"], "regionalFlag");
+        assert_eq!(
+            cue_clusters(&violations[0])[0]["codepoints"],
+            serde_json::json!(["1f1f0", "1f1f7"])
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should report a keycap sequence
+    #[tokio::test]
+    async fn test_emoji_rule_should_report_a_keycap_sequence() {
+        let sequence = sequence_with_caption("Step 1\u{FE0F}\u{20E3}");
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(first_cue(&violations[0])["worstClass"], "keycap");
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should report a ZWJ family as one cluster, not four
+    #[tokio::test]
+    async fn test_emoji_rule_should_report_a_zwj_family_as_one_cluster_not_four() {
+        let sequence = sequence_with_caption(
+            "Our \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466} plan",
+        );
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(violations.len(), 1);
+        let cue = first_cue(&violations[0]);
+        assert_eq!(cue["emojiCount"], 1, "a joined family is one emoji");
+        assert_eq!(cue["worstClass"], "zwjSequence");
+
+        let clusters = cue_clusters(&violations[0]);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(
+            clusters[0]["codepoints"]
+                .as_array()
+                .expect("code points")
+                .len(),
+            7,
+            "four people and the three joiners between them"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should report a skin tone modifier
+    #[tokio::test]
+    async fn test_emoji_rule_should_report_a_skin_tone_modifier() {
+        let sequence = sequence_with_caption("Nice work \u{1F44D}\u{1F3FD}");
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(first_cue(&violations[0])["worstClass"], "skinToneModified");
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should not report text that already asks for monochrome
+    ///
+    /// `U+FE0E` is a request for the text presentation, which is exactly what
+    /// the burn-in draws — and a bare text-default symbol with no selector at
+    /// all draws correctly for the same reason.
+    #[tokio::test]
+    async fn test_emoji_rule_should_not_report_a_text_presentation_selector() {
+        for text in ["Thanks \u{2764}\u{FE0E}", "Thanks \u{2764}"] {
+            let sequence = sequence_with_caption(text);
+
+            let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+            assert!(
+                violations.is_empty(),
+                "{text:?} renders as written: {violations:?}"
+            );
+        }
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should not report plain Latin or CJK text
+    #[tokio::test]
+    async fn test_emoji_rule_should_not_report_plain_latin_or_cjk_text() {
+        for text in [
+            "The quick brown fox jumps over the lazy dog",
+            "\u{C548}\u{B155}\u{D558}\u{C138}\u{C694} \u{C5EC}\u{B7EC}\u{BD84}",
+            "Meeting at 10:30 on 2024-05-01 (room #4)",
+        ] {
+            let sequence = sequence_with_caption(text);
+
+            let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+            assert!(violations.is_empty(), "{text:?}: {violations:?}");
+        }
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should count a flag as one cluster, not as two letters
+    #[tokio::test]
+    async fn test_emoji_rule_should_count_a_flag_as_one_cluster_not_two_letters() {
+        let sequence = sequence_with_caption("\u{1F1F0}\u{1F1F7}");
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        let cue = first_cue(&violations[0]);
+        assert_eq!(cue["emojiCount"], 1);
+
+        let clusters = cue_clusters(&violations[0]);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(
+            clusters[0]["codepoints"]
+                .as_array()
+                .expect("code points")
+                .len(),
+            2,
+            "one flag, spelled with two regional indicators"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should propose an UpdateCaption that strips the emoji
+    #[tokio::test]
+    async fn test_emoji_rule_should_emit_an_update_caption_fix_that_strips_the_emoji() {
+        let sequence = sequence_with_caption("Ship it \u{1F389} today");
+        let track_id = sequence.tracks[0].id.clone();
+        let clip_id = sequence.tracks[0].clips[0].id.clone();
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(first_cue(&violations[0])["repair"], "strip");
+        let fix = violations[0].suggested_fix.as_ref().expect("a proposal");
+        assert_eq!(fix.commands.len(), 1);
+
+        let command = &fix.commands[0];
+        assert_eq!(command["type"], "UpdateCaption");
+        assert_eq!(command["sequenceId"], sequence.id);
+        assert_eq!(command["trackId"], track_id);
+        assert_eq!(command["clipId"], clip_id);
+        assert_eq!(
+            command["text"], "Ship it today",
+            "the gap the emoji left behind is closed"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should carry no fix when stripping would empty the caption
+    #[tokio::test]
+    async fn test_emoji_rule_should_not_propose_an_empty_caption() {
+        let sequence = sequence_with_caption("\u{1F389}");
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(first_cue(&violations[0])["repair"], "none");
+        assert!(
+            violations[0].suggested_fix.is_none(),
+            "a blank caption is not a repair"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should never claim the group can be fixed automatically
+    #[tokio::test]
+    async fn test_emoji_rule_should_mark_the_group_as_not_auto_fixable() {
+        let sequence = sequence_with_caption("Ship it \u{1F389} today");
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert!(violations[0].suggested_fix.is_some());
+        assert!(
+            !violations[0].auto_fixable,
+            "deleting an author's emoji is a content decision, not a repair"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should report emoji in a text overlay clip
+    ///
+    /// The export burns caption cues and text clips through the same subtitles
+    /// node, so a title card with an emoji in it fails identically.
+    #[tokio::test]
+    async fn test_emoji_rule_should_report_emoji_in_a_text_overlay_clip() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        let (clip, effect) = text_overlay_clip("Big sale \u{1F389}", 0.0, 4.0);
+        let clip_id = clip.id.clone();
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let mut state = ProjectState::new("p");
+        state.effects.insert(effect.id.clone(), effect);
+
+        let violations = emoji_violations(&sequence, &state).await;
+
+        assert_eq!(violations.len(), 1);
+        let cue = first_cue(&violations[0]);
+        assert_eq!(cue["clipId"], clip_id);
+        assert_eq!(cue["kind"], "textOverlay");
+        assert_eq!(cue["repair"], "none");
+        assert!(
+            violations[0].suggested_fix.is_none(),
+            "no command in the QC vocabulary rewrites a text clip"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should ignore a caption track that is never drawn
+    #[tokio::test]
+    async fn test_emoji_rule_should_ignore_a_hidden_caption_track() {
+        let mut sequence = sequence_with_caption("Ship it \u{1F389}");
+        sequence.tracks[0].visible = false;
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert!(
+            violations.is_empty(),
+            "a hidden caption track is not laid onto the output"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should report the worst class when a cue carries several
+    #[tokio::test]
+    async fn test_emoji_rule_should_report_the_worst_class_of_a_mixed_cue() {
+        let sequence = sequence_with_caption("Live \u{1F389} from \u{1F1F0}\u{1F1F7}");
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        let cue = first_cue(&violations[0]);
+        assert_eq!(cue["emojiCount"], 2);
+        assert_eq!(
+            cue["worstClass"], "regionalFlag",
+            "a flag reading as its letters beats a picture reading as an outline"
+        );
     }
 
     // ========================================================================

@@ -337,5 +337,7 @@ Do not treat cue boundaries as frame-exact. Nothing here changes the CLI surface
 
 After generating captions, run `verify` — `caption.overlap`,
 `caption.out_of_bounds`, `caption.reading_rate`, and `caption.safe_area` catch
-the failures auto-generated subtitles actually produce. See
-[Verify](../verify/REFERENCE.md).
+the failures auto-generated subtitles actually produce, and
+`caption.emoji_unsupported` catches the one hand-written and model-written cues
+produce: an emoji the burn-in draws as a flat outline, a tofu box, or the two
+letters a flag is spelled with. See [Verify](../verify/REFERENCE.md).

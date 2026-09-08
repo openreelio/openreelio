@@ -8,7 +8,9 @@
 //!   clip as typed [`CaptionStyle`] — and then draws zero `CaptionSafeAreaRule`
 //!   violations on both a 1920x1080 and a 1080x1920 canvas, each pack measured
 //!   with the kind of text it is for (see [`caption_text_for`]), with a
-//!   negative control proving the rule can still fail;
+//!   negative control proving the rule can still fail, and zero
+//!   `CaptionEmojiRule` violations, so no pack ships text the burn-in
+//!   cannot draw;
 //! * every caption pack's own typography reaches the `drawtext` filter through
 //!   the render seam, so a pack cannot be legible on paper and generic in the
 //!   export;
@@ -32,7 +34,7 @@ use crate::core::effects::{Effect, EffectType, IntoFFmpegFilter, ParamValue};
 use crate::core::project::ProjectState;
 use crate::core::qc::context::QCContext;
 use crate::core::qc::rules::{QCRule, RuleConfig};
-use crate::core::qc::CaptionSafeAreaRule;
+use crate::core::qc::{CaptionEmojiRule, CaptionSafeAreaRule};
 use crate::core::render::export::build_caption_drawtext_with_enable;
 use crate::core::style::{
     caption_pack_ids, transition_recipe_ids, CAPTION_PACKS, TEXT_PRESETS, TRANSITION_RECIPES,
@@ -112,6 +114,24 @@ async fn safe_area_violations(state: &ProjectState, sequence_id: &str) -> Vec<St
         .check(sequence, state, &config, &context)
         .await
         .expect("safe area rule runs");
+
+    violations
+        .into_iter()
+        .map(|violation| format!("{} ({:?})", violation.message, violation.severity))
+        .collect()
+}
+
+/// Runs `CaptionEmojiRule` over a sequence and returns its violations.
+async fn emoji_violations(state: &ProjectState, sequence_id: &str) -> Vec<String> {
+    let sequence = state.sequences.get(sequence_id).expect("sequence exists");
+    let rule = CaptionEmojiRule::new();
+    let context = QCContext::from_sequence(sequence);
+    let config = RuleConfig::default();
+
+    let violations = rule
+        .check(sequence, state, &config, &context)
+        .await
+        .expect("emoji rule runs");
 
     violations
         .into_iter()
@@ -224,6 +244,63 @@ async fn every_caption_pack_passes_the_safe_area_rule_on_both_canvases() {
             );
         }
     }
+}
+
+/// Feature: Curated caption packs
+/// Scenario: should draw no emoji the burn-in cannot render
+///
+/// A pack contributes typography and an anchor, never words, so this guards
+/// two things at once: that no pack sample text acquires an emoji, and that
+/// the rule does not read ordinary caption text as one. The negative control
+/// below is what stops it from passing vacuously.
+#[tokio::test]
+async fn every_caption_pack_draws_no_unsupported_emoji() {
+    for pack in CAPTION_PACKS {
+        for (label, format) in [
+            ("1920x1080", SequenceFormat::youtube_1080()),
+            ("1080x1920", SequenceFormat::shorts_1080()),
+        ] {
+            let (state, sequence_id, _clip) = create_caption_with_pack(format, pack.id);
+            let violations = emoji_violations(&state, &sequence_id).await;
+
+            assert!(
+                violations.is_empty(),
+                "pack '{}' must draw no unsupported emoji at {label}, got: {}",
+                pack.id,
+                violations.join("; ")
+            );
+        }
+    }
+}
+
+/// Feature: Curated caption packs
+/// Scenario: should still report a pack-styled caption that does carry emoji
+#[tokio::test]
+async fn the_emoji_guarantee_is_falsifiable() {
+    let pack = CAPTION_PACKS
+        .first()
+        .expect("the registry names at least one pack");
+    let (mut state, sequence_id, caption_track_id, _clip_id) =
+        project_with_caption_track(SequenceFormat::youtube_1080());
+
+    execute_payload(
+        &mut state,
+        "CreateCaption",
+        json!({
+            "sequenceId": sequence_id,
+            "trackId": caption_track_id,
+            "text": "Ship it 🎉 today",
+            "startSec": 0.0,
+            "endSec": 4.0,
+            "stylePack": pack.id,
+        }),
+    )
+    .expect("caption is created");
+
+    assert!(
+        !emoji_violations(&state, &sequence_id).await.is_empty(),
+        "a pack-styled caption carrying a colour emoji must still be reported"
+    );
 }
 
 #[tokio::test]

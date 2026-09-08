@@ -106,6 +106,7 @@ fn video_clip(asset_id: &str, timeline_in_sec: f64, duration_sec: f64) -> Clip {
 /// * a sub-frame leftover clip — `RemoveClip`
 /// * a caption pinned to the very bottom of the canvas — `UpdateCaption`
 /// * a caption that reads too fast with no gap to grow into — `CreateCaption`
+/// * a caption carrying an emoji the burn-in cannot draw — `UpdateCaption`
 /// * a caption clip faded too far for any outline to rescue — `SetClipOpacity`
 /// * black at the head of a clip whose source has room — `TrimClip`
 /// * a clipped, over-loud mix — `SetMasterVolume`
@@ -163,6 +164,16 @@ fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
     faded.label = Some(FADED_CAPTION_LABEL.to_string());
     faded.opacity = 0.3;
     captions.add_clip(faded);
+
+    // A colour emoji libass paints as a flat monochrome outline. Comfortably
+    // slow to read and nowhere near an edge, so this cue trips the emoji rule
+    // and nothing else, and its `UpdateCaption` carries a rewritten `text`
+    // rather than the retimed `endSec` the reading-rate repair emits.
+    let mut emoji = Clip::with_range("caption", 0.0, 3.0);
+    emoji.place.timeline_in_sec = 9.0;
+    emoji.place.duration_sec = 3.0;
+    emoji.label = Some("Ship it \u{1F389} today".to_string());
+    captions.add_clip(emoji);
 
     sequence.add_track(captions);
 
