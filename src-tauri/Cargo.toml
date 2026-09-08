@@ -97,7 +97,7 @@ fs2 = "0.4"
 hostname = "0.4"
 
 # System metrics (CPU, RAM, Disk I/O)
-sysinfo = "0.32"
+sysinfo = "0.39"
 
 # JSON Schema derivation for the backend command payloads. Non-optional: the
 # derived schemas are part of the Tauri-free core the CLI links, which builds
