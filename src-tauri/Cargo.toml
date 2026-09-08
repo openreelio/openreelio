@@ -74,7 +74,7 @@ tokio = { version = "1", features = ["full"] }
 thiserror = "2.0"
 
 # ID generation
-ulid = "1.1"
+ulid = "3.0"
 uuid = { version = "1.11", features = ["v4"] }
 
 # Date/time
