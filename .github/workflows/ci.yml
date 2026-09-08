@@ -48,6 +48,13 @@ jobs:
       - name: Check version sync
         run: npm run version:check
 
+      - name: Check generated emoji tables are in sync
+        # The Unicode property tables baked into core::text::emoji are checked
+        # in, so a hand edit or a half-applied version bump is invisible until
+        # the burn-in check misclassifies something. Re-derives them from
+        # unicode.org and fails if the file does not match.
+        run: npm run emoji:check
+
       - name: Run linter
         run: npm run lint --if-present
 

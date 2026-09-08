@@ -22,24 +22,28 @@
 //! # Where the tables come from
 //!
 //! The `Emoji` and `Emoji_Presentation` properties are generated from the
-//! Unicode Consortium's `emoji-data.txt` by `scripts/generate-emoji-tables.mjs`
-//! and baked in as sorted, inclusive code-point ranges, in the same shape as
-//! the existing range tables in `core::qc::rules`. See
-//! [`EMOJI_DATA_UNICODE_VERSION`] for the release they were taken from.
+//! Unicode Consortium's `emoji-data.txt`, and the bases that have a text-style
+//! variation sequence from its `emoji-variation-sequences.txt`, by
+//! `scripts/generate-emoji-tables.mjs`; all three are baked in as sorted,
+//! inclusive code-point ranges, in the same shape as the existing range tables
+//! in `core::qc::rules`. See [`EMOJI_DATA_UNICODE_VERSION`] for the release
+//! they were taken from.
 
 use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Unicode release the generated property tables were derived from.
-///
-/// Bumping this means re-running `scripts/generate-emoji-tables.mjs --version
-/// <release>`; the tables and this constant are meant to move together.
-pub const EMOJI_DATA_UNICODE_VERSION: &str = "16.0.0";
-
 // BEGIN GENERATED EMOJI TABLES
 // Generated from https://www.unicode.org/Public/16.0.0/ucd/emoji/emoji-data.txt
+// and https://www.unicode.org/Public/16.0.0/ucd/emoji/emoji-variation-sequences.txt
 // Regenerate with `node scripts/generate-emoji-tables.mjs`. Do not edit by hand.
+
+/// Unicode release the generated property tables were derived from.
+///
+/// Bumping this means re-running `scripts/generate-emoji-tables.mjs
+/// --version <release>`; it is generated with the tables so the constant
+/// and the data it names can never drift apart.
+pub const EMOJI_DATA_UNICODE_VERSION: &str = "16.0.0";
 
 /// Code points with the Unicode `Emoji` property.
 ///
@@ -287,6 +291,202 @@ const EMOJI_PRESENTATION_RANGES: [(u32, u32); 80] = [
     (0x1FAF0, 0x1FAF8),
 ];
 
+/// Code points that have a text-style (`U+FE0E`) variation sequence.
+///
+/// Only a base listed here can be asked for monochrome: a variation selector
+/// is honoured for the sequences Unicode actually defines, and a renderer
+/// ignores an `FE0E` it has no sequence for and draws the colour emoji anyway.
+/// Treating any `FE0E` as a request for text presentation therefore silenced
+/// the check on exactly the strings an agent produces when it "repairs" a
+/// finding by appending the selector.
+///
+/// 371 bases in Unicode 16.0.0, merged into the ranges below.
+const TEXT_VARIATION_BASES: [(u32, u32); 183] = [
+    (0x0023, 0x0023),
+    (0x002A, 0x002A),
+    (0x0030, 0x0039),
+    (0x00A9, 0x00A9),
+    (0x00AE, 0x00AE),
+    (0x203C, 0x203C),
+    (0x2049, 0x2049),
+    (0x2122, 0x2122),
+    (0x2139, 0x2139),
+    (0x2194, 0x2199),
+    (0x21A9, 0x21AA),
+    (0x231A, 0x231B),
+    (0x2328, 0x2328),
+    (0x23CF, 0x23CF),
+    (0x23E9, 0x23F3),
+    (0x23F8, 0x23FA),
+    (0x24C2, 0x24C2),
+    (0x25AA, 0x25AB),
+    (0x25B6, 0x25B6),
+    (0x25C0, 0x25C0),
+    (0x25FB, 0x25FE),
+    (0x2600, 0x2604),
+    (0x260E, 0x260E),
+    (0x2611, 0x2611),
+    (0x2614, 0x2615),
+    (0x2618, 0x2618),
+    (0x261D, 0x261D),
+    (0x2620, 0x2620),
+    (0x2622, 0x2623),
+    (0x2626, 0x2626),
+    (0x262A, 0x262A),
+    (0x262E, 0x262F),
+    (0x2638, 0x263A),
+    (0x2640, 0x2640),
+    (0x2642, 0x2642),
+    (0x2648, 0x2653),
+    (0x265F, 0x2660),
+    (0x2663, 0x2663),
+    (0x2665, 0x2666),
+    (0x2668, 0x2668),
+    (0x267B, 0x267B),
+    (0x267E, 0x267F),
+    (0x2692, 0x2697),
+    (0x2699, 0x2699),
+    (0x269B, 0x269C),
+    (0x26A0, 0x26A1),
+    (0x26A7, 0x26A7),
+    (0x26AA, 0x26AB),
+    (0x26B0, 0x26B1),
+    (0x26BD, 0x26BE),
+    (0x26C4, 0x26C5),
+    (0x26C8, 0x26C8),
+    (0x26CE, 0x26CF),
+    (0x26D1, 0x26D1),
+    (0x26D3, 0x26D4),
+    (0x26E9, 0x26EA),
+    (0x26F0, 0x26F5),
+    (0x26F7, 0x26FA),
+    (0x26FD, 0x26FD),
+    (0x2702, 0x2702),
+    (0x2705, 0x2705),
+    (0x2708, 0x270D),
+    (0x270F, 0x270F),
+    (0x2712, 0x2712),
+    (0x2714, 0x2714),
+    (0x2716, 0x2716),
+    (0x271D, 0x271D),
+    (0x2721, 0x2721),
+    (0x2728, 0x2728),
+    (0x2733, 0x2734),
+    (0x2744, 0x2744),
+    (0x2747, 0x2747),
+    (0x274C, 0x274C),
+    (0x274E, 0x274E),
+    (0x2753, 0x2755),
+    (0x2757, 0x2757),
+    (0x2763, 0x2764),
+    (0x2795, 0x2797),
+    (0x27A1, 0x27A1),
+    (0x27B0, 0x27B0),
+    (0x27BF, 0x27BF),
+    (0x2934, 0x2935),
+    (0x2B05, 0x2B07),
+    (0x2B1B, 0x2B1C),
+    (0x2B50, 0x2B50),
+    (0x2B55, 0x2B55),
+    (0x3030, 0x3030),
+    (0x303D, 0x303D),
+    (0x3297, 0x3297),
+    (0x3299, 0x3299),
+    (0x1F004, 0x1F004),
+    (0x1F170, 0x1F171),
+    (0x1F17E, 0x1F17F),
+    (0x1F202, 0x1F202),
+    (0x1F21A, 0x1F21A),
+    (0x1F22F, 0x1F22F),
+    (0x1F237, 0x1F237),
+    (0x1F30D, 0x1F30F),
+    (0x1F315, 0x1F315),
+    (0x1F31C, 0x1F31C),
+    (0x1F321, 0x1F321),
+    (0x1F324, 0x1F32C),
+    (0x1F336, 0x1F336),
+    (0x1F378, 0x1F378),
+    (0x1F37D, 0x1F37D),
+    (0x1F393, 0x1F393),
+    (0x1F396, 0x1F397),
+    (0x1F399, 0x1F39B),
+    (0x1F39E, 0x1F39F),
+    (0x1F3A7, 0x1F3A7),
+    (0x1F3AC, 0x1F3AE),
+    (0x1F3C2, 0x1F3C2),
+    (0x1F3C4, 0x1F3C4),
+    (0x1F3C6, 0x1F3C6),
+    (0x1F3CA, 0x1F3CE),
+    (0x1F3D4, 0x1F3E0),
+    (0x1F3ED, 0x1F3ED),
+    (0x1F3F3, 0x1F3F3),
+    (0x1F3F5, 0x1F3F5),
+    (0x1F3F7, 0x1F3F7),
+    (0x1F408, 0x1F408),
+    (0x1F415, 0x1F415),
+    (0x1F41F, 0x1F41F),
+    (0x1F426, 0x1F426),
+    (0x1F43F, 0x1F43F),
+    (0x1F441, 0x1F442),
+    (0x1F446, 0x1F449),
+    (0x1F44D, 0x1F44E),
+    (0x1F453, 0x1F453),
+    (0x1F46A, 0x1F46A),
+    (0x1F47D, 0x1F47D),
+    (0x1F4A3, 0x1F4A3),
+    (0x1F4B0, 0x1F4B0),
+    (0x1F4B3, 0x1F4B3),
+    (0x1F4BB, 0x1F4BB),
+    (0x1F4BF, 0x1F4BF),
+    (0x1F4CB, 0x1F4CB),
+    (0x1F4DA, 0x1F4DA),
+    (0x1F4DF, 0x1F4DF),
+    (0x1F4E4, 0x1F4E6),
+    (0x1F4EA, 0x1F4ED),
+    (0x1F4F7, 0x1F4F7),
+    (0x1F4F9, 0x1F4FB),
+    (0x1F4FD, 0x1F4FD),
+    (0x1F508, 0x1F508),
+    (0x1F50D, 0x1F50D),
+    (0x1F512, 0x1F513),
+    (0x1F549, 0x1F54A),
+    (0x1F550, 0x1F567),
+    (0x1F56F, 0x1F570),
+    (0x1F573, 0x1F579),
+    (0x1F587, 0x1F587),
+    (0x1F58A, 0x1F58D),
+    (0x1F590, 0x1F590),
+    (0x1F5A5, 0x1F5A5),
+    (0x1F5A8, 0x1F5A8),
+    (0x1F5B1, 0x1F5B2),
+    (0x1F5BC, 0x1F5BC),
+    (0x1F5C2, 0x1F5C4),
+    (0x1F5D1, 0x1F5D3),
+    (0x1F5DC, 0x1F5DE),
+    (0x1F5E1, 0x1F5E1),
+    (0x1F5E3, 0x1F5E3),
+    (0x1F5E8, 0x1F5E8),
+    (0x1F5EF, 0x1F5EF),
+    (0x1F5F3, 0x1F5F3),
+    (0x1F5FA, 0x1F5FA),
+    (0x1F610, 0x1F610),
+    (0x1F687, 0x1F687),
+    (0x1F68D, 0x1F68D),
+    (0x1F691, 0x1F691),
+    (0x1F694, 0x1F694),
+    (0x1F698, 0x1F698),
+    (0x1F6AD, 0x1F6AD),
+    (0x1F6B2, 0x1F6B2),
+    (0x1F6B9, 0x1F6BA),
+    (0x1F6BC, 0x1F6BC),
+    (0x1F6CB, 0x1F6CB),
+    (0x1F6CD, 0x1F6CF),
+    (0x1F6E0, 0x1F6E5),
+    (0x1F6E9, 0x1F6E9),
+    (0x1F6F0, 0x1F6F0),
+    (0x1F6F3, 0x1F6F3),
+];
+
 // END GENERATED EMOJI TABLES
 
 /// First and last regional indicator symbol letter (`A`..`Z`).
@@ -358,10 +558,14 @@ pub enum EmojiClass {
     /// Drawn as the monochrome base outline in the caption's fill colour, or as
     /// tofu where the colour font carries no base outline.
     Presentation,
-    /// An emoji explicitly asking for text presentation with `U+FE0E` (❤︎).
+    /// A defined text-style variation sequence: a base plus `U+FE0E` (❤︎).
     ///
     /// The one class a monochrome burn-in renders exactly as asked, listed so a
-    /// caller can tell "not emoji" from "emoji that is already fine".
+    /// caller can tell "not emoji" from "emoji that is already fine". The base
+    /// has to be one Unicode gives a text-style sequence (see
+    /// [`TEXT_VARIATION_BASES`]); an `U+FE0E` after anything else is ignored by
+    /// the renderer and the colour emoji is drawn, so such a cluster is
+    /// classified by what it really draws as instead.
     TextPresentation,
 }
 
@@ -435,9 +639,15 @@ pub fn scan(text: &str) -> Vec<EmojiCluster<'_>> {
 /// Lowercase hexadecimal code points joined by `-`, with every `U+FE0F`
 /// dropped: the emoji presentation selector changes nothing about *which*
 /// emoji a sequence is, and keeping it would file `👍` and `👍️` as two
-/// different things. The result matches the naming CLDR and the emoji-test
-/// data use for sequences, so `1f469-200d-1f4bb` is a key a lookup table or a
-/// bug report can be written against.
+/// different things.
+///
+/// Dropping it is the *unqualified* spelling — the one Twemoji and the other
+/// image sets name their files with — not the fully-qualified form
+/// `emoji-test.txt` lists, which keeps every `U+FE0F` a sequence is written
+/// with. Both are hyphen-joined lowercase hex, so a key like
+/// `1f469-200d-1f4bb` reads the same in either; the difference only shows on a
+/// sequence that carries the selector, and a lookup written against this key
+/// has to strip it there too.
 pub fn sequence_key(cluster: &EmojiCluster<'_>) -> String {
     sequence_key_for(&cluster.codepoints)
 }
@@ -494,7 +704,7 @@ fn classify(codepoints: &[char]) -> Option<EmojiClass> {
         return Some(EmojiClass::SkinToneModified);
     }
 
-    if codepoints.contains(&VARIATION_SELECTOR_15) {
+    if has_text_presentation(codepoints) {
         return Some(EmojiClass::TextPresentation);
     }
 
@@ -505,19 +715,41 @@ fn classify(codepoints: &[char]) -> Option<EmojiClass> {
     None
 }
 
+/// Whether the cluster is a text-style variation sequence Unicode defines.
+///
+/// The selector alone is not enough. `U+FE0E` only means anything after one of
+/// the 371 bases that *have* a text-style sequence; a renderer handed one it has
+/// no sequence for ignores it and draws the colour emoji regardless, so treating
+/// any `U+FE0E` as a request for monochrome reported the string as already fine
+/// while the frame still showed a picture. That is the exact shape a caller
+/// produces when it "repairs" a finding by appending the selector, which is the
+/// one case this check must not go quiet on.
+fn has_text_presentation(codepoints: &[char]) -> bool {
+    codepoints
+        .windows(2)
+        .any(|pair| has_text_variation_sequence(pair[0]) && pair[1] == VARIATION_SELECTOR_15)
+}
+
 /// Whether the cluster asks for, or defaults to, the colour presentation.
 ///
 /// Either half is enough: a code point whose `Emoji_Presentation` is `Yes`
 /// defaults to colour with nothing written after it, and a text-default emoji
 /// followed by `U+FE0F` has asked for colour explicitly.
+///
+/// A keycap base is the exception, and it is excluded rather than merely ranked
+/// below the keycap class: `1`, `#` and `*` carry `Emoji=Yes` only so that a
+/// keycap can be built on them, and no font ships a standalone colour glyph for
+/// one. So `1 U+FE0F` with no `U+20E3` after it — a truncated keycap, or a
+/// selector somebody appended to a year — is drawn as a plain digit by every
+/// path here, and reporting it named a defect the frame does not have.
 fn has_emoji_presentation(codepoints: &[char]) -> bool {
     if codepoints.iter().copied().any(is_emoji_presentation) {
         return true;
     }
 
-    codepoints
-        .windows(2)
-        .any(|pair| is_emoji(pair[0]) && pair[1] == VARIATION_SELECTOR_16)
+    codepoints.windows(2).any(|pair| {
+        is_emoji(pair[0]) && !KEYCAP_BASES.contains(&pair[0]) && pair[1] == VARIATION_SELECTOR_16
+    })
 }
 
 /// Whether `codepoint` falls inside any of the inclusive `ranges`.
@@ -551,6 +783,11 @@ fn is_tag_character(codepoint: char) -> bool {
 /// Whether `codepoint` is a Fitzpatrick skin-tone modifier.
 fn is_skin_tone_modifier(codepoint: char) -> bool {
     in_ranges(&[SKIN_TONE_RANGE], codepoint)
+}
+
+/// Whether `codepoint` has a text-style (`U+FE0E`) variation sequence.
+fn has_text_variation_sequence(codepoint: char) -> bool {
+    in_ranges(&TEXT_VARIATION_BASES, codepoint)
 }
 
 // =============================================================================
@@ -589,7 +826,7 @@ mod tests {
     /// Scenario: should classify every class the burn-in fails, and only those
     #[test]
     fn should_classify_each_emoji_class() {
-        let cases: [(&str, Option<EmojiClass>); 14] = [
+        let cases: [(&str, Option<EmojiClass>); 17] = [
             // Emoji_Presentation=Yes: colour with nothing asked for.
             ("\u{1F600}", Some(EmojiClass::Presentation)),
             // Emoji=Yes plus U+FE0F: colour asked for explicitly.
@@ -611,6 +848,14 @@ mod tests {
             ("1\u{20E3}", Some(EmojiClass::Keycap)),
             ("\u{1F469}\u{200D}\u{1F4BB}", Some(EmojiClass::ZwjSequence)),
             ("\u{1F44D}\u{1F3FD}", Some(EmojiClass::SkinToneModified)),
+            // A watch has a text-style sequence, so U+FE0E is honoured.
+            ("\u{231A}\u{FE0E}", Some(EmojiClass::TextPresentation)),
+            // A grinning face has none, so the selector is ignored and the
+            // colour emoji is drawn: still a finding, whatever it asked for.
+            ("\u{1F600}\u{FE0E}", Some(EmojiClass::Presentation)),
+            // A keycap base with the colour selector but no enclosure is not a
+            // keycap and has no colour glyph of its own: a plain digit.
+            ("1\u{FE0F}", None),
             // Plain text of both widths.
             ("A", None),
             ("\u{D55C}", None),
@@ -727,6 +972,74 @@ mod tests {
         assert!(EmojiClass::TagFlag.rank() < EmojiClass::RegionalFlag.rank());
     }
 
+    /// Feature: Emoji classification
+    /// Scenario: should honour U+FE0E only where Unicode defines the sequence
+    ///
+    /// The selector is not a magic word. A renderer applies it for the bases
+    /// that have a text-style sequence and ignores it everywhere else, drawing
+    /// the colour emoji regardless - so a cluster that merely *carries* FE0E is
+    /// not evidence that the frame is fine. Appending the selector is also the
+    /// obvious wrong "repair" for a finding, which is precisely the string this
+    /// check must keep reporting.
+    #[test]
+    fn should_honour_the_text_selector_only_on_a_defined_variation_base() {
+        // Bases Unicode gives a text-style sequence: the selector is honoured
+        // and the burn-in draws exactly what was asked for.
+        for text in ["\u{2764}\u{FE0E}", "\u{231A}\u{FE0E}", "\u{2708}\u{FE0E}"] {
+            let found = scan(text);
+            assert_eq!(found.len(), 1, "{text:?} must scan as one cluster");
+            assert_eq!(
+                found[0].class,
+                EmojiClass::TextPresentation,
+                "{text:?} is a defined text-style variation sequence"
+            );
+        }
+
+        // Bases with no text-style sequence at all. The selector is dropped on
+        // the floor by every renderer, so these still reach the frame as colour
+        // emoji and still have to be reported.
+        for text in [
+            "\u{1F600}\u{FE0E}",
+            "\u{1F389}\u{FE0E}",
+            "\u{1F926}\u{FE0E}",
+        ] {
+            let found = scan(text);
+            assert_eq!(found.len(), 1, "{text:?} must scan as one cluster");
+            assert_ne!(
+                found[0].class,
+                EmojiClass::TextPresentation,
+                "{text:?} has no text-style sequence, so U+FE0E is ignored and \
+                 the colour emoji is drawn"
+            );
+        }
+
+        assert!(has_text_variation_sequence('\u{2764}'));
+        assert!(!has_text_variation_sequence('\u{1F600}'));
+    }
+
+    /// Feature: Emoji classification
+    /// Scenario: should not report a keycap base that never became a keycap
+    ///
+    /// `1`, `#` and `*` are `Emoji=Yes` only so a keycap can be built on them,
+    /// and no font carries a standalone colour glyph for one. Without the
+    /// enclosing `U+20E3` the burn-in draws a plain digit, which is what the
+    /// project said - and reporting it also filed the cluster under the same
+    /// `sequenceKey` as the bare character.
+    #[test]
+    fn should_not_report_a_keycap_base_without_its_enclosure() {
+        for text in ["1\u{FE0F}", "#\u{FE0F}", "*\u{FE0F}", "0\u{FE0F}"] {
+            assert!(
+                scan(text).is_empty(),
+                "{text:?} draws as a plain character: {:?}",
+                scan(text)
+            );
+        }
+
+        // The full keycap is still a finding, selector or not.
+        assert_eq!(scan("1\u{FE0F}\u{20E3}")[0].class, EmojiClass::Keycap);
+        assert_eq!(scan("1\u{20E3}")[0].class, EmojiClass::Keycap);
+    }
+
     /// Feature: Emoji tables
     /// Scenario: should stay sorted and disjoint so a lookup can trust them
     #[test]
@@ -737,6 +1050,7 @@ mod tests {
                 "EMOJI_PRESENTATION_RANGES",
                 EMOJI_PRESENTATION_RANGES.as_slice(),
             ),
+            ("TEXT_VARIATION_BASES", TEXT_VARIATION_BASES.as_slice()),
         ] {
             for window in ranges.windows(2) {
                 assert!(

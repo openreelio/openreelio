@@ -4,10 +4,15 @@
  *
  * The QC burn-in check has to know which code points a font is expected to draw
  * as emoji, and Rust has no such table in the standard library. Rather than take
- * a dependency on an unmaintained crate, the two derived properties the check
- * needs — `Emoji` and `Emoji_Presentation` — are baked in as sorted, inclusive
- * code-point ranges, generated from the Unicode Consortium's own data file so
- * the table can be re-derived instead of hand-audited.
+ * a dependency on an unmaintained crate, the three derived tables the check
+ * needs — `Emoji` and `Emoji_Presentation` from `emoji-data.txt`, and the bases
+ * that have a text-style variation sequence from `emoji-variation-sequences.txt`
+ * — are baked in as sorted, inclusive code-point ranges, generated from the
+ * Unicode Consortium's own data files so they can be re-derived instead of
+ * hand-audited.
+ *
+ * The version constant is emitted with them, inside the same markers, so
+ * `--version` moves the tables and the release they claim to be together.
  *
  * Usage:
  *   node scripts/generate-emoji-tables.mjs            # rewrite the tables in place
@@ -22,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 /** Unicode release the checked-in tables were generated from. */
 const DEFAULT_UNICODE_VERSION = '16.0.0';
 
-/** Properties baked into the Rust file, in the order they are emitted. */
+/** Properties read out of `emoji-data.txt`, in the order they are emitted. */
 const PROPERTIES = [
   {
     property: 'Emoji',
@@ -48,6 +53,21 @@ const PROPERTIES = [
   },
 ];
 
+/** The table derived from `emoji-variation-sequences.txt`. */
+const TEXT_VARIATION_BASES = {
+  constName: 'TEXT_VARIATION_BASES',
+  doc: [
+    'Code points that have a text-style (`U+FE0E`) variation sequence.',
+    '',
+    'Only a base listed here can be asked for monochrome: a variation selector',
+    'is honoured for the sequences Unicode actually defines, and a renderer',
+    'ignores an `FE0E` it has no sequence for and draws the colour emoji anyway.',
+    'Treating any `FE0E` as a request for text presentation therefore silenced',
+    'the check on exactly the strings an agent produces when it "repairs" a',
+    'finding by appending the selector.',
+  ],
+};
+
 const BEGIN_MARKER = '// BEGIN GENERATED EMOJI TABLES';
 const END_MARKER = '// END GENERATED EMOJI TABLES';
 
@@ -61,10 +81,13 @@ const versionIndex = args.indexOf('--version');
 const unicodeVersion =
   versionIndex >= 0 && args[versionIndex + 1] ? args[versionIndex + 1] : DEFAULT_UNICODE_VERSION;
 
-const sourceUrl = `https://www.unicode.org/Public/${unicodeVersion}/ucd/emoji/emoji-data.txt`;
+const unicodeBaseUrl = `https://www.unicode.org/Public/${unicodeVersion}/ucd/emoji`;
+const emojiDataUrl = `${unicodeBaseUrl}/emoji-data.txt`;
+const variationSequencesUrl = `${unicodeBaseUrl}/emoji-variation-sequences.txt`;
 
-const emojiData = await fetchEmojiData(sourceUrl);
-const generated = renderTables(emojiData);
+const emojiData = await fetchUnicodeFile(emojiDataUrl);
+const variationSequences = await fetchUnicodeFile(variationSequencesUrl);
+const generated = renderTables(emojiData, variationSequences);
 
 const current = await readFile(targetPath, 'utf8');
 const begin = current.indexOf(BEGIN_MARKER);
@@ -92,13 +115,34 @@ if (checkOnly) {
 await writeFile(targetPath, updated, 'utf8');
 console.log(`Wrote emoji tables from Unicode ${unicodeVersion} to ${path.relative(repoRoot, targetPath)}.`);
 
-/** Downloads `emoji-data.txt` and returns its text. */
-async function fetchEmojiData(url) {
+/** Downloads one Unicode data file and returns its text. */
+async function fetchUnicodeFile(url) {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`GET ${url} failed with ${response.status} ${response.statusText}`);
   }
   return response.text();
+}
+
+/** Merges a set of code points into sorted, inclusive `[first, last]` ranges. */
+function mergeRanges(points) {
+  const sorted = [...points].sort((left, right) => left - right);
+  const ranges = [];
+  let first = sorted[0];
+  let previous = sorted[0];
+
+  for (const point of sorted.slice(1)) {
+    if (point === previous + 1) {
+      previous = point;
+      continue;
+    }
+    ranges.push([first, previous]);
+    first = point;
+    previous = point;
+  }
+  ranges.push([first, previous]);
+
+  return ranges;
 }
 
 /**
@@ -130,45 +174,87 @@ function parseProperty(text, property) {
     throw new Error(`No code points found for property ${property}`);
   }
 
-  const sorted = [...points].sort((left, right) => left - right);
-  const ranges = [];
-  let first = sorted[0];
-  let previous = sorted[0];
+  return mergeRanges(points);
+}
 
-  for (const point of sorted.slice(1)) {
-    if (point === previous + 1) {
-      previous = point;
-      continue;
+/**
+ * Parses the bases of every text-style variation sequence out of
+ * `emoji-variation-sequences.txt` into merged, inclusive ranges.
+ *
+ * Each line is `<base> <selector> ; <style> ; # comment`, so the base is the
+ * first code point of a line whose style is `text style`.
+ */
+function parseTextVariationBases(text) {
+  const points = new Set();
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.split('#')[0].trim();
+    if (!line) continue;
+
+    const [sequence, style] = line.split(';').map((part) => part.trim());
+    if (style !== 'text style') continue;
+
+    const base = Number.parseInt(sequence.split(/\s+/)[0], 16);
+    if (!Number.isInteger(base)) {
+      throw new Error(`Unparseable variation sequence: ${rawLine}`);
     }
-    ranges.push([first, previous]);
-    first = point;
-    previous = point;
+    points.add(base);
   }
-  ranges.push([first, previous]);
 
-  return ranges;
+  if (points.size === 0) {
+    throw new Error('No text-style variation sequences found');
+  }
+
+  return { ranges: mergeRanges(points), baseCount: points.size };
+}
+
+/** Renders one `const NAME: [(u32, u32); N]` table with its doc comment. */
+function renderRangeTable(constName, doc, ranges) {
+  const entries = ranges.map(([first, last]) => `    (${hex(first)}, ${hex(last)}),`).join('\n');
+
+  return [
+    ...doc.map((line) => (line ? `/// ${line}` : '///')),
+    `const ${constName}: [(u32, u32); ${ranges.length}] = [`,
+    entries,
+    '];',
+  ].join('\n');
 }
 
 /** Renders the whole generated block, markers included. */
-function renderTables(text) {
-  const blocks = PROPERTIES.map(({ property, constName, doc }) => {
-    const ranges = parseProperty(text, property);
-    const entries = ranges
-      .map(([first, last]) => `    (${hex(first)}, ${hex(last)}),`)
-      .join('\n');
+function renderTables(emojiDataText, variationSequencesText) {
+  const version = [
+    '/// Unicode release the generated property tables were derived from.',
+    '///',
+    '/// Bumping this means re-running `scripts/generate-emoji-tables.mjs',
+    '/// --version <release>`; it is generated with the tables so the constant',
+    '/// and the data it names can never drift apart.',
+    `pub const EMOJI_DATA_UNICODE_VERSION: &str = "${unicodeVersion}";`,
+  ].join('\n');
 
-    return [
-      ...doc.map((line) => (line ? `/// ${line}` : '///')),
-      `const ${constName}: [(u32, u32); ${ranges.length}] = [`,
-      entries,
-      '];',
-    ].join('\n');
-  });
+  const blocks = PROPERTIES.map(({ property, constName, doc }) =>
+    renderRangeTable(constName, doc, parseProperty(emojiDataText, property)),
+  );
+
+  const { ranges, baseCount } = parseTextVariationBases(variationSequencesText);
+  blocks.push(
+    renderRangeTable(
+      TEXT_VARIATION_BASES.constName,
+      [
+        ...TEXT_VARIATION_BASES.doc,
+        '',
+        `${baseCount} bases in Unicode ${unicodeVersion}, merged into the ranges below.`,
+      ],
+      ranges,
+    ),
+  );
 
   return [
     BEGIN_MARKER,
-    `// Generated from ${sourceUrl}`,
+    `// Generated from ${emojiDataUrl}`,
+    `// and ${variationSequencesUrl}`,
     '// Regenerate with `node scripts/generate-emoji-tables.mjs`. Do not edit by hand.',
+    '',
+    version,
     '',
     blocks.join('\n\n'),
     '',
