@@ -59,7 +59,7 @@ tauri-plugin-updater = { version = "2.9", optional = true }
 tauri-plugin-stronghold = { version = "2", optional = true }
 
 # Cryptography for credential storage and derivation
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 argon2 = "0.5"
 rand = "0.8"
 
