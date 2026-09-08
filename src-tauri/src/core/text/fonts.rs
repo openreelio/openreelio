@@ -333,12 +333,24 @@ fn face_count(bytes: &[u8]) -> u32 {
 }
 
 /// Calls `visit` with every decodable `(name ID, value)` pair of one face.
+///
+/// Walks the records by index instead of iterating the table. `NamesIter`
+/// signals a record it cannot decode - an unknown platform ID, a string offset
+/// that runs past the storage area - by yielding `None`, which *ends* a `for`
+/// loop rather than skipping that record. One malformed entry would therefore
+/// hide every entry after it, and the Windows family name a font declares
+/// usually sits behind the Macintosh records that precede it.
 fn for_each_face_name(face: &RawFace<'_>, mut visit: impl FnMut(u16, String)) {
     let Some(table) = face_table(face, b"name").and_then(name::Table::parse) else {
         return;
     };
 
-    for record in table.names {
+    let names = table.names;
+    for index in 0..names.len() {
+        let Some(record) = names.get(index) else {
+            continue;
+        };
+
         if let Some(value) = decode_font_name(
             platform_id_number(record.platform_id),
             record.encoding_id,
@@ -446,13 +458,47 @@ mod tests {
     /// [`make_test_font`]: 12-byte header plus one 16-byte table record.
     const TEST_NAME_TABLE_OFFSET: u32 = 28;
 
-    fn make_test_font(family: &str) -> Vec<u8> {
-        let family_utf16 = family
-            .encode_utf16()
-            .flat_map(u16::to_be_bytes)
-            .collect::<Vec<_>>();
-        let name_table_offset = TEST_NAME_TABLE_OFFSET;
-        let name_table_length = 18u32 + family_utf16.len() as u32;
+    /// Byte length of a `name` table header: format, count, storage offset.
+    const NAME_TABLE_HEADER_LEN: u16 = 6;
+
+    /// Byte length of one `name` table record.
+    const NAME_RECORD_LEN: u16 = 12;
+
+    /// One record to write into a fixture's `name` table.
+    ///
+    /// The value is always stored as UTF-16BE, whatever `platform_id` says, so
+    /// a record can be given a platform the reader is expected to reject
+    /// without the fixture having to model that platform's encoding too.
+    struct TestNameRecord<'a> {
+        platform_id: u16,
+        encoding_id: u16,
+        name_id: u16,
+        value: &'a str,
+    }
+
+    /// Builds a single-face font whose only table is the given `name` records.
+    fn make_test_font_with_names(records: &[TestNameRecord<'_>]) -> Vec<u8> {
+        let storage_offset = NAME_TABLE_HEADER_LEN + NAME_RECORD_LEN * records.len() as u16;
+
+        let mut record_bytes = Vec::new();
+        let mut storage: Vec<u8> = Vec::new();
+        for record in records {
+            let value = record
+                .value
+                .encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect::<Vec<_>>();
+
+            push_u16(&mut record_bytes, record.platform_id);
+            push_u16(&mut record_bytes, record.encoding_id);
+            push_u16(&mut record_bytes, 0x0409);
+            push_u16(&mut record_bytes, record.name_id);
+            push_u16(&mut record_bytes, value.len() as u16);
+            push_u16(&mut record_bytes, storage.len() as u16);
+            storage.extend_from_slice(&value);
+        }
+
+        let name_table_length = u32::from(storage_offset) + storage.len() as u32;
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"\x00\x01\x00\x00");
@@ -463,26 +509,57 @@ mod tests {
 
         bytes.extend_from_slice(b"name");
         push_u32(&mut bytes, 0);
-        push_u32(&mut bytes, name_table_offset);
+        push_u32(&mut bytes, TEST_NAME_TABLE_OFFSET);
         push_u32(&mut bytes, name_table_length);
 
         push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 1);
-        push_u16(&mut bytes, 18);
-        push_u16(&mut bytes, 3);
-        push_u16(&mut bytes, 1);
-        push_u16(&mut bytes, 0x0409);
-        push_u16(&mut bytes, 1);
-        push_u16(&mut bytes, family_utf16.len() as u16);
-        push_u16(&mut bytes, 0);
-        bytes.extend_from_slice(&family_utf16);
+        push_u16(&mut bytes, records.len() as u16);
+        push_u16(&mut bytes, storage_offset);
+        bytes.extend_from_slice(&record_bytes);
+        bytes.extend_from_slice(&storage);
         bytes
+    }
+
+    fn make_test_font(family: &str) -> Vec<u8> {
+        make_test_font_with_names(&[TestNameRecord {
+            platform_id: 3,
+            encoding_id: 1,
+            name_id: name_id::FAMILY,
+            value: family,
+        }])
     }
 
     #[test]
     fn parse_font_families_reads_true_type_name_table() {
         assert_eq!(
             parse_font_families(&make_test_font("OpenReelio Sans")),
+            vec!["OpenReelio Sans".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_font_families_skips_an_undecodable_record_and_keeps_reading() {
+        // Platform ID 9 is not one `ttf-parser` knows, so the record fails to
+        // parse and the table iterator reports the end of the list there.
+        // Reading past it is what keeps the Windows family name - which real
+        // fonts place after their Macintosh records - visible.
+        let bytes = make_test_font_with_names(&[
+            TestNameRecord {
+                platform_id: 9,
+                encoding_id: 0,
+                name_id: name_id::FAMILY,
+                value: "Unreadable Platform",
+            },
+            TestNameRecord {
+                platform_id: 3,
+                encoding_id: 1,
+                name_id: name_id::FAMILY,
+                value: "OpenReelio Sans",
+            },
+        ]);
+
+        assert_eq!(
+            parse_font_families(&bytes),
             vec!["OpenReelio Sans".to_string()]
         );
     }
@@ -517,6 +594,25 @@ mod tests {
         }
 
         bytes
+    }
+
+    #[test]
+    fn parse_font_families_reads_each_ttc_member_at_its_own_offset() {
+        // Distinct families on purpose: with the same family in both members
+        // this would still pass if the parser read member 0 twice, which is
+        // exactly the per-member offset resolution it is meant to pin.
+        let bytes = make_test_collection(&[
+            make_test_font("OpenReelio Sans"),
+            make_test_font("OpenReelio Serif"),
+        ]);
+
+        assert_eq!(
+            parse_font_families(&bytes),
+            vec![
+                "OpenReelio Sans".to_string(),
+                "OpenReelio Serif".to_string()
+            ]
+        );
     }
 
     #[test]
