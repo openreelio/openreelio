@@ -13,6 +13,17 @@
 //! of thousands of codepoints collapses just as hard, where a set would hold an
 //! entry - and a hash - for every one of them. A binary search over a few
 //! hundred pairs costs less than the hash it replaces.
+//!
+//! # What this module does not answer
+//!
+//! [`face_covers`] reports *per-codepoint* `cmap` coverage and nothing more. It
+//! does not say whether an emoji grapheme will actually render: a ZWJ sequence,
+//! a skin-tone modifier, or a VS16 presentation selector is a cluster of
+//! several codepoints whose appearance depends on cluster decomposition and on
+//! the variation and substitution lookups (`GSUB`, `cmap` format 14) that this
+//! primitive deliberately does not read. A face can cover every codepoint of a
+//! ZWJ family and still draw four separate people. Callers reasoning about
+//! emoji must treat a `true` here as necessary, never sufficient.
 
 use std::{cmp::Ordering, collections::HashMap, sync::OnceLock};
 
@@ -23,9 +34,23 @@ use super::bundled_fonts::{bundled_faces, BundledFont};
 /// Inclusive codepoint ranges a face covers, sorted and disjoint.
 type CoverageRanges = Box<[(u32, u32)]>;
 
+/// Identity of the font bytes a cached coverage list was built from.
+///
+/// Address and length together, rather than [`BundledFont::file_name`]: a
+/// `BundledFont` assembled outside the registry may carry any file name it
+/// likes, and keying on the name would hand it another font's coverage. Only
+/// the compiled-in faces are ever cached, and their bytes live in the binary's
+/// read-only data for the life of the process, so no later allocation can take
+/// an entry's address back and collide with it.
+type FaceKey = (usize, usize);
+
 /// True if `font`'s cmap maps `ch` to a real glyph.
+///
+/// Answers a single codepoint. It does not answer whether an emoji grapheme -
+/// a ZWJ sequence, a skin-tone modifier, a VS16 presentation - renders as one
+/// glyph; see the module documentation.
 pub fn face_covers(font: &BundledFont, ch: char) -> bool {
-    if let Some(ranges) = coverage_cache().get(font.file_name) {
+    if let Some(ranges) = coverage_cache().get(&face_key(font.bytes)) {
         return ranges_contain(ranges, u32::from(ch));
     }
 
@@ -34,22 +59,41 @@ pub fn face_covers(font: &BundledFont, ch: char) -> bool {
     Face::parse(font.bytes, 0).is_ok_and(|face| face.glyph_index(ch).is_some())
 }
 
-/// Returns the coverage of every compiled-in face, keyed by file name.
+/// Returns the cache key identifying a face's bytes.
+fn face_key(bytes: &[u8]) -> FaceKey {
+    (bytes.as_ptr() as usize, bytes.len())
+}
+
+/// Returns the coverage of every compiled-in face, keyed by its bytes.
 ///
 /// Built on first use and never rebuilt, so every later question is a hash
 /// lookup and a binary search rather than another `cmap` walk.
-fn coverage_cache() -> &'static HashMap<&'static str, CoverageRanges> {
-    static CACHE: OnceLock<HashMap<&'static str, CoverageRanges>> = OnceLock::new();
+fn coverage_cache() -> &'static HashMap<FaceKey, CoverageRanges> {
+    static CACHE: OnceLock<HashMap<FaceKey, CoverageRanges>> = OnceLock::new();
 
     CACHE.get_or_init(|| {
         bundled_faces()
             .iter()
-            .map(|font| (font.file_name, face_coverage(font.bytes)))
+            .map(|font| (face_key(font.bytes), face_coverage(font.bytes)))
             .collect()
     })
 }
 
 /// Reads the codepoints an in-memory font maps to a glyph.
+///
+/// A face or `cmap` that will not parse yields empty coverage, which is the
+/// fail-safe answer: every caller then reads "cannot draw this" and picks
+/// another face rather than shipping a row of notdef boxes.
+///
+/// # Trust invariant
+///
+/// Only ever called on the compiled-in font bytes, which ship inside the
+/// binary and are therefore trusted. That is what makes the walk below safe:
+/// a `cmap` format 12 group enumerates `start..=end` with no bound, so a
+/// hostile font could declare a handful of groups spanning billions of
+/// codepoints and stall the process. If this is ever widened to system-
+/// installed or user-supplied fonts, bound the per-group iteration (and the
+/// total codepoint count) before reading them.
 fn face_coverage(bytes: &[u8]) -> CoverageRanges {
     let Ok(face) = Face::parse(bytes, 0) else {
         return CoverageRanges::default();
@@ -115,6 +159,15 @@ mod tests {
     /// Hangul syllable "ga" - outside every Latin face compiled in today.
     const HANGUL_GA: char = '\u{AC00}';
 
+    /// Returns a `'static` copy of `bytes` living at an address of its own.
+    ///
+    /// Deliberately leaked, and small: `BundledFont::bytes` is `&'static [u8]`,
+    /// and a copy is precisely what makes a face unknown to the cache, which is
+    /// keyed on where the compiled-in bytes live rather than on a file name.
+    fn leak_font_bytes(bytes: &[u8]) -> &'static [u8] {
+        Box::leak(bytes.to_vec().into_boxed_slice())
+    }
+
     #[test]
     fn every_bundled_face_covers_the_latin_alphabet() {
         for font in bundled_faces() {
@@ -177,11 +230,28 @@ mod tests {
         let unregistered = BundledFont {
             family: bundled.family,
             file_name: "not-in-the-registry",
-            bytes: bundled.bytes,
+            bytes: leak_font_bytes(bundled.bytes),
         };
 
         assert!(face_covers(&unregistered, 'A'));
         assert!(!face_covers(&unregistered, HANGUL_GA));
+    }
+
+    #[test]
+    fn a_face_reusing_a_registry_file_name_does_not_inherit_its_coverage() {
+        // The cache answers for the bytes it was built from, not for a name a
+        // caller can pick. A face that borrows a registered file name while
+        // carrying different bytes has to be read from those bytes.
+        let registered = resolve_bundled("TikTok Sans").expect("TikTok Sans is bundled");
+        assert!(face_covers(registered, 'A'), "the real face covers 'A'");
+
+        let impostor = BundledFont {
+            family: registered.family,
+            file_name: registered.file_name,
+            bytes: leak_font_bytes(b"not a font at all"),
+        };
+
+        assert!(!face_covers(&impostor, 'A'));
     }
 
     #[test]
