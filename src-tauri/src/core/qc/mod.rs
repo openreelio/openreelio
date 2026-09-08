@@ -17,6 +17,9 @@ pub mod violation;
 /// Proves every fix a rule can suggest is a command the edit layer accepts.
 #[cfg(test)]
 mod fix_roundtrip_tests;
+/// Fixtures shared by the QC test modules.
+#[cfg(test)]
+mod test_support;
 
 // Re-export main types
 pub use caption_contrast::{
@@ -39,9 +42,9 @@ pub use rules::{
     RuleConfig,
 };
 pub use structural::{
-    crossref_black_ranges_with_gaps, CaptionOutOfBoundsRule, CaptionOverlapRule,
-    CaptionReadingRateRule, ClipOrphanRule, EmptySequenceRule, MissingAssetRule,
-    ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
+    crossref_black_ranges_with_gaps, CaptionEmojiRule, CaptionOutOfBoundsRule, CaptionOverlapRule,
+    CaptionReadingRateRule, ClipOrphanRule, EmojiRenderCapability, EmptySequenceRule,
+    MissingAssetRule, ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
 };
 pub use verify::{
     exit_code_for, CheckStatus, VerifyArgumentNames, VerifyError, VerifyErrorKind, VerifyPlan,

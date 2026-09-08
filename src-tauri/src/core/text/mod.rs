@@ -27,6 +27,8 @@ use specta::Type;
 
 pub mod ass_embed;
 pub mod bundled_fonts;
+/// Classifies emoji in text that has to be burned into the picture.
+pub mod emoji;
 pub mod fonts;
 
 // =============================================================================

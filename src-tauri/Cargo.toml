@@ -88,6 +88,10 @@ tracing-appender = "0.2"
 # Utilities
 num_cpus = "1.16"
 regex = "1"
+# Extended grapheme clustering. `chars()` splits a flag into two letters and a
+# ZWJ family into four people, which is the wrong answer to every question the
+# caption burn-in check asks; this is the segmentation that keeps them whole.
+unicode-segmentation = "1.12"
 dirs = "5.0"
 fs2 = "0.4"
 hostname = "0.4"

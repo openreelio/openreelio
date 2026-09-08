@@ -17,6 +17,7 @@ use crate::core::project::ProjectState;
 use crate::core::qc::caption_contrast::CaptionBandSample;
 use crate::core::qc::context::RenderMeasurements;
 use crate::core::qc::engine::QCEngine;
+use crate::core::qc::test_support::text_overlay_clip;
 use crate::core::qc::violation::QCViolation;
 use crate::core::timeline::{Clip, Sequence, SequenceFormat, Track};
 use crate::ipc::CommandPayload;
@@ -34,6 +35,7 @@ const EXPECTED_FIX_COMMAND_TYPES: &[&str] = &[
     "SetMasterVolume",
     "TrimClip",
     "UpdateCaption",
+    "UpdateTextClip",
 ];
 
 /// Label of the fixture's faded caption cue.
@@ -106,6 +108,8 @@ fn video_clip(asset_id: &str, timeline_in_sec: f64, duration_sec: f64) -> Clip {
 /// * a sub-frame leftover clip — `RemoveClip`
 /// * a caption pinned to the very bottom of the canvas — `UpdateCaption`
 /// * a caption that reads too fast with no gap to grow into — `CreateCaption`
+/// * a caption carrying an emoji the burn-in cannot draw — `UpdateCaption`
+/// * a title card carrying one — `UpdateTextClip`
 /// * a caption clip faded too far for any outline to rescue — `SetClipOpacity`
 /// * black at the head of a clip whose source has room — `TrimClip`
 /// * a clipped, over-loud mix — `SetMasterVolume`
@@ -164,12 +168,33 @@ fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
     faded.opacity = 0.3;
     captions.add_clip(faded);
 
+    // A colour emoji libass paints as a flat monochrome outline. Comfortably
+    // slow to read and nowhere near an edge, so this cue trips the emoji rule
+    // and nothing else, and its `UpdateCaption` carries a rewritten `text`
+    // rather than the retimed `endSec` the reading-rate repair emits.
+    let mut emoji = Clip::with_range("caption", 0.0, 3.0);
+    emoji.place.timeline_in_sec = 9.0;
+    emoji.place.duration_sec = 3.0;
+    emoji.label = Some("Ship it \u{1F389} today".to_string());
+    captions.add_clip(emoji);
+
     sequence.add_track(captions);
 
     let mut state = ProjectState::new("QC Fix Round Trip");
     state
         .assets
         .insert(ASSET_ID.to_string(), fixture_asset(ASSET_ID));
+
+    // A title card carrying the same emoji, on a track of its own so it adds no
+    // gap and no overlap for the other rules to find. The emoji rule repairs a
+    // text overlay with `UpdateTextClip`, whose payload is a whole
+    // `TextClipData` block rather than a handful of ids - the one fix in the
+    // module that has to survive the strict parser as a nested struct.
+    let mut titles = Track::new_video("V2");
+    let (title, title_effect) = text_overlay_clip("Big sale \u{1F389} today", 0.0, 4.0);
+    titles.add_clip(title);
+    state.effects.insert(title_effect.id.clone(), title_effect);
+    sequence.add_track(titles);
 
     (sequence, state)
 }

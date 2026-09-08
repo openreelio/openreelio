@@ -33,6 +33,8 @@
     "analyze:stats": "vite build && npx source-map-explorer dist/assets/*.js --html stats.html",
     "version:check": "node scripts/with-node-temp.mjs npx tsx scripts/sync-version.ts --check",
     "version:sync": "node scripts/with-node-temp.mjs npx tsx scripts/sync-version.ts --fix",
+    "emoji:check": "node scripts/generate-emoji-tables.mjs --check",
+    "emoji:sync": "node scripts/generate-emoji-tables.mjs",
     "generate-signing-keys": "node scripts/with-node-temp.mjs npx tsx scripts/generate-signing-keys.ts",
     "prepare": "husky"
   },

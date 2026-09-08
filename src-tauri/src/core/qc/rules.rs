@@ -3710,6 +3710,22 @@ mod tests {
                  {measured} vs {latin}"
             );
         }
+
+        // A country flag is one full-em glyph spelled with *two* regional
+        // indicators, so the pair has to come to one em between them. Charging
+        // each indicator a full em - which listing the regional-indicator block
+        // among the wide scripts does, because the advance is summed per
+        // character - estimates a flag at two, and a caption of flags at twice
+        // the width libass draws it. That is the wrong direction to be wrong
+        // in: the same figure is the crop handed to the contrast pass, so the
+        // band it measures takes in picture the flag never covered. The half-em
+        // default is what makes the pair add up.
+        let flag = estimated_width_percent("\u{1F1F0}\u{1F1F7}");
+        let one_em = estimated_width_percent("\u{D55C}");
+        assert!(
+            (flag - one_em).abs() < 1e-9,
+            "a flag is one em across the pair, not two: {flag} vs {one_em}"
+        );
     }
 
     #[test]

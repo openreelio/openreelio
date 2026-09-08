@@ -838,12 +838,12 @@ openreelio-cli verify --path ./demo --file ./proxy.mp4 \
 Without `--file`, only structural checks run and FFmpeg is never invoked.
 `--structural-only` makes that explicit and conflicts with `--file`.
 
-Twenty-four checks in two categories. **structural**: `sequence.empty`,
+Twenty-five checks in two categories. **structural**: `sequence.empty`,
 `timeline.gap`, `clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`,
 `audio.silent_clip`, `caption.overlap`, `caption.reading_rate`,
-`caption.out_of_bounds`, `caption.safe_area`, `shot.length_stats`,
-`shot.cut_rhythm`, `transition.no_handles`, plus the opt-in `asset.license` and
-`sequence.duration`.
+`caption.out_of_bounds`, `caption.safe_area`, `caption.emoji_unsupported`,
+`shot.length_stats`, `shot.cut_rhythm`, `transition.no_handles`, plus the opt-in
+`asset.license` and `sequence.duration`.
 **rendered**: `render.duration_mismatch`, `render.missing_video`,
 `render.resolution_mismatch`, `render.black_frames`, `render.frozen`,
 `audio.peak`, `audio.clipping`, `audio.loudness`, `caption.contrast`. The two
@@ -980,14 +980,16 @@ as `skipped`, like every other rendered check, and the report's "N rendered
 check(s) were skipped" warning names the flag that would run it — except under
 `--structural-only`, which is the caller saying it already knows.
 
-The caption checks report **one violation per caption track**, not one per cue:
-`caption.safe_area`, `caption.out_of_bounds` and `caption.reading_rate` list
-every offending cue under `metrics.cues` (with `clipId`, `startSec`, `endSec`
-and that cue's own numbers) and in `entities`, publish those cue windows again
-as `metrics.timeRanges` — the violation's own `timeRange` spans the first cue to
-the last, which is usually the whole track, so hand `metrics.timeRanges` to
-`frame extract --ranges` instead — and their `suggestedFix`
-is a single plan repairing all of them. A machine transcript anchored two
+The caption checks report **one violation per track**, not one per cue:
+`caption.safe_area`, `caption.out_of_bounds`, `caption.reading_rate` and
+`caption.emoji_unsupported` list every offending cue under `metrics.cues` (with
+`clipId`, `startSec`, `endSec` and that cue's own numbers) and in `entities`,
+publish those cue windows again as `metrics.timeRanges` — the violation's own
+`timeRange` spans the first cue to the last, which is usually the whole track,
+so hand `metrics.timeRanges` to `frame extract --ranges` instead — and their
+`suggestedFix` is a single plan repairing all of them. The track is a caption
+track for the first three; `caption.emoji_unsupported` also reads text overlays,
+so it groups those per video track. A machine transcript anchored two
 percent too low is one mistake, and this is what stops the fix loop from having
 to run once per caption. A plan is capped at 200 steps; beyond that the finding
 splits into several violations carrying `part`/`partCount`. `autoFixable` is
@@ -998,6 +1000,24 @@ where it is not it proposes a split at the nearest word boundary
 carrying the original cue's `style` and `position` so it is drawn the same way
 in the same place) which a human or model still has to accept, so the group
 reports `autoFixable: false`.
+
+`caption.emoji_unsupported` (warning) reports caption and text-overlay text the
+burn-in cannot draw as written. libass paints one monochrome outline per glyph,
+so a colour emoji comes out as a flat shape or a tofu box, a flag as its two
+letters ("KR"), a keycap as the digit plus a box, and a ZWJ family as the people
+it was joined from. The render still succeeds, which is why nothing else
+notices. Each cue lists its `clusters` (`text`, `class`, `codepoints`,
+`sequenceKey`, `reason`) plus `unsupportedCount` — the clusters this renderer
+cannot draw, not every emoji in the cue — and `worstClass`. Each cue's `kind`
+says which surface it came from, and both are repairable: a `caption` cue
+carries an `UpdateCaption` with the rewritten `text`, a `textOverlay` cue an
+`UpdateTextClip` carrying that clip's own `textData` with only `content`
+replaced, so nothing else the author styled moves. Deleting the clusters closes
+the whitespace they leave behind and nothing else in the line. A cue whose text
+would be left empty carries no command at all (`repair: "none"`). Every fix is
+offered as a proposal (`autoFixable: false`) because removing an author's emoji
+is a content decision. Text overlays are grouped per video track rather than
+per caption track.
 
 The report always lists every check that ran, was skipped, or errored — so
 "checked and clean" is distinguishable from "never looked". Each entry carries
