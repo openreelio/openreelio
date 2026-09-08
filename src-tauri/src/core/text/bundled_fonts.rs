@@ -45,6 +45,43 @@ pub struct BundledFont {
 /// otherwise fall back to whatever the host font provider ranks first.
 pub const DEFAULT_BUNDLED_FAMILY: &str = "TikTok Sans";
 
+/// Families this codebase writes as its own "no font was chosen" placeholder,
+/// mapped onto the bundled face that renders them.
+///
+/// `"Arial"` is not a user's choice: it is the literal every caption pack, the
+/// `CaptionStyle`/`TextStyle` defaults and the `font_family` parameter fallback
+/// emit when nothing was picked. We do not ship Arial, so on a host that has it
+/// the burn-in used the host's copy and on a host that does not it used some
+/// other face entirely - the same project, a different typeface per machine.
+/// Mapping the placeholder onto a bundled family makes that path embed a face
+/// and render identically everywhere.
+///
+/// `"TikTok Sans"` is the substitute because it is the only bundled
+/// neo-grotesque, a neutral large-x-height UI sans in Arial's role, while the
+/// rest of the registry is geometric (Montserrat, Poppins) or display (Anton,
+/// Bebas Neue, Archivo Black, Bangers, Luckiest Guy). It also ships a real Bold, so a
+/// `FontWeight::Bold` caption gets a drawn bold rather than a synthesized one,
+/// and it is already [`DEFAULT_BUNDLED_FAMILY`], so an aliased request and an
+/// unresolvable one land on the same face.
+///
+/// Deliberately only the placeholder. Every other family a picker offers
+/// (Helvetica, Georgia, Impact) is something a user typed or chose, and those
+/// keep resolving against the host so a deliberate choice is never overridden.
+const PLACEHOLDER_FAMILY_ALIASES: &[(&str, &str)] = &[("Arial", DEFAULT_BUNDLED_FAMILY)];
+
+/// Returns the bundled family a placeholder family name stands in for.
+///
+/// `None` for anything that is not one of the placeholders, including families
+/// that are themselves bundled - callers resolve those directly first.
+pub fn resolve_placeholder_alias(family: &str) -> Option<&'static str> {
+    let key = lookup_key(family.trim());
+
+    PLACEHOLDER_FAMILY_ALIASES
+        .iter()
+        .find(|(placeholder, _)| lookup_key(placeholder) == key)
+        .map(|(_, bundled)| *bundled)
+}
+
 macro_rules! bundled_font {
     ($family:literal, $file:literal, $path:literal) => {
         BundledFont {
@@ -265,6 +302,38 @@ mod tests {
     #[test]
     fn the_substitution_default_is_itself_bundled() {
         assert!(resolve_bundled(DEFAULT_BUNDLED_FAMILY).is_some());
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: the placeholder family resolves to something we ship
+    #[test]
+    fn every_placeholder_alias_points_at_a_bundled_family() {
+        for (placeholder, bundled) in PLACEHOLDER_FAMILY_ALIASES {
+            assert!(
+                resolve_bundled(placeholder).is_none(),
+                "{placeholder} is bundled, so it needs no alias"
+            );
+            assert!(
+                resolve_bundled(bundled).is_some(),
+                "{placeholder} is aliased to {bundled}, which is not compiled in"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arial_placeholder_resolves_to_the_bundled_grotesque() {
+        assert_eq!(resolve_placeholder_alias("Arial"), Some("TikTok Sans"));
+        assert_eq!(resolve_placeholder_alias("  arial "), Some("TikTok Sans"));
+    }
+
+    #[test]
+    fn a_family_a_user_chose_is_not_aliased_away() {
+        // Only the placeholder is redirected. Helvetica, Georgia and Impact are
+        // deliberate picks, so they keep resolving against the host font set
+        // even though we do not ship them.
+        for family in ["Helvetica", "Georgia", "Impact", "Courier New", ""] {
+            assert_eq!(resolve_placeholder_alias(family), None, "{family}");
+        }
     }
 
     #[test]

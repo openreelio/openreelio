@@ -5,10 +5,7 @@
 //! must enter through an optional RenderPlan contract and receive plain args
 //! that are wrapped into `FfmpegInvocation` before execution.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+use std::collections::{HashMap, HashSet};
 
 use crate::core::{
     assets::Asset,
@@ -31,8 +28,9 @@ use super::{
         is_text_clip, output_video_dimensions, output_video_fps, output_video_pixel_format,
         resolve_asset_source_dimensions, resolve_asset_source_duration, resolve_trim_source_kind,
         seed_source_dimension_cache, seed_source_duration_cache, shape_video_segments_to_window,
-        unmeasurable_effect_message, AssetAudioInfo, ExportEngine, ExportError, ExportSettings,
-        SourceFrameCountCache, VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
+        unmeasurable_effect_message, AssTextOverlayPlan, AssetAudioInfo, ExportEngine, ExportError,
+        ExportSettings, SourceFrameCountCache, VideoCodec, VideoTimelineSegment,
+        TIMELINE_EPSILON_SEC,
     },
     pip_stitch::{fold_pip_groups, plan_pip_groups, PipPlan},
     render_window::RenderWindow,
@@ -55,7 +53,12 @@ pub(super) struct SequenceFfmpegBuildContext<'a> {
     pub audio_info: &'a HashMap<String, AssetAudioInfo>,
     pub settings: &'a ExportSettings,
     pub render_plan: Option<&'a RenderPlan>,
-    pub ass_text_overlay_path: Option<&'a Path>,
+    /// The burn-in script to overlay, if one was written.
+    ///
+    /// Carries whether the script needs the host's fonts, which decides whether
+    /// the `subtitles` node names a `fontsdir`. See [`append_ass_text_overlay`]
+    /// for the determinism boundary that draws.
+    pub ass_text_overlay: Option<AssTextOverlayPlan<'a>>,
 }
 
 pub(super) struct AudioOnlyFfmpegBuildContext<'a> {
@@ -116,7 +119,7 @@ pub(super) fn build_sequence_ffmpeg_args(
         output_fps,
     );
 
-    let use_ass_text_overlays = ctx.ass_text_overlay_path.is_some();
+    let use_ass_text_overlays = ctx.ass_text_overlay.is_some();
     let drawtext_text_overlays = if use_ass_text_overlays {
         Vec::new()
     } else {
@@ -693,8 +696,13 @@ pub(super) fn build_sequence_ffmpeg_args(
         filter_complex.push_str(&format!("[{}]null[outv]", adj_video_label));
     }
 
-    let final_video_label = if let Some(ass_path) = ctx.ass_text_overlay_path {
-        append_ass_text_overlay(&mut filter_complex, "[outv]", ass_path)
+    let final_video_label = if let Some(overlay) = ctx.ass_text_overlay {
+        append_ass_text_overlay(
+            &mut filter_complex,
+            "[outv]",
+            overlay.path,
+            overlay.needs_host_fonts,
+        )
     } else {
         append_drawtext_text_overlays(&mut filter_complex, "[outv]", &drawtext_text_overlays)
     };

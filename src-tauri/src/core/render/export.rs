@@ -6265,6 +6265,11 @@ pub(crate) enum FontResolution {
     /// Compiled into the binary. The script embeds it, so the burn-in looks the
     /// same on a machine that has never seen the family.
     Bundled(&'static str),
+    /// This codebase's own "no font was chosen" placeholder, mapped onto a
+    /// bundled family. Embedded exactly like [`FontResolution::Bundled`]; the
+    /// separate variant exists so validation can tell a deliberate default
+    /// apart from a family that genuinely could not be found.
+    Aliased(&'static str),
     /// Installed on this host. libass resolves it through the system provider.
     System,
     /// Available nowhere. libass would silently pick some fallback and never
@@ -6276,9 +6281,20 @@ pub(crate) enum FontResolution {
 ///
 /// Shared by the script builder and export validation so the warning a caller
 /// sees and the font that actually renders can never disagree.
+///
+/// The order is load-bearing. A bundled family wins outright; the placeholder
+/// alias comes next, so the default caption path lands on a face we embed
+/// rather than on whatever the host calls "Arial"; only then does a genuinely
+/// chosen family get resolved against the host. See
+/// [`crate::core::text::bundled_fonts::resolve_placeholder_alias`] for why the
+/// alias table holds exactly one entry.
 pub(crate) fn resolve_text_font_family(requested: &str) -> FontResolution {
     if let Some(font) = crate::core::text::bundled_fonts::resolve_bundled(requested) {
         return FontResolution::Bundled(font.family);
+    }
+
+    if let Some(family) = crate::core::text::bundled_fonts::resolve_placeholder_alias(requested) {
+        return FontResolution::Aliased(family);
     }
 
     let requested = requested.trim();
@@ -6383,7 +6399,31 @@ pub fn build_ass_text_overlay_script(
     sequence: &Sequence,
     effects: &HashMap<String, Effect>,
 ) -> Result<Option<String>, ExportError> {
-    build_ass_text_overlay_script_in_window(sequence, effects, 0.0)
+    Ok(build_ass_text_overlay_script_in_window(sequence, effects, 0.0)?.map(|built| built.script))
+}
+
+/// Where a written burn-in script landed, and what the graph needs to know.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AssTextOverlayPlan<'a> {
+    /// The `.ass` file the `subtitles` filter reads.
+    pub path: &'a Path,
+    /// Whether any style named a family only the host font set can supply.
+    pub needs_host_fonts: bool,
+}
+
+/// An ASS burn-in script, plus what the filtergraph has to know about it.
+#[derive(Clone, Debug)]
+pub(crate) struct AssTextOverlayScript {
+    /// The script itself.
+    pub script: String,
+    /// Whether any style named a family only the host font provider can supply.
+    ///
+    /// False for everything this codebase controls: bundled families and the
+    /// placeholder alias are carried inside the script's `[Fonts]` section, so
+    /// the graph needs no `fontsdir` and the render does not depend on the
+    /// machine's font set. It flips only when a user deliberately picked an
+    /// installed system font.
+    pub uses_host_fonts: bool,
 }
 
 /// [`build_ass_text_overlay_script`], with every event's timing rebased.
@@ -6397,12 +6437,13 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
     sequence: &Sequence,
     effects: &HashMap<String, Effect>,
     window_start_sec: f64,
-) -> Result<Option<String>, ExportError> {
+) -> Result<Option<AssTextOverlayScript>, ExportError> {
     let (play_res_x, play_res_y) = ass_play_resolution(&sequence.format.canvas);
     let mut styles = String::new();
     let mut events = String::new();
     let mut fonts = AssFontEmbedder::default();
     let mut event_count = 0usize;
+    let mut uses_host_fonts = false;
 
     let stack_depths = visual_stack_depths(sequence);
 
@@ -6454,11 +6495,16 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
                 "Arial",
             );
             let font_family = match resolve_text_font_family(&requested_family) {
-                FontResolution::Bundled(family) | FontResolution::Substituted(family) => {
+                FontResolution::Bundled(family)
+                | FontResolution::Aliased(family)
+                | FontResolution::Substituted(family) => {
                     fonts.embed_family(family);
                     family.to_string()
                 }
-                FontResolution::System => requested_family,
+                FontResolution::System => {
+                    uses_host_fonts = true;
+                    requested_family
+                }
             };
 
             let style_name = format!("OpenReelioText{event_count}");
@@ -6485,10 +6531,13 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
 
     // `WrapStyle: 0` is what makes a caption wrap at all; the margins on a
     // preset caption's event give libass the box to wrap it inside.
-    Ok(Some(format!(
-        "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\nYCbCr Matrix: TV.709\nPlayResX: {play_res_x}\nPlayResY: {play_res_y}\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n{styles}\n{}[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n{events}",
-        fonts.into_section()
-    )))
+    Ok(Some(AssTextOverlayScript {
+        script: format!(
+            "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\nYCbCr Matrix: TV.709\nPlayResX: {play_res_x}\nPlayResY: {play_res_y}\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n{styles}\n{}[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n{events}",
+            fonts.into_section()
+        ),
+        uses_host_fonts,
+    }))
 }
 
 /// Reads the filter names an FFmpeg binary reports, or `None` if it cannot run.
@@ -6516,10 +6565,25 @@ async fn probe_ffmpeg_filters(ffmpeg_path: &Path) -> Option<HashSet<String>> {
     )
 }
 
+/// Appends the `subtitles` node that burns the ASS script in.
+///
+/// # Determinism boundary
+///
+/// `fontsdir` names a directory on *this* machine, so a graph that carries it
+/// renders against whatever that host has installed. Everything this codebase
+/// chooses - every caption pack, every text default, every bundled family -
+/// resolves to a face the script carries in its own `[Fonts]` section, needs no
+/// directory, and therefore burns in identically on Windows, macOS and Linux.
+/// The option is emitted only when `host_fonts_needed` says a style named a
+/// family that exists nowhere but the host font set, which happens only when a
+/// user deliberately picked an installed system font. That clip renders with
+/// that machine's copy of that font - by the user's own choice, and the export
+/// validation warning already tells them when a pick could not be found at all.
 pub(super) fn append_ass_text_overlay(
     filter_complex: &mut String,
     base_video_label: &str,
     ass_path: &Path,
+    host_fonts_needed: bool,
 ) -> String {
     use crate::core::effects::escape_ffmpeg_filter_value;
 
@@ -6534,8 +6598,11 @@ pub(super) fn append_ass_text_overlay(
     // The filter takes a single directory, and libass reads it in addition to
     // the host's own font provider. Taking whichever path happened to sort
     // first meant a per-user font folder could shadow the system one; naming
-    // the platform's primary folder makes the choice deterministic.
+    // the platform's primary folder makes the choice deterministic *on one
+    // machine*, which is not the same as deterministic across machines - hence
+    // the gate above.
     let fonts_dir_option = crate::core::text::fonts::primary_system_font_directory()
+        .filter(|_| host_fonts_needed)
         .filter(|directory| {
             // Same apostrophe limit as the `.ass` path: FFmpeg cannot carry a literal
             // `'` into an option value. Unlike the script path, this option is purely
@@ -6963,7 +7030,7 @@ impl ExportEngine {
         effects: &std::collections::HashMap<String, Effect>,
         audio_info: &std::collections::HashMap<String, AssetAudioInfo>,
         settings: &ExportSettings,
-        ass_text_overlay_path: Option<&Path>,
+        ass_text_overlay: Option<AssTextOverlayPlan<'_>>,
     ) -> Result<Vec<String>, ExportError> {
         super::ffmpeg_plan::build_sequence_ffmpeg_args(
             super::ffmpeg_plan::SequenceFfmpegBuildContext {
@@ -6974,7 +7041,7 @@ impl ExportEngine {
                 audio_info,
                 settings,
                 render_plan: None,
-                ass_text_overlay_path,
+                ass_text_overlay,
             },
         )
     }
@@ -7107,6 +7174,7 @@ impl ExportEngine {
 
         let mut ass_text_overlay_dir: Option<tempfile::TempDir> = None;
         let mut ass_text_overlay_path: Option<PathBuf> = None;
+        let mut ass_text_overlay_needs_host_fonts = false;
         // The script is written before the graph is built, so it has to resolve
         // the same window the builder will: `subtitles` reads its timings
         // against the graph's clock, and that clock now starts at the window.
@@ -7135,11 +7203,12 @@ impl ExportEngine {
                 // instruction rather than rendering a video with every caption missing.
                 crate::core::fs::validate_filter_safe_path(&ass_path, "Text overlay path")
                     .map_err(ExportError::InvalidSettings)?;
-                tokio::fs::write(&ass_path, ass_script)
+                tokio::fs::write(&ass_path, ass_script.script)
                     .await
                     .map_err(ExportError::IoError)?;
                 ass_text_overlay_path = Some(ass_path);
                 ass_text_overlay_dir = Some(temp_dir);
+                ass_text_overlay_needs_host_fonts = ass_script.uses_host_fonts;
             } else {
                 tracing::warn!(
                     "FFmpeg subtitles filter is unavailable; falling back to drawtext overlays"
@@ -7156,7 +7225,12 @@ impl ExportEngine {
                 audio_info: &audio_info,
                 settings,
                 render_plan,
-                ass_text_overlay_path: ass_text_overlay_path.as_deref(),
+                ass_text_overlay: ass_text_overlay_path
+                    .as_deref()
+                    .map(|path| AssTextOverlayPlan {
+                        path,
+                        needs_host_fonts: ass_text_overlay_needs_host_fonts,
+                    }),
             },
         )?;
 
@@ -8651,7 +8725,7 @@ pub fn build_complex_filter_args_with_audio_info(
         audio_info,
         settings,
         render_plan: None,
-        ass_text_overlay_path: None,
+        ass_text_overlay: None,
     })
 }
 /// Detect gaps in the timeline between clips
@@ -8758,7 +8832,11 @@ mod tests {
             "text",
             ParamValue::String("Hello\nWorld {safe}".to_string()),
         );
-        effect.set_param("font_family", ParamValue::String("Inter".to_string()));
+        // A bundled family, so the assertion below pins the style mapping
+        // rather than whatever this machine happens to have installed. The
+        // family used to be "Inter", which passed everywhere only because the
+        // font catalog claimed every picker suggestion was installed.
+        effect.set_param("font_family", ParamValue::String("Bebas Neue".to_string()));
         effect.set_param("font_size", ParamValue::Float(64.0));
         effect.set_param("font_weight", ParamValue::Int(700));
         effect.set_param("color", ParamValue::String("#AABBCC".to_string()));
@@ -8779,7 +8857,7 @@ mod tests {
 
         assert!(script.contains("PlayResX: 1920"));
         assert!(script.contains("PlayResY: 1080"));
-        assert!(script.contains("Style: OpenReelioText0,Inter,96.00,&H40CCBBAA"));
+        assert!(script.contains("Style: OpenReelioText0,Bebas Neue,96.00,&H40CCBBAA"));
         assert!(script.contains(",133.33,66.67,"));
         // A rotated, multi-line text block is one event carrying `\N`, so the
         // rotation applies to the block rather than to each line separately.
@@ -9163,6 +9241,151 @@ mod tests {
             }),
             "the substitution must be reported. Got: {:?}",
             validation.warnings
+        );
+    }
+
+    /// Builds the burn-in script for one caption carrying `style`.
+    fn caption_script_for_style(style: serde_json::Value) -> AssTextOverlayScript {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some("Caption".to_string());
+        clip.caption_style = Some(style);
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        build_ass_text_overlay_script_in_window(&sequence, &HashMap::new(), 0.0)
+            .expect("script result")
+            .expect("script exists")
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: the placeholder family never reaches the host font provider
+    ///
+    /// `"Arial"` is what every caption pack, both style defaults and the
+    /// `font_family` parameter fallback emit when nothing was chosen, and we do
+    /// not ship it. The font catalog used to claim it was installed on every
+    /// machine, so the script named `Arial`, embedded nothing, and libass drew
+    /// the caption in whatever that host called Arial - or in something else
+    /// entirely where there was no Arial at all.
+    #[test]
+    fn the_placeholder_family_is_embedded_rather_than_left_to_the_host() {
+        assert_eq!(
+            resolve_text_font_family("Arial"),
+            FontResolution::Aliased("TikTok Sans"),
+        );
+
+        let built = caption_script_for_style(serde_json::json!({ "fontFamily": "Arial" }));
+
+        assert!(
+            built.script.contains("Style: OpenReelioText0,TikTok Sans,"),
+            "the placeholder must name the bundled family. Got: {}",
+            built.script
+        );
+        assert!(
+            built
+                .script
+                .contains("[Fonts]\nfontname: TikTokSans-Regular_0.ttf"),
+            "the named family must travel with the script. Got: {}",
+            built.script
+        );
+        assert!(
+            !built.uses_host_fonts,
+            "nothing in this script needs the host font set"
+        );
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: every curated pack renders from a face we ship
+    #[test]
+    fn every_caption_pack_resolves_to_a_face_the_script_carries() {
+        for pack in crate::core::style::caption_packs::CAPTION_PACKS {
+            let family = pack.style().font_family;
+            let resolution = resolve_text_font_family(&family);
+
+            assert!(
+                matches!(
+                    resolution,
+                    FontResolution::Bundled(_) | FontResolution::Aliased(_)
+                ),
+                "pack {:?} asks for {family:?}, which resolved to {resolution:?} - a pack must \
+                 never depend on the host font set",
+                pack.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_caption_created_from_the_default_pack_embeds_its_face() {
+        let pack = crate::core::style::caption_packs::resolve_caption_pack("default")
+            .expect("the default pack resolves");
+        let style = serde_json::to_value(pack.style()).expect("pack style serializes");
+
+        let built = caption_script_for_style(style);
+
+        assert!(
+            built.script.contains("Style: OpenReelioText0,TikTok Sans,"),
+            "got: {}",
+            built.script
+        );
+        assert!(
+            built
+                .script
+                .contains("[Fonts]\nfontname: TikTokSans-Regular_0.ttf"),
+            "got: {}",
+            built.script
+        );
+        assert!(!built.uses_host_fonts);
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a font the user picked from the host still renders
+    ///
+    /// The determinism guarantee covers what this codebase chooses, not what a
+    /// user deliberately chose: a genuinely installed family stays on the host
+    /// path, is named verbatim, and flags the graph so it keeps `fontsdir`.
+    #[test]
+    fn a_user_picked_system_font_still_resolves_against_the_host() {
+        let Some(family) = crate::core::text::fonts::list_installed_font_families()
+            .into_iter()
+            .find(|family| {
+                // Skip anything the resolver answers before it reaches the host,
+                // and anything the ASS style field would rewrite.
+                crate::core::text::bundled_fonts::resolve_bundled(family).is_none()
+                    && crate::core::text::bundled_fonts::resolve_placeholder_alias(family).is_none()
+                    && *family == ass_sanitize_style_field(family, "Arial")
+                    && family
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == ' ')
+            })
+        else {
+            eprintln!("Skipping test: this host reports no usable installed font family");
+            return;
+        };
+
+        assert_eq!(resolve_text_font_family(&family), FontResolution::System);
+
+        let built = caption_script_for_style(serde_json::json!({ "fontFamily": family }));
+
+        assert!(
+            built
+                .script
+                .contains(&format!("Style: OpenReelioText0,{family},")),
+            "a chosen family must be named verbatim. Got: {}",
+            built.script
+        );
+        assert!(
+            !built.script.contains("[Fonts]"),
+            "there is nothing bundled to embed for {family}. Got: {}",
+            built.script
+        );
+        assert!(
+            built.uses_host_fonts,
+            "the graph has to keep fontsdir for {family}"
         );
     }
 
@@ -9830,7 +10053,10 @@ mod tests {
             .expect("script result")
             .expect("script exists");
 
-        assert!(script.contains("Style: OpenReelioText0,Arial,42.00,&H3320F0FF"));
+        // "Arial" is this codebase's own placeholder for "no font was chosen",
+        // and we do not ship it, so it resolves to the bundled family the
+        // script embeds instead of to whatever the host calls Arial.
+        assert!(script.contains("Style: OpenReelioText0,TikTok Sans,42.00,&H3320F0FF"));
         assert!(script.contains("Dialogue: 0,0:00:00.50,0:00:02.50,OpenReelioText0"));
         // A custom position is an exact point, so it keeps `\pos` - now in the
         // 1080-tall PlayRes space rather than in output pixels.
@@ -10143,7 +10369,10 @@ mod tests {
                 &HashMap::new(),
                 &audio_info,
                 &settings,
-                Some(&ass_path),
+                Some(AssTextOverlayPlan {
+                    path: &ass_path,
+                    needs_host_fonts: false,
+                }),
             )
             .expect("filter args");
         let filter = args
@@ -10173,6 +10402,7 @@ mod tests {
             &mut filter_complex,
             "[outv]",
             &PathBuf::from("/tmp/vertical.ass"),
+            false,
         );
 
         assert_eq!(label, "[txtass0]");
@@ -10181,6 +10411,164 @@ mod tests {
             "got: {filter_complex}"
         );
         assert!(filter_complex.contains("subtitles=filename='/tmp/vertical.ass'"));
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: the graph names a host directory only when it has to
+    ///
+    /// `fontsdir` points at a folder on this machine, so a graph that carries
+    /// it renders against whatever that machine has installed. Everything this
+    /// codebase chooses travels inside the script's own `[Fonts]` section, so
+    /// the option is emitted only for a family the user picked off the host.
+    #[test]
+    fn the_subtitles_node_names_a_font_directory_only_for_a_host_font() {
+        let mut deterministic = String::from("[0:v]null[outv]");
+        append_ass_text_overlay(
+            &mut deterministic,
+            "[outv]",
+            &PathBuf::from("/tmp/embedded.ass"),
+            false,
+        );
+        assert!(
+            !deterministic.contains("fontsdir"),
+            "an embedded-font script must not depend on this machine. Got: {deterministic}"
+        );
+
+        let mut host = String::from("[0:v]null[outv]");
+        append_ass_text_overlay(&mut host, "[outv]", &PathBuf::from("/tmp/host.ass"), true);
+
+        let host_directory_is_usable = crate::core::text::fonts::primary_system_font_directory()
+            .is_some_and(|directory| {
+                crate::core::fs::validate_filter_safe_path(&directory, "System font directory")
+                    .is_ok()
+            });
+        assert_eq!(
+            host.contains(":fontsdir="),
+            host_directory_is_usable,
+            "a host-font script must reach the host's fonts wherever they are nameable. \
+             Got: {host}"
+        );
+    }
+
+    /// Returns the `fontselect:` lines libass logs while burning `script` in.
+    ///
+    /// The script is written into the directory FFmpeg runs in so the
+    /// filtergraph can name it without escaping a Windows drive letter. libass
+    /// reports its choice at `MSGL_INFO`, which the `subtitles` filter maps to
+    /// FFmpeg's verbose level.
+    #[cfg(test)]
+    fn libass_font_selections(ffmpeg: &Path, script: &str) -> Option<Vec<String>> {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("overlay.ass"), script).expect("write script");
+
+        let mut command = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut command);
+        let output = command
+            .current_dir(dir.path())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "debug",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x240:d=2",
+                "-vf",
+                "subtitles=overlay.ass",
+                "-ss",
+                "1",
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            eprintln!(
+                "ffmpeg could not burn in the ASS script: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return None;
+        }
+
+        Some(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .filter(|line| line.contains("fontselect:"))
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: the shipped libass really does select the embedded face
+    ///
+    /// The whole determinism argument rests on `[Fonts]` working in the binary
+    /// we ship, and a pixel diff only says "something changed". Reading libass's
+    /// own `fontselect:` line says *which* face it picked, so the embedded
+    /// attachment and a host fallback cannot be confused for one another. Point
+    /// `OPENREELIO_FFMPEG_PATH` at the bundled binary to test what ships.
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn libass_selects_the_embedded_face_rather_than_a_host_font() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        // A display face nothing on a stock machine ships, so a fallback cannot
+        // be mistaken for a hit.
+        let attachment = "fontname: LuckiestGuy-Regular_0.ttf";
+        let embedded =
+            caption_script_for_style(serde_json::json!({ "fontFamily": "Luckiest Guy" })).script;
+        assert!(
+            embedded.contains(&format!("[Fonts]\n{attachment}")),
+            "the fixture must carry the face it claims. Got: {embedded}"
+        );
+
+        let Some(selections) = libass_font_selections(&ffmpeg, &embedded) else {
+            skip_without_ffmpeg("ffmpeg could not burn in the embedded-font script");
+            return;
+        };
+        assert!(
+            !selections.is_empty(),
+            "libass must report which face it chose; the build may log nothing at verbose level"
+        );
+        // libass names an attachment by the `[Fonts]` entry with VSFilter's
+        // `_0.ttf` mangling stripped, and a host font by its full path - so the
+        // bare stem after the arrow is only reachable through the section.
+
+        assert!(
+            selections
+                .iter()
+                .any(|line| line.contains("-> LuckiestGuy-Regular,")),
+            "libass must select the attached face, got: {selections:?}"
+        );
+
+        // The control differs only by the missing section, so a pass here is
+        // evidence about the section rather than about the rest of the script.
+        let fonts_start = embedded.find("[Fonts]\n").expect("fonts section");
+        let events_start = embedded.find("[Events]\n").expect("events section");
+        let control = format!("{}{}", &embedded[..fonts_start], &embedded[events_start..]);
+
+        let Some(fallbacks) = libass_font_selections(&ffmpeg, &control) else {
+            skip_without_ffmpeg("ffmpeg could not burn in the control script");
+            return;
+        };
+        assert!(
+            !fallbacks.is_empty(),
+            "libass must still report the substitute it fell back to"
+        );
+        assert!(
+            !fallbacks
+                .iter()
+                .any(|line| line.contains("-> LuckiestGuy-Regular,")),
+            "without the section there is nothing to attach, got: {fallbacks:?}"
+        );
     }
 
     #[test]
@@ -10196,6 +10584,7 @@ mod tests {
             &mut filter_complex,
             "[outv]",
             &PathBuf::from("/tmp/x';[in]movie=filename=/etc/passwd[out];[out].ass"),
+            false,
         );
 
         assert_eq!(label, "[txtass0]");
