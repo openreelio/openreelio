@@ -1172,6 +1172,18 @@ On an **update** a pack restyles without moving the caption: `caption update
 replaces whatever position it carries. Pass `--position` when you do want it
 moved.
 
+**Fonts and reproducibility.** Every pack names a family that ships inside the
+binary, and the burn-in carries that face in the script it hands libass, so a
+packed caption renders the same on Windows, macOS and Linux — the same project
+gives the same pixels on any machine. `"Arial"` is the placeholder a caption
+carries when no font was chosen, including in projects made before the packs
+named a bundled family; it is not shipped, so it resolves to the bundled
+`TikTok Sans` rather than to whatever a given host calls Arial. A family you
+choose deliberately — anything else the font picker offers — is resolved
+against that machine's installed fonts instead, so it renders with that host's
+copy and can differ elsewhere. `verify` and export validation report a chosen
+family that could not be found at all.
+
 ### Text presets
 
 `--preset` is the same idea for text overlays: one id supplies typography,
