@@ -14,18 +14,35 @@
  * The version constant is emitted with them, inside the same markers, so
  * `--version` moves the tables and the release they claim to be together.
  *
+ * The inputs are vendored under `scripts/unicode-data/`, and generation reads
+ * them off disk. Deriving them from a live unicode.org download instead made a
+ * third party a merge gate: a transient 5xx there turned an unrelated pull
+ * request's lint job red. Refreshing the vendored copies is an explicit,
+ * interactive `--fetch`; everything else — generation and `--check` alike — is
+ * offline and deterministic.
+ *
  * Usage:
  *   node scripts/generate-emoji-tables.mjs            # rewrite the tables in place
  *   node scripts/generate-emoji-tables.mjs --check     # fail if they are stale
- *   node scripts/generate-emoji-tables.mjs --version 17.0.0
+ *   node scripts/generate-emoji-tables.mjs --fetch     # refresh the vendored data first
+ *   node scripts/generate-emoji-tables.mjs --fetch --version 17.0.0
  */
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** Unicode release the checked-in tables were generated from. */
+/** Unicode release assumed when the vendored data carries no version marker. */
 const DEFAULT_UNICODE_VERSION = '16.0.0';
+
+/** How long one `--fetch` request may take before it is abandoned. */
+const FETCH_TIMEOUT_MS = 30_000;
+
+/** How many times `--fetch` tries a file before giving up. */
+const FETCH_ATTEMPTS = 3;
+
+/** Base delay between `--fetch` retries; multiplied by the attempt number. */
+const FETCH_RETRY_DELAY_MS = 1_000;
 
 /** Properties read out of `emoji-data.txt`, in the order they are emitted. */
 const PROPERTIES = [
@@ -74,54 +91,181 @@ const END_MARKER = '// END GENERATED EMOJI TABLES';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 const targetPath = path.join(repoRoot, 'src-tauri', 'src', 'core', 'text', 'emoji.rs');
+const dataDir = path.join(scriptDir, 'unicode-data');
+const versionPath = path.join(dataDir, 'VERSION');
 
-const args = process.argv.slice(2);
-const checkOnly = args.includes('--check');
-const versionIndex = args.indexOf('--version');
-const unicodeVersion =
-  versionIndex >= 0 && args[versionIndex + 1] ? args[versionIndex + 1] : DEFAULT_UNICODE_VERSION;
+/** The vendored inputs, keyed by the file name they carry upstream. */
+const DATA_FILES = {
+  emojiData: 'emoji-data.txt',
+  variationSequences: 'emoji-variation-sequences.txt',
+};
 
-const unicodeBaseUrl = `https://www.unicode.org/Public/${unicodeVersion}/ucd/emoji`;
-const emojiDataUrl = `${unicodeBaseUrl}/emoji-data.txt`;
-const variationSequencesUrl = `${unicodeBaseUrl}/emoji-variation-sequences.txt`;
-
-const emojiData = await fetchUnicodeFile(emojiDataUrl);
-const variationSequences = await fetchUnicodeFile(variationSequencesUrl);
-const generated = renderTables(emojiData, variationSequences);
-
-const current = await readFile(targetPath, 'utf8');
-const begin = current.indexOf(BEGIN_MARKER);
-const end = current.indexOf(END_MARKER);
-if (begin < 0 || end < 0) {
-  throw new Error(`Markers ${BEGIN_MARKER} / ${END_MARKER} not found in ${targetPath}`);
+try {
+  await main();
+} catch (error) {
+  // A misuse of the flags and a missing vendored file are both ordinary,
+  // actionable outcomes; a stack trace only buries the sentence that says what
+  // to do about them.
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
 }
 
-const updated =
-  current.slice(0, begin) + generated + current.slice(end + END_MARKER.length);
+/** Parses the command line, refreshes the data if asked, and writes or checks. */
+async function main() {
+  const args = process.argv.slice(2);
+  const checkOnly = args.includes('--check');
+  const shouldFetch = args.includes('--fetch') || args.includes('--update-data');
+  const versionIndex = args.indexOf('--version');
+  const requestedVersion = versionIndex >= 0 ? args[versionIndex + 1] : undefined;
 
-if (updated === current) {
-  console.log(`Emoji tables are up to date with Unicode ${unicodeVersion}.`);
-  process.exit(0);
-}
-
-if (checkOnly) {
-  console.error(
-    `Emoji tables in ${path.relative(repoRoot, targetPath)} are stale. ` +
-      'Run `node scripts/generate-emoji-tables.mjs`.',
-  );
-  process.exit(1);
-}
-
-await writeFile(targetPath, updated, 'utf8');
-console.log(`Wrote emoji tables from Unicode ${unicodeVersion} to ${path.relative(repoRoot, targetPath)}.`);
-
-/** Downloads one Unicode data file and returns its text. */
-async function fetchUnicodeFile(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`GET ${url} failed with ${response.status} ${response.statusText}`);
+  if (versionIndex >= 0 && !requestedVersion) {
+    throw new Error('--version needs a release, e.g. `--version 17.0.0`');
   }
-  return response.text();
+  if (checkOnly && shouldFetch) {
+    throw new Error('--check is offline by design; drop --fetch or drop --check');
+  }
+
+  const vendoredVersion = await readVendoredVersion();
+
+  if (requestedVersion && !shouldFetch && requestedVersion !== vendoredVersion) {
+    throw new Error(
+      `Vendored data under ${path.relative(repoRoot, dataDir)} is Unicode ${vendoredVersion}, ` +
+        `not ${requestedVersion}. Re-run with \`--fetch --version ${requestedVersion}\` to ` +
+        'refresh it, so the emitted version constant and the data it names stay together.',
+    );
+  }
+
+  const unicodeVersion = shouldFetch
+    ? (requestedVersion ?? vendoredVersion)
+    : vendoredVersion;
+  const urls = dataUrls(unicodeVersion);
+
+  if (shouldFetch) {
+    await refreshVendoredData(urls, unicodeVersion);
+  }
+
+  const emojiData = await readVendoredFile(DATA_FILES.emojiData);
+  const variationSequences = await readVendoredFile(DATA_FILES.variationSequences);
+  const generated = renderTables(emojiData, variationSequences, unicodeVersion, urls);
+
+  const current = await readFile(targetPath, 'utf8');
+  const begin = current.indexOf(BEGIN_MARKER);
+  const end = current.indexOf(END_MARKER);
+  if (begin < 0 || end < 0) {
+    throw new Error(`Markers ${BEGIN_MARKER} / ${END_MARKER} not found in ${targetPath}`);
+  }
+
+  const updated = current.slice(0, begin) + generated + current.slice(end + END_MARKER.length);
+
+  if (updated === current) {
+    console.log(`Emoji tables are up to date with Unicode ${unicodeVersion}.`);
+    return;
+  }
+
+  if (checkOnly) {
+    console.error(
+      `Emoji tables in ${path.relative(repoRoot, targetPath)} are stale. ` +
+        'Run `node scripts/generate-emoji-tables.mjs`.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  await writeFile(targetPath, updated, 'utf8');
+  console.log(
+    `Wrote emoji tables from Unicode ${unicodeVersion} to ${path.relative(repoRoot, targetPath)}.`,
+  );
+}
+
+/** The upstream URLs one Unicode release publishes its emoji data at. */
+function dataUrls(unicodeVersion) {
+  const base = `https://www.unicode.org/Public/${unicodeVersion}/ucd/emoji`;
+  return {
+    emojiData: `${base}/${DATA_FILES.emojiData}`,
+    variationSequences: `${base}/${DATA_FILES.variationSequences}`,
+  };
+}
+
+/** The Unicode release the vendored inputs were retrieved from. */
+async function readVendoredVersion() {
+  try {
+    const marker = await readFile(versionPath, 'utf8');
+    const version = marker.trim();
+    if (version) return version;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  return DEFAULT_UNICODE_VERSION;
+}
+
+/** Reads one vendored input, pointing at `--fetch` when it is missing. */
+async function readVendoredFile(name) {
+  const file = path.join(dataDir, name);
+  try {
+    return await readFile(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error(
+        `Vendored Unicode input ${path.relative(repoRoot, file)} is missing. ` +
+          'Run `node scripts/generate-emoji-tables.mjs --fetch` to download it.',
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * Re-downloads the vendored inputs from unicode.org.
+ *
+ * The only code path that touches the network, and it is never taken by CI: a
+ * refresh is something a person does on purpose, reviews as a diff, and commits.
+ * Written with the LF the upstream files use so a refresh on Windows does not
+ * churn every line.
+ */
+async function refreshVendoredData(urls, unicodeVersion) {
+  await mkdir(dataDir, { recursive: true });
+
+  for (const [key, name] of Object.entries(DATA_FILES)) {
+    const text = await fetchUnicodeFile(urls[key]);
+    await writeFile(path.join(dataDir, name), text.replace(/\r\n/g, '\n'), 'utf8');
+    console.log(`Fetched ${name} from ${urls[key]}`);
+  }
+
+  await writeFile(versionPath, `${unicodeVersion}\n`, 'utf8');
+}
+
+/** Downloads one Unicode data file, with a timeout and a couple of retries. */
+async function fetchUnicodeFile(url) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) {
+        throw new Error(`GET ${url} failed with ${response.status} ${response.statusText}`);
+      }
+      return await response.text();
+    } catch (error) {
+      lastError = error;
+      if (attempt < FETCH_ATTEMPTS) {
+        console.warn(`GET ${url} failed (attempt ${attempt}/${FETCH_ATTEMPTS}): ${error.message}`);
+        await delay(attempt * FETCH_RETRY_DELAY_MS);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastError;
+}
+
+/** Resolves after `milliseconds`. */
+function delay(milliseconds) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
 }
 
 /** Merges a set of code points into sorted, inclusive `[first, last]` ranges. */
@@ -221,7 +365,7 @@ function renderRangeTable(constName, doc, ranges) {
 }
 
 /** Renders the whole generated block, markers included. */
-function renderTables(emojiDataText, variationSequencesText) {
+function renderTables(emojiDataText, variationSequencesText, unicodeVersion, urls) {
   const version = [
     '/// Unicode release the generated property tables were derived from.',
     '///',
@@ -250,8 +394,8 @@ function renderTables(emojiDataText, variationSequencesText) {
 
   return [
     BEGIN_MARKER,
-    `// Generated from ${emojiDataUrl}`,
-    `// and ${variationSequencesUrl}`,
+    `// Generated from ${urls.emojiData}`,
+    `// and ${urls.variationSequences}`,
     '// Regenerate with `node scripts/generate-emoji-tables.mjs`. Do not edit by hand.',
     '',
     version,

@@ -32,6 +32,12 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
+    # Reading a pull request's file list is what narrows the emoji-table check
+    # to the pull requests that can actually invalidate it.
+    permissions:
+      contents: read
+      pull-requests: read
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -48,11 +54,42 @@ jobs:
       - name: Check version sync
         run: npm run version:check
 
+      - name: Decide whether the emoji tables need re-checking
+        id: emoji-scope
+        # The tables are derived from the Unicode data vendored under
+        # scripts/unicode-data, so the only things that can invalidate them are
+        # the table, the generator, and that data. Skipping the check on the
+        # pull requests that touch none of the three saves a job step without
+        # weakening it: anything that could go stale still runs it, and a push
+        # to main always does. Fails open — an unreadable file list runs the
+        # check rather than silently waving it through.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" != 'pull_request' ]; then
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! changed=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename'); then
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if printf '%s\n' "$changed" | grep -qE '^(src-tauri/src/core/text/emoji\.rs|scripts/generate-emoji-tables\.mjs|scripts/unicode-data/)'; then
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check generated emoji tables are in sync
         # The Unicode property tables baked into core::text::emoji are checked
         # in, so a hand edit or a half-applied version bump is invisible until
-        # the burn-in check misclassifies something. Re-derives them from
-        # unicode.org and fails if the file does not match.
+        # the burn-in check misclassifies something. Re-derives them from the
+        # vendored Unicode data — offline, so unicode.org is never a merge gate
+        # — and fails if the file does not match.
+        if: steps.emoji-scope.outputs.needed == 'true'
         run: npm run emoji:check
 
       - name: Run linter
