@@ -115,9 +115,10 @@ libass rasterizes outlines and reads no colour table - so they are composited
 over the text as images. The images ship as pre-rasterized PNG under
 `src-tauri/emoji/`, alongside the upstream license and a generated
 `manifest.json` that maps an emoji sequence to its file. They are shipped as
-resources rather than compiled in: the Tauri bundle carries them under
-`emoji/`, and `crates/openreelio-cli/build.rs` stages the same directory beside
-the CLI binary.
+resources rather than compiled in. The Tauri bundle carries them under
+`emoji/`; the standalone `openreelio-cli-*` release archives and the
+`@openreelio/cli-*` npm packages carry the same directory beside the binary; and
+`crates/openreelio-cli/build.rs` stages it next to a locally built CLI.
 
 ### Fluent Emoji
 

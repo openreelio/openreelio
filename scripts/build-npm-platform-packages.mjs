@@ -54,6 +54,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   createReadStream,
   existsSync,
   lstatSync,
@@ -69,6 +70,42 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '..');
 const SHIM_DIR = join(PROJECT_ROOT, 'npm', 'openreelio-cli');
 const SCOPE = '@openreelio';
+
+/**
+ * Directory name the colour emoji pack takes inside a platform package.
+ *
+ * The CLI resolves the pack relative to its own executable, and a platform
+ * package puts that executable in `bin/`, so the pack sits one level up at the
+ * package root - which is the `<exe_dir>/../emoji` rung in
+ * `core::text::emoji_assets::candidate_roots`. Without it, an
+ * `npm i openreelio-cli` install burns every caption emoji in monochrome while
+ * the desktop app draws the same project in colour.
+ */
+const EMOJI_PACK_DIR = 'emoji';
+
+/** The pack in the checkout, used when no archive carried one. */
+const CHECKOUT_EMOJI_PACK = join(PROJECT_ROOT, 'src-tauri', EMOJI_PACK_DIR);
+
+/**
+ * Locates the colour emoji pack that belongs with `binaryPath`.
+ *
+ * The release archives carry the pack beside the binary, and that copy is the
+ * one to publish: it came out of the archive whose checksum was verified. A
+ * local run against a bare `--binary` has no such copy, so the checkout's pack
+ * stands in.
+ *
+ * @param {string} binaryPath Binary the package is being built around.
+ * @returns {string|null} Directory holding `manifest.json` and `png/`, or null.
+ */
+function resolveEmojiPack(binaryPath) {
+  for (const candidate of [join(dirname(binaryPath), EMOJI_PACK_DIR), CHECKOUT_EMOJI_PACK]) {
+    if (existsSync(join(candidate, 'manifest.json'))) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
 
 /**
  * Release targets published to npm. Kept deliberately in lockstep with the
@@ -439,7 +476,7 @@ function writePlatformPackage(target, binaryPath, version, outDir) {
     os: [target.os],
     cpu: [target.cpu],
     engines: { node: '>=18' },
-    files: [`bin/${target.binaryName}`, 'README.md', 'LICENSE'],
+    files: [`bin/${target.binaryName}`, EMOJI_PACK_DIR, 'README.md', 'LICENSE'],
     preferUnplugged: true,
   };
 
@@ -470,6 +507,15 @@ function writePlatformPackage(target, binaryPath, version, outDir) {
   writeFileSync(join(packageDir, 'README.md'), readme, 'utf-8');
 
   copyFileSync(join(PROJECT_ROOT, 'LICENSE'), join(packageDir, 'LICENSE'));
+
+  const emojiPack = resolveEmojiPack(binaryPath);
+  if (emojiPack) {
+    cpSync(emojiPack, join(packageDir, EMOJI_PACK_DIR), { recursive: true });
+  } else {
+    console.warn(
+      `  warning: no colour emoji pack found for ${packageName}; the published CLI will render emoji in monochrome.`,
+    );
+  }
 
   const destinationBinary = join(packageDir, 'bin', target.binaryName);
   copyFileSync(binaryPath, destinationBinary);

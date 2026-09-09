@@ -35,6 +35,7 @@
     "version:sync": "node scripts/with-node-temp.mjs npx tsx scripts/sync-version.ts --fix",
     "emoji:check": "node scripts/generate-emoji-tables.mjs --check",
     "emoji:sync": "node scripts/generate-emoji-tables.mjs",
+    "emoji:pack:check": "node scripts/generate-emoji-pack.mjs --check-files",
     "generate-signing-keys": "node scripts/with-node-temp.mjs npx tsx scripts/generate-signing-keys.ts",
     "prepare": "husky"
   },

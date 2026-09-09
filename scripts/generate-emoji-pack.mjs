@@ -43,6 +43,14 @@
  *   node scripts/generate-emoji-pack.mjs --deps <dir> --size 96
  *   node scripts/generate-emoji-pack.mjs --deps <dir> --sha <40-hex>
  *   node scripts/generate-emoji-pack.mjs --deps <dir> --check
+ *   node scripts/generate-emoji-pack.mjs --check-files
+ *
+ * `--check` re-derives the pack from the pinned commit and needs both the
+ * rasterization dependencies and the cached upstream tree. `--check-files`
+ * needs neither: it asserts only that the committed manifest and `png/` name
+ * exactly the same set of files, which is the failure that silently reaches
+ * users - a manifest entry with no picture is an `-i <missing>.png` on the
+ * export's command line. That makes it cheap enough to be a merge gate.
  */
 
 import { createRequire } from 'node:module';
@@ -118,10 +126,19 @@ main().catch((error) => {
 /** Parses the command line, builds the pack, and prints a summary. */
 async function main() {
   const options = parseArguments(process.argv.slice(2));
-  const { rasterize, quantize } = await loadImageTools(options.depsDir);
 
   const outputDir = options.outputDir;
   const pngDir = path.join(outputDir, 'png');
+
+  // Before anything is loaded or downloaded: this mode is a merge gate, and a
+  // gate that needs native dependencies and a warm cache is one that gets
+  // turned off.
+  if (options.checkFiles) {
+    await assertManifestMatchesDisk(outputDir, pngDir);
+    return;
+  }
+
+  const { rasterize, quantize } = await loadImageTools(options.depsDir);
 
   const tree = await loadTree(options);
   const assets = selectAssets(tree);
@@ -161,6 +178,7 @@ function parseArguments(argv) {
     outputDir: path.join(repoRoot, 'src-tauri', 'emoji'),
     depsDir: null,
     check: false,
+    checkFiles: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -200,6 +218,9 @@ function parseArguments(argv) {
         break;
       case '--check':
         options.check = true;
+        break;
+      case '--check-files':
+        options.checkFiles = true;
         break;
       default:
         throw new Error(`unknown argument: ${flag}`);
@@ -657,8 +678,9 @@ async function writeReadme(entries, outputDir, options, skipped, collisions) {
     '',
     'The first run downloads from GitHub and caches by commit SHA; later runs are',
     'offline and rewrite identical bytes. `--check` verifies the pack without',
-    'writing. Bumping the pinned commit changes the artwork and belongs in its own',
-    'commit alongside the regenerated pack.',
+    'writing, and `--check-files` verifies the manifest against `png/` with no',
+    'dependencies at all. Bumping the pinned commit changes the artwork and',
+    'belongs in its own commit alongside the regenerated pack.',
     '',
   ];
   await writeFile(path.join(outputDir, 'README.md'), lines.join('\n'), 'utf8');

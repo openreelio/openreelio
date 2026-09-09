@@ -448,13 +448,27 @@ jobs:
           cp "$CLI_PATH" "${STAGE_DIR}/${CLI_NAME}"
           cp LICENSE "${STAGE_DIR}/LICENSE"
 
+          # The colour emoji pack ships beside the binary, which is the first
+          # layout `core::text::emoji_assets::candidate_roots` looks in. Without
+          # it the standalone CLI and the MCP surface silently burn every emoji
+          # in monochrome while the GUI - which carries the same directory as a
+          # Tauri resource - draws them in colour, and the two disagree about
+          # what the same project renders as. The pack is committed, so a
+          # missing one is a broken checkout rather than a configuration.
+          if [ ! -f src-tauri/emoji/manifest.json ]; then
+            echo "Missing colour emoji pack: src-tauri/emoji/manifest.json" >&2
+            exit 1
+          fi
+          mkdir -p "${STAGE_DIR}/emoji"
+          cp -R src-tauri/emoji/. "${STAGE_DIR}/emoji/"
+
           rm -f "$ASSET_NAME" "${ASSET_NAME}.sha256"
           if [ "${{ runner.os }}" = "Windows" ]; then
             powershell -NoProfile -NonInteractive -Command \
               "Compress-Archive -Path '${STAGE_DIR}/*' -DestinationPath '${ASSET_NAME}' -Force"
           else
             # COPYFILE_DISABLE keeps macOS bsdtar from adding ._ metadata entries.
-            COPYFILE_DISABLE=1 tar -czf "$ASSET_NAME" -C "$STAGE_DIR" "$CLI_NAME" LICENSE
+            COPYFILE_DISABLE=1 tar -czf "$ASSET_NAME" -C "$STAGE_DIR" "$CLI_NAME" LICENSE emoji
           fi
 
           # macOS runners ship shasum instead of coreutils sha256sum.

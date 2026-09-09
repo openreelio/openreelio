@@ -74,16 +74,16 @@ fn stage_pack(source: &Path, destination: &Path) -> std::io::Result<()> {
     }
 
     fs::create_dir_all(destination.join("png"))?;
-    fs::copy(
-        source.join("manifest.json"),
-        destination.join("manifest.json"),
-    )?;
 
-    let license = source.join("LICENSE");
-    if license.is_file() {
-        fs::copy(license, destination.join("LICENSE"))?;
-    }
-
+    // The manifest is written last, and that ordering is the whole atomicity
+    // story here. The freshness check above reads the destination manifest and
+    // concludes the pack is complete; if the manifest landed first and the copy
+    // then failed - a full disk, an interrupted build, a locked file - every
+    // later build would read a complete manifest over a half-copied `png/` and
+    // skip the repair. The resolver would load a pack whose entries point at
+    // files that are not there, and the export would hand FFmpeg a missing
+    // input. With the manifest last, an interrupted stage leaves no manifest,
+    // the pack does not load at all, and the next build copies it again.
     for entry in fs::read_dir(source.join("png"))? {
         let entry = entry?;
         if entry.file_type()?.is_file() {
@@ -93,6 +93,16 @@ fn stage_pack(source: &Path, destination: &Path) -> std::io::Result<()> {
             )?;
         }
     }
+
+    let license = source.join("LICENSE");
+    if license.is_file() {
+        fs::copy(license, destination.join("LICENSE"))?;
+    }
+
+    fs::copy(
+        source.join("manifest.json"),
+        destination.join("manifest.json"),
+    )?;
 
     Ok(())
 }
