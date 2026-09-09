@@ -23,6 +23,7 @@ use crate::core::render::transition_stitch::plan_sequence_transitions;
 use crate::core::text::bundled_fonts::{self, DEFAULT_TEXT_FONT_FAMILY};
 use crate::core::text::coverage::{caption_font_stack, FontStack};
 use crate::core::text::emoji::{self, EmojiClass, EmojiCluster};
+use crate::core::text::emoji_assets;
 use crate::core::text::TextClipData;
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::CoreResult;
@@ -1381,13 +1382,17 @@ impl EmojiRenderCapability {
         }
 
         match self {
-            // Nothing today constructs this variant, and the blanket `None` is
-            // only defensible while nothing does. A colour-emoji layer draws
-            // what the font it is given has: a subdivision flag whose tag
-            // sequence the font never shipped, or a ZWJ combination assigned
-            // after the font was built, still falls back to its parts. Whoever
-            // turns the capability on has to decide which classes stay
-            // findings under it rather than inherit this line.
+            // No class is excepted, and that is a property of how the
+            // capability is now *constructed* rather than an assumption made
+            // here. `CaptionEmojiRule::capability_for` only reports this
+            // variant when the bundled pack resolves the cluster to a picture
+            // that is still the same emoji - a dropped skin tone or variation
+            // selector qualifies, the first member of a ZWJ sequence does not
+            // (see `EmojiAssetStep::preserves_sequence`). A sequence the pack
+            // never shipped, a cue whose layout animates, and everything past
+            // the per-render overlay cap all keep the bundled monochrome glyph
+            // and report as `BundledMonochrome`, which is the picture the
+            // project asked for with only its colour missing.
             EmojiRenderCapability::ColorOverlay => None,
             // The face is in the script, its `GSUB` joins the sequence, and the
             // frame shows the emoji the project names. Only its colour is gone,
@@ -1550,10 +1555,23 @@ impl CaptionEmojiRule {
     /// chain either. Both of those fall to the host, which is the state that
     /// actually mis-draws.
     fn capability_for(stack: &FontStack, cluster: &EmojiCluster<'_>) -> EmojiRenderCapability {
-        if stack.covers(cluster.text) {
-            EmojiRenderCapability::BundledMonochrome
+        if !stack.covers(cluster.text) {
+            return EmojiRenderCapability::HostFallback;
+        }
+
+        // Colour is layered over what the bundled emoji tier drew, never over
+        // the host's guess, so reaching that tier is a precondition rather than
+        // an alternative - which is why this is nested inside the coverage test
+        // and mirrors the gate in `ass_text_with_font_runs` exactly.
+        //
+        // Neither branch is a finding, so a build that ships no pack reports
+        // exactly what a build that ships one reports. That is deliberate: this
+        // rule is structural, and a project must not be graded differently
+        // because of what is installed next to the binary.
+        if emoji_assets::color_asset_available(&cluster.sequence_key) {
+            EmojiRenderCapability::ColorOverlay
         } else {
-            EmojiRenderCapability::HostFallback
+            EmojiRenderCapability::BundledMonochrome
         }
     }
 
