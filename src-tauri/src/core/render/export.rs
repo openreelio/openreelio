@@ -38,7 +38,8 @@ use crate::core::{
         build_ffmpeg_invocation_for_render_plan, build_ffmpeg_invocation_from_args,
         execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
     },
-    text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY,
+    text::bundled_fonts::{DEFAULT_TEXT_FONT_FAMILY, EMOJI_FALLBACK_FAMILY},
+    text::coverage::FontStack,
     timeline::{
         BlendMode, Canvas, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track,
         TrackKind, Transform,
@@ -5893,6 +5894,63 @@ fn ass_escape_text(raw: &str) -> String {
     escaped
 }
 
+/// Escapes an event's text, naming a fallback face wherever a run needs one.
+///
+/// libass carries an `\fn` forward to the end of the line, so this cannot just
+/// tag the runs that need a fallback: the run *after* an emoji has to say which
+/// face it goes back to, or the rest of the caption is drawn in the emoji face.
+/// The emitter therefore tracks the face currently in effect and writes an
+/// override only where it changes, which also means a caption that needs no
+/// fallback comes out byte-for-byte what it was before there was a chain.
+///
+/// A run no bundled face covers stays on the style's own family. That is not a
+/// failure: it is what lets libass consult the host font provider for it, which
+/// is how every Korean, Japanese, Chinese, Arabic and Thai caption has always
+/// rendered - and `uses_host_fonts` keeps `fontsdir` on the graph so there is
+/// somewhere for it to look.
+///
+/// Escaping happens per run and *before* the override is prefixed, so a brace a
+/// user typed is escaped as text while the braces this function writes are
+/// syntax. Escaping the assembled string instead would turn every `\fn` into
+/// literal text.
+fn ass_text_with_font_runs(raw: &str, stack: &FontStack, style_family: &str) -> String {
+    // The reset target has to be the family the `Style` line actually names, or
+    // a run going "back to the primary" would go somewhere else. They are built
+    // from the same resolution, so a mismatch means the stack does not describe
+    // this event and the chain is skipped rather than guessed at.
+    let Some(primary) = stack.primary().filter(|family| *family == style_family) else {
+        return ass_escape_text(raw);
+    };
+
+    let mut markup = String::with_capacity(raw.len());
+    let mut current = primary;
+
+    for run in crate::core::text::coverage::split_runs(raw, stack) {
+        let wanted = run.family.unwrap_or(primary);
+        if wanted != current {
+            markup.push_str(&format!("{{\\fn{}}}", ass_font_name_override(wanted)));
+            current = wanted;
+        }
+
+        markup.push_str(&ass_escape_text(run.text));
+    }
+
+    markup
+}
+
+/// Strips anything from a family name that could escape an override block.
+///
+/// Only ever called with a [`FontStack`] tier, so only with a family name from
+/// the compiled-in registry, which makes this the identity today -
+/// `every_bundled_family_name_is_inert_inside_an_override_block` is the guard
+/// that keeps it so. It stays because a name reaching an override block is the
+/// one place where a stray `}` would hand the rest of a caption to libass as
+/// syntax, and a defence that costs one allocation on a path that runs once per
+/// face change is not worth reasoning about twice.
+fn ass_font_name_override(family: &str) -> String {
+    family.replace(['{', '}', '\\', ',', '\r', '\n'], "")
+}
+
 /// Reads the horizontal alignment an effect stores, normalized.
 fn caption_effect_alignment(effect: &Effect) -> String {
     effect
@@ -6126,6 +6184,12 @@ struct AssEventContext<'a> {
     /// Font family after bundled/system resolution, so a family that resolves
     /// nowhere is named explicitly rather than left to libass to guess at.
     font_family: &'a str,
+    /// The bundled faces this event may draw from, `font_family` first.
+    ///
+    /// Empty for a family the user picked off the host: the chain can only name
+    /// faces the script carries, and it has nothing to fall back *from* when
+    /// the primary is not one of them.
+    font_stack: &'a FontStack,
     anchor: AssTextAnchor,
     /// Where this render's own clock starts on the timeline, so the event lands
     /// at the same picture a full render would have put it on.
@@ -6143,6 +6207,7 @@ fn append_ass_text_style_and_event(
         style_name,
         layer,
         font_family,
+        font_stack,
         anchor,
         window_start_sec,
     } = *context;
@@ -6249,7 +6314,11 @@ fn append_ass_text_style_and_event(
     // `\N`. Splitting the block into a positioned event per line made libass
     // draw a `BorderStyle: 3` background box around each line instead of around
     // the block, and left every line immune to wrapping.
-    let text = ass_escape_text(&effect_string_param(effect, "text", "Title"));
+    let text = ass_text_with_font_runs(
+        &effect_string_param(effect, "text", "Title"),
+        font_stack,
+        &font_family,
+    );
     let event_border_width = style_outline_width;
     let start = ass_timecode(clip.place.timeline_in_sec - window_start_sec);
     let end = ass_timecode(clip.place.timeline_out_sec() - window_start_sec);
@@ -6306,43 +6375,36 @@ pub(crate) fn resolve_text_font_family(requested: &str) -> FontResolution {
     }
 }
 
-/// Whether the faces of a bundled `family` can draw every character of `text`.
+/// The bundled faces a caption in `family` may draw from, most preferred first.
 ///
 /// Family selection and glyph coverage are different questions. Resolving a
 /// style to a bundled family says the script carries *a* face; it says nothing
 /// about whether that face has an outline for the characters this event
-/// actually contains. Every family compiled in today is Latin-only, so a
-/// Korean, Japanese, Chinese or emoji caption on the default path resolves to a
-/// bundled family, embeds it, and still needs libass to reach past the
-/// attachment for the glyphs the face does not have. Reporting that here is
-/// what keeps `fontsdir` on the graph for those events - without it libass has
-/// one fewer place to look and draws notdef boxes.
+/// actually contains. Every *text* family compiled in is Latin-only, so an
+/// emoji on the default path used to resolve to a bundled family, embed it, and
+/// then need libass to reach past the attachment - onto whichever colour emoji
+/// font the machine happened to have, or onto nothing at all.
 ///
-/// Whitespace and control characters are laid out rather than drawn, so a face
-/// with no glyph for them still renders the line; everything else is asked of
-/// the family's own `cmap`, short-circuiting on the first character no weight
-/// of the family covers.
+/// The second tier closes that: [`EMOJI_FALLBACK_FAMILY`] is a monochrome face
+/// we ship, so an emoji is drawn from the script's own `[Fonts]` section on
+/// every OS. What is left over - Korean, Japanese, Chinese, Arabic, Thai, every
+/// script we bundle no face for - still comes back uncovered, which is what
+/// keeps `fontsdir` on the graph for those events.
 ///
-/// Any weight vouching for the family is an approximation, and it is sound only
-/// while a family's weights agree on their coverage.
+/// Any weight of a tier vouching for the whole family is an approximation, and
+/// it is sound only while a family's weights agree on their coverage.
 /// `every_weight_of_a_bundled_family_covers_the_same_codepoints` in
-/// [`crate::core::text::coverage`] is the guard that keeps it that way; if a
-/// future face ever breaks it, this has to become a per-face question.
-fn bundled_family_covers_text(family: &str, text: &str) -> bool {
-    let faces = crate::core::text::bundled_fonts::bundled_family_faces(family);
-    if faces.is_empty() {
-        return false;
+/// [`crate::core::text::coverage`] is the guard that keeps it that way.
+fn caption_font_stack(family: &str) -> FontStack {
+    // A chain needs a primary the script carries. Without one there is nothing
+    // to fall back *from* - and building the stack anyway would quietly promote
+    // the emoji face to primary, which is the one face a caption must never be
+    // set in.
+    if crate::core::text::bundled_fonts::resolve_bundled(family).is_none() {
+        return FontStack::default();
     }
 
-    !text.chars().any(|ch| {
-        if ch.is_whitespace() || ch.is_control() {
-            return false;
-        }
-
-        !faces
-            .iter()
-            .any(|face| crate::core::text::coverage::face_covers(face, ch))
-    })
+    FontStack::new(&[family, EMOJI_FALLBACK_FAMILY])
 }
 
 /// Ceiling on the bytes one script may carry in its `[Fonts]` section.
@@ -6476,10 +6538,12 @@ pub(crate) struct AssTextOverlayScript {
     ///
     /// - *Family*: a user deliberately picked a family that is installed here
     ///   and nowhere in the binary, so libass has to resolve it off the host.
-    /// - *Glyph*: the resolved family is bundled and embedded, but its faces
-    ///   have no outline for some character of the event's text. Every family
-    ///   compiled in today is Latin-only, so a Korean, Japanese, Chinese or
-    ///   emoji caption lands here even on the default path.
+    /// - *Glyph*: no tier of the event's [`FontStack`] - the resolved family,
+    ///   then the bundled emoji face - has an outline for some character of the
+    ///   event's text. Every text family compiled in is Latin-only and the
+    ///   fallback tier is emoji-only, so a Korean, Japanese, Chinese, Arabic or
+    ///   Thai caption lands here even on the default path. An emoji no longer
+    ///   does.
     /// - *Cap*: the family is bundled but a weight of it was dropped at
     ///   [`MAX_EMBEDDED_FONT_BYTES`], so the script names a face it does not
     ///   carry. Unreachable with today's font list; see
@@ -6572,30 +6636,44 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
                 &effect_string_param(&effect, "font_family", DEFAULT_TEXT_FONT_FAMILY),
                 DEFAULT_TEXT_FONT_FAMILY,
             );
-            let font_family = match resolve_text_font_family(&requested_family) {
+            let (font_family, font_stack) = match resolve_text_font_family(&requested_family) {
                 FontResolution::Bundled(family)
                 | FontResolution::Aliased(family)
                 | FontResolution::Substituted(family) => {
                     // Embedding the family answers the family question, not the
-                    // glyph one: the bundled faces are Latin-only, so a caption
-                    // in a script none of them covers still needs the host's
-                    // fonts for the characters the attachment cannot draw. A
-                    // face the embed cap dropped is the family question again,
-                    // and reopens it the same way.
+                    // glyph one: a caption in a script no bundled face covers
+                    // still needs the host's fonts for the characters the
+                    // attachment cannot draw. A face the embed cap dropped is
+                    // the family question again, and reopens it the same way.
                     if !fonts.embed_family(family) {
                         uses_host_fonts = true;
                     }
-                    if !bundled_family_covers_text(
-                        family,
-                        &effect_string_param(&effect, "text", "Title"),
-                    ) {
+
+                    let text = effect_string_param(&effect, "text", "Title");
+                    let stack = caption_font_stack(family);
+                    // Only the tiers this event's runs actually name: a caption
+                    // with no emoji in it must not pay a megabyte for the emoji
+                    // face, and a `\fn` naming a face the script does not carry
+                    // is the same failure as a missing family.
+                    for fallback in stack.fallbacks_used(&text) {
+                        if !fonts.embed_family(fallback) {
+                            uses_host_fonts = true;
+                        }
+                    }
+                    if !stack.covers(&text) {
                         uses_host_fonts = true;
                     }
-                    family.to_string()
+
+                    (family.to_string(), stack)
                 }
                 FontResolution::System => {
                     uses_host_fonts = true;
-                    requested_family
+                    // A deliberately chosen host family cannot be the primary of
+                    // a chain: the script does not carry it, so there would be
+                    // no bundled name to write when a run goes back to it. The
+                    // event is emitted exactly as it was before the chain
+                    // existed, and the graph keeps `fontsdir` for all of it.
+                    (requested_family, FontStack::default())
                 }
             };
 
@@ -6607,6 +6685,7 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
                     style_name: &style_name,
                     layer: ass_dialogue_layer(stack_depth, clip_index),
                     font_family: &font_family,
+                    font_stack: &font_stack,
                     anchor: ass_text_anchor(clip, &track.kind, &effect, play_res_x, play_res_y),
                     window_start_sec,
                 },
@@ -9620,6 +9699,257 @@ mod tests {
         );
     }
 
+    /// The `Dialogue:` text of the first event, past the leading override.
+    fn first_event_text(script: &str) -> String {
+        let dialogue = script
+            .lines()
+            .find(|line| line.starts_with("Dialogue: "))
+            .expect("the script carries an event");
+        let overrides_end = dialogue.find('}').expect("the leading override block");
+
+        dialogue[overrides_end + 1..].to_string()
+    }
+
+    /// The default caption pack's style, which is the path most captions take.
+    fn default_caption_style() -> serde_json::Value {
+        serde_json::to_value(
+            crate::core::style::caption_packs::resolve_caption_pack("default")
+                .expect("the default pack resolves")
+                .style(),
+        )
+        .expect("pack style serializes")
+    }
+
+    /// Feature: deterministic emoji burn-in
+    /// Scenario: an emoji is drawn from the script rather than from the host
+    ///
+    /// This is the whole point of the chain. Before it, an emoji resolved to a
+    /// bundled Latin family that has no outline for it, `fontsdir` went on the
+    /// graph, and libass drew whatever emoji font the machine happened to
+    /// have: Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji, or nothing.
+    /// Now the run is lifted onto a face the script carries, and the graph
+    /// needs the host for nothing at all.
+    #[test]
+    fn an_emoji_caption_draws_from_a_face_the_script_carries() {
+        let built = caption_script_for_style_and_text(default_caption_style(), "Ship it \u{1F525}");
+
+        assert!(
+            built.script.contains(&format!(
+                "Style: OpenReelioText0,{DEFAULT_TEXT_FONT_FAMILY},"
+            )),
+            "the caption keeps its own family. Got: {}",
+            built.script
+        );
+        assert_eq!(
+            first_event_text(&built.script),
+            "Ship it {\\fnNoto Emoji}\u{1F525}",
+            "only the emoji run changes face. Got: {}",
+            built.script
+        );
+        assert!(
+            built.script.contains("fontname: TikTokSans-Regular_0.ttf"),
+            "got: {}",
+            built.script
+        );
+        assert!(
+            built.script.contains("fontname: NotoEmoji-Regular_0.ttf"),
+            "a `\\fn` naming a face the script does not carry is no better than \
+             a missing family. Got: {}",
+            built.script
+        );
+        assert!(
+            !built.uses_host_fonts,
+            "every character is drawn by an attachment, so the graph needs no fontsdir"
+        );
+    }
+
+    /// Feature: deterministic emoji burn-in
+    /// Scenario: a caption goes back to its own face after an emoji
+    ///
+    /// libass carries an `\fn` to the end of the line, so the run *after* an
+    /// emoji has to name the family it returns to. Without that, one emoji in
+    /// the middle of a sentence drew the rest of the sentence in the emoji
+    /// face, where every Latin letter is a notdef box.
+    #[test]
+    fn text_after_an_emoji_is_named_back_onto_the_caption_face() {
+        let built = caption_script_for_style_and_text(
+            default_caption_style(),
+            "Hi \u{1F525} there \u{1F600} you",
+        );
+
+        assert_eq!(
+            first_event_text(&built.script),
+            concat!(
+                "Hi {\\fnNoto Emoji}\u{1F525}{\\fnTikTok Sans} there ",
+                "{\\fnNoto Emoji}\u{1F600}{\\fnTikTok Sans} you"
+            ),
+            "got: {}",
+            built.script
+        );
+        assert!(!built.uses_host_fonts);
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a caption with no emoji is emitted exactly as it always was
+    #[test]
+    fn a_caption_without_emoji_carries_no_emoji_face_and_no_font_change() {
+        let built = caption_script_for_style_and_text(default_caption_style(), "Hello there");
+
+        assert_eq!(first_event_text(&built.script), "Hello there");
+        assert!(
+            !built.script.contains("NotoEmoji"),
+            "a megabyte per script for a face nothing reaches. Got: {}",
+            built.script
+        );
+        assert!(!built.uses_host_fonts);
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a script we bundle no face for is emitted byte for byte as before
+    ///
+    /// The chain must not touch these. A Korean, Arabic, Thai or Devanagari
+    /// caption has no bundled face to move to, so every cluster - and the
+    /// spaces between them - stays on the style's own family and reaches libass
+    /// as one unbroken run, shaped against the host fallback exactly as it was.
+    #[test]
+    fn a_caption_in_a_script_no_bundled_face_covers_is_unchanged_by_the_chain() {
+        for (text, script) in [
+            ("\u{C548}\u{B155} \u{D558}\u{C138}\u{C694}", "Hangul"),
+            (
+                "\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{643}",
+                "Arabic contextual forms",
+            ),
+            ("\u{E2A}\u{E27}\u{E31}\u{E2A}\u{E14}\u{E35}", "Thai"),
+            ("\u{915}\u{94D}\u{937}\u{93F} \u{939}\u{948}", "Devanagari"),
+            (
+                "\u{645}\u{631}\u{62D}\u{628}\u{627} OpenReelio \u{628}\u{643}",
+                "an RTL sentence around a Latin word",
+            ),
+        ] {
+            let built = caption_script_for_style_and_text(default_caption_style(), text);
+
+            assert_eq!(
+                first_event_text(&built.script),
+                ass_escape_text(text),
+                "{script} must reach libass exactly as it did before the chain"
+            );
+            assert!(
+                built.uses_host_fonts,
+                "{script} still has to keep fontsdir on the graph"
+            );
+            assert!(
+                !built.script.contains("NotoEmoji"),
+                "{script} names no emoji face, so the script must not carry one"
+            );
+        }
+    }
+
+    /// Feature: deterministic emoji burn-in
+    /// Scenario: emoji become deterministic without CJK becoming so
+    #[test]
+    fn an_emoji_in_a_hangul_caption_is_embedded_while_the_hangul_keeps_the_host() {
+        let built = caption_script_for_style_and_text(
+            default_caption_style(),
+            "\u{C548}\u{B155} \u{1F525}",
+        );
+
+        assert_eq!(
+            first_event_text(&built.script),
+            "\u{C548}\u{B155} {\\fnNoto Emoji}\u{1F525}",
+            "got: {}",
+            built.script
+        );
+        assert!(
+            built.script.contains("fontname: NotoEmoji-Regular_0.ttf"),
+            "got: {}",
+            built.script
+        );
+        assert!(
+            built.uses_host_fonts,
+            "no bundled face draws Hangul, so the graph still needs the host"
+        );
+    }
+
+    /// Feature: deterministic emoji burn-in
+    /// Scenario: a brace a user typed is text, and a brace the emitter wrote is syntax
+    ///
+    /// Escaping runs before the overrides are prefixed. Escaping the assembled
+    /// string instead would rewrite every `{\fn...}` this function produced into
+    /// literal `\{\fn...\}` and draw the tags on screen.
+    #[test]
+    fn braces_in_caption_text_stay_escaped_across_a_font_change() {
+        let built =
+            caption_script_for_style_and_text(default_caption_style(), "a{b} \u{1F525} {\\c&H00}");
+
+        assert_eq!(
+            first_event_text(&built.script),
+            "a\\{b\\} {\\fnNoto Emoji}\u{1F525}{\\fnTikTok Sans} \\{\\\\c&H00\\}",
+            "got: {}",
+            built.script
+        );
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a font change can only ever name a face we ship
+    ///
+    /// `\fn` is written inside an override block, so a family name carrying a
+    /// brace would hand the rest of the caption to libass as syntax. The names
+    /// come from the compiled-in registry and nowhere else; this is the guard
+    /// that says so at the emitter rather than at the registry.
+    #[test]
+    fn a_font_change_only_ever_names_a_bundled_family() {
+        let built = caption_script_for_style_and_text(
+            default_caption_style(),
+            "\u{1F525} mixed \u{C548} \u{1F600}",
+        );
+        let text = first_event_text(&built.script);
+        let names: Vec<&str> = text
+            .match_indices("{\\fn")
+            .map(|(at, tag)| {
+                let rest = &text[at + tag.len()..];
+                &rest[..rest.find('}').expect("every override block closes")]
+            })
+            .collect();
+
+        assert!(!names.is_empty(), "the fixture must produce a change");
+        for name in names {
+            assert!(
+                crate::core::text::bundled_fonts::bundled_family_faces(name)
+                    .first()
+                    .is_some_and(|font| font.family == name),
+                "{name:?} is not a family this binary carries"
+            );
+        }
+    }
+
+    /// Feature: deterministic emoji burn-in
+    /// Scenario: a chosen host family is left exactly as it was
+    ///
+    /// The chain's reset target has to be a face the script carries, and a
+    /// family the user picked off this machine is not one. Rather than write a
+    /// user-supplied string into an override block, the event is emitted the way
+    /// it was before the chain existed and `fontsdir` covers all of it.
+    #[test]
+    fn a_host_family_caption_is_emitted_without_a_font_chain() {
+        let text = "Hi \u{1F525}";
+        let stack = FontStack::default();
+
+        assert_eq!(
+            ass_text_with_font_runs(text, &stack, "Some Host Family"),
+            ass_escape_text(text)
+        );
+        // And a stack whose primary is not the family the `Style` line names
+        // cannot reset onto it either, so it is refused the same way.
+        assert_eq!(
+            ass_text_with_font_runs(
+                text,
+                &caption_font_stack(DEFAULT_TEXT_FONT_FAMILY),
+                "Some Host Family"
+            ),
+            ass_escape_text(text)
+        );
+    }
+
     /// Feature: deterministic caption burn-in
     /// Scenario: whitespace is laid out, not drawn
     #[test]
@@ -9628,17 +9958,18 @@ mod tests {
         // glyph for one still renders the line. Treating them as uncovered
         // would put `fontsdir` on every graph and give up the guarantee for
         // nothing.
-        assert!(bundled_family_covers_text(
-            DEFAULT_TEXT_FONT_FAMILY,
-            "Two\tlines\nof\u{00A0}text"
-        ));
-        assert!(!bundled_family_covers_text(
-            DEFAULT_TEXT_FONT_FAMILY,
-            "mostly latin \u{C548}"
-        ));
-        // A family we do not ship covers nothing here; the caller reaches that
-        // answer through `FontResolution::System` instead.
-        assert!(!bundled_family_covers_text("Definitely Not Bundled", "A"));
+        let stack = caption_font_stack(DEFAULT_TEXT_FONT_FAMILY);
+
+        assert!(stack.covers("Two\tlines\nof\u{00A0}text"));
+        assert!(!stack.covers("mostly latin \u{C548}"));
+        // A family we do not ship builds no chain at all; the caller reaches
+        // that answer through `FontResolution::System` instead. In particular
+        // the emoji tier must not be promoted into the primary slot the missing
+        // family left behind.
+        let unbundled = caption_font_stack("Definitely Not Bundled");
+        assert!(unbundled.is_empty());
+        assert_eq!(unbundled.primary(), None);
+        assert!(!unbundled.covers("A"));
     }
 
     /// Feature: deterministic caption burn-in
@@ -10164,6 +10495,7 @@ mod tests {
                 style_name: "OpenReelioText0",
                 layer: 0,
                 font_family: "Arial",
+                font_stack: &FontStack::default(),
                 window_start_sec: 0.0,
                 anchor: ass_text_anchor(
                     &sequence.tracks[0].clips[0],
@@ -10871,6 +11203,76 @@ mod tests {
             !fallbacks
                 .iter()
                 .any(|line| line.contains("-> LuckiestGuy-Regular,")),
+            "without the section there is nothing to attach, got: {fallbacks:?}"
+        );
+    }
+
+    /// Feature: deterministic emoji burn-in
+    /// Scenario: the shipped libass really draws the emoji from our own face
+    ///
+    /// Everything else about this chain is an assertion on a string we wrote.
+    /// This is the one that says the string does what it claims in the binary
+    /// we ship: libass's own `fontselect:` line has to name the attached
+    /// `NotoEmoji-Regular`, not Segoe UI Emoji, Apple Color Emoji or whatever
+    /// the machine ranks first. Point `OPENREELIO_FFMPEG_PATH` at the bundled
+    /// binary to test what ships.
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn libass_selects_the_embedded_emoji_face_for_an_emoji_run() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        let embedded =
+            caption_script_for_style_and_text(default_caption_style(), "Ship it \u{1F525}").script;
+        assert!(
+            embedded.contains("fontname: NotoEmoji-Regular_0.ttf"),
+            "the fixture must carry the face it names. Got: {embedded}"
+        );
+        assert!(
+            embedded.contains("{\\fnNoto Emoji}"),
+            "the fixture must ask for the face. Got: {embedded}"
+        );
+
+        let Some(selections) = libass_font_selections(&ffmpeg, &embedded) else {
+            skip_without_ffmpeg("ffmpeg could not burn in the emoji script");
+            return;
+        };
+        assert!(
+            !selections.is_empty(),
+            "libass must report which face it chose; the build may log nothing at verbose level"
+        );
+        // An attachment is named by its `[Fonts]` entry with VSFilter's `_0.ttf`
+        // mangling stripped; a host font is named by its full path.
+        assert!(
+            selections
+                .iter()
+                .any(|line| line.contains("-> NotoEmoji-Regular,")),
+            "the emoji run must come from the attachment, got: {selections:?}"
+        );
+
+        // The control differs only by the section, and renames the family so a
+        // machine that happens to have Noto Emoji installed cannot make the
+        // assertion above pass for the wrong reason.
+        let fonts_start = embedded.find("[Fonts]\n").expect("fonts section");
+        let events_start = embedded.find("[Events]\n").expect("events section");
+        let control = format!("{}{}", &embedded[..fonts_start], &embedded[events_start..])
+            .replace("Noto Emoji", "OpenReelio Absent Emoji");
+
+        let Some(fallbacks) = libass_font_selections(&ffmpeg, &control) else {
+            skip_without_ffmpeg("ffmpeg could not burn in the control script");
+            return;
+        };
+        assert!(
+            !fallbacks.is_empty(),
+            "libass must still report the substitute it fell back to"
+        );
+        assert!(
+            !fallbacks
+                .iter()
+                .any(|line| line.contains("-> NotoEmoji-Regular,")),
             "without the section there is nothing to attach, got: {fallbacks:?}"
         );
     }

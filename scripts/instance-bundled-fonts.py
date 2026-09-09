@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Rebuilds the static font instances bundled for caption burn-in.
 
-Two of the families the caption presets use ship upstream only as variable
-fonts. libass cannot read a variable font's named instances: it matches a
+Three of the faces the caption burn-in relies on ship upstream only as
+variable fonts. libass cannot read a variable font's named instances: it matches a
 requested family against `name` ID 1 (family) and `name` ID 4 (full name) and
 nothing else, and it decides "is this face bold" from the `OS/2` `fsSelection`
 bold bit and the `head` `macStyle` bold bit. A default instancer run leaves
@@ -17,7 +17,7 @@ Run it from the repository root:
 
     python scripts/instance-bundled-fonts.py
 
-It overwrites the four files under `src-tauri/fonts/` listed in `TARGETS`.
+It overwrites the five files under `src-tauri/fonts/` listed in `TARGETS`.
 The other bundled families ship upstream as single static faces whose name
 tables are already correct, so they are copied verbatim from Google Fonts and
 are not regenerated here.
@@ -47,6 +47,13 @@ MONTSERRAT_URL = (
 TIKTOK_SANS_URL = (
     "https://raw.githubusercontent.com/google/fonts/main/ofl/tiktoksans/"
     "TikTokSans%5Bopsz,slnt,wdth,wght%5D.ttf"
+)
+# The *monochrome* Noto Emoji, not Noto Color Emoji: libass rasterizes outlines
+# and has no path for the `CBDT`/`COLR` bitmap and layer tables a colour emoji
+# font carries, so a colour build would attach megabytes and still draw nothing.
+NOTO_EMOJI_URL = (
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/notoemoji/"
+    "NotoEmoji%5Bwght%5D.ttf"
 )
 
 # `OS/2` `fsSelection` bits and the `head` `macStyle` bit libass reads.
@@ -140,7 +147,29 @@ TARGETS: tuple[Target, ...] = (
         weight_class=700,
         bold=True,
     ),
+    Target(
+        source_url=NOTO_EMOJI_URL,
+        source_name="NotoEmoji[wght].ttf",
+        output="noto-emoji/NotoEmoji-Regular.ttf",
+        # 400 is the upstream default; the emoji face is only ever a per-glyph
+        # fallback tier, so it needs no second weight to pair with a bold
+        # caption - libass synthesizes one if a bold event reaches it.
+        location={"wght": 400},
+        family="Noto Emoji",
+        subfamily="Regular",
+        full_name="Noto Emoji Regular",
+        postscript_name="NotoEmoji-Regular",
+        weight_class=400,
+        bold=False,
+    ),
 )
+
+# Deliberately not subset. Every one of the ~1900 glyphs in this face is an
+# emoji, so there is no Latin or CJK bulk to strip, and the ZWJ sequences are
+# `GSUB` ligatures over component glyphs that a codepoint subset would have to
+# close over exactly right or silently break. Pinning the weight axis already
+# takes the file from 1.9 MB to ~0.87 MB, which is the whole win a subset was
+# going to buy.
 
 
 def download(url: str, cache_dir: Path, file_name: str) -> Path:
