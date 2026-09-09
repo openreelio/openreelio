@@ -509,6 +509,12 @@ async fn measure_batch(
 }
 
 /// Builds and runs the probe command, returning the metadata text it printed.
+///
+/// The command has to parse on every FFmpeg this ships against, not just the
+/// bundled one: a rejected option is an exit before decoding, which arrives
+/// here as an empty report and turns every cell into a refusal. That is why the
+/// frame-timing flag is `-fps_mode passthrough` and not the `-vsync 0` it
+/// replaced - see the comment beside it.
 async fn run_probe(
     engine: &ExportEngine,
     request: &EmojiMeasureRequest<'_>,
@@ -566,8 +572,16 @@ async fn run_probe(
         ),
         "-vf".to_string(),
         filter,
-        "-vsync".to_string(),
-        "0".to_string(),
+        // `-fps_mode passthrough`, not `-vsync 0`: FFmpeg 9 removed `-vsync`
+        // outright, and an unrecognised option is a parse error before a single
+        // frame is decoded - which reaches this pass as "no cell could be
+        // measured" and quietly turns the whole colour feature off on every
+        // host with a modern binary. `passthrough` is the documented successor,
+        // means the same thing (keep the frames `select` let through on their
+        // own timestamps rather than resampling to the output rate) and is
+        // accepted by 8.x and 9.x alike.
+        "-fps_mode".to_string(),
+        "passthrough".to_string(),
         "-f".to_string(),
         "null".to_string(),
         "-".to_string(),
@@ -1254,8 +1268,10 @@ mod tests {
                      metadata=mode=print:file=-",
                     escape_ffmpeg_filter_value(&path_text)
                 ),
-                "-vsync",
-                "0",
+                // Matches `run_probe`; see the note there for why this is not
+                // `-vsync 0`.
+                "-fps_mode",
+                "passthrough",
                 "-f",
                 "null",
                 "-",

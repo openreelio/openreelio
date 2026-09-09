@@ -11199,8 +11199,10 @@ mod tests {
                 &path.to_string_lossy(),
                 "-vf",
                 &format!("select='eq(n\\,{frame})',signalstats,metadata=mode=print:file=-"),
-                "-vsync",
-                "0",
+                // Not `-vsync 0`: FFmpeg 9 removed the option, and this helper
+                // would fail on a modern binary rather than measure anything.
+                "-fps_mode",
+                "passthrough",
                 "-f",
                 "null",
                 "-",
@@ -11248,8 +11250,10 @@ mod tests {
                     "select='eq(n\\,{frame})',{isolate}bbox=min_val=24,\
                      metadata=mode=print:file=-"
                 ),
-                "-vsync",
-                "0",
+                // Not `-vsync 0`: FFmpeg 9 removed the option, and this helper
+                // would fail on a modern binary rather than measure anything.
+                "-fps_mode",
+                "passthrough",
                 "-f",
                 "null",
                 "-",
