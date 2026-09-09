@@ -1752,7 +1752,7 @@ impl CaptionSafeAreaRule {
     /// unless it *can* break: libass needs a break opportunity, so a run
     /// without one - unspaced CJK, a bare URL - stays on one line and runs off
     /// the side, which is a horizontal breach and is reported as one.
-    fn estimate_text_box_percent(
+    pub(super) fn estimate_text_box_percent(
         clip: &Clip,
         canvas_width: u32,
         canvas_height: u32,
@@ -1815,7 +1815,7 @@ impl CaptionSafeAreaRule {
     ///
     /// Mirrors the render path's alias list; anything unrecognized is centered,
     /// which is the renderer's own default.
-    fn alignment(style: Option<&serde_json::Value>) -> TextAlignment {
+    pub(super) fn alignment(style: Option<&serde_json::Value>) -> TextAlignment {
         let Some(value) = style.and_then(serde_json::Value::as_object) else {
             return TextAlignment::Center;
         };
@@ -1838,7 +1838,7 @@ impl CaptionSafeAreaRule {
     ///
     /// Matches both render paths: a left-aligned run starts at the anchor,
     /// a right-aligned one ends there, and a centered one straddles it.
-    fn horizontal_span(
+    pub(super) fn horizontal_span(
         anchor_percent: f64,
         width_percent: f64,
         alignment: &TextAlignment,
@@ -1860,7 +1860,7 @@ impl CaptionSafeAreaRule {
     /// canvas above the bottom edge, and the block grows upward from there.
     /// So the margin always protects the edge it names, and what a large font
     /// or a wrapped caption threatens is the *opposite* edge.
-    fn preset_vertical_span(
+    pub(super) fn preset_vertical_span(
         vertical: &VerticalPosition,
         margin_percent: f64,
         box_height_percent: f64,
@@ -1949,7 +1949,7 @@ pub(super) const MIN_CAPTION_SPAN_WIDTH_PERCENT: f64 = 10.0;
 const CAPTION_SPAN_SAFETY_FACTOR: f64 = 1.5;
 
 /// The alignment spelling the render path's anchor helpers take.
-fn alignment_key(alignment: &TextAlignment) -> &'static str {
+pub(super) fn alignment_key(alignment: &TextAlignment) -> &'static str {
     match alignment {
         TextAlignment::Left => "left",
         TextAlignment::Right => "right",
