@@ -108,6 +108,34 @@ Copyright (c) 2010 by Brian J. Bonislawsky DBA Astigmatic (AOETI). All rights re
 - Upstream license file: `src-tauri/fonts/luckiest-guy/LICENSE.txt`
 
 
+## Bundled Emoji Artwork
+
+Colour emoji cannot be drawn by the subtitle renderer that burns captions in -
+libass rasterizes outlines and reads no colour table - so they are composited
+over the text as images. The images ship as pre-rasterized PNG under
+`src-tauri/emoji/`, alongside the upstream license and a generated
+`manifest.json` that maps an emoji sequence to its file. They are shipped as
+resources rather than compiled in. The Tauri bundle carries them under
+`emoji/`; the standalone `openreelio-cli-*` release archives and the
+`@openreelio/cli-*` npm packages carry the same directory beside the binary; and
+`crates/openreelio-cli/build.rs` stages it next to a locally built CLI.
+
+### Fluent Emoji
+
+- Copyright: (c) Microsoft Corporation
+- License: MIT
+- Source: https://github.com/microsoft/fluentui-emoji
+- Pinned commit: `1ffb34c752ecf5d402f04cfb4b392c77f57c54bc`
+- Files: `src-tauri/emoji/png/*.png` (1595 rasters, 128x128, from the `Color`
+  style's SVG sources)
+- Upstream license file: `src-tauri/emoji/LICENSE`
+
+The artwork is redistributed unmodified in content; only the file format
+(SVG rasterized to PNG at a fixed size) and the file naming differ from
+upstream. `scripts/generate-emoji-pack.mjs` reproduces the pack from the pinned
+commit. The full MIT license text appears under "MIT License" below.
+
+
 ## Bundled JavaScript Libraries
 
 These packages are compiled into the OpenReelio application bundle.

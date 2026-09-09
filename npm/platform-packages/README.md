@@ -1,10 +1,24 @@
 # Platform packages (`@openreelio/cli-*`)
 
 These packages are **generated, not committed**. Each one carries a single
-prebuilt `openreelio-cli` binary for one release target, plus `os`/`cpu` fields
-so npm installs exactly one of them per host. The `openreelio-cli` shim in
-`../openreelio-cli` lists all four as `optionalDependencies` and resolves the
-binary at run time.
+prebuilt `openreelio-cli` binary for one release target, the bundled colour
+emoji pack, plus `os`/`cpu` fields so npm installs exactly one of them per host.
+The `openreelio-cli` shim in `../openreelio-cli` lists all four as
+`optionalDependencies` and resolves the binary at run time.
+
+## Layout
+
+```
+@openreelio/cli-<platform>/
+├── bin/openreelio-cli[.exe]
+└── emoji/                     # manifest.json + png/, resolved as ../emoji
+```
+
+The binary sits in `bin/` and the emoji pack at the package root, because the
+CLI resolves the pack relative to its own executable (`<exe_dir>/../emoji`).
+Dropping the pack would leave `npm i openreelio-cli` burning captions with
+monochrome emoji while the desktop app - which carries the same directory as a
+Tauri resource - draws the same project in colour.
 
 The binaries only exist as release assets, so the packages are assembled during
 the publish workflow by `scripts/build-npm-platform-packages.mjs` and written to

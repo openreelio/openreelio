@@ -31,6 +31,8 @@ pub mod bundled_fonts;
 pub mod coverage;
 /// Classifies emoji in text that has to be burned into the picture.
 pub mod emoji;
+/// Finds the bundled colour picture for an emoji sequence.
+pub mod emoji_assets;
 pub mod fonts;
 
 // =============================================================================

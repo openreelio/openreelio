@@ -56,7 +56,10 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "binaries/*": "binaries/"
+      "binaries/*": "binaries/",
+      "emoji/manifest.json": "emoji/manifest.json",
+      "emoji/LICENSE": "emoji/LICENSE",
+      "emoji/png/*": "emoji/png/"
     },
     "windows": {
       "certificateThumbprint": null,

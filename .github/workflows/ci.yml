@@ -54,15 +54,16 @@ jobs:
       - name: Check version sync
         run: npm run version:check
 
-      - name: Decide whether the emoji tables need re-checking
+      - name: Decide which emoji checks need running
         id: emoji-scope
         # The tables are derived from the Unicode data vendored under
         # scripts/unicode-data, so the only things that can invalidate them are
-        # the table, the generator, and that data. Skipping the check on the
-        # pull requests that touch none of the three saves a job step without
-        # weakening it: anything that could go stale still runs it, and a push
-        # to main always does. Fails open — an unreadable file list runs the
-        # check rather than silently waving it through.
+        # the table, the generator, and that data. The pack check has its own
+        # narrower trigger, the pack directory and its generator. Skipping
+        # either on the pull requests that touch none of their inputs saves a
+        # job step without weakening it: anything that could go stale still
+        # runs it, and a push to main always does. Fails open — an unreadable
+        # file list runs both checks rather than silently waving them through.
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -71,10 +72,12 @@ jobs:
           set -uo pipefail
           if [ "${{ github.event_name }}" != 'pull_request' ]; then
             echo 'needed=true' >> "$GITHUB_OUTPUT"
+            echo 'pack=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if ! changed=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename'); then
             echo 'needed=true' >> "$GITHUB_OUTPUT"
+            echo 'pack=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if printf '%s\n' "$changed" | grep -qE '^(src-tauri/src/core/text/emoji\.rs|scripts/generate-emoji-tables\.mjs|scripts/unicode-data/)'; then
@@ -82,6 +85,21 @@ jobs:
           else
             echo 'needed=false' >> "$GITHUB_OUTPUT"
           fi
+          if printf '%s\n' "$changed" | grep -qE '^(src-tauri/emoji/|scripts/generate-emoji-pack\.mjs)'; then
+            echo 'pack=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'pack=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the colour emoji pack is complete
+        # The manifest is the index the export resolves a sequence through, and
+        # it is trusted rather than probed: an entry whose PNG is not there
+        # reaches FFmpeg as `-i <missing>.png` and the render exits non-zero.
+        # Re-deriving the artwork needs the upstream assets and two native
+        # dependencies, so the gate is the half that can be checked offline -
+        # every entry has a file and every file has an entry.
+        if: steps.emoji-scope.outputs.pack == 'true'
+        run: npm run emoji:pack:check
 
       - name: Check generated emoji tables are in sync
         # The Unicode property tables baked into core::text::emoji are checked

@@ -13,3 +13,11 @@ THIRD_PARTY_NOTICES.md -text -whitespace
 # from it. Normalizing its line endings would make a refresh on Windows churn
 # every line and could change what the generator parses.
 scripts/unicode-data/*.txt -text -whitespace
+
+# The bundled emoji rasters are generated binaries. Marking them binary keeps
+# every text tool - diff, merge, whitespace checks, line-ending normalization -
+# away from bytes that only the pack generator is allowed to write. The upstream
+# license copied in beside them is byte-for-byte theirs, so it gets the same
+# treatment as the vendored font licenses above.
+src-tauri/emoji/png/*.png binary
+src-tauri/emoji/LICENSE -text -whitespace

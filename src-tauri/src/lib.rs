@@ -1965,6 +1965,14 @@ mod tauri_app {
             let app_state: tauri::State<'_, AppState> = app.state();
             app_state.set_app_handle(app.handle().clone());
 
+            // The colour emoji pack ships as a Tauri resource, and the CLI has
+            // no resource resolver to share, so the directory is published
+            // process-wide here - before any render can ask for it, because the
+            // resolver caches its answer for the life of the process.
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                crate::core::text::emoji_assets::set_emoji_pack_dir(resource_dir);
+            }
+
             // Initialize process-wide runtime-discovery and Claude auth-mode flags
             // from persisted settings BEFORE any probe can run, so executable
             // discovery (codex/claude preferSystem) and the Claude readiness probe

@@ -54,6 +54,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   createReadStream,
   existsSync,
   lstatSync,
@@ -69,6 +70,44 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '..');
 const SHIM_DIR = join(PROJECT_ROOT, 'npm', 'openreelio-cli');
 const SCOPE = '@openreelio';
+
+/**
+ * Directory name the colour emoji pack takes inside a platform package.
+ *
+ * The CLI resolves the pack relative to its own executable, and a platform
+ * package puts that executable in `bin/`, so the pack sits one level up at the
+ * package root - which is the `<exe_dir>/../emoji` rung in
+ * `core::text::emoji_assets::candidate_roots`. Without it, an
+ * `npm i openreelio-cli` install burns every caption emoji in monochrome while
+ * the desktop app draws the same project in colour.
+ */
+const EMOJI_PACK_DIR = 'emoji';
+
+/** The pack in the checkout, used when no archive carried one. */
+const CHECKOUT_EMOJI_PACK = join(PROJECT_ROOT, 'src-tauri', EMOJI_PACK_DIR);
+
+/**
+ * Locates the colour emoji pack that belongs with `binaryPath`.
+ *
+ * The release archives carry the pack beside the binary, and that copy is the
+ * one to publish: it came out of the archive whose checksum was verified. A
+ * local run against a bare `--binary` has no such copy, so the checkout's pack
+ * stands in. Coming back empty is only survivable on that local path: see
+ * `writePlatformPackage`, which refuses to write a pack-less package when the
+ * binaries came from release archives.
+ *
+ * @param {string} binaryPath Binary the package is being built around.
+ * @returns {string|null} Directory holding `manifest.json` and `png/`, or null.
+ */
+function resolveEmojiPack(binaryPath) {
+  for (const candidate of [join(dirname(binaryPath), EMOJI_PACK_DIR), CHECKOUT_EMOJI_PACK]) {
+    if (existsSync(join(candidate, 'manifest.json'))) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
 
 /**
  * Release targets published to npm. Kept deliberately in lockstep with the
@@ -412,9 +451,13 @@ function resolveBinary(target, explicitPath, inputDir, version) {
  * @param {string} binaryPath Source binary.
  * @param {string} version Version to stamp.
  * @param {string} outDir Output root.
+ * @param {boolean} requireEmojiPack Whether a missing colour emoji pack is
+ *                                   fatal rather than a warning. True on the
+ *                                   release path, where the package written
+ *                                   here is the one that gets published.
  * @returns {string} The package directory that was written.
  */
-function writePlatformPackage(target, binaryPath, version, outDir) {
+function writePlatformPackage(target, binaryPath, version, outDir, requireEmojiPack) {
   const packageName = `${SCOPE}/cli-${target.platform}`;
   const packageDir = join(outDir, `cli-${target.platform}`);
 
@@ -439,7 +482,7 @@ function writePlatformPackage(target, binaryPath, version, outDir) {
     os: [target.os],
     cpu: [target.cpu],
     engines: { node: '>=18' },
-    files: [`bin/${target.binaryName}`, 'README.md', 'LICENSE'],
+    files: [`bin/${target.binaryName}`, EMOJI_PACK_DIR, 'README.md', 'LICENSE'],
     preferUnplugged: true,
   };
 
@@ -470,6 +513,25 @@ function writePlatformPackage(target, binaryPath, version, outDir) {
   writeFileSync(join(packageDir, 'README.md'), readme, 'utf-8');
 
   copyFileSync(join(PROJECT_ROOT, 'LICENSE'), join(packageDir, 'LICENSE'));
+
+  const emojiPack = resolveEmojiPack(binaryPath);
+  if (emojiPack) {
+    cpSync(emojiPack, join(packageDir, EMOJI_PACK_DIR), { recursive: true });
+  } else if (requireEmojiPack) {
+    // The release path builds the very packages that get published, so a
+    // warning here is a warning nobody reads until an installed CLI is already
+    // burning captions in monochrome while the desktop app draws them in
+    // colour. Refuse to write a pack-less package instead.
+    fail(
+      `no colour emoji pack found for ${packageName}. The release archive for ` +
+        `${target.triple} must carry ${EMOJI_PACK_DIR}/manifest.json beside the binary; ` +
+        'without it the published CLI renders every caption emoji in monochrome.',
+    );
+  } else {
+    console.warn(
+      `  warning: no colour emoji pack found for ${packageName}; the published CLI will render emoji in monochrome.`,
+    );
+  }
 
   const destinationBinary = join(packageDir, 'bin', target.binaryName);
   copyFileSync(binaryPath, destinationBinary);
@@ -595,7 +657,13 @@ async function main() {
       );
     }
 
-    const packageDir = writePlatformPackage(target, binaryPath, version, outDir);
+    const packageDir = writePlatformPackage(
+      target,
+      binaryPath,
+      version,
+      outDir,
+      Boolean(archivesDir),
+    );
     console.log(`  ${SCOPE}/cli-${target.platform} -> ${packageDir}`);
   }
 
