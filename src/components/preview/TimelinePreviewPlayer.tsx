@@ -1050,6 +1050,17 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     requestRenderFrame(usePlaybackStore.getState().currentTime);
   }, [parkedSegmentKey, isPlaying, requestRenderFrame]);
 
+  // The draw function the font-load redraw below reaches for.
+  //
+  // `requestRenderFrame` is rebuilt whenever the clips, assets or sequence
+  // format change. Depending on it directly would re-run the load effect on
+  // every one of those and queue a redundant redraw each time, when the faces
+  // load exactly once per session.
+  const requestRenderFrameRef = useRef(requestRenderFrame);
+  useEffect(() => {
+    requestRenderFrameRef.current = requestRenderFrame;
+  }, [requestRenderFrame]);
+
   // Redraw once the bundled faces are actually loaded.
   //
   // `@font-face` is lazy, and a canvas gives no signal when the face it asked
@@ -1064,13 +1075,13 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         return;
       }
 
-      requestRenderFrame(usePlaybackStore.getState().currentTime);
+      requestRenderFrameRef.current(usePlaybackStore.getState().currentTime);
     });
 
     return () => {
       cancelled = true;
     };
-  }, [requestRenderFrame]);
+  }, []);
 
   // Release the decoded frames and the FFmpeg processes behind them when the
   // canvas preview goes away, so nothing keeps decoding for a player that is no
@@ -1491,10 +1502,10 @@ function renderCaptionClipToCanvas(
 
   ctx.save();
   ctx.globalAlpha = clip.opacity * (style.opacity ?? 1);
-  // The shared builder quotes the family and resolves it the way the exporter
-  // does, so a caption stored in a multi-word bundled family — which the
-  // default, `TikTok Sans`, is — no longer produces a shorthand the canvas
-  // rejects outright and silently draws at `10px sans-serif`.
+  // The shared builder resolves the family the way the exporter does, so a
+  // caption stored in the `Arial` placeholder draws in the face the export
+  // substitutes for it rather than in the host's Arial, and it quotes the
+  // result — the form that holds for any name a stored style can carry.
   ctx.font = cssFontShorthand({
     fontFamily: style.fontFamily,
     fontSizePx,
