@@ -7,6 +7,7 @@
 import type { TextClipData, TextStyle, Clip, Transform } from '@/types';
 import { isTextClip } from '@/types';
 import { scaleFontSizeToCanvas } from './previewCoords';
+import { cssFontShorthand } from './previewFonts';
 import { DEFAULT_TEXT_FONT_FAMILY } from './textFonts';
 
 // =============================================================================
@@ -253,12 +254,20 @@ export function renderTextToCanvas(
     ctx.translate(-textX, -textY);
   }
 
-  // Build font string
-  const fontStyle = style.italic ? 'italic ' : '';
-  const fontWeight = `${getTextFontWeightNumber(style)} `;
   // Scale font size relative to the shared reference canvas height.
   const scaledFontSize = scaleFontSizeToCanvas(style.fontSize, canvasHeight);
-  ctx.font = `${fontStyle}${fontWeight}${scaledFontSize}px ${style.fontFamily}`;
+  // The shared builder rather than an interpolation: it quotes the family, so a
+  // multi-word one no longer makes the whole shorthand unparseable, and it
+  // resolves the family the same way the exporter does. `measureTextBounds` in
+  // `transformOverlayGeometry` builds the same string from the same style, and
+  // the selection handles it places only line up with these glyphs while both
+  // stay on this function.
+  ctx.font = cssFontShorthand({
+    fontFamily: style.fontFamily,
+    fontSizePx: scaledFontSize,
+    fontWeight: getTextFontWeightNumber(style),
+    italic: style.italic,
+  });
 
   // Set text alignment
   ctx.textAlign = style.alignment;

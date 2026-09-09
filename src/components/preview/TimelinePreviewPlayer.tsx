@@ -33,6 +33,7 @@ import {
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
 import { getClipMaxMotionScale, getClipMotionTransformAtTime } from '@/utils/clipMotion';
 import { computeContainFit, scaleFontSizeToCanvas } from '@/utils/previewCoords';
+import { cssFontShorthand, ensureBundledPreviewFontsLoaded } from '@/utils/previewFonts';
 import { getActiveVisualLayers } from '@/utils/renderGraphLayers';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
@@ -1049,6 +1050,28 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     requestRenderFrame(usePlaybackStore.getState().currentTime);
   }, [parkedSegmentKey, isPlaying, requestRenderFrame]);
 
+  // Redraw once the bundled faces are actually loaded.
+  //
+  // `@font-face` is lazy, and a canvas gives no signal when the face it asked
+  // for was not available: `measureText` just answers in the fallback and the
+  // frame is drawn at the wrong metrics, with nothing to trigger a second pass.
+  // The DOM overlay reflows itself when the load lands; the canvas needs this.
+  useEffect(() => {
+    let cancelled = false;
+
+    void ensureBundledPreviewFontsLoaded().then(() => {
+      if (cancelled || !isMountedRef.current || usePlaybackStore.getState().isPlaying) {
+        return;
+      }
+
+      requestRenderFrame(usePlaybackStore.getState().currentTime);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [requestRenderFrame]);
+
   // Release the decoded frames and the FFmpeg processes behind them when the
   // canvas preview goes away, so nothing keeps decoding for a player that is no
   // longer on screen.
@@ -1444,8 +1467,6 @@ function renderCaptionClipToCanvas(
   }
 
   const fontSizePx = scaleFontSizeToCanvas(style.fontSize, canvasHeight, 12);
-  const fontWeight = String(getCaptionFontWeightNumber(style));
-  const fontStyle = style.italic ? 'italic ' : '';
   const lineHeight = fontSizePx * (style.lineHeight ?? 1.2);
   const letterSpacing = style.letterSpacing ?? 0;
 
@@ -1470,7 +1491,16 @@ function renderCaptionClipToCanvas(
 
   ctx.save();
   ctx.globalAlpha = clip.opacity * (style.opacity ?? 1);
-  ctx.font = `${fontStyle}${fontWeight} ${fontSizePx}px ${style.fontFamily}`;
+  // The shared builder quotes the family and resolves it the way the exporter
+  // does, so a caption stored in a multi-word bundled family — which the
+  // default, `TikTok Sans`, is — no longer produces a shorthand the canvas
+  // rejects outright and silently draws at `10px sans-serif`.
+  ctx.font = cssFontShorthand({
+    fontFamily: style.fontFamily,
+    fontSizePx,
+    fontWeight: getCaptionFontWeightNumber(style),
+    italic: style.italic,
+  });
   ctx.textAlign = style.alignment;
   ctx.textBaseline = 'middle';
 

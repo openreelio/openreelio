@@ -11,6 +11,7 @@ import type { Transform, TextClipAlignment, TextClipData, Asset, Clip } from '@/
 import { isTextClip } from '@/types';
 import { extractTextDataFromClipWithMap, getTextFontWeightNumber } from '@/utils/textRenderer';
 import { scaleFontSizeToCanvas, type PreviewSource } from '@/utils/previewCoords';
+import { cssFontShorthand } from '@/utils/previewFonts';
 
 const DEFAULT_TEXT_BOUNDS = { width: 320, height: 96 };
 
@@ -124,9 +125,17 @@ export function measureTextBounds(
   }
 
   const scaledFontSize = scaleFontSizeToCanvas(textData.style.fontSize, canvasHeight, 1);
-  const fontStyle = textData.style.italic ? 'italic ' : '';
-  const fontWeight = `${getTextFontWeightNumber(textData.style)} `;
-  ctx.font = `${fontStyle}${fontWeight}${scaledFontSize}px ${textData.style.fontFamily}`;
+  // The same builder `renderTextToCanvas` draws with. These handles frame the
+  // glyphs that function paints, so measuring in a different face than it draws
+  // in puts the box somewhere other than the text — which is what a hand-built
+  // shorthand did for every multi-word family, silently, by leaving both
+  // contexts on their `10px sans-serif` default at different scales.
+  ctx.font = cssFontShorthand({
+    fontFamily: textData.style.fontFamily,
+    fontSizePx: scaledFontSize,
+    fontWeight: getTextFontWeightNumber(textData.style),
+    italic: textData.style.italic,
+  });
 
   const maxLineWidth = lines.reduce((maxWidth, line) => {
     return Math.max(maxWidth, measureLineWidth(ctx, line, textData.style.letterSpacing));
