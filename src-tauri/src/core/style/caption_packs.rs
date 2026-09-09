@@ -302,8 +302,9 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
     },
     CaptionPackSpec {
         id: "shorts-bold-outline",
-        description: "Large bold white text with a thick black outline, lifted to an 18% bottom \
-                      margin so vertical-platform UI does not cover it.",
+        description: "Large bold white text with a thick black outline, lifted to a 26% bottom \
+                      margin so the block sits above the bottom UI band vertical platforms draw \
+                      over the picture.",
         aliases: &["shorts", "reels", "tiktok", "vertical"],
         font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 72,
@@ -322,7 +323,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         alignment: TextAlignment::Center,
         anchor: PackAnchor::Preset {
             vertical: VerticalPosition::Bottom,
-            margin_percent: 18.0,
+            margin_percent: 26.0,
         },
     },
     CaptionPackSpec {
