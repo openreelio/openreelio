@@ -7222,7 +7222,8 @@ pub(crate) fn cells_with_no_picture_on_disk(
     refused
 }
 
-/// Turns measured placements into inputs and draws.
+/// Turns measured placements into inputs and draws, and names the cells it
+/// could not draw after all.
 ///
 /// A placement whose sequence the pack can no longer resolve, or whose picture
 /// is not on disk, is dropped rather than drawn from some other file. The cell
@@ -7230,11 +7231,27 @@ pub(crate) fn cells_with_no_picture_on_disk(
 /// the text layer underneath - [`cells_with_no_picture_on_disk`] refuses it
 /// before the script is written, and the check here is the second half of that
 /// promise: whatever else happens, no missing file reaches the command line.
+///
+/// # Why the drops come back
+///
+/// [`cells_with_no_picture_on_disk`] stats the pack before the script is
+/// written; this stats it again while the graph is built. Between those two
+/// moments a file can go away - an installer repairing itself, a cache sweeper,
+/// a half-finished download replaced. A cell dropped here was therefore *not*
+/// in the refusal set the script was built from, so it is still an empty spacer
+/// on disk, and dropping it silently burns a blank 1.2 em hole into the
+/// caption. Returning the occurrence indices lets the caller fold them into the
+/// refusals and rebuild the script *before* it renders, so the cell comes out
+/// as the monochrome glyph it would have had with no pack at all.
+///
+/// The returned set is by occurrence index, the same currency
+/// [`EmojiSpacerContext::refused`] speaks.
 pub(crate) fn build_emoji_overlay_plan(
     placements: &[EmojiPlacement],
     pack: &dyn EmojiRasterSource,
-) -> EmojiOverlayPlan {
+) -> (EmojiOverlayPlan, HashSet<usize>) {
     let mut plan = EmojiOverlayPlan::default();
+    let mut dropped: HashSet<usize> = HashSet::new();
     // One `stat` per distinct picture, not per draw: forty identical emoji are
     // one file, and the map is what keeps this off the per-caption path.
     let mut readable: HashMap<PathBuf, bool> = HashMap::new();
@@ -7247,6 +7264,7 @@ pub(crate) fn build_emoji_overlay_plan(
                 "The colour emoji pack no longer resolves '{}'; keeping the monochrome glyph",
                 placement.sequence_key
             );
+            dropped.insert(placement.occurrence_index);
             continue;
         };
 
@@ -7260,6 +7278,7 @@ pub(crate) fn build_emoji_overlay_plan(
                 placement.sequence_key,
                 asset.path.display()
             );
+            dropped.insert(placement.occurrence_index);
             continue;
         }
 
@@ -7306,7 +7325,7 @@ pub(crate) fn build_emoji_overlay_plan(
         });
     }
 
-    plan
+    (plan, dropped)
 }
 
 /// Composites the colour emoji over the burned-in text layer.
@@ -8192,17 +8211,29 @@ impl ExportEngine {
                         play_res_y,
                         fps: output_video_fps(sequence, settings),
                     };
-                    let (placements, refused) = self.measure_colour_emoji_cells(&pass).await?;
+                    let (placements, mut refused) = self.measure_colour_emoji_cells(&pass).await?;
+
+                    // The graph is built *before* the script is rewritten, not
+                    // after, because building it is the last thing that can
+                    // discover a refusal. A picture that was on disk when the
+                    // pass started can be gone by now, and such a placement is
+                    // dropped from the plan - so it has to reach the rebuild
+                    // below as a refusal too, or the cell renders as the empty
+                    // spacer the first script gave it with no overlay ever
+                    // arriving to fill it.
+                    let (plan, dropped) = build_emoji_overlay_plan(&placements, pack);
+                    emoji_overlay_plan = plan;
+                    refused.extend(dropped);
 
                     // The script on disk was written with every eligible
                     // cluster as an empty spacer. A refused one has to become
-                    // the monochrome glyph again *there*, before the graph is
-                    // built - otherwise the overlay that was going to fill the
+                    // the monochrome glyph again *there*, before the render
+                    // starts - otherwise the overlay that was going to fill the
                     // hole never arrives and the caption burns in with a blank
                     // 1.2 em gap in it, which is worse than the grey emoji the
                     // feature was replacing.
                     if !refused.is_empty() {
-                        if let Some(rebuilt) = build_ass_text_overlay_script_in_window_with_emoji(
+                        match build_ass_text_overlay_script_in_window_with_emoji(
                             sequence,
                             effects,
                             pass.window_start_sec,
@@ -8212,16 +8243,27 @@ impl ExportEngine {
                                 refused: Some(&refused),
                             }),
                         )? {
-                            // The glyph a refused cell goes back to may need a
-                            // face the spacer script did not have to embed.
-                            ass_text_overlay_needs_host_fonts = rebuilt.uses_host_fonts;
-                            tokio::fs::write(&ass_path, rebuilt.script)
-                                .await
-                                .map_err(ExportError::IoError)?;
+                            Some(rebuilt) => {
+                                // The glyph a refused cell goes back to may
+                                // need a face the spacer script did not have to
+                                // embed.
+                                ass_text_overlay_needs_host_fonts = rebuilt.uses_host_fonts;
+                                tokio::fs::write(&ass_path, rebuilt.script)
+                                    .await
+                                    .map_err(ExportError::IoError)?;
+                            }
+                            // Unreachable: the same emitter produced a script a
+                            // moment ago from the same sequence and window, and
+                            // a refusal only changes what a cell emits. Saying
+                            // so out loud beats rendering the spacer script that
+                            // is still on disk without a word.
+                            None => tracing::warn!(
+                                "The caption script vanished when its refusals were folded in; \
+                                 rendering the one already written, which may leave a gap where \
+                                 a refused emoji was"
+                            ),
                         }
                     }
-
-                    emoji_overlay_plan = build_emoji_overlay_plan(&placements, pack);
                 }
 
                 ass_text_overlay_path = Some(ass_path);
@@ -10886,8 +10928,9 @@ mod tests {
             placement("1f525", 500, 200, 3.0, 5.0),
         ];
 
-        let plan = build_emoji_overlay_plan(&placements, &pack);
+        let (plan, dropped) = build_emoji_overlay_plan(&placements, &pack);
 
+        assert!(dropped.is_empty(), "every picture is on disk");
         assert_eq!(plan.inputs.len(), 2, "two pictures, three draws");
         assert_eq!(plan.draws.len(), 3);
 
@@ -10946,6 +10989,64 @@ mod tests {
     }
 
     /// Feature: colour emoji burn-in
+    /// Scenario: a picture that vanishes mid-render still leaves a glyph
+    ///
+    /// The race the two-pass order exists to close. `cells_with_no_picture_on_disk`
+    /// stats the pack before the script is written; `build_emoji_overlay_plan`
+    /// stats it again while the graph is built, and between those two moments a
+    /// file can go away - an installer repairing itself, a cache sweeper, a
+    /// download replaced. The plan builder drops such a placement so no missing
+    /// file ever reaches the command line, but the cell was *not* in the
+    /// refusal set the script on disk was built from: it is still an empty
+    /// spacer there, with no overlay coming to fill it.
+    ///
+    /// So the plan is built first, its drops are folded into the refusals, and
+    /// only then is the script rewritten - which is what this walks, in the
+    /// order the exporter walks it.
+    #[test]
+    fn a_picture_that_vanishes_before_the_graph_is_built_goes_back_to_the_glyph() {
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        let text = "Ship it \u{1F525}";
+
+        // Pass one: the picture is there, so the cell is laid out as a spacer
+        // and nothing is refused.
+        let mut refused: HashSet<usize> = HashSet::new();
+        let staged = caption_script_refusing(text, Some(&pack), None, Some(&refused), 0.0, 0.0);
+        assert!(
+            staged.script.contains("{\\p1}"),
+            "the cell starts life as a spacer. Got: {}",
+            staged.script
+        );
+        assert_eq!(staged.emoji_occurrences.len(), 1);
+
+        // ... and then it is gone.
+        std::fs::remove_file(pack.root().join("1f525.png")).expect("remove the picture");
+
+        // Pass two: the plan drops the placement rather than naming a file that
+        // is not there, and says which occurrence it dropped.
+        let (plan, dropped) =
+            build_emoji_overlay_plan(&[placement("1f525", 10, 20, 0.0, 2.0)], &pack);
+        assert!(plan.is_empty(), "no missing file may reach the graph");
+        assert_eq!(dropped, [0usize].into_iter().collect::<HashSet<usize>>());
+
+        // Folding the drop into the refusals and rebuilding is what turns the
+        // hole back into a picture - the monochrome one, but a picture.
+        refused.extend(dropped);
+        let rebuilt = caption_script_refusing(text, Some(&pack), None, Some(&refused), 0.0, 0.0);
+        let without_pack = caption_script_with_pack(text, None, None, 0.0, 0.0);
+
+        assert_eq!(
+            rebuilt.script, without_pack.script,
+            "a dropped cell has to leave the script it would have had with no pack at all"
+        );
+        assert!(
+            !rebuilt.script.contains("{\\p1}"),
+            "a spacer with no overlay behind it is a blank hole in the caption. Got: {}",
+            rebuilt.script
+        );
+    }
+
+    /// Feature: colour emoji burn-in
     /// Scenario: refusing one cell leaves the others alone
     #[test]
     fn a_refusal_takes_only_the_cell_it_names() {
@@ -10987,9 +11088,12 @@ mod tests {
             [0usize, 1].into_iter().collect::<HashSet<usize>>()
         );
 
-        // And even if one slipped through, no missing file reaches the graph.
-        let plan = build_emoji_overlay_plan(&[placement("1f525", 0, 0, 0.0, 1.0)], &half_staged);
+        // And even if one slipped through, no missing file reaches the graph -
+        // and the cell it was for comes back so the caller can refuse it.
+        let (plan, dropped) =
+            build_emoji_overlay_plan(&[placement_for(3, "1f525", 0, 0, 0.0, 1.0)], &half_staged);
         assert!(plan.is_empty());
+        assert_eq!(dropped, [3usize].into_iter().collect::<HashSet<usize>>());
     }
 
     /// One occurrence of `key`, in the shape the emitter records them.
@@ -11022,10 +11126,11 @@ mod tests {
     /// presented at exactly `end` - the one frame the caption has already left.
     #[test]
     fn an_overlay_is_gated_on_the_same_centisecond_grid_the_event_is() {
-        let mut plan = build_emoji_overlay_plan(
+        let (mut plan, dropped) = build_emoji_overlay_plan(
             &[placement("1f525", 10, 20, 1.0037, 2.0062)],
             &FakeEmojiPack::carrying(&["1f525"]),
         );
+        assert!(dropped.is_empty());
         assert_eq!(plan.draws.len(), 1);
 
         let mut graph = String::new();
@@ -11064,10 +11169,11 @@ mod tests {
     /// this pins.
     #[test]
     fn an_overlay_is_off_on_the_frame_presented_at_the_cue_end() {
-        let plan = build_emoji_overlay_plan(
+        let (plan, dropped) = build_emoji_overlay_plan(
             &[placement("1f525", 10, 20, 1.0, 2.0)],
             &FakeEmojiPack::carrying(&["1f525"]),
         );
+        assert!(dropped.is_empty());
 
         let mut graph = String::new();
         append_emoji_overlays(&mut graph, "[txtass0]", &plan, 3);
@@ -11101,7 +11207,8 @@ mod tests {
         squashed.size_x = 41;
         squashed.size_y = 72;
 
-        let plan = build_emoji_overlay_plan(&[squashed], &pack);
+        let (plan, dropped) = build_emoji_overlay_plan(&[squashed], &pack);
+        assert!(dropped.is_empty());
         let mut graph = String::new();
         append_emoji_overlays(&mut graph, "[txtass0]", &plan, 5);
 
@@ -11217,15 +11324,33 @@ mod tests {
     #[test]
     fn the_first_member_of_a_zwj_sequence_is_never_composited() {
         let pack = FakeEmojiPack::carrying(&["1f469"]);
-        let plan =
+        let (plan, dropped) =
             build_emoji_overlay_plan(&[placement("1f469-200d-1f4bb", 0, 0, 0.0, 1.0)], &pack);
 
         assert!(plan.is_empty());
+        assert_eq!(
+            dropped,
+            [0usize].into_iter().collect::<HashSet<usize>>(),
+            "a cell the pack will not draw has to go back to the glyph, not stay a spacer"
+        );
     }
 
     fn placement(key: &str, x: i32, y: i32, start: f64, end: f64) -> EmojiPlacement {
+        placement_for(0, key, x, y, start, end)
+    }
+
+    /// A placement that names which occurrence it measured, for the cases that
+    /// assert on the indices coming back out of the plan builder.
+    fn placement_for(
+        occurrence_index: usize,
+        key: &str,
+        x: i32,
+        y: i32,
+        start: f64,
+        end: f64,
+    ) -> EmojiPlacement {
         EmojiPlacement {
-            occurrence_index: 0,
+            occurrence_index,
             x,
             y,
             size_x: 64,
