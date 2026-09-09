@@ -46,6 +46,17 @@ use std::{
 
 use super::export::{ExportEngine, ExportError};
 
+/// How far inside a cue's end a frame time has to be to count as on the cue.
+///
+/// A cue is drawn on `[start, end)`, so the frame presented at exactly `end` is
+/// not on it. `end * fps` is computed in binary, though, and a product that
+/// lands a few ULPs above an integer - `(1.0 + 1.0 / 30.0) * 30.0` is
+/// `31.000000000000004` - makes `ceil` name the boundary frame as if it were
+/// one past it. A nanosecond is four orders of magnitude below a frame interval
+/// at any rate this renders at, so subtracting it can only ever undo that
+/// rounding.
+const FRAME_BOUNDARY_EPSILON: f64 = 1e-9;
+
 /// One emoji cell the burn-in script laid out, and when it is on screen.
 ///
 /// Produced by the script builder, which is the only place that knows which
@@ -102,6 +113,14 @@ impl EmojiOccurrence {
     /// entirely between two presentation times, so no frame ever shows it and
     /// there is nothing to measure. The caller refuses that cell back to the
     /// monochrome glyph before the script it is written into reaches disk.
+    ///
+    /// The last frame is `ceil(end*fps - EPSILON) - 1` rather than
+    /// `ceil(end*fps) - 1` because the range is half-open and binary rounding
+    /// is not: a cue ending at `1.0 + 1/30` gives `end*fps == 31.000000000000004`
+    /// at 30fps, whose `ceil` is 32 - naming frame 31 as probeable when frame 31
+    /// is presented at exactly the cue end, where libass draws nothing. The
+    /// epsilon is far below a frame interval at any sane rate, so it can only
+    /// ever pull back a bound that landed on the boundary by rounding.
     pub fn probe_frame(&self, fps: f64) -> Option<u64> {
         if !fps.is_finite() || fps <= 0.0 {
             return None;
@@ -114,7 +133,11 @@ impl EmojiOccurrence {
         }
 
         let first = (start * fps).ceil().max(0.0);
-        let last = (end * fps).ceil() - 1.0;
+        // `end` is exclusive, so a frame presented exactly at it is not on the
+        // cue. Nudging inwards keeps a product that rounded a hair *above* the
+        // boundary - `(1.0 + 1.0/30.0) * 30.0` is `31.000000000000004` - from
+        // naming that frame anyway.
+        let last = (end * fps - FRAME_BOUNDARY_EPSILON).ceil() - 1.0;
         if last < first {
             return None;
         }
@@ -864,6 +887,35 @@ mod tests {
         let cue = occurrence(29.0 / 30.0, 1.0, "1f600");
 
         assert_eq!(cue.probe_frame(30.0), Some(29));
+    }
+
+    /// Feature: colour emoji measurement
+    /// Scenario: the frame presented at the cue end is never probed
+    ///
+    /// The range of frames a cue is on is half-open - frame `n` draws it when
+    /// `start <= n/fps < end` - but `end * fps` is arithmetic in binary, and a
+    /// product landing a few ULPs above an integer makes `ceil` name one frame
+    /// too many. A one-frame cue at 24fps is the smallest case where that costs
+    /// something real: `(25/24 + 1/24) * 24` is `26.000000000000004`, so the
+    /// unnudged bound offers frame 26 - presented at exactly the cue end, where
+    /// libass draws nothing - and the midpoint rounds straight onto it. The
+    /// probe then reads a blank frame, the cell measures as unmeasurable, and a
+    /// perfectly renderable emoji loses its colour.
+    #[test]
+    fn the_frame_presented_at_the_cue_end_is_not_probeable() {
+        let start = 25.0 / 24.0;
+        let cue = occurrence(start, start + 1.0 / 24.0, "1f600");
+
+        assert_eq!(
+            cue.probe_frame(24.0),
+            Some(25),
+            "frame 25 is the only frame this cue is on"
+        );
+
+        // The cue is still measurable, so it is never refused for want of a
+        // frame - which is what the bound naming frame 26 used to cause once
+        // the probe came back empty.
+        assert!(cells_no_frame_can_show(&[cue], 24.0).is_empty());
     }
 
     /// Feature: colour emoji measurement
