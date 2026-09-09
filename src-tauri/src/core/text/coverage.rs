@@ -168,6 +168,50 @@ mod tests {
         Box::leak(bytes.to_vec().into_boxed_slice())
     }
 
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a family answers the coverage question with one voice
+    ///
+    /// The export path asks whether a *family* can draw a string and takes
+    /// `true` from any weight of it - see `bundled_family_covers_text`. That
+    /// approximation is only sound while every weight of a family covers the
+    /// same codepoints, which is true of the eight compiled in today because
+    /// each family's weights are instanced from one design. A future face whose
+    /// bold dropped, say, the Latin Extended block would make the regular
+    /// weight vouch for characters the bold cannot draw, and the bold event
+    /// would burn in as notdef boxes with `fontsdir` already dropped from the
+    /// graph. Fail here rather than there.
+    #[test]
+    fn every_weight_of_a_bundled_family_covers_the_same_codepoints() {
+        let mut by_family: HashMap<&'static str, Vec<&'static BundledFont>> = HashMap::new();
+        for font in bundled_faces() {
+            by_family.entry(font.family).or_default().push(font);
+        }
+
+        for (family, faces) in by_family {
+            let Some((first, rest)) = faces.split_first() else {
+                continue;
+            };
+            let expected = face_coverage(first.bytes);
+            assert!(
+                !expected.is_empty(),
+                "{} reported no coverage at all",
+                first.file_name
+            );
+
+            for font in rest {
+                assert_eq!(
+                    face_coverage(font.bytes),
+                    expected,
+                    "'{family}' weights disagree on coverage ({} vs {}); the any-weight \
+                     approximation in bundled_family_covers_text is no longer sound and has to \
+                     become a per-face question",
+                    first.file_name,
+                    font.file_name
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_bundled_face_covers_the_latin_alphabet() {
         for font in bundled_faces() {

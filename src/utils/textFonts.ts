@@ -6,10 +6,14 @@
  * the same in the *exported file* on every machine. That guarantee is about the
  * export path only: the live preview draws text with the webview's own fonts,
  * and these faces are not registered as `@font-face` yet, so a preview can wrap
- * differently from the burn-in. Mirrors `BUNDLED_FONTS` in
- * `src-tauri/src/core/text/bundled_fonts.rs`; a family listed here that is not
- * compiled in there just falls back to a host font, which is the behaviour for
- * any other unbundled family.
+ * differently from the burn-in.
+ *
+ * A hand-written mirror of `BUNDLED_FONTS` in
+ * `src-tauri/src/core/text/bundled_fonts.rs`, which is the source of truth: it
+ * is what the exporter actually compiles in. `textFonts.test.ts` reads that
+ * file and fails when the two disagree, because a family listed here but not
+ * compiled in there silently falls back to a host font — the opposite of the
+ * guarantee this list advertises.
  *
  * TODO(preview-parity): register these faces as `@font-face` and mirror the
  * backend's placeholder alias so the preview draft matches the export.
@@ -29,9 +33,12 @@ export const BUNDLED_TEXT_FONT_FAMILIES = [
  * Family a new caption or text clip carries when the user picked none.
  *
  * Mirrors `DEFAULT_TEXT_FONT_FAMILY` in
- * `src-tauri/src/core/text/bundled_fonts.rs`. Naming a bundled face rather than
+ * `src-tauri/src/core/text/bundled_fonts.rs`, which is the source of truth;
+ * `textFonts.test.ts` pins the two together. Naming a bundled face rather than
  * an unshipped one ('Arial', historically) means a fresh clip stores the family
- * that actually renders it.
+ * that actually renders it. Every "no font was picked" default on this side —
+ * `DEFAULT_CAPTION_STYLE`, `DEFAULT_TEXT_STYLE`, the text preset catalog, the
+ * caption track default — names this rather than a literal of its own.
  */
 export const DEFAULT_TEXT_FONT_FAMILY = 'TikTok Sans';
 

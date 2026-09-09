@@ -6322,6 +6322,12 @@ pub(crate) fn resolve_text_font_family(requested: &str) -> FontResolution {
 /// with no glyph for them still renders the line; everything else is asked of
 /// the family's own `cmap`, short-circuiting on the first character no weight
 /// of the family covers.
+///
+/// Any weight vouching for the family is an approximation, and it is sound only
+/// while a family's weights agree on their coverage.
+/// `every_weight_of_a_bundled_family_covers_the_same_codepoints` in
+/// [`crate::core::text::coverage`] is the guard that keeps it that way; if a
+/// future face ever breaks it, this has to become a per-face question.
 fn bundled_family_covers_text(family: &str, text: &str) -> bool {
     let faces = crate::core::text::bundled_fonts::bundled_family_faces(family);
     if faces.is_empty() {
@@ -6357,7 +6363,18 @@ struct AssFontEmbedder {
 
 impl AssFontEmbedder {
     /// Embeds every weight of `family`, once, if it is bundled and fits.
-    fn embed_family(&mut self, family: &str) {
+    ///
+    /// Returns whether the *whole* family made it into the section. A face
+    /// dropped at [`MAX_EMBEDDED_FONT_BYTES`] is still a face libass has to find
+    /// somewhere, so the caller has to treat a `false` here exactly like a
+    /// deliberately picked host family and keep `fontsdir` on the graph -
+    /// otherwise a bold event in a partially embedded family would silently draw
+    /// in whatever libass reaches for with nowhere left to look. Every family
+    /// compiled in today fits several times over, so this cannot be `false`
+    /// yet; it is the invariant that keeps a longer future font list honest.
+    fn embed_family(&mut self, family: &str) -> bool {
+        let mut embedded_whole_family = true;
+
         for font in crate::core::text::bundled_fonts::bundled_family_faces(family) {
             if self.embedded.contains(&font.file_name) {
                 continue;
@@ -6370,6 +6387,7 @@ impl AssFontEmbedder {
                     font.bytes.len(),
                     MAX_EMBEDDED_FONT_BYTES
                 );
+                embedded_whole_family = false;
                 continue;
             }
 
@@ -6381,6 +6399,8 @@ impl AssFontEmbedder {
             self.embedded.push(font.file_name);
             self.total_bytes += font.bytes.len();
         }
+
+        embedded_whole_family
     }
 
     /// Renders the section, or nothing when no font was embedded.
@@ -6452,7 +6472,7 @@ pub(crate) struct AssTextOverlayScript {
     pub script: String,
     /// Whether any event needs a glyph only the host font provider can supply.
     ///
-    /// Two things flip it, and they are different questions:
+    /// Three things flip it, and they are different questions:
     ///
     /// - *Family*: a user deliberately picked a family that is installed here
     ///   and nowhere in the binary, so libass has to resolve it off the host.
@@ -6460,6 +6480,10 @@ pub(crate) struct AssTextOverlayScript {
     ///   have no outline for some character of the event's text. Every family
     ///   compiled in today is Latin-only, so a Korean, Japanese, Chinese or
     ///   emoji caption lands here even on the default path.
+    /// - *Cap*: the family is bundled but a weight of it was dropped at
+    ///   [`MAX_EMBEDDED_FONT_BYTES`], so the script names a face it does not
+    ///   carry. Unreachable with today's font list; see
+    ///   [`AssFontEmbedder::embed_family`].
     ///
     /// False only when every event's text is drawn end to end by a face the
     /// script carries; then the graph needs no `fontsdir` and the render does
@@ -6552,11 +6576,15 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
                 FontResolution::Bundled(family)
                 | FontResolution::Aliased(family)
                 | FontResolution::Substituted(family) => {
-                    fonts.embed_family(family);
                     // Embedding the family answers the family question, not the
                     // glyph one: the bundled faces are Latin-only, so a caption
                     // in a script none of them covers still needs the host's
-                    // fonts for the characters the attachment cannot draw.
+                    // fonts for the characters the attachment cannot draw. A
+                    // face the embed cap dropped is the family question again,
+                    // and reopens it the same way.
+                    if !fonts.embed_family(family) {
+                        uses_host_fonts = true;
+                    }
                     if !bundled_family_covers_text(
                         family,
                         &effect_string_param(&effect, "text", "Title"),
@@ -8305,19 +8333,64 @@ fn validate_text_render_fidelity(
                 &effect_string_param(&effect, "font_family", DEFAULT_TEXT_FONT_FAMILY),
                 DEFAULT_TEXT_FONT_FAMILY,
             );
-            if let FontResolution::Substituted(replacement) =
-                resolve_text_font_family(&requested_family)
-            {
+            if let Some(reason) = font_substitution_reason(
+                &requested_family,
+                resolve_text_font_family(&requested_family),
+                crate::core::text::fonts::system_font_family_installed,
+            ) {
                 validation.add_clip_warning(
                     &sequence.id,
                     &clip.id,
                     format!(
-                        "Font '{requested_family}' on clip '{}' on track '{}' is neither bundled nor installed; the clip renders in the bundled '{replacement}' instead",
+                        "Font '{requested_family}' on clip '{}' on track '{}' {reason}",
                         clip.id, track.name
                     ),
                 );
             }
         }
+    }
+}
+
+/// Explains why the family a clip asks for is not the one that will draw it.
+///
+/// `None` when the request is honored: a bundled family, a host family this
+/// machine has, or a placeholder alias on a machine that could not have honored
+/// the placeholder anyway.
+///
+/// Two different swaps are reported, and the second one is conditional:
+///
+/// * [`FontResolution::Substituted`] is always worth saying - the family is
+///   available nowhere, so the render is guaranteed to differ from what was
+///   asked for.
+/// * [`FontResolution::Aliased`] is only worth saying on a host that *has* the
+///   aliased-from family. The alias exists so a project written before the
+///   bundled default still resolves to a face we embed; on a machine without
+///   Arial that swap changes nothing the author could have seen, and warning
+///   about it would put a line on every legacy project that names no decision
+///   the reader can act on. On a machine that does have it, the same swap
+///   really does override a family the host would otherwise have drawn -
+///   whether it was a pre-migration placeholder or a family typed by hand into
+///   the caption font field, which this layer cannot tell apart - so the reader
+///   is told. The check is on the aliased-*from* family, i.e. `requested`, so it
+///   generalizes to any future entry in the alias table.
+///
+/// `family_installed` is injected rather than called directly so both branches
+/// can be tested without a machine that happens to have the family.
+fn font_substitution_reason(
+    requested: &str,
+    resolution: FontResolution,
+    family_installed: impl Fn(&str) -> bool,
+) -> Option<String> {
+    match resolution {
+        FontResolution::Bundled(_) | FontResolution::System => None,
+        FontResolution::Substituted(replacement) => Some(format!(
+            "is neither bundled nor installed; the clip renders in the bundled '{replacement}' instead"
+        )),
+        FontResolution::Aliased(replacement) => family_installed(requested).then(|| {
+            format!(
+                "is installed here, but it is this app's placeholder for \"no font chosen\"; the clip renders in the bundled '{replacement}' instead so it looks the same on every machine"
+            )
+        }),
     }
 }
 
@@ -9374,6 +9447,87 @@ mod tests {
         assert!(
             !built.uses_host_fonts,
             "nothing in this script needs the host font set"
+        );
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: the alias is reported only when it overrode something real
+    ///
+    /// The placeholder swap is silent on a machine that never had the
+    /// aliased-from family - there is nothing the author could have seen
+    /// differently, and every project written before the migration would carry
+    /// the warning forever. On a machine that does have it, the same swap
+    /// really did override the face the host would have drawn, so it is said.
+    #[test]
+    fn the_placeholder_swap_is_reported_only_where_the_aliased_family_exists() {
+        let resolution = resolve_text_font_family("Arial");
+        assert_eq!(resolution, FontResolution::Aliased("TikTok Sans"));
+
+        let with_arial = font_substitution_reason("Arial", resolution, |family| family == "Arial")
+            .expect("a host that has Arial is told the family was overridden");
+        assert!(
+            with_arial.contains("TikTok Sans"),
+            "the warning must name the face that draws instead. Got: {with_arial}"
+        );
+
+        assert_eq!(
+            font_substitution_reason("Arial", resolution, |_| false),
+            None,
+            "a host without Arial saw nothing change, so there is nothing to report"
+        );
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: an honored request is never reported
+    #[test]
+    fn a_family_that_renders_as_asked_produces_no_fidelity_warning() {
+        assert_eq!(
+            font_substitution_reason(
+                "TikTok Sans",
+                FontResolution::Bundled("TikTok Sans"),
+                |_| { true }
+            ),
+            None
+        );
+        assert_eq!(
+            font_substitution_reason("Verdana", FontResolution::System, |_| true),
+            None
+        );
+        assert!(font_substitution_reason(
+            "Nowhere At All",
+            FontResolution::Substituted("TikTok Sans"),
+            |_| false
+        )
+        .is_some());
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a face the embed cap dropped still needs somewhere to come from
+    ///
+    /// `uses_host_fonts` is what keeps `fontsdir` on the graph. Naming a family
+    /// whose bold weight did not fit inside the script and *not* flipping it
+    /// would leave libass one fewer place to look for that weight. The whole
+    /// bundled list is a couple of megabytes, so this cannot happen today; the
+    /// guard is here so a longer list cannot break the invariant quietly.
+    #[test]
+    fn a_family_the_embed_cap_truncated_is_reported_as_needing_host_fonts() {
+        let mut embedder = AssFontEmbedder::default();
+        assert!(
+            embedder.embed_family("TikTok Sans"),
+            "every weight of a bundled family fits under the cap today"
+        );
+
+        let mut full = AssFontEmbedder {
+            total_bytes: MAX_EMBEDDED_FONT_BYTES,
+            ..AssFontEmbedder::default()
+        };
+        assert!(
+            !full.embed_family("TikTok Sans"),
+            "a family that cannot fit has not been embedded in full"
+        );
+        assert!(
+            full.into_section().is_empty(),
+            "nothing was written, so there is no [Fonts] section to name"
         );
     }
 
@@ -17051,8 +17205,11 @@ mod tests {
             "Expected left alignment to anchor on the 10% left margin, matching the preview. Got: {}",
             args_str
         );
+        // The style suffix rides on whichever family the caption carries, and
+        // the pack names a bundled one, so assert the suffix rather than a
+        // family literal no caption default writes any more.
         assert!(
-            args_str.contains("font='Arial\\:style=Bold'") || args_str.contains("style=Bold"),
+            args_str.contains("\\:style=Bold'"),
             "Expected numeric font weight to request bold font style. Got: {}",
             args_str
         );
