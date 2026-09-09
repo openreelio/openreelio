@@ -7,6 +7,7 @@ import type {
 } from '@/types';
 import { getTrackSwapTargets, isProtectedBaseTrack } from '@/utils/trackReorder';
 import { getClipTimelineEndSec } from '@/utils/clipTiming';
+import { DEFAULT_TEXT_FONT_FAMILY } from '@/utils/textFonts';
 import { CaptionTrack } from './CaptionTrack';
 import { Track } from './Track';
 
@@ -30,7 +31,7 @@ function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
     locked: track.locked,
     captions,
     defaultStyle: {
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       fontSize: 48,
       fontWeight: 'normal',
       color: { r: 255, g: 255, b: 255, a: 255 },

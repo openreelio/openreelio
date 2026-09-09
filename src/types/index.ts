@@ -4,6 +4,8 @@
  * TypeScript types that match the Rust types in the Core Engine.
  */
 
+import { DEFAULT_TEXT_FONT_FAMILY } from '@/utils/textFonts';
+
 // =============================================================================
 // ID Types
 // =============================================================================
@@ -675,9 +677,16 @@ export interface CaptionTrack {
   defaultPosition: CaptionPosition;
 }
 
-/** Default caption style */
+/**
+ * Default caption style, matching `CaptionStyle::default` in
+ * `src-tauri/src/core/captions/models.rs`.
+ *
+ * The family is a face the exporter compiles in, so a caption created from the
+ * defaults burns in identically on every machine rather than resolving against
+ * whatever the host calls Arial.
+ */
 export const DEFAULT_CAPTION_STYLE: CaptionStyle = {
-  fontFamily: 'Arial',
+  fontFamily: DEFAULT_TEXT_FONT_FAMILY,
   fontSize: 48,
   fontWeight: 'normal',
   color: { r: 255, g: 255, b: 255, a: 255 },
@@ -720,7 +729,7 @@ export type TextClipAlignment = 'left' | 'center' | 'right';
  * Matches the Rust TextStyle struct.
  */
 export interface TextStyle {
-  /** Font family name (e.g., "Arial", "Helvetica") */
+  /** Font family name (e.g., "TikTok Sans", "Helvetica") */
   fontFamily: string;
   /** Font size in points */
   fontSize: number;
@@ -803,10 +812,11 @@ export interface TextClipData {
 }
 
 /**
- * Default text style matching Rust defaults.
+ * Default text style, matching `TextStyle::default` in
+ * `src-tauri/src/core/text/mod.rs`.
  */
 export const DEFAULT_TEXT_STYLE: TextStyle = {
-  fontFamily: 'Arial',
+  fontFamily: DEFAULT_TEXT_FONT_FAMILY,
   fontSize: 48,
   fontWeight: 400,
   color: '#FFFFFF',

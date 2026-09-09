@@ -36,7 +36,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::text::{
-    TextAlignment, TextClipData, TextOutline, TextPosition, TextShadow, TextStyle,
+    bundled_fonts::DEFAULT_TEXT_FONT_FAMILY, TextAlignment, TextClipData, TextOutline,
+    TextPosition, TextShadow, TextStyle,
 };
 
 use super::normalize_pack_id;
@@ -121,14 +122,16 @@ pub struct TextPresetSpec {
     pub default_duration_sec: f64,
     /// Family the preset renders in.
     ///
-    /// Six presets deliberately name a family we do not ship - Helvetica,
+    /// Eight presets deliberately name a family we do not ship - Helvetica,
     /// Impact, Georgia, Courier New - because the typeface *is* the preset:
     /// a slab-serif quote card or a monospaced terminal caption is not the
     /// same design drawn in the bundled grotesque. Those are host picks by
     /// intent, so on a machine without the family export validation warns
     /// that it fell back to the bundled default, and that warning is correct
-    /// and expected rather than a defect. Every other preset names a bundled
-    /// family, or the historical "Arial" placeholder that resolves to one.
+    /// and expected rather than a defect. Every other preset names
+    /// [`DEFAULT_TEXT_FONT_FAMILY`], a family we compile in, so applying it
+    /// stores the face that actually draws it - see
+    /// `every_text_preset_applied_today_stores_a_shipped_family`.
     font_family: &'static str,
     font_size: u32,
     color: &'static str,
@@ -263,7 +266,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["lower_third", "lowerthird", "name_title"],
         default_content: "Speaker Name\nTitle or Role",
         default_duration_sec: 5.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 42,
         color: "#FFFFFF",
         bold: true,
@@ -323,7 +326,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["broadcast_lower_third", "news-lower-third"],
         default_content: "Breaking Story\nLocation",
         default_duration_sec: 6.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 40,
         color: "#FFFFFF",
         bold: true,
@@ -386,7 +389,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["annotation_label", "tag"],
         default_content: "Label",
         default_duration_sec: 3.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 24,
         color: "#FFFFFF",
         bold: false,
@@ -415,7 +418,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["title"],
         default_content: "Main Title",
         default_duration_sec: 4.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 72,
         color: "#FFFFFF",
         bold: true,
@@ -511,7 +514,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["end_card", "outro_title"],
         default_content: "Thanks for Watching",
         default_duration_sec: 6.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 58,
         color: "#FFFFFF",
         bold: true,
@@ -540,7 +543,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["caption", "subtitles"],
         default_content: "Subtitle text",
         default_duration_sec: 3.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 32,
         color: "#FFFFFF",
         bold: false,
@@ -566,7 +569,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["outlined_subtitle"],
         default_content: "Subtitle text",
         default_duration_sec: 3.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 34,
         color: "#FFFFFF",
         bold: true,
@@ -598,7 +601,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["emphasis"],
         default_content: "Key Point",
         default_duration_sec: 3.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 48,
         color: "#FFD700",
         bold: true,
@@ -632,7 +635,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["stat", "number_callout", "price_callout"],
         default_content: "42%",
         default_duration_sec: 3.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 82,
         color: "#38BDF8",
         bold: true,
@@ -666,7 +669,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["warning", "important_callout"],
         default_content: "Important",
         default_duration_sec: 3.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 46,
         color: "#111827",
         bold: true,
@@ -763,7 +766,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["source_credit", "attribution"],
         default_content: "Source: OpenReelio",
         default_duration_sec: 5.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 24,
         color: "#E5E7EB",
         bold: false,
@@ -789,7 +792,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["bug", "channel_bug", "brand_bug"],
         default_content: "OPEN",
         default_duration_sec: 10.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 24,
         color: "#FFFFFF",
         bold: true,
@@ -815,7 +818,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &["handle", "social"],
         default_content: "@openreelio",
         default_duration_sec: 5.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 30,
         color: "#FFFFFF",
         bold: true,
@@ -906,7 +909,7 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         aliases: &[],
         default_content: "Brand",
         default_duration_sec: 10.0,
-        font_family: "Arial",
+        font_family: DEFAULT_TEXT_FONT_FAMILY,
         font_size: 24,
         color: "#FFFFFF",
         bold: false,

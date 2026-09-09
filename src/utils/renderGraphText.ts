@@ -1,5 +1,6 @@
 import type { ColorRgba, TextRenderSpec } from '@/bindings';
 import type { TextClipAlignment, TextClipData } from '@/types';
+import { DEFAULT_TEXT_FONT_FAMILY } from './textFonts';
 
 function clampFinite(value: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(value)) {
@@ -43,7 +44,10 @@ export function textRenderSpecToTextClipData(spec: TextRenderSpec): TextClipData
   const textData: TextClipData = {
     content: spec.text,
     style: {
-      fontFamily: spec.style.fontFamily.trim() || 'Arial',
+      // The backend normalizes the family before it builds a spec, so this is
+      // only a guard against an empty string reaching a style that has to name
+      // something. It names the same default the backend would have written.
+      fontFamily: spec.style.fontFamily.trim() || DEFAULT_TEXT_FONT_FAMILY,
       fontSize: clampFinite(Math.round(spec.style.fontSizePx), 1, 500, 48),
       fontWeight: clampFinite(Math.round(spec.style.fontWeight), 100, 900, 400),
       color: colorRgbaToCss(spec.style.fillColor),

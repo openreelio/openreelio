@@ -48,11 +48,16 @@ pub const DEFAULT_BUNDLED_FAMILY: &str = "TikTok Sans";
 /// The family a caption or text style carries when the user chose none.
 ///
 /// Every "no font was picked" default in the tree - [`CaptionStyle::default`],
-/// [`TextStyle::default`], the curated caption packs and the `font_family`
-/// parameter fallbacks on both render paths - names this rather than a family
-/// we do not ship. Storing the face that actually renders is what keeps the
-/// common path off [`PLACEHOLDER_FAMILY_ALIASES`], which stays behind purely so
-/// projects written before this still resolve.
+/// [`TextStyle::default`], the curated caption packs, the curated text presets
+/// that do not name a typeface on purpose, and the `font_family` parameter
+/// fallbacks on both render paths - names this rather than a family we do not
+/// ship. Storing the face that actually renders is what keeps the common path
+/// off [`PLACEHOLDER_FAMILY_ALIASES`], which stays behind purely so projects
+/// written before this still resolve.
+///
+/// The TypeScript side mirrors this as `DEFAULT_TEXT_FONT_FAMILY` in
+/// `src/utils/textFonts.ts`, which is this file's copy rather than a second
+/// source of truth; `textFonts.test.ts` pins the two together.
 ///
 /// [`CaptionStyle::default`]: crate::core::captions::CaptionStyle
 /// [`TextStyle::default`]: crate::core::text::TextStyle
@@ -62,18 +67,22 @@ pub const DEFAULT_TEXT_FONT_FAMILY: &str = DEFAULT_BUNDLED_FAMILY;
 /// mapped onto the bundled face that renders them.
 ///
 /// `"Arial"` was not a user's choice: it was the literal every caption pack,
-/// the `CaptionStyle`/`TextStyle` defaults and the `font_family` parameter
-/// fallback emitted when nothing was picked. We do not ship Arial, so on a host
-/// that has it the burn-in used the host's copy and on a host that does not it
-/// used some other face entirely - the same project, a different typeface per
-/// machine. Mapping the placeholder onto a bundled family makes that path embed
+/// every non-deliberate text preset, the `CaptionStyle`/`TextStyle` defaults
+/// and the `font_family` parameter fallback emitted when nothing was picked.
+/// We do not ship Arial, so on a host that has it the burn-in used the host's
+/// copy and on a host that does not it used some other face entirely - the
+/// same project, a different typeface per machine. Mapping the placeholder onto a bundled family makes that path embed
 /// a face and render identically everywhere.
 ///
-/// This table is now **only** a back-compat shim. Every live default names
+/// This table is now **only** a back-compat shim. Every live default in the
+/// tree - the two style defaults, the caption packs, the text presets, the
+/// render-path parameter fallbacks and their TypeScript mirrors - names
 /// [`DEFAULT_TEXT_FONT_FAMILY`] directly, so nothing written today depends on
 /// it; it stays so op logs written before that change still resolve to the face
-/// they have always rendered with. Do not add entries for families a user can
-/// deliberately pick - see below.
+/// they have always rendered with.
+/// `every_text_preset_applied_today_stores_a_shipped_family` in
+/// `core::style::contract_tests` is the guard that keeps the preset catalog off
+/// it. Do not add entries for families a user can deliberately pick - see below.
 ///
 /// `"TikTok Sans"` is the substitute because it is the only bundled
 /// neo-grotesque, a neutral large-x-height UI sans in Arial's role, while the

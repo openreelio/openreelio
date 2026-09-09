@@ -7,6 +7,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TextInspector, SelectedTextClip } from './TextInspector';
 import { createTextClipData, createTitleTextClipData, type Transform } from '@/types';
+import { DEFAULT_TEXT_FONT_FAMILY } from '@/utils/textFonts';
 
 describe('TextInspector', () => {
   const mockOnTextDataChange = vi.fn();
@@ -69,7 +70,7 @@ describe('TextInspector', () => {
       );
 
       const fontSelector = screen.getByRole('combobox');
-      expect(fontSelector).toHaveValue('Arial');
+      expect(fontSelector).toHaveValue(DEFAULT_TEXT_FONT_FAMILY);
     });
 
     it('should render with title preset styling', () => {
@@ -500,7 +501,7 @@ describe('TextInspector', () => {
         expect.objectContaining({
           content: 'Custom Text', // Content should be preserved
           style: expect.objectContaining({
-            fontFamily: 'Arial',
+            fontFamily: DEFAULT_TEXT_FONT_FAMILY,
             fontSize: 48,
             bold: false,
             italic: false,
