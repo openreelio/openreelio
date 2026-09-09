@@ -256,9 +256,10 @@ export function renderTextToCanvas(
 
   // Scale font size relative to the shared reference canvas height.
   const scaledFontSize = scaleFontSizeToCanvas(style.fontSize, canvasHeight);
-  // The shared builder rather than an interpolation: it quotes the family, so a
-  // multi-word one no longer makes the whole shorthand unparseable, and it
-  // resolves the family the same way the exporter does. `measureTextBounds` in
+  // The shared builder rather than an interpolation: it resolves the family the
+  // same way the exporter does, and quotes it — the form that holds for any
+  // name a stored style can carry, not just the ones that happen to spell a
+  // bare CSS identifier sequence. `measureTextBounds` in
   // `transformOverlayGeometry` builds the same string from the same style, and
   // the selection handles it places only line up with these glyphs while both
   // stay on this function.
@@ -320,6 +321,13 @@ export function renderTextToCanvas(
 
 /**
  * Draws text background rectangle.
+ *
+ * Known gap (pre-existing): the box is measured with a whole-line
+ * `measureText`, so it ignores `style.letterSpacing` and comes out narrower
+ * than the glyphs `drawTextWithLetterSpacing` actually lays down.
+ * `drawUnderlines` below has the same gap. Both should measure through the
+ * per-drawable-character sum that `measureLineWidth` in
+ * `transformOverlayGeometry` uses.
  */
 function drawTextBackground(
   ctx: CanvasRenderingContext2D,
@@ -456,6 +464,9 @@ function drawTextWithLetterSpacing(
 
 /**
  * Draws underlines for text.
+ *
+ * Shares the `drawTextBackground` gap above: the rule is measured whole-line,
+ * so a letter-spaced line is underlined short of its last glyph.
  */
 function drawUnderlines(
   ctx: CanvasRenderingContext2D,
