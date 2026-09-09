@@ -43,7 +43,10 @@ use std::{cmp::Ordering, collections::HashMap, sync::OnceLock};
 use ttf_parser::Face;
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::bundled_fonts::{bundled_faces, bundled_family_faces, BundledFont};
+use super::{
+    bundled_fonts::{bundled_faces, bundled_family_faces, BundledFont, EMOJI_FALLBACK_FAMILY},
+    emoji,
+};
 
 /// Inclusive codepoint ranges a face covers, sorted and disjoint.
 type CoverageRanges = Box<[(u32, u32)]>;
@@ -159,11 +162,26 @@ fn coalesce(codepoints: &[u32]) -> CoverageRanges {
 struct FaceTier {
     family: &'static str,
     faces: Vec<&'static BundledFont>,
+    /// Whether this tier may only claim clusters drawn as a picture.
+    ///
+    /// True for the emoji face and nothing else. Its `cmap` reaches well past
+    /// the pictures it is here for: `▶`, `⏸`, `‼`, `ℹ`, `Ⓜ` and the rest of the
+    /// text-default symbols that carry the `Emoji` property are all in it, and
+    /// all drawn at emoji proportions - 1.27 em against a text face's 0.218 em
+    /// space. Claiming those turned `"▶ PLAY"` into an oversized triangle and
+    /// moved the line's wrap, so coverage alone does not qualify a tier that
+    /// draws at emoji proportions: the cluster has to be an emoji presentation
+    /// as well. See [`emoji::is_emoji_presentation_cluster`].
+    emoji_presentation_only: bool,
 }
 
 impl FaceTier {
     /// True if one face of this family draws every codepoint of `cluster`.
     fn covers_cluster(&self, cluster: &str) -> bool {
+        if self.emoji_presentation_only && !emoji::is_emoji_presentation_cluster(cluster) {
+            return false;
+        }
+
         cluster
             .chars()
             .all(|ch| self.faces.iter().any(|face| face_covers(face, ch)))
@@ -225,7 +243,11 @@ impl FontStack {
                 continue;
             }
 
-            tiers.push(FaceTier { family, faces });
+            tiers.push(FaceTier {
+                family,
+                faces,
+                emoji_presentation_only: family == EMOJI_FALLBACK_FAMILY,
+            });
         }
 
         Self { tiers }
@@ -255,6 +277,20 @@ impl FontStack {
     /// face with no glyph for them still renders the line and they are not
     /// asked about. Everything else has to be covered by one tier, cluster by
     /// cluster; a `false` here is what keeps `fontsdir` on the filtergraph.
+    ///
+    /// # The answer is codepoint coverage, and that is irreversible here
+    ///
+    /// A tier vouches for a cluster when it maps every codepoint in it, which
+    /// says nothing about whether its `GSUB` joins them - see the module
+    /// documentation. Noto Emoji 3.002 ligates the sequences of its own
+    /// Unicode release and maps the parts of every later one, so a ZWJ
+    /// combination assigned after that build returns `true` here, drops
+    /// `fontsdir`, and then decomposes into the emoji it was joined from. That
+    /// is now a one-way door: dropping `fontsdir` is exactly what stops libass
+    /// consulting the machine's newer emoji font, which might have ligated it.
+    /// The trade is deliberate - one deterministic decomposition everywhere
+    /// beats a different picture per OS - but a font bump is the only thing
+    /// that fixes such a sequence.
     pub fn covers(&self, text: &str) -> bool {
         text.graphemes(true)
             .all(|cluster| is_neutral(cluster) || self.family_for_cluster(cluster).is_some())
@@ -282,6 +318,40 @@ impl FontStack {
 
         used
     }
+}
+
+/// The bundled faces a caption or overlay set in `family` may draw from.
+///
+/// Family selection and glyph coverage are different questions. Resolving a
+/// style to a bundled family says the script carries *a* face; it says nothing
+/// about whether that face has an outline for the characters this event
+/// actually contains. Every *text* family compiled in is Latin-only, so an
+/// emoji on the default path used to resolve to a bundled family, embed it, and
+/// then need libass to reach past the attachment - onto whichever colour emoji
+/// font the machine happened to have, or onto nothing at all.
+///
+/// The second tier closes that: [`EMOJI_FALLBACK_FAMILY`] is a monochrome face
+/// we ship, so an emoji is drawn from the script's own `[Fonts]` section on
+/// every OS. What is left over - Korean, Japanese, Chinese, Arabic, Thai, every
+/// script we bundle no face for - still comes back uncovered, which is what
+/// keeps `fontsdir` on the graph for those events.
+///
+/// `family` has to be one the binary carries. Without a primary there is
+/// nothing to fall back *from*, and building the stack anyway would quietly
+/// promote the emoji face to primary - the one face a caption must never be set
+/// in - so a family we do not ship yields an empty stack, and the event is
+/// emitted exactly as it was before the chain existed.
+///
+/// Shared with `core::qc::structural::CaptionEmojiRule`, which asks the same
+/// question about the same caption without rendering it: a check that reasoned
+/// about a chain the export does not build would report defects the frame does
+/// not have.
+pub fn caption_font_stack(family: &str) -> FontStack {
+    if super::bundled_fonts::resolve_bundled(family).is_none() {
+        return FontStack::default();
+    }
+
+    FontStack::new(&[family, EMOJI_FALLBACK_FAMILY])
 }
 
 /// True if a cluster is laid out rather than drawn.
@@ -354,10 +424,18 @@ pub fn split_runs<'a>(text: &'a str, stack: &FontStack) -> Vec<TextRun<'a>> {
 
 /// Gives every neutral cluster the face of the run it belongs to.
 ///
-/// A maximal group of neutral clusters takes the family of its neighbours when
-/// both exist and agree, and the primary otherwise - including at either end of
-/// the string, so a leading or trailing space never drags itself into a
-/// fallback face.
+/// A maximal group of neutral clusters takes the family of its neighbours only
+/// when both exist, agree, and name something a space may safely be measured
+/// in: the primary, or `None` - the unlabelled run that a script we bundle no
+/// face for comes back as, which has to stay whole so the host shapes it in one
+/// piece. Every other agreement falls to the primary, including at either end
+/// of the string.
+///
+/// "Every other agreement" is the fallback faces, and it is the whole point.
+/// Two emoji with a space between them - `"🔥 🔥"`, the product's own caption
+/// idiom - agree on the emoji face, and inheriting it would draw the space in
+/// Noto Emoji at 1.27 em against the text face's 0.218 em: 5.8 times wider,
+/// changing both the spacing and where the line wraps.
 fn resolve_neutral_clusters(clusters: &mut [(usize, usize, Slot)], primary: Option<&'static str>) {
     let mut index = 0;
     while index < clusters.len() {
@@ -376,7 +454,11 @@ fn resolve_neutral_clusters(clusters: &mut [(usize, usize, Slot)], primary: Opti
         let left = index.checked_sub(1).map(|before| clusters[before].2);
         let right = clusters.get(group_end).map(|(_, _, slot)| *slot);
         let resolved = match (left, right) {
-            (Some(Slot::Drawn(before)), Some(Slot::Drawn(after))) if before == after => before,
+            (Some(Slot::Drawn(before)), Some(Slot::Drawn(after)))
+                if before == after && (before.is_none() || before == primary) =>
+            {
+                before
+            }
             _ => primary,
         };
 
@@ -774,6 +856,113 @@ mod tests {
             stack.covers("Two\tlines\nof\u{00A0}text"),
             "a face with no glyph for a tab still renders the line"
         );
+    }
+
+    /// Feature: deterministic emoji burn-in
+    /// Scenario: a space between two emoji is still measured in the text face
+    ///
+    /// Two emoji with a space between them is the product's own caption idiom,
+    /// and both of the space's neighbours agree on the emoji face. Inheriting
+    /// an agreement is right for the primary and for the unlabelled run a
+    /// script we bundle no face for comes back as; it is wrong for a fallback,
+    /// because Noto Emoji's space is 1.27 em against TikTok Sans' 0.218 em, so
+    /// the gap would come out 5.8 times too wide and the line would wrap
+    /// somewhere else.
+    #[test]
+    fn a_space_between_two_emoji_stays_on_the_primary() {
+        let stack = caption_stack();
+
+        assert_eq!(
+            runs_of("\u{1F525} \u{1F525}", &stack),
+            vec![
+                ("\u{1F525}".to_string(), Some(EMOJI_FALLBACK_FAMILY)),
+                (" ".to_string(), Some(DEFAULT_BUNDLED_FAMILY)),
+                ("\u{1F525}".to_string(), Some(EMOJI_FALLBACK_FAMILY)),
+            ]
+        );
+        assert_eq!(
+            runs_of("\u{1F389} \u{1F38A} \u{1F388}", &stack),
+            vec![
+                ("\u{1F389}".to_string(), Some(EMOJI_FALLBACK_FAMILY)),
+                (" ".to_string(), Some(DEFAULT_BUNDLED_FAMILY)),
+                ("\u{1F38A}".to_string(), Some(EMOJI_FALLBACK_FAMILY)),
+                (" ".to_string(), Some(DEFAULT_BUNDLED_FAMILY)),
+                ("\u{1F388}".to_string(), Some(EMOJI_FALLBACK_FAMILY)),
+            ]
+        );
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a text-default symbol is not dragged into the emoji face
+    ///
+    /// Noto Emoji's `cmap` covers far more than the pictures it is bundled
+    /// for: `▶`, `⏸`, `‼`, `ℹ`, `Ⓜ` and the rest of the text-default symbols
+    /// that carry the `Emoji` property are all in it, drawn at emoji
+    /// proportions. Routing by coverage alone gave `"▶ PLAY"` a triangle 1.27
+    /// em wide and dropped `fontsdir` with it, so the host could not draw the
+    /// symbol at text proportions any more. These belong to nothing in the
+    /// stack, exactly as they did before the chain existed.
+    #[test]
+    fn a_text_default_symbol_is_left_to_the_host() {
+        let stack = caption_stack();
+
+        assert_eq!(
+            runs_of("\u{25B6} PLAY", &stack),
+            vec![
+                ("\u{25B6}".to_string(), None),
+                (" PLAY".to_string(), Some(DEFAULT_BUNDLED_FAMILY)),
+            ],
+            "the arrow is ordinary text, and the space belongs to the word"
+        );
+        assert!(
+            !stack.covers("\u{25B6} PLAY"),
+            "the graph has to keep fontsdir so the host can draw the arrow"
+        );
+
+        // The rest are symbols too. Which face draws one depends on whether the
+        // Latin primary happens to carry it - `↔` does, `⏸` does not - and both
+        // answers are right; what matters is that none of them is drawn at
+        // emoji proportions.
+        for symbol in [
+            "\u{25C0}", "\u{23F8}", "\u{203C}", "\u{2049}", "\u{2139}", "\u{2194}", "\u{24C2}",
+            "\u{25AA}", "\u{25AB}",
+        ] {
+            let runs = runs_of(symbol, &stack);
+            assert_eq!(runs.len(), 1, "{symbol:?} is one cluster: {runs:?}");
+            assert_ne!(
+                runs[0].1,
+                Some(EMOJI_FALLBACK_FAMILY),
+                "{symbol:?} is a symbol, not a picture"
+            );
+        }
+
+        // The same base with `U+FE0F` after it did ask for the picture, and an
+        // emoji-presentation codepoint never needed to ask.
+        assert_eq!(
+            runs_of("\u{25B6}\u{FE0F}", &stack),
+            vec![("\u{25B6}\u{FE0F}".to_string(), Some(EMOJI_FALLBACK_FAMILY))]
+        );
+        assert_eq!(
+            runs_of("\u{1F525}", &stack),
+            vec![("\u{1F525}".to_string(), Some(EMOJI_FALLBACK_FAMILY))]
+        );
+        assert!(stack.covers("\u{1F525}"));
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: only a family the binary carries can head a chain
+    #[test]
+    fn a_caption_stack_needs_a_bundled_primary() {
+        let bundled = caption_font_stack(DEFAULT_BUNDLED_FAMILY);
+        assert_eq!(bundled.primary(), Some(DEFAULT_BUNDLED_FAMILY));
+        assert!(bundled.covers("Ship it \u{1F389}"));
+
+        let host = caption_font_stack("Comic Sans MS");
+        assert!(
+            host.is_empty(),
+            "a family we do not ship must never promote the emoji face to primary"
+        );
+        assert!(!host.covers("Ship it \u{1F389}"));
     }
 
     /// Feature: deterministic emoji burn-in
