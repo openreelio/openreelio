@@ -25,8 +25,34 @@
 //! Every family here is licensed under the SIL Open Font License 1.1, except
 //! Luckiest Guy which is Apache-2.0. See `THIRD_PARTY_NOTICES.md` at the
 //! repository root for the copyright notices and full license texts.
+//!
+//! # Two kinds of face
+//!
+//! Most of the registry is [`FaceRole::Text`]: a family a caption or text style
+//! can name, and the face an ASS `Style` line's `Fontname` column asks for.
+//! [`FaceRole::Fallback`] is the other kind - a face that covers a script none
+//! of the text families do, reachable only per glyph through the font chain
+//! [`crate::core::text::coverage::FontStack`] drives. A fallback face is
+//! deliberately invisible to [`resolve_bundled`] and to
+//! [`bundled_font_families`]: setting a whole caption in Noto Emoji would draw
+//! every Latin letter as a notdef box, so it must not be reachable as the
+//! family a `Style` line names.
 
 use std::{collections::HashMap, sync::OnceLock};
+
+/// What a bundled face is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceRole {
+    /// A family a style may name outright. Resolvable, offerable, and expected
+    /// to draw the Latin alphabet a caption is mostly made of.
+    Text,
+    /// A face reached only per glyph, for characters no text family covers.
+    ///
+    /// Never resolvable as the family a style names: it covers one script and
+    /// nothing else, so a `Style` line naming it would draw notdef boxes for
+    /// the rest of the caption.
+    Fallback,
+}
 
 /// A font compiled into the binary.
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +61,8 @@ pub struct BundledFont {
     pub family: &'static str,
     /// Name used for the font inside an ASS `[Fonts]` section.
     pub file_name: &'static str,
+    /// Whether a style may name this family, or only a fallback chain may.
+    pub role: FaceRole,
     /// The font file itself.
     pub bytes: &'static [u8],
 }
@@ -114,13 +142,28 @@ pub fn resolve_placeholder_alias(family: &str) -> Option<&'static str> {
 
 macro_rules! bundled_font {
     ($family:literal, $file:literal, $path:literal) => {
+        bundled_font!($family, $file, $path, FaceRole::Text)
+    };
+    ($family:literal, $file:literal, $path:literal, $role:expr) => {
         BundledFont {
             family: $family,
             file_name: $file,
+            role: $role,
             bytes: include_bytes!(concat!("../../../fonts/", $path)),
         }
     };
 }
+
+/// The family that draws emoji when no text family can.
+///
+/// Monochrome by construction: libass rasterizes outlines and reads none of
+/// the `CBDT`/`COLR` tables a colour emoji font carries, so a colour build
+/// would attach ten megabytes to every script and still burn in nothing. The
+/// picture is therefore black and white - which is the *deterministic* answer
+/// on every OS, where the host providers disagree (Apple Color Emoji, Segoe UI
+/// Emoji, Noto Color Emoji) about the artwork, about which sequences exist at
+/// all, and about whether the font is installed in the first place.
+pub const EMOJI_FALLBACK_FAMILY: &str = "Noto Emoji";
 
 /// Fonts compiled into the binary, in a stable order.
 ///
@@ -167,6 +210,16 @@ static BUNDLED_FONTS: &[BundledFont] = &[
         "LuckiestGuy-Regular",
         "luckiest-guy/LuckiestGuy-Regular.ttf"
     ),
+    // Last, and a fallback: it is only ever reached per glyph, and the embed
+    // cap drops faces from the tail, so a future font list that outgrows the
+    // cap sheds the tier a caption can survive without before it sheds the
+    // face its `Style` line names.
+    bundled_font!(
+        "Noto Emoji",
+        "NotoEmoji-Regular",
+        "noto-emoji/NotoEmoji-Regular.ttf",
+        FaceRole::Fallback
+    ),
 ];
 
 /// Lookup key for a family name.
@@ -187,6 +240,10 @@ fn lookup_key(family: &str) -> String {
 /// Seeded from the declared family names, then widened with the family names in
 /// each font's own `name` table, so a project that stored a typographic family
 /// name ("Archivo Black Regular") still resolves.
+///
+/// Holds every role. [`resolve_bundled`] is what narrows the answer to a family
+/// a style may name; the table itself has to know the fallback faces so
+/// [`bundled_family_faces`] can find the ones a font chain asks to embed.
 fn lookup_table() -> &'static HashMap<String, usize> {
     static TABLE: OnceLock<HashMap<String, usize>> = OnceLock::new();
 
@@ -210,8 +267,8 @@ fn lookup_table() -> &'static HashMap<String, usize> {
     })
 }
 
-/// Returns the bundled font a family name resolves to, if any.
-pub fn resolve_bundled(family: &str) -> Option<&'static BundledFont> {
+/// Returns the bundled font a family name resolves to, whatever its role.
+fn resolve_any_role(family: &str) -> Option<&'static BundledFont> {
     let trimmed = family.trim();
     if trimmed.is_empty() {
         return None;
@@ -222,13 +279,25 @@ pub fn resolve_bundled(family: &str) -> Option<&'static BundledFont> {
         .map(|index| &BUNDLED_FONTS[*index])
 }
 
+/// Returns the bundled font a family name resolves to, if any.
+///
+/// Only [`FaceRole::Text`] faces. A fallback face covers one script and no
+/// Latin at all, so resolving a style's chosen family onto it would burn the
+/// caption in as notdef boxes; it is reached per glyph or not at all.
+pub fn resolve_bundled(family: &str) -> Option<&'static BundledFont> {
+    resolve_any_role(family).filter(|font| font.role == FaceRole::Text)
+}
+
 /// Returns every bundled font whose declared family matches `family`.
 ///
 /// A family ships as several weights and libass picks between them, so an ASS
 /// script has to embed all of them rather than just the one `resolve_bundled`
 /// returns.
+///
+/// Answers for a fallback family too: a script that names one in a `\fn` has
+/// to carry it, and the embedder reaches the bytes through here.
 pub fn bundled_family_faces(family: &str) -> Vec<&'static BundledFont> {
-    let Some(resolved) = resolve_bundled(family) else {
+    let Some(resolved) = resolve_any_role(family) else {
         return Vec::new();
     };
 
@@ -247,12 +316,16 @@ pub fn bundled_faces() -> &'static [BundledFont] {
     BUNDLED_FONTS
 }
 
-/// Returns the distinct family names compiled into the binary.
+/// Returns the distinct families a style may name, in registry order.
+///
+/// Fallback families are left out on purpose: they are not typefaces anyone
+/// sets a caption in, and offering one would let a picker choose a face that
+/// draws no Latin.
 pub fn bundled_font_families() -> Vec<&'static str> {
     let mut families: Vec<&'static str> = Vec::new();
 
     for font in BUNDLED_FONTS {
-        if !families.contains(&font.family) {
+        if font.role == FaceRole::Text && !families.contains(&font.family) {
             families.push(font.family);
         }
     }
@@ -332,6 +405,64 @@ mod tests {
     #[test]
     fn the_substitution_default_is_itself_bundled() {
         assert!(resolve_bundled(DEFAULT_BUNDLED_FAMILY).is_some());
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: the emoji face is a fallback tier and never a chosen typeface
+    ///
+    /// Noto Emoji draws no Latin at all, so a `Style` line naming it would
+    /// burn the caption in as a row of notdef boxes. It has to be embeddable
+    /// and reachable per glyph, and unreachable every other way.
+    #[test]
+    fn the_emoji_fallback_family_is_embeddable_but_never_resolvable() {
+        let faces = bundled_family_faces(EMOJI_FALLBACK_FAMILY);
+        assert_eq!(
+            faces.iter().map(|font| font.file_name).collect::<Vec<_>>(),
+            vec!["NotoEmoji-Regular"],
+            "the chain has to be able to reach the bytes it names"
+        );
+        assert!(faces.iter().all(|font| font.role == FaceRole::Fallback));
+
+        assert!(
+            resolve_bundled(EMOJI_FALLBACK_FAMILY).is_none(),
+            "a style must not be able to resolve onto the emoji face"
+        );
+        assert!(
+            resolve_placeholder_alias(EMOJI_FALLBACK_FAMILY).is_none(),
+            "and no placeholder may alias onto it either"
+        );
+        assert!(
+            !bundled_font_families().contains(&EMOJI_FALLBACK_FAMILY),
+            "a picker offering it would let a caption be set in an emoji face"
+        );
+    }
+
+    #[test]
+    fn every_family_a_style_may_name_is_a_text_face() {
+        for family in bundled_font_families() {
+            let font = resolve_bundled(family).expect("an offered family resolves");
+            assert_eq!(font.role, FaceRole::Text, "{family}");
+        }
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a family name written into a `\fn` cannot close its own block
+    ///
+    /// The emitter puts these names inside an ASS override block, and the only
+    /// names it may write come from this registry. A brace, a backslash or a
+    /// newline in one would end the block early and turn the rest of the
+    /// caption into override syntax, so the closed set has to stay inert.
+    #[test]
+    fn every_bundled_family_name_is_inert_inside_an_override_block() {
+        for font in BUNDLED_FONTS {
+            assert!(
+                font.family
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == ' '),
+                "{:?} is not safe to write into an ASS override block",
+                font.family
+            );
+        }
     }
 
     /// Feature: deterministic caption burn-in

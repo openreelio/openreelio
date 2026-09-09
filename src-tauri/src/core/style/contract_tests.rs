@@ -277,7 +277,15 @@ async fn every_caption_pack_draws_no_unsupported_emoji() {
 }
 
 /// Feature: Curated caption packs
-/// Scenario: should still report a pack-styled caption that does carry emoji
+/// Scenario: should still report a pack-styled caption the burn-in cannot draw
+///
+/// The negative control for the test above, and it has to be an emoji that
+/// genuinely does not render. Every pack names a family the app ships, so a
+/// pack-styled caption reaches the bundled emoji face and `🎉` draws from the
+/// script's own attachment - correctly, in monochrome. `U+1FAC6` FINGERPRINT is
+/// Unicode 16.0 and Noto Emoji 3.002 predates it, so that one still falls to
+/// the host and is still a finding; a font bump that adds it will fail here and
+/// this control will need another code point.
 #[tokio::test]
 async fn the_emoji_guarantee_is_falsifiable() {
     let pack = CAPTION_PACKS
@@ -292,7 +300,7 @@ async fn the_emoji_guarantee_is_falsifiable() {
         json!({
             "sequenceId": sequence_id,
             "trackId": caption_track_id,
-            "text": "Ship it 🎉 today",
+            "text": "New \u{1FAC6} scanner",
             "startSec": 0.0,
             "endSec": 4.0,
             "stylePack": pack.id,
@@ -302,8 +310,45 @@ async fn the_emoji_guarantee_is_falsifiable() {
 
     assert!(
         !emoji_violations(&state, &sequence_id).await.is_empty(),
-        "a pack-styled caption carrying a colour emoji must still be reported"
+        "a pack-styled caption carrying an emoji no bundled face draws must still be reported"
     );
+}
+
+/// Feature: Curated caption packs
+/// Scenario: should draw a pack-styled caption's emoji from the bundled face
+///
+/// The other half of the guarantee. A pack names a family the app ships, so the
+/// chain behind it reaches Noto Emoji and an ordinary caption emoji renders -
+/// which is why `every_caption_pack_draws_no_unsupported_emoji` above is now a
+/// statement about the packs *and* about the face they reach.
+#[tokio::test]
+async fn a_pack_styled_caption_renders_an_ordinary_emoji() {
+    for pack in CAPTION_PACKS {
+        let (mut state, sequence_id, caption_track_id, _clip_id) =
+            project_with_caption_track(SequenceFormat::youtube_1080());
+
+        execute_payload(
+            &mut state,
+            "CreateCaption",
+            json!({
+                "sequenceId": sequence_id,
+                "trackId": caption_track_id,
+                "text": "Ship it 🎉 today",
+                "startSec": 0.0,
+                "endSec": 4.0,
+                "stylePack": pack.id,
+            }),
+        )
+        .expect("caption is created");
+
+        let violations = emoji_violations(&state, &sequence_id).await;
+        assert!(
+            violations.is_empty(),
+            "pack '{}' reaches the bundled emoji face, got: {}",
+            pack.id,
+            violations.join("; ")
+        );
+    }
 }
 
 #[tokio::test]

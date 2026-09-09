@@ -23,6 +23,7 @@ their upstream license files live under `src-tauri/fonts/`.
 | Poppins | OFL-1.1 | `src-tauri/fonts/poppins/Poppins-Regular.ttf`<br>`src-tauri/fonts/poppins/Poppins-Bold.ttf` |
 | Bangers | OFL-1.1 | `src-tauri/fonts/bangers/Bangers-Regular.ttf` |
 | Luckiest Guy | Apache-2.0 | `src-tauri/fonts/luckiest-guy/LuckiestGuy-Regular.ttf` |
+| Noto Emoji | OFL-1.1 | `src-tauri/fonts/noto-emoji/NotoEmoji-Regular.ttf` |
 
 
 ### TikTok Sans
@@ -85,6 +86,20 @@ Copyright 2010 The Bangers Project Authors (https://github.com/googlefonts/bange
 - Upstream license file: `src-tauri/fonts/bangers/OFL.txt`
 
 
+### Noto Emoji
+
+Copyright 2013 Google LLC (https://github.com/googlefonts/noto-emoji)
+
+- Version: 3.002
+- License: OFL-1.1 (full text below)
+- Upstream license file: `src-tauri/fonts/noto-emoji/OFL.txt`
+- Note: The *monochrome* Noto Emoji, not Noto Color Emoji. Static Regular (400)
+  instance generated from the upstream variable font by
+  `scripts/instance-bundled-fonts.py`. It is a per-glyph fallback face rather
+  than a family a caption can be set in: it draws the emoji in a caption so the
+  burn-in does not depend on the host's emoji font.
+
+
 ### Luckiest Guy
 
 Copyright (c) 2010 by Brian J. Bonislawsky DBA Astigmatic (AOETI). All rights reserved.
@@ -134,7 +149,7 @@ shipped bundle and are deliberately not listed above.
 ## SIL Open Font License 1.1
 
 Applies to TikTok Sans, Montserrat, Anton, Archivo Black, Bebas Neue,
-Poppins and Bangers, each under its own copyright notice above.
+Poppins, Bangers and Noto Emoji, each under its own copyright notice above.
 
 ```
 This Font Software is licensed under the SIL Open Font License, Version 1.1.

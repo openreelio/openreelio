@@ -168,14 +168,18 @@ fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
     faded.opacity = 0.3;
     captions.add_clip(faded);
 
-    // A colour emoji libass paints as a flat monochrome outline. Comfortably
-    // slow to read and nowhere near an edge, so this cue trips the emoji rule
-    // and nothing else, and its `UpdateCaption` carries a rewritten `text`
-    // rather than the retimed `endSec` the reading-rate repair emits.
+    // An emoji that reaches no face the burn-in script carries, so libass
+    // resolves it off the render machine: `U+1FAC6` is Unicode 16.0 and the
+    // bundled Noto Emoji 3.002 never mapped it. A cue in a shipped family whose
+    // emoji the bundled face *does* draw is not a finding at all, so this one
+    // has to be the unmapped kind to keep tripping the rule. Comfortably slow
+    // to read and nowhere near an edge, so it trips the emoji rule and nothing
+    // else, and its `UpdateCaption` carries a rewritten `text` rather than the
+    // retimed `endSec` the reading-rate repair emits.
     let mut emoji = Clip::with_range("caption", 0.0, 3.0);
     emoji.place.timeline_in_sec = 9.0;
     emoji.place.duration_sec = 3.0;
-    emoji.label = Some("Ship it \u{1F389} today".to_string());
+    emoji.label = Some("New \u{1FAC6} scanner".to_string());
     captions.add_clip(emoji);
 
     sequence.add_track(captions);
@@ -191,7 +195,7 @@ fn project_with_every_fixable_finding() -> (Sequence, ProjectState) {
     // `TextClipData` block rather than a handful of ids - the one fix in the
     // module that has to survive the strict parser as a nested struct.
     let mut titles = Track::new_video("V2");
-    let (title, title_effect) = text_overlay_clip("Big sale \u{1F389} today", 0.0, 4.0);
+    let (title, title_effect) = text_overlay_clip("Big sale \u{1FAC6} today", 0.0, 4.0);
     titles.add_clip(title);
     state.effects.insert(title_effect.id.clone(), title_effect);
     sequence.add_track(titles);

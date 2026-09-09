@@ -634,6 +634,29 @@ pub fn scan(text: &str) -> Vec<EmojiCluster<'_>> {
         .collect()
 }
 
+/// Whether a grapheme cluster is drawn as a picture rather than as text.
+///
+/// True for every class an emoji font paints - a presentation emoji, a keycap,
+/// a flag, a ZWJ sequence, a skin-tone modifier - and false for two things that
+/// look like emoji to a codepoint test and are not:
+///
+/// - the text-default symbols that merely carry the `Emoji` property with no
+///   `U+FE0F` after them (`▶`, `⏸`, `‼`, `ℹ`, `Ⓜ`, `▪`), which are ordinary
+///   typographic symbols;
+/// - a cluster that asked for the text presentation with `U+FE0E`.
+///
+/// This is the question a font chain has to ask before routing a cluster into
+/// an emoji face, because `cmap` coverage answers a different one. Noto Emoji's
+/// `cmap` maps `▶` - and draws it 1.27 em wide against TikTok Sans' 0.218 em
+/// space - so a chain that routed by coverage alone turned `"▶ PLAY"` into an
+/// oversized triangle and changed where the line wrapped. See
+/// [`super::coverage::FontStack`].
+pub fn is_emoji_presentation_cluster(cluster: &str) -> bool {
+    let codepoints: Vec<char> = cluster.chars().collect();
+
+    matches!(classify(&codepoints), Some(class) if class != EmojiClass::TextPresentation)
+}
+
 /// Canonical identity of a cluster's sequence.
 ///
 /// Lowercase hexadecimal code points joined by `-`, with every `U+FE0F`
@@ -1038,6 +1061,54 @@ mod tests {
         // The full keycap is still a finding, selector or not.
         assert_eq!(scan("1\u{FE0F}\u{20E3}")[0].class, EmojiClass::Keycap);
         assert_eq!(scan("1\u{20E3}")[0].class, EmojiClass::Keycap);
+    }
+
+    /// Feature: Emoji classification
+    /// Scenario: should tell a picture apart from a symbol that is merely emoji
+    ///
+    /// The predicate a font chain routes on. A text-default symbol answering
+    /// `true` here would be drawn from an emoji face at emoji proportions,
+    /// which is a typographic regression rather than a rendering one - nothing
+    /// is missing from the frame, the arrow is simply five times too wide.
+    #[test]
+    fn should_separate_emoji_presentation_from_text_default_symbols() {
+        for picture in [
+            "\u{1F525}",                                     // fire
+            "\u{25B6}\u{FE0F}",                              // play, asked for colour
+            "\u{1F1F0}\u{1F1F7}",                            // a flag
+            "1\u{FE0F}\u{20E3}",                             // a keycap
+            "1\u{20E3}",                                     // the legacy keycap
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",   // a ZWJ family
+            "\u{1F44D}\u{1F3FD}",                            // a skin tone
+            "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E007F}", // a subdivision flag
+        ] {
+            assert!(
+                is_emoji_presentation_cluster(picture),
+                "{picture:?} is drawn as a picture"
+            );
+        }
+
+        for symbol in [
+            "\u{25B6}",         // play
+            "\u{25C0}",         // reverse
+            "\u{23F8}",         // pause
+            "\u{203C}",         // double exclamation
+            "\u{2049}",         // interrobang
+            "\u{2139}",         // information source
+            "\u{2194}",         // left-right arrow
+            "\u{24C2}",         // circled M
+            "\u{25AA}",         // small black square
+            "\u{2764}",         // a text-default heart
+            "\u{2764}\u{FE0E}", // and one that asked for text explicitly
+            "1",
+            "A",
+            "\u{AC00}",
+        ] {
+            assert!(
+                !is_emoji_presentation_cluster(symbol),
+                "{symbol:?} is ordinary text"
+            );
+        }
     }
 
     /// Feature: Emoji tables
