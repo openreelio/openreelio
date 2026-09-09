@@ -7,6 +7,7 @@ import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import type { RenderGraph } from '@/bindings';
 import type { Asset, Clip, Sequence, Track } from '@/types';
+import { DEFAULT_TEXT_FONT_FAMILY } from '@/utils/textFonts';
 
 const runtimeMocks = vi.hoisted(() => ({
   isTauriRuntime: vi.fn(() => false),
@@ -22,6 +23,74 @@ vi.mock('@/services/framePaths', () => ({
 }));
 
 const mockedInvoke = vi.mocked(invoke);
+
+/**
+ * A render graph carrying one text layer, so a test can vary the one field it
+ * cares about instead of restating forty that never change.
+ */
+function textRenderGraph(sequence: Sequence, textClip: Clip, fontFamily: string): RenderGraph {
+  return {
+    graphVersion: 1,
+    sequenceId: sequence.id,
+    format: sequence.format,
+    durationSec: 10,
+    durationFrames: 300,
+    visualLayers: [
+      {
+        layerIndex: 0,
+        trackId: sequence.tracks[0].id,
+        trackKind: 'video',
+        trackIndex: 0,
+        clipId: textClip.id,
+        timelineInSec: 0,
+        timelineOutSec: 10,
+        timelineInFrame: 0,
+        timelineOutFrame: 300,
+        durationFrames: 300,
+        sourceInSec: 0,
+        sourceOutSec: 10,
+        sourceInFrame: 0,
+        sourceOutFrame: 300,
+        transform: textClip.transform,
+        opacity: 1,
+        blendMode: 'normal',
+        effects: [],
+        source: {
+          type: 'text',
+          assetId: textClip.assetId,
+          textData: null,
+          renderSpec: {
+            text: 'Graph title',
+            style: {
+              fontFamily,
+              fontSizePx: 64,
+              fontWeight: 650,
+              bold: true,
+              italic: false,
+              underline: false,
+              alignment: 'center',
+              lineHeight: 1.2,
+              letterSpacingPx: 2,
+              fillColor: { r: 255, g: 10, b: 20, a: 255 },
+              opacity: 0.8,
+            },
+            position: {
+              xPercent: 25,
+              yPercent: 75,
+              anchorXPercent: 50,
+              anchorYPercent: 50,
+            },
+            background: null,
+            outline: null,
+            shadow: null,
+            rotationDeg: 0,
+          },
+        },
+      },
+    ],
+    audioLayers: [],
+  };
+}
 
 function createClip(id: string, assetId: string): Clip {
   return {
@@ -407,71 +476,9 @@ describe('ProxyPreviewPlayer', () => {
     const textClip = createClip('text-clip', '__text__title');
     sequence.tracks[0].clips.push(textClip);
 
-    const renderGraph: RenderGraph = {
-      graphVersion: 1,
-      sequenceId: sequence.id,
-      format: sequence.format,
-      durationSec: 10,
-      durationFrames: 300,
-      visualLayers: [
-        {
-          layerIndex: 0,
-          trackId: sequence.tracks[0].id,
-          trackKind: 'video',
-          trackIndex: 0,
-          clipId: textClip.id,
-          timelineInSec: 0,
-          timelineOutSec: 10,
-          timelineInFrame: 0,
-          timelineOutFrame: 300,
-          durationFrames: 300,
-          sourceInSec: 0,
-          sourceOutSec: 10,
-          sourceInFrame: 0,
-          sourceOutFrame: 300,
-          transform: textClip.transform,
-          opacity: 1,
-          blendMode: 'normal',
-          effects: [],
-          source: {
-            type: 'text',
-            assetId: textClip.assetId,
-            textData: null,
-            renderSpec: {
-              text: 'Graph title',
-              style: {
-                fontFamily: 'Inter',
-                fontSizePx: 64,
-                fontWeight: 650,
-                bold: true,
-                italic: false,
-                underline: false,
-                alignment: 'center',
-                lineHeight: 1.2,
-                letterSpacingPx: 2,
-                fillColor: { r: 255, g: 10, b: 20, a: 255 },
-                opacity: 0.8,
-              },
-              position: {
-                xPercent: 25,
-                yPercent: 75,
-                anchorXPercent: 50,
-                anchorYPercent: 50,
-              },
-              background: null,
-              outline: null,
-              shadow: null,
-              rotationDeg: 0,
-            },
-          },
-        },
-      ],
-      audioLayers: [],
-    };
-
     mockedInvoke.mockImplementation(async (command) => {
       if (command === 'get_sequence_render_graph') {
-        return renderGraph;
+        return textRenderGraph(sequence, textClip, 'Inter');
       }
 
       return [];
@@ -498,6 +505,96 @@ describe('ProxyPreviewPlayer', () => {
     expect(overlay.style.transform).toBe('translate(-50%, -50%) rotate(0deg)');
     expect(overlay.style.transformOrigin).toBe('center center');
     expect(overlay.style.opacity).toBe('0.8');
+  });
+
+  /**
+   * Feature: caption preview draft draws in the fonts the export embeds
+   * Scenario: a clip stored with the historical placeholder family
+   *
+   * Every "no font was picked" default wrote 'Arial' before the defaults named
+   * a shipped face, and the exporter maps that placeholder onto TikTok Sans
+   * before it embeds anything. A draft that took the stored string literally
+   * showed the host's Arial for text that ships in a different typeface.
+   */
+  it('resolves the placeholder font family the way the export does', async () => {
+    runtimeMocks.isTauriRuntime.mockReturnValue(true);
+    const sequence = createSequence();
+    const textClip = createClip('text-clip', '__text__title');
+    sequence.tracks[0].clips.push(textClip);
+
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_sequence_render_graph') {
+        return textRenderGraph(sequence, textClip, 'Arial');
+      }
+
+      return [];
+    });
+
+    const assets = new Map<string, Asset>([
+      ['asset-top', createVideoAsset('asset-top', 'https://example.com/top.mp4')],
+      ['asset-bottom', createVideoAsset('asset-bottom', 'https://example.com/bottom.mp4')],
+    ]);
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={assets} showControls />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('proxy-text-overlay-text-clip')).toBeInTheDocument();
+    });
+
+    const overlay = screen.getByTestId('proxy-text-overlay-text-clip') as HTMLElement;
+    expect(overlay.style.fontFamily).toBe(DEFAULT_TEXT_FONT_FAMILY);
+  });
+
+  /**
+   * Feature: labeled preview draft
+   * Scenario: video mode is drafting text it does not burn in
+   *
+   * Video mode never falls back to the canvas for text, so nothing on screen
+   * said the overlay is laid out by the browser rather than burned in by
+   * libass, and this layer does not wrap lines at all.
+   */
+  it('labels the frame as a draft while it is drawing a text overlay', async () => {
+    runtimeMocks.isTauriRuntime.mockReturnValue(true);
+    const sequence = createSequence();
+    const textClip = createClip('text-clip', '__text__title');
+    sequence.tracks[0].clips.push(textClip);
+
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_sequence_render_graph') {
+        return textRenderGraph(sequence, textClip, 'Poppins');
+      }
+
+      return [];
+    });
+
+    const assets = new Map<string, Asset>([
+      ['asset-top', createVideoAsset('asset-top', 'https://example.com/top.mp4')],
+      ['asset-bottom', createVideoAsset('asset-bottom', 'https://example.com/bottom.mp4')],
+    ]);
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={assets} showControls />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('preview-draft-badge')).toHaveAttribute(
+        'data-draft-reason',
+        'text',
+      );
+    });
+  });
+
+  it('does not label the frame as a draft when no text is being drawn', async () => {
+    const sequence = createSequence();
+    const assets = new Map<string, Asset>([
+      ['asset-top', createVideoAsset('asset-top', 'https://example.com/top.mp4')],
+      ['asset-bottom', createVideoAsset('asset-bottom', 'https://example.com/bottom.mp4')],
+    ]);
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={assets} showControls />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('proxy-video-layer')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('preview-draft-badge')).not.toBeInTheDocument();
   });
 
   it('commits text placement from an inline preview input', async () => {
