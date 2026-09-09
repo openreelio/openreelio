@@ -4,6 +4,7 @@ import {
   applyClipTransformToRenderedTextData,
   extractTextDataFromClipWithMap,
   getTextFontWeightNumber,
+  splitIntoDrawableCharacters,
 } from './textRenderer';
 import type { Clip, TextClipData } from '@/types';
 import { DEFAULT_TEXT_FONT_FAMILY } from './textFonts';
@@ -192,5 +193,44 @@ describe('applyClipTransformToRenderedTextData', () => {
     expect(result.style.letterSpacing).toBe(3);
     expect(result.shadow).toEqual({ color: '#000000', offsetX: 3, offsetY: 6, blur: 3 });
     expect(result.outline).toEqual({ color: '#000000', width: 3 });
+  });
+});
+
+describe('splitIntoDrawableCharacters', () => {
+  /**
+   * Feature: caption preview draft
+   * Scenario: an emoji survives a letter-spaced line
+   *
+   * Letter spacing is drawn one unit at a time, and the units used to be UTF-16
+   * code units. An astral emoji is two of those, and a canvas asked to draw a
+   * lone surrogate draws a replacement box — so a caption looked right until
+   * someone set letter spacing on it, then lost its emoji.
+   */
+  it('should keep an astral emoji whole rather than splitting it into surrogates', () => {
+    const units = splitIntoDrawableCharacters('Cut \u{1F3AC}!');
+
+    expect(units).toEqual(['C', 'u', 't', ' ', '\u{1F3AC}', '!']);
+    // A single UTF-16 code unit in the surrogate range is half a character, and
+    // half a character is the replacement box the old split produced.
+    for (const unit of units) {
+      expect(unit, `${JSON.stringify(unit)} is a lone surrogate`).not.toMatch(/^[\uD800-\uDFFF]$/);
+    }
+  });
+
+  it('should keep every non-astral character on its own', () => {
+    expect(splitIntoDrawableCharacters('ab c')).toEqual(['a', 'b', ' ', 'c']);
+    expect(splitIntoDrawableCharacters('')).toEqual([]);
+  });
+
+  it('should split a multi-code-point emoji sequence the way the caption measurer does', () => {
+    // A ZWJ sequence is several code points, and `measureCaptionLineWidth` in
+    // the canvas caption path counts them separately. Grouping them here and
+    // not there would centre a line off its own measured width; the two move
+    // together or not at all.
+    expect(splitIntoDrawableCharacters('\u{1F468}\u200D\u{1F4BB}')).toEqual([
+      '\u{1F468}',
+      '\u200D',
+      '\u{1F4BB}',
+    ]);
   });
 });

@@ -392,6 +392,28 @@ function drawTextLines(
 }
 
 /**
+ * Splits a line into the units letter spacing may be inserted between.
+ *
+ * Code points, never UTF-16 code units. Splitting an astral emoji by code unit
+ * yields two lone surrogates, and a canvas asked to draw one of those draws a
+ * replacement box: a caption with an emoji in it fell apart the moment a style
+ * set a non-zero letter spacing, and only then, which is why it survived this
+ * long.
+ *
+ * `Array.from` rather than `Intl.Segmenter`, deliberately: the caption path's
+ * `measureCaptionLineWidth` splits by code point too, and a renderer that
+ * grouped a flag or a family emoji into one cluster while the measurer counted
+ * its parts separately would draw a centred line off its own measured centre.
+ * Both should move to grapheme clusters together or not at all.
+ *
+ * @param text - One line of text content.
+ * @returns The units to draw, in order.
+ */
+export function splitIntoDrawableCharacters(text: string): string[] {
+  return Array.from(text);
+}
+
+/**
  * Draws text with custom letter spacing.
  */
 function drawTextWithLetterSpacing(
@@ -402,7 +424,7 @@ function drawTextWithLetterSpacing(
   letterSpacing: number,
   isStroke: boolean,
 ): void {
-  const chars = text.split('');
+  const chars = splitIntoDrawableCharacters(text);
   let currentX = x;
 
   // Adjust starting X for alignment
