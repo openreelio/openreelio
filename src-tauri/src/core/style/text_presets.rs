@@ -119,6 +119,16 @@ pub struct TextPresetSpec {
     pub default_content: &'static str,
     /// Suggested clip duration in seconds.
     pub default_duration_sec: f64,
+    /// Family the preset renders in.
+    ///
+    /// Six presets deliberately name a family we do not ship - Helvetica,
+    /// Impact, Georgia, Courier New - because the typeface *is* the preset:
+    /// a slab-serif quote card or a monospaced terminal caption is not the
+    /// same design drawn in the bundled grotesque. Those are host picks by
+    /// intent, so on a machine without the family export validation warns
+    /// that it fell back to the bundled default, and that warning is correct
+    /// and expected rather than a defect. Every other preset names a bundled
+    /// family, or the historical "Arial" placeholder that resolves to one.
     font_family: &'static str,
     font_size: u32,
     color: &'static str,
