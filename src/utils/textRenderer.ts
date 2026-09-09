@@ -7,6 +7,7 @@
 import type { TextClipData, TextStyle, Clip, Transform } from '@/types';
 import { isTextClip } from '@/types';
 import { scaleFontSizeToCanvas } from './previewCoords';
+import { cssFontShorthand } from './previewFonts';
 import { DEFAULT_TEXT_FONT_FAMILY } from './textFonts';
 
 // =============================================================================
@@ -253,12 +254,21 @@ export function renderTextToCanvas(
     ctx.translate(-textX, -textY);
   }
 
-  // Build font string
-  const fontStyle = style.italic ? 'italic ' : '';
-  const fontWeight = `${getTextFontWeightNumber(style)} `;
   // Scale font size relative to the shared reference canvas height.
   const scaledFontSize = scaleFontSizeToCanvas(style.fontSize, canvasHeight);
-  ctx.font = `${fontStyle}${fontWeight}${scaledFontSize}px ${style.fontFamily}`;
+  // The shared builder rather than an interpolation: it resolves the family the
+  // same way the exporter does, and quotes it — the form that holds for any
+  // name a stored style can carry, not just the ones that happen to spell a
+  // bare CSS identifier sequence. `measureTextBounds` in
+  // `transformOverlayGeometry` builds the same string from the same style, and
+  // the selection handles it places only line up with these glyphs while both
+  // stay on this function.
+  ctx.font = cssFontShorthand({
+    fontFamily: style.fontFamily,
+    fontSizePx: scaledFontSize,
+    fontWeight: getTextFontWeightNumber(style),
+    italic: style.italic,
+  });
 
   // Set text alignment
   ctx.textAlign = style.alignment;
@@ -311,6 +321,13 @@ export function renderTextToCanvas(
 
 /**
  * Draws text background rectangle.
+ *
+ * Known gap (pre-existing): the box is measured with a whole-line
+ * `measureText`, so it ignores `style.letterSpacing` and comes out narrower
+ * than the glyphs `drawTextWithLetterSpacing` actually lays down.
+ * `drawUnderlines` below has the same gap. Both should measure through the
+ * per-drawable-character sum that `measureLineWidth` in
+ * `transformOverlayGeometry` uses.
  */
 function drawTextBackground(
   ctx: CanvasRenderingContext2D,
@@ -383,6 +400,28 @@ function drawTextLines(
 }
 
 /**
+ * Splits a line into the units letter spacing may be inserted between.
+ *
+ * Code points, never UTF-16 code units. Splitting an astral emoji by code unit
+ * yields two lone surrogates, and a canvas asked to draw one of those draws a
+ * replacement box: a caption with an emoji in it fell apart the moment a style
+ * set a non-zero letter spacing, and only then, which is why it survived this
+ * long.
+ *
+ * `Array.from` rather than `Intl.Segmenter`, deliberately: the caption path's
+ * `measureCaptionLineWidth` splits by code point too, and a renderer that
+ * grouped a flag or a family emoji into one cluster while the measurer counted
+ * its parts separately would draw a centred line off its own measured centre.
+ * Both should move to grapheme clusters together or not at all.
+ *
+ * @param text - One line of text content.
+ * @returns The units to draw, in order.
+ */
+export function splitIntoDrawableCharacters(text: string): string[] {
+  return Array.from(text);
+}
+
+/**
  * Draws text with custom letter spacing.
  */
 function drawTextWithLetterSpacing(
@@ -393,7 +432,7 @@ function drawTextWithLetterSpacing(
   letterSpacing: number,
   isStroke: boolean,
 ): void {
-  const chars = text.split('');
+  const chars = splitIntoDrawableCharacters(text);
   let currentX = x;
 
   // Adjust starting X for alignment
@@ -425,6 +464,9 @@ function drawTextWithLetterSpacing(
 
 /**
  * Draws underlines for text.
+ *
+ * Shares the `drawTextBackground` gap above: the rule is measured whole-line,
+ * so a letter-spaced line is underlined short of its last glyph.
  */
 function drawUnderlines(
   ctx: CanvasRenderingContext2D,

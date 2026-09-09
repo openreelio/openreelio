@@ -1,0 +1,119 @@
+/* =============================================================================
+   Bundled text faces, registered for the WebView
+
+   The export path compiles these families into the binary (see
+   `src-tauri/src/core/text/bundled_fonts.rs`) so caption burn-in never depends
+   on the host font set. The live preview draws the same captions with CSS, and
+   until these `@font-face` rules existed it could not resolve a single one of
+   them: `font-family: 'TikTok Sans'` fell through to the UI sans, whose metrics
+   are not the exported face's, so the draft wrapped and sat differently from
+   the file the user gets.
+
+   The `font-family` names here are the exact strings `BUNDLED_FONTS` declares,
+   because those are also what a caption or text style stores and what the ASS
+   `Style` line's `Fontname` column asks libass for. A rename on either side
+   fails `previewFonts.test.ts`, which reads this file and the Rust registry.
+
+   The files are referenced out of `src-tauri/fonts/` rather than copied into
+   `src/`: one set of bytes, so the preview can never drift onto a stale copy of
+   a face the exporter has since replaced.
+
+   `font-display: block` rather than `swap`: these are local assets that resolve
+   in a frame or two, and a swap-in after the canvas has already measured a line
+   would leave a frame drawn at fallback metrics on screen.
+
+   `Noto Emoji` is deliberately absent. It is a `FaceRole::Fallback` face on the
+   Rust side, reached per glyph and never named by a style, and the export
+   composites colour Fluent artwork over the monochrome outlines it burns in.
+   Registering it here would only let the draft draw black-and-white emoji where
+   the export draws colour; the WebView's own colour emoji font is the closer
+   approximation, so the draft keeps it.
+   ============================================================================= */
+
+@font-face {
+  font-family: 'TikTok Sans';
+  src: url('../../src-tauri/fonts/tiktok-sans/TikTokSans-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'TikTok Sans';
+  src: url('../../src-tauri/fonts/tiktok-sans/TikTokSans-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('../../src-tauri/fonts/montserrat/Montserrat-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('../../src-tauri/fonts/montserrat/Montserrat-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Anton';
+  src: url('../../src-tauri/fonts/anton/Anton-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Archivo Black';
+  src: url('../../src-tauri/fonts/archivo-black/ArchivoBlack-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Bebas Neue';
+  src: url('../../src-tauri/fonts/bebas-neue/BebasNeue-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Poppins';
+  src: url('../../src-tauri/fonts/poppins/Poppins-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Poppins';
+  src: url('../../src-tauri/fonts/poppins/Poppins-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Bangers';
+  src: url('../../src-tauri/fonts/bangers/Bangers-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Luckiest Guy';
+  src: url('../../src-tauri/fonts/luckiest-guy/LuckiestGuy-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}

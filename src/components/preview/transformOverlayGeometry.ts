@@ -9,8 +9,13 @@
 
 import type { Transform, TextClipAlignment, TextClipData, Asset, Clip } from '@/types';
 import { isTextClip } from '@/types';
-import { extractTextDataFromClipWithMap, getTextFontWeightNumber } from '@/utils/textRenderer';
+import {
+  extractTextDataFromClipWithMap,
+  getTextFontWeightNumber,
+  splitIntoDrawableCharacters,
+} from '@/utils/textRenderer';
 import { scaleFontSizeToCanvas, type PreviewSource } from '@/utils/previewCoords';
+import { cssFontShorthand } from '@/utils/previewFonts';
 
 const DEFAULT_TEXT_BOUNDS = { width: 320, height: 96 };
 
@@ -95,17 +100,41 @@ export function resolveTransformForTextOverlay(
   };
 }
 
+/**
+ * Measures one drawn line exactly the way `renderTextToCanvas` draws it.
+ *
+ * With no letter spacing the renderer draws the line as a single run, so the
+ * whole-string measurement is the right one. With letter spacing it stops doing
+ * that: `drawTextWithLetterSpacing` splits the line into drawable characters
+ * and lays them out one at a time, so the covered width is the sum of the
+ * per-character advances plus one gap between each pair — no whole-run kerning,
+ * and one gap per *code point*.
+ *
+ * Measuring the whole string and adding `line.length - 1` gaps instead counts
+ * an astral emoji as the two UTF-16 code units it is stored in, so a line like
+ * `Cut 🎬🔥🎉` gained an extra gap per emoji and kept kerning the renderer had
+ * already dropped. The box came out wider than the glyphs and the right handle
+ * floated off the text. `measureCaptionLineWidth` in `TimelinePreviewPlayer`
+ * measures the caption pass the same way, for the same reason.
+ */
 function measureLineWidth(
   ctx: CanvasRenderingContext2D,
   line: string,
   letterSpacing: number,
 ): number {
-  const baseWidth = ctx.measureText(line).width;
-  if (letterSpacing === 0 || line.length <= 1) {
-    return baseWidth;
+  if (letterSpacing === 0) {
+    return ctx.measureText(line).width;
   }
 
-  return baseWidth + (line.length - 1) * letterSpacing;
+  const characters = splitIntoDrawableCharacters(line);
+  if (characters.length <= 1) {
+    return ctx.measureText(line).width;
+  }
+
+  return (
+    characters.reduce((width, character) => width + ctx.measureText(character).width, 0) +
+    (characters.length - 1) * letterSpacing
+  );
 }
 
 /** Measures a text clip's drawn box in canvas-space pixels. */
@@ -124,9 +153,18 @@ export function measureTextBounds(
   }
 
   const scaledFontSize = scaleFontSizeToCanvas(textData.style.fontSize, canvasHeight, 1);
-  const fontStyle = textData.style.italic ? 'italic ' : '';
-  const fontWeight = `${getTextFontWeightNumber(textData.style)} `;
-  ctx.font = `${fontStyle}${fontWeight}${scaledFontSize}px ${textData.style.fontFamily}`;
+  // The same builder `renderTextToCanvas` draws with. These handles frame the
+  // glyphs that function paints, so a family resolved differently here than
+  // there — the stored `Arial` placeholder is the case that bites — measures in
+  // one face while the renderer draws in another and puts the box somewhere
+  // other than the text. Sharing one builder is what keeps the resolution, the
+  // quoting and the clamping identical on both paths.
+  ctx.font = cssFontShorthand({
+    fontFamily: textData.style.fontFamily,
+    fontSizePx: scaledFontSize,
+    fontWeight: getTextFontWeightNumber(textData.style),
+    italic: textData.style.italic,
+  });
 
   const maxLineWidth = lines.reduce((maxWidth, line) => {
     return Math.max(maxWidth, measureLineWidth(ctx, line, textData.style.letterSpacing));

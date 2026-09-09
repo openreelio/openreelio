@@ -44,8 +44,10 @@ import {
 } from '@/utils/clipTiming';
 import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
 import { computeContainFit, scaleFontSizeToCanvas } from '@/utils/previewCoords';
+import { resolvePreviewFontFamily } from '@/utils/previewFonts';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { TextPlacementOverlay, type TextPlacementCommitPayload } from './TextPlacementOverlay';
+import { PreviewDraftBadge } from './PreviewDraftBadge';
 import { TransformOverlay } from './TransformOverlay';
 import {
   isTextClip,
@@ -1502,6 +1504,25 @@ export function ProxyPreviewPlayer({
 
   const hasActiveRenderableClip = renderableClips.some((clipInfo) => clipInfo.isActive);
 
+  /**
+   * Whether what is on screen includes text this player only drafts.
+   *
+   * Video mode never falls back to the canvas for a text or caption clip: it
+   * draws them as DOM overlays instead, which is fast and editable but is not
+   * what export writes — libass burns the same text in, wrapping it to the
+   * frame, and this layer does not wrap at all. Nothing said so, so a caption
+   * that reads fine here could ship as an overflowing line. The canvas player
+   * has carried the same warning all along, keyed on the render cache's own
+   * flags; this path has no cache to key on, so the overlays themselves are the
+   * signal.
+   *
+   * Only while paused, matching the canvas player: during playback every frame
+   * is a guess, and a chip flickering on and off across caption boundaries is
+   * noise rather than information.
+   */
+  const showTextDraftBadge =
+    !isPlaying && (activeCaptions.length > 0 || activeTextOverlays.length > 0);
+
   return (
     <div
       ref={containerRef}
@@ -1642,7 +1663,12 @@ export function ProxyPreviewPlayer({
                   top: `${anchor.yPercent}%`,
                   transform: `translate(${translate.x}, ${translate.y})`,
                   color: toRgba(style.color),
-                  fontFamily: style.fontFamily,
+                  // Resolved rather than passed through: the export maps the
+                  // historical 'Arial' placeholder onto the bundled face before
+                  // it embeds anything, so a draft taking the stored string
+                  // literally would show the host's Arial for a caption that
+                  // ships in TikTok Sans.
+                  fontFamily: resolvePreviewFontFamily(style.fontFamily),
                   fontSize: `${captionFontSize}px`,
                   fontWeight,
                   fontStyle: style.italic ? 'italic' : 'normal',
@@ -1724,7 +1750,7 @@ export function ProxyPreviewPlayer({
                   transform: `translate(${translateX}, -50%) rotate(${rotation}deg)`,
                   transformOrigin: textTransformOrigin(textData.style.alignment),
                   color: resolveTextColor(textData.style.color, '#FFFFFF'),
-                  fontFamily: textData.style.fontFamily,
+                  fontFamily: resolvePreviewFontFamily(textData.style.fontFamily),
                   fontSize: `${fontSize}px`,
                   fontWeight: getTextFontWeightNumber(textData.style),
                   fontStyle: textData.style.italic ? 'italic' : 'normal',
@@ -1751,6 +1777,8 @@ export function ProxyPreviewPlayer({
           })}
         </div>
       )}
+
+      {showTextDraftBadge && <PreviewDraftBadge reason="text" />}
 
       <TransformOverlay
         sequence={sequence}

@@ -33,6 +33,7 @@ import {
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
 import { getClipMaxMotionScale, getClipMotionTransformAtTime } from '@/utils/clipMotion';
 import { computeContainFit, scaleFontSizeToCanvas } from '@/utils/previewCoords';
+import { cssFontShorthand, ensureBundledPreviewFontsLoaded } from '@/utils/previewFonts';
 import { getActiveVisualLayers } from '@/utils/renderGraphLayers';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
@@ -1049,6 +1050,39 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     requestRenderFrame(usePlaybackStore.getState().currentTime);
   }, [parkedSegmentKey, isPlaying, requestRenderFrame]);
 
+  // The draw function the font-load redraw below reaches for.
+  //
+  // `requestRenderFrame` is rebuilt whenever the clips, assets or sequence
+  // format change. Depending on it directly would re-run the load effect on
+  // every one of those and queue a redundant redraw each time, when the faces
+  // load exactly once per session.
+  const requestRenderFrameRef = useRef(requestRenderFrame);
+  useEffect(() => {
+    requestRenderFrameRef.current = requestRenderFrame;
+  }, [requestRenderFrame]);
+
+  // Redraw once the bundled faces are actually loaded.
+  //
+  // `@font-face` is lazy, and a canvas gives no signal when the face it asked
+  // for was not available: `measureText` just answers in the fallback and the
+  // frame is drawn at the wrong metrics, with nothing to trigger a second pass.
+  // The DOM overlay reflows itself when the load lands; the canvas needs this.
+  useEffect(() => {
+    let cancelled = false;
+
+    void ensureBundledPreviewFontsLoaded().then(() => {
+      if (cancelled || !isMountedRef.current || usePlaybackStore.getState().isPlaying) {
+        return;
+      }
+
+      requestRenderFrameRef.current(usePlaybackStore.getState().currentTime);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Release the decoded frames and the FFmpeg processes behind them when the
   // canvas preview goes away, so nothing keeps decoding for a player that is no
   // longer on screen.
@@ -1444,8 +1478,6 @@ function renderCaptionClipToCanvas(
   }
 
   const fontSizePx = scaleFontSizeToCanvas(style.fontSize, canvasHeight, 12);
-  const fontWeight = String(getCaptionFontWeightNumber(style));
-  const fontStyle = style.italic ? 'italic ' : '';
   const lineHeight = fontSizePx * (style.lineHeight ?? 1.2);
   const letterSpacing = style.letterSpacing ?? 0;
 
@@ -1470,7 +1502,16 @@ function renderCaptionClipToCanvas(
 
   ctx.save();
   ctx.globalAlpha = clip.opacity * (style.opacity ?? 1);
-  ctx.font = `${fontStyle}${fontWeight} ${fontSizePx}px ${style.fontFamily}`;
+  // The shared builder resolves the family the way the exporter does, so a
+  // caption stored in the `Arial` placeholder draws in the face the export
+  // substitutes for it rather than in the host's Arial, and it quotes the
+  // result — the form that holds for any name a stored style can carry.
+  ctx.font = cssFontShorthand({
+    fontFamily: style.fontFamily,
+    fontSizePx,
+    fontWeight: getCaptionFontWeightNumber(style),
+    italic: style.italic,
+  });
   ctx.textAlign = style.alignment;
   ctx.textBaseline = 'middle';
 

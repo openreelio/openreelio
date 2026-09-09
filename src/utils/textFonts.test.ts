@@ -5,6 +5,7 @@ import {
   BUNDLED_TEXT_FONT_FAMILIES,
   DEFAULT_TEXT_FONT_FAMILY,
   DEFAULT_TEXT_FONT_FAMILIES,
+  PLACEHOLDER_FONT_FAMILY_ALIASES,
   mergeTextFontFamilies,
 } from './textFonts';
 
@@ -54,6 +55,33 @@ function rustTextFamilies(): string[] {
   return families;
 }
 
+/**
+ * The placeholder aliases the Rust registry carries, in declaration order.
+ *
+ * `DEFAULT_BUNDLED_FAMILY` appears as an identifier rather than a literal in
+ * the table, so it is substituted here the same way the compiler would.
+ */
+function rustPlaceholderAliases(): Array<[string, string]> {
+  const source = readBundledFontsSource();
+  const table = source.match(
+    /const PLACEHOLDER_FAMILY_ALIASES: &\[\(&str, &str\)\] = &\[([\s\S]*?)\];/,
+  )?.[1];
+  if (!table) {
+    return [];
+  }
+
+  const defaultFamily = source.match(/pub const DEFAULT_BUNDLED_FAMILY: &str = "([^"]+)";/)?.[1];
+
+  return [...table.matchAll(/\(\s*"([^"]+)"\s*,\s*([^)]+?)\s*\)/g)].map((match) => {
+    const target = match[2].trim();
+    const literal = target.match(/^"([^"]+)"$/)?.[1];
+    return [
+      match[1],
+      literal ?? (target === 'DEFAULT_BUNDLED_FAMILY' ? (defaultFamily ?? '') : target),
+    ];
+  });
+}
+
 /** The family the Rust registry substitutes when nothing was picked. */
 function rustDefaultFamily(): string {
   const source = readBundledFontsSource();
@@ -97,6 +125,29 @@ describe('textFonts', () => {
       expect(match?.[1], SYNC_HINT).toBeTruthy();
       expect(BUNDLED_TEXT_FONT_FAMILIES, SYNC_HINT).not.toContain(match?.[1]);
       expect(DEFAULT_TEXT_FONT_FAMILIES, SYNC_HINT).not.toContain(match?.[1]);
+    });
+
+    it('should mirror the placeholder aliases the exporter resolves before embedding', () => {
+      // The preview resolves a stored family through this table before it draws
+      // (`resolvePreviewFontFamily`), so an alias here that the exporter does
+      // not have — or the reverse — is a caption drafted in one typeface and
+      // shipped in another.
+      const rustAliases = rustPlaceholderAliases();
+
+      expect(rustAliases.length, `${SYNC_HINT} No alias entries were parsed.`).toBeGreaterThan(0);
+      expect(
+        PLACEHOLDER_FONT_FAMILY_ALIASES.map(([a, b]) => [a, b]),
+        SYNC_HINT,
+      ).toEqual(rustAliases);
+    });
+
+    it('should alias only onto families the exporter actually ships', () => {
+      for (const [placeholder, bundled] of PLACEHOLDER_FONT_FAMILY_ALIASES) {
+        expect(BUNDLED_TEXT_FONT_FAMILIES, SYNC_HINT).toContain(bundled);
+        // A family we ship needs no alias, and aliasing one away would override
+        // a deliberate pick.
+        expect(BUNDLED_TEXT_FONT_FAMILIES, SYNC_HINT).not.toContain(placeholder);
+      }
     });
 
     it('should offer every bundled family ahead of the host suggestions', () => {
