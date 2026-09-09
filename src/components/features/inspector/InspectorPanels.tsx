@@ -1820,7 +1820,6 @@ type CaptionStyleField = keyof Pick<
  */
 const CAPTION_FONT_FAMILIES = [
   ...BUNDLED_TEXT_FONT_FAMILIES,
-  'Arial',
   'Helvetica',
   'Verdana',
   'Inter',

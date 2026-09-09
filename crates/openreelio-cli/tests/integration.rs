@@ -11031,7 +11031,9 @@ fn test_caption_style_pack_applies_and_is_overridable() {
     let list = run_cli_ok(&["caption", "list", "--path", &path]);
     let caption = &list["captions"][0];
     let caption_id = caption["id"].as_str().unwrap().to_string();
-    assert_eq!(caption["style"]["fontFamily"], "Arial");
+    // The packs name a bundled family so the burn-in embeds the face it draws
+    // with; "Arial" is not shipped and used to leave the typeface to the host.
+    assert_eq!(caption["style"]["fontFamily"], "TikTok Sans");
     assert_eq!(caption["style"]["fontSize"], 48);
     assert_eq!(caption["style"]["backgroundColor"]["a"], 180);
     assert_eq!(caption["position"]["type"], "preset");

@@ -904,11 +904,18 @@ pub async fn app_cleanup(_state: State<'_, AppState>) -> Result<AppCleanupResult
     })
 }
 
-/// Lists installed system font family names for text editing controls.
+/// Lists the font families a text editing control should offer.
+///
+/// This is the picker's list: everything installed on this host plus a curated
+/// suggestion set, so the dropdown still names the families a project is likely
+/// to carry. It is deliberately *not* a statement about what is installed - the
+/// renderer asks `system_font_family_installed` for that, and conflating the
+/// two is what used to make caption burn-in depend on the host's font set. The
+/// command keeps its name so the frontend contract is unchanged.
 #[tauri::command]
 #[specta::specta]
 pub async fn list_system_font_families() -> Result<Vec<String>, String> {
-    tokio::task::spawn_blocking(crate::core::text::fonts::list_system_font_families)
+    tokio::task::spawn_blocking(crate::core::text::fonts::list_font_picker_suggestions)
         .await
         .map_err(|error| format!("Failed to list system fonts: {error}"))
 }

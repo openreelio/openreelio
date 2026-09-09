@@ -20,7 +20,14 @@ async appCleanup() : Promise<Result<AppCleanupResult, string>> {
 }
 },
 /**
- * Lists installed system font family names for text editing controls.
+ * Lists the font families a text editing control should offer.
+ * 
+ * This is the picker's list: everything installed on this host plus a curated
+ * suggestion set, so the dropdown still names the families a project is likely
+ * to carry. It is deliberately *not* a statement about what is installed - the
+ * renderer asks `system_font_family_installed` for that, and conflating the
+ * two is what used to make caption burn-in depend on the host's font set. The
+ * command keeps its name so the frontend contract is unchanged.
  */
 async listSystemFontFamilies() : Promise<Result<string[], string>> {
     try {
@@ -9653,8 +9660,18 @@ text: string }
  */
 export type TextStyle = { 
 /**
- * Font family name (system font)
- * Common values: "Arial", "Helvetica", "Times New Roman", "Georgia", "Courier New"
+ * Font family name.
+ * 
+ * Prefer a family the app ships, because those are carried inside the
+ * burn-in script and therefore render the same on every machine:
+ * `"TikTok Sans"` (the default), `"Montserrat"`, `"Poppins"`, `"Anton"`,
+ * `"Archivo Black"`, `"Bebas Neue"`, `"Bangers"`, `"Luckiest Guy"`.
+ * 
+ * Any other name is resolved against the fonts installed on the machine
+ * doing the render, so the result differs per host and export validation
+ * warns when it cannot be found at all. `"Arial"` is accepted only as a
+ * back-compat placeholder from older projects and renders as the bundled
+ * default; do not choose it for new text.
  */
 fontFamily: string; 
 /**

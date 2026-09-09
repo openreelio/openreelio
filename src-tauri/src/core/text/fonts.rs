@@ -22,8 +22,24 @@ use walkdir::WalkDir;
 
 const MAX_FONT_FILES_TO_SCAN: usize = 4096;
 const MAX_FONT_FILE_BYTES: u64 = 64 * 1024 * 1024;
-const DEFAULT_FONT_FAMILIES: &[&str] = &[
-    "Arial",
+
+/// Families a font picker offers whether or not this host has them.
+///
+/// These are suggestions, not facts. The list used to be folded into the
+/// scanned catalog, which made [`system_font_family_installed`] answer `true`
+/// for every name in it on every machine - so `"Arial"`, the family every
+/// caption pack and every text default asked for, looked installed on a Linux
+/// box that has never seen it and the renderer took the host-font path instead
+/// of embedding a face. Keeping the two apart is what makes the burn-in
+/// reproducible: only [`list_font_picker_suggestions`] may read this.
+///
+/// `"Arial"` is deliberately absent. We do not ship it, so offering it hands
+/// the user a name that silently renders as the bundled default; the bundled
+/// family is offered under its own name instead, so a pick and the face that
+/// draws it agree. Everything else here is a family a user may genuinely want
+/// off their own machine, and picking one is a deliberate host-font choice.
+const FONT_PICKER_SUGGESTIONS: &[&str] = &[
+    "TikTok Sans",
     "Helvetica",
     "Verdana",
     "Inter",
@@ -65,23 +81,66 @@ fn system_font_families() -> &'static [String] {
     SYSTEM_FONT_FAMILY_CACHE.get_or_init(scan_system_font_families)
 }
 
-/// Returns installed font family names discovered from standard system folders.
+/// Returns the families a font picker should offer.
+///
+/// Everything this host actually has, plus [`FONT_PICKER_SUGGESTIONS`] so the
+/// dropdown still names the families a project is likely to carry. A name that
+/// came only from the suggestion list is *not* a claim that the font is
+/// installed - ask [`system_font_family_installed`] for that.
 ///
 /// This copies the whole catalog, which on a well-stocked machine is thousands
 /// of names. Callers that only need a membership test should use
 /// [`system_font_family_installed`] instead - export validation asks once per
 /// text clip, and a copy per question is pure waste.
-pub fn list_system_font_families() -> Vec<String> {
+pub fn list_font_picker_suggestions() -> Vec<String> {
+    merge_picker_suggestions(system_font_families())
+}
+
+/// Returns the family names this host genuinely has installed.
+///
+/// The scanned catalog with nothing added. Ask this when the answer has to be
+/// a fact about the machine; ask [`list_font_picker_suggestions`] when it only
+/// has to fill a dropdown.
+///
+/// Nothing outside this crate calls it today, and its only caller is a test, so
+/// narrowing it to `pub(crate)` just trades the wide visibility for a dead-code
+/// warning. It stays `pub` as the honest counterpart to
+/// [`list_font_picker_suggestions`]; a caller that only needs a membership test
+/// should use [`system_font_family_installed`] rather than a copy of every name
+/// on the machine.
+pub fn list_installed_font_families() -> Vec<String> {
     system_font_families().to_vec()
 }
 
-/// Returns whether `family` names an installed font, ignoring case.
+/// Returns whether `family` names a font installed on this host, ignoring case.
+///
+/// Reads only the scanned catalog. The renderer branches on this to decide
+/// between embedding a face and letting libass resolve one, so a name that is
+/// merely *offered* by the picker must never answer `true` here.
 pub fn system_font_family_installed(family: &str) -> bool {
+    catalog_contains_family(system_font_families(), family)
+}
+
+/// Returns whether `catalog` holds `family`, ignoring case and surrounding space.
+fn catalog_contains_family(catalog: &[String], family: &str) -> bool {
     let family = family.trim();
 
-    system_font_families()
+    catalog
         .iter()
         .any(|installed| installed.eq_ignore_ascii_case(family))
+}
+
+/// Returns `installed` widened with the suggestion list, sorted and deduplicated.
+fn merge_picker_suggestions(installed: &[String]) -> Vec<String> {
+    let mut families: BTreeSet<String> = installed.iter().cloned().collect();
+
+    for family in FONT_PICKER_SUGGESTIONS {
+        if !catalog_contains_family(installed, family) {
+            families.insert((*family).to_string());
+        }
+    }
+
+    families.into_iter().collect()
 }
 
 /// Returns standard OS font directories that currently exist.
@@ -130,10 +189,6 @@ fn scan_system_font_families() -> Vec<String> {
         }
 
         scan_font_directory(&directory, &mut families, &mut scanned_files);
-    }
-
-    for family in DEFAULT_FONT_FAMILIES {
-        families.insert((*family).to_string());
     }
 
     families.into_iter().collect()
@@ -624,6 +679,69 @@ mod tests {
             parse_font_families(&bytes),
             vec!["OpenReelio Sans".to_string()]
         );
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a picker suggestion is not evidence that the font is installed
+    ///
+    /// The suggestion list used to be folded into the scanned catalog, so
+    /// `system_font_family_installed("Arial")` answered `true` on a machine
+    /// with no Arial. The renderer reads that answer to decide whether to embed
+    /// a face, so the whole default caption path silently fell through to
+    /// whatever font the host happened to rank first.
+    #[test]
+    fn a_picker_suggestion_is_not_reported_as_installed() {
+        let installed = vec!["Only Installed Family".to_string()];
+
+        for family in FONT_PICKER_SUGGESTIONS {
+            assert!(
+                !catalog_contains_family(&installed, family),
+                "{family} is a suggestion, not an installed font"
+            );
+        }
+    }
+
+    #[test]
+    fn the_picker_offers_the_suggestions_on_top_of_what_is_installed() {
+        let installed = vec!["Only Installed Family".to_string()];
+        let suggestions = merge_picker_suggestions(&installed);
+
+        assert!(suggestions.contains(&"Only Installed Family".to_string()));
+        for family in FONT_PICKER_SUGGESTIONS {
+            assert!(
+                suggestions.contains(&(*family).to_string()),
+                "the picker must still offer {family}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_picker_does_not_list_an_installed_family_twice() {
+        // The scan reports the host's own spelling; the suggestion list carries
+        // a canonical one. Matching case-insensitively keeps "helvetica" and
+        // "Helvetica" from both reaching the dropdown.
+        let duplicated = FONT_PICKER_SUGGESTIONS
+            .first()
+            .expect("the picker offers at least one suggestion");
+        let installed = vec![duplicated.to_lowercase()];
+        let suggestions = merge_picker_suggestions(&installed);
+
+        assert_eq!(
+            suggestions
+                .iter()
+                .filter(|family| family.eq_ignore_ascii_case(duplicated))
+                .count(),
+            1,
+            "got: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn catalog_membership_ignores_case_and_surrounding_space() {
+        let installed = vec!["OpenReelio Sans".to_string()];
+
+        assert!(catalog_contains_family(&installed, "  openreelio sans "));
+        assert!(!catalog_contains_family(&installed, "OpenReelio Serif"));
     }
 
     #[test]

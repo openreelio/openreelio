@@ -7,6 +7,7 @@
 import type { TextClipData, TextStyle, Clip, Transform } from '@/types';
 import { isTextClip } from '@/types';
 import { scaleFontSizeToCanvas } from './previewCoords';
+import { DEFAULT_TEXT_FONT_FAMILY } from './textFonts';
 
 // =============================================================================
 // Text Data Extraction
@@ -201,7 +202,7 @@ function createBasicTextData(content: string): TextClipData {
   return {
     content,
     style: {
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       fontSize: 48,
       fontWeight: 400,
       color: '#FFFFFF',

@@ -6,6 +6,7 @@ import { useProjectStore } from '@/stores/projectStore';
 import { readWorkspaceDocumentFromBackend } from '@/services/workspaceGateway';
 import { commands, type AssetAnnotation } from '@/bindings';
 import type { Clip, Sequence, Track } from '@/types';
+import { DEFAULT_TEXT_FONT_FAMILY } from '@/utils/textFonts';
 
 vi.mock('@/stores/projectStore', () => ({
   useProjectStore: {
@@ -667,7 +668,7 @@ describe('captionTools', () => {
       sequenceId: 'seq-1',
       trackId: 'track-caption-1',
       language: 'en',
-      trackDefaultStyle: { fontFamily: 'Arial', fontSize: 48 },
+      trackDefaultStyle: { fontFamily: DEFAULT_TEXT_FONT_FAMILY, fontSize: 48 },
       trackDefaultPosition: { type: 'preset', vertical: 'bottom', marginPercent: 5 },
       existingCaption: {
         captionId: 'cap-styled',

@@ -1172,6 +1172,30 @@ On an **update** a pack restyles without moving the caption: `caption update
 replaces whatever position it carries. Pass `--position` when you do want it
 moved.
 
+**Fonts and reproducibility.** Every pack names a family that ships inside the
+binary, and the burn-in carries that face in the script it hands libass, so a
+packed caption **renders the same on Windows, macOS and Linux — for text the
+bundled face covers**. Every bundled family is Latin-only today, so a caption in
+a script none of them has glyphs for — Korean, Japanese, Chinese, emoji — still
+falls back per glyph to the host's fonts and can look different on another
+machine. The exporter detects that and keeps the host font directory on the
+graph so the characters render at all rather than as empty boxes.
+
+`"TikTok Sans"` is the family a new caption or text clip stores when no font was
+chosen. `"Arial"` is the placeholder projects made before that carry; it is not
+shipped, so it resolves to the same bundled `TikTok Sans` rather than to
+whatever a given host calls Arial. Do not ask for `"Arial"` in new work — name a
+bundled family, or a host family you actually want. A family you choose
+deliberately — anything the font picker offers that is not bundled — is resolved
+against that machine's installed fonts, so it renders with that host's copy and
+can differ elsewhere. `verify` and export validation report a chosen family that
+could not be found at all.
+
+This is a guarantee about the **rendered file**, not about the editor. The live
+preview draws captions in the webview with its own fonts, so a caption can wrap
+differently there than in the export; inspect a render (`frame extract`,
+`render start --proxy`) when the exact line breaks matter.
+
 ### Text presets
 
 `--preset` is the same idea for text overlays: one id supplies typography,

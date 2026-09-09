@@ -6,6 +6,7 @@ import {
   getTextFontWeightNumber,
 } from './textRenderer';
 import type { Clip, TextClipData } from '@/types';
+import { DEFAULT_TEXT_FONT_FAMILY } from './textFonts';
 
 function createClip(overrides: Partial<Clip> = {}): Clip {
   return {
@@ -69,7 +70,9 @@ describe('extractTextDataFromClipWithMap', () => {
     const result = extractTextDataFromClipWithMap(clip);
 
     expect(result?.content).toBe('Hello fallback');
-    expect(result?.style.fontFamily).toBe('Arial');
+    // A clip built from a bare label still stores a family the exporter ships,
+    // so it burns in the same everywhere rather than resolving off the host.
+    expect(result?.style.fontFamily).toBe(DEFAULT_TEXT_FONT_FAMILY);
   });
 });
 

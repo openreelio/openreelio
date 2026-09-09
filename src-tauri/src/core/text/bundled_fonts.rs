@@ -45,6 +45,73 @@ pub struct BundledFont {
 /// otherwise fall back to whatever the host font provider ranks first.
 pub const DEFAULT_BUNDLED_FAMILY: &str = "TikTok Sans";
 
+/// The family a caption or text style carries when the user chose none.
+///
+/// Every "no font was picked" default in the tree - [`CaptionStyle::default`],
+/// [`TextStyle::default`], the curated caption packs, the curated text presets
+/// that do not name a typeface on purpose, and the `font_family` parameter
+/// fallbacks on both render paths - names this rather than a family we do not
+/// ship. Storing the face that actually renders is what keeps the common path
+/// off [`PLACEHOLDER_FAMILY_ALIASES`], which stays behind purely so projects
+/// written before this still resolve.
+///
+/// The TypeScript side mirrors this as `DEFAULT_TEXT_FONT_FAMILY` in
+/// `src/utils/textFonts.ts`, which is this file's copy rather than a second
+/// source of truth; `textFonts.test.ts` pins the two together.
+///
+/// [`CaptionStyle::default`]: crate::core::captions::CaptionStyle
+/// [`TextStyle::default`]: crate::core::text::TextStyle
+pub const DEFAULT_TEXT_FONT_FAMILY: &str = DEFAULT_BUNDLED_FAMILY;
+
+/// Families this codebase writes as its own "no font was chosen" placeholder,
+/// mapped onto the bundled face that renders them.
+///
+/// `"Arial"` was not a user's choice: it was the literal every caption pack,
+/// every non-deliberate text preset, the `CaptionStyle`/`TextStyle` defaults
+/// and the `font_family` parameter fallback emitted when nothing was picked.
+/// We do not ship Arial, so on a host that has it the burn-in used the host's
+/// copy and on a host that does not it used some other face entirely - the
+/// same project, a different typeface per machine. Mapping the placeholder onto a bundled family makes that path embed
+/// a face and render identically everywhere.
+///
+/// This table is now **only** a back-compat shim. Every live default in the
+/// tree - the two style defaults, the caption packs, the text presets, the
+/// render-path parameter fallbacks and their TypeScript mirrors - names
+/// [`DEFAULT_TEXT_FONT_FAMILY`] directly, so nothing written today depends on
+/// it; it stays so op logs written before that change still resolve to the face
+/// they have always rendered with.
+/// `every_text_preset_applied_today_stores_a_shipped_family` in
+/// `core::style::contract_tests` is the guard that keeps the preset catalog off
+/// it. Do not add entries for families a user can deliberately pick - see below.
+///
+/// `"TikTok Sans"` is the substitute because it is the only bundled
+/// neo-grotesque, a neutral large-x-height UI sans in Arial's role, while the
+/// rest of the registry is geometric (Montserrat, Poppins) or display (Anton,
+/// Bebas Neue, Archivo Black, Bangers, Luckiest Guy). It also ships a real Bold, so a
+/// `FontWeight::Bold` caption gets a drawn bold rather than a synthesized one,
+/// and it is already [`DEFAULT_BUNDLED_FAMILY`], so an aliased request and an
+/// unresolvable one land on the same face.
+///
+/// Deliberately only the placeholder. Every other family a picker offers
+/// (Helvetica, Georgia, Impact) is something a user typed or chose, and those
+/// keep resolving against the host so a deliberate choice is never overridden.
+const PLACEHOLDER_FAMILY_ALIASES: &[(&str, &str)] = &[("Arial", DEFAULT_BUNDLED_FAMILY)];
+
+/// Returns the bundled family a placeholder family name stands in for.
+///
+/// `None` for anything that is not one of the placeholders, including families
+/// that are themselves bundled - callers resolve those directly first.
+pub fn resolve_placeholder_alias(family: &str) -> Option<&'static str> {
+    // `lookup_key` already drops every whitespace character, leading and
+    // trailing included, so trimming first would be a second pass for nothing.
+    let key = lookup_key(family);
+
+    PLACEHOLDER_FAMILY_ALIASES
+        .iter()
+        .find(|(placeholder, _)| lookup_key(placeholder) == key)
+        .map(|(_, bundled)| *bundled)
+}
+
 macro_rules! bundled_font {
     ($family:literal, $file:literal, $path:literal) => {
         BundledFont {
@@ -265,6 +332,82 @@ mod tests {
     #[test]
     fn the_substitution_default_is_itself_bundled() {
         assert!(resolve_bundled(DEFAULT_BUNDLED_FAMILY).is_some());
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: the placeholder family resolves to something we ship
+    #[test]
+    fn every_placeholder_alias_points_at_a_bundled_family() {
+        for (placeholder, bundled) in PLACEHOLDER_FAMILY_ALIASES {
+            assert!(
+                resolve_bundled(placeholder).is_none(),
+                "{placeholder} is bundled, so it needs no alias"
+            );
+            assert!(
+                resolve_bundled(bundled).is_some(),
+                "{placeholder} is aliased to {bundled}, which is not compiled in"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arial_placeholder_resolves_to_the_bundled_grotesque() {
+        assert_eq!(resolve_placeholder_alias("Arial"), Some("TikTok Sans"));
+        assert_eq!(resolve_placeholder_alias("  arial "), Some("TikTok Sans"));
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a new clip stores the face it renders with
+    ///
+    /// The data model cannot tell "nobody picked a font" from "the user picked
+    /// Arial" - both are a bare family string - so as long as the defaults
+    /// emitted `"Arial"` a deliberate Arial pick was silently swapped for the
+    /// bundled face with no warning. Naming the bundled family in the defaults
+    /// leaves the alias below to mean only what it says: an old op log.
+    #[test]
+    fn a_freshly_defaulted_style_names_a_family_we_ship() {
+        for family in [
+            crate::core::captions::CaptionStyle::default().font_family,
+            crate::core::text::TextStyle::default().font_family,
+        ] {
+            assert_eq!(family, DEFAULT_TEXT_FONT_FAMILY);
+            assert!(
+                resolve_bundled(&family).is_some(),
+                "{family} must be a face we ship, not a placeholder"
+            );
+        }
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a project written before the defaults changed still resolves
+    #[test]
+    fn a_style_stored_before_the_defaults_changed_still_reaches_the_bundled_face() {
+        // Op logs are append-only, so every caption and text clip created
+        // before this carries "Arial" forever. The alias is the only thing
+        // keeping those projects on the face they have always rendered with.
+        let stored = crate::core::captions::CaptionStyle {
+            font_family: "Arial".to_string(),
+            ..Default::default()
+        };
+
+        assert!(
+            resolve_bundled(&stored.font_family).is_none(),
+            "we do not ship Arial; the alias is the only path"
+        );
+        assert_eq!(
+            resolve_placeholder_alias(&stored.font_family),
+            Some(DEFAULT_TEXT_FONT_FAMILY)
+        );
+    }
+
+    #[test]
+    fn a_family_a_user_chose_is_not_aliased_away() {
+        // Only the placeholder is redirected. Helvetica, Georgia and Impact are
+        // deliberate picks, so they keep resolving against the host font set
+        // even though we do not ship them.
+        for family in ["Helvetica", "Georgia", "Impact", "Courier New", ""] {
+            assert_eq!(resolve_placeholder_alias(family), None, "{family}");
+        }
     }
 
     #[test]

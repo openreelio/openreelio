@@ -18,7 +18,7 @@ use crate::core::{
     captions::{CAPTION_CUSTOM_DEFAULT_Y_PERCENT, CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT},
     commands::{get_text_data, is_text_clip},
     project::ProjectState,
-    text::{TextAlignment, TextClipData},
+    text::{bundled_fonts::DEFAULT_TEXT_FONT_FAMILY, TextAlignment, TextClipData},
     timeline::{AudioSettings, BlendMode, SequenceFormat, TimelineClock, TrackKind, Transform},
     AssetId, ClipId, CoreError, CoreResult, EffectId, Frame, SequenceId, TimeSec, TrackId,
 };
@@ -279,7 +279,7 @@ impl TextRenderSpec {
         let font_family = style_object
             .and_then(|object| json_string(object, &["fontFamily", "font_family"]))
             .map(|value| normalize_font_family(&value))
-            .unwrap_or_else(|| "Arial".to_string());
+            .unwrap_or_else(|| DEFAULT_TEXT_FONT_FAMILY.to_string());
         let font_size_px = style_object
             .and_then(|object| json_number(object, &["fontSize", "font_size"]))
             .map(|value| clamp_finite(value, 1.0, 500.0, 48.0))
@@ -600,7 +600,7 @@ fn clamp_finite(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
 fn normalize_font_family(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        "Arial".to_string()
+        DEFAULT_TEXT_FONT_FAMILY.to_string()
     } else {
         trimmed.to_string()
     }

@@ -481,7 +481,7 @@ mod tests {
             name: "YouTube Style".to_string(),
             category: "modern".to_string(),
             style: serde_json::json!({
-                "fontFamily": "Arial",
+                "fontFamily": "TikTok Sans",
                 "fontSize": 24,
                 "color": "#FFFFFF",
                 "stroke": "#000000",

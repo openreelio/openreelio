@@ -168,6 +168,17 @@ pub struct CaptionPackDescriptor {
     pub position: CaptionPosition,
 }
 
+/// The family every curated caption pack names.
+///
+/// The packs used to say `"Arial"`, which we do not ship: the burn-in then
+/// picked whatever the host called Arial, or something else entirely on a host
+/// without it, so one project rendered in a different typeface per machine.
+/// Naming a bundled family instead makes the script embed the face it draws
+/// with, so a pack renders identically everywhere. Captions created before this
+/// still carry `"Arial"` in their op log and reach the same face through the
+/// placeholder alias in `core::text::bundled_fonts`.
+const BUNDLED_CAPTION_FAMILY: &str = crate::core::text::bundled_fonts::DEFAULT_BUNDLED_FAMILY;
+
 /// White at full opacity.
 const WHITE: Color = Color {
     r: 255,
@@ -194,7 +205,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         description: "General-purpose subtitle: white text with a thin black outline and a soft \
                       drop shadow. The safe default when the brief says nothing about styling.",
         aliases: &["standard", "default"],
-        font_family: "Arial",
+        font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 48,
         font_weight: FontWeight::Normal,
         color: WHITE,
@@ -219,7 +230,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         description: "Unadorned white text with no outline, shadow, or box. Use only over \
                       controlled, consistently dark footage.",
         aliases: &["minimal", "clean"],
-        font_family: "Arial",
+        font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 48,
         font_weight: FontWeight::Normal,
         color: WHITE,
@@ -239,7 +250,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         description: "White text on a translucent black box. Survives busy or bright backgrounds \
                       where an outline alone breaks down.",
         aliases: &["boxed", "box"],
-        font_family: "Arial",
+        font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 48,
         font_weight: FontWeight::Normal,
         color: WHITE,
@@ -264,7 +275,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         description: "Broadcast-legacy yellow subtitle with black outline and shadow. Reads as \
                       dialogue subtitling rather than on-screen graphics.",
         aliases: &["yellow", "classic"],
-        font_family: "Arial",
+        font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 48,
         font_weight: FontWeight::Normal,
         color: Color {
@@ -294,7 +305,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         description: "Large bold white text with a thick black outline, lifted to an 18% bottom \
                       margin so vertical-platform UI does not cover it.",
         aliases: &["shorts", "reels", "tiktok", "vertical"],
-        font_family: "Arial",
+        font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 72,
         font_weight: FontWeight::Bold,
         color: WHITE,
@@ -319,7 +330,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         description: "Left-aligned boxed name plate anchored in the lower-left third, for \
                       attribution rather than dialogue.",
         aliases: &["broadcast", "lower-third"],
-        font_family: "Arial",
+        font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 40,
         font_weight: FontWeight::Bold,
         color: WHITE,
@@ -353,7 +364,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         description: "Oversized bold white text on a near-opaque black box. Highest legibility \
                       floor for small screens and low-vision viewers.",
         aliases: &["accessible", "a11y", "high-contrast"],
-        font_family: "Arial",
+        font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 64,
         font_weight: FontWeight::Bold,
         color: WHITE,
@@ -378,7 +389,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         description: "Outlined white text anchored to the top of frame, for shots whose action \
                       or burned-in graphics own the lower half.",
         aliases: &["top", "top-caption"],
-        font_family: "Arial",
+        font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 48,
         font_weight: FontWeight::Normal,
         color: WHITE,

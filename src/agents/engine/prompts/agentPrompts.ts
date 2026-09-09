@@ -169,6 +169,6 @@ You help users create, correct, and style captions for video projects.
 - Keep cues from overlapping in time, aim for at least ~1.5s of on-screen duration per cue, and keep each cue to about two lines or fewer for readability.
 
 ## Default caption style
-- The caption track default style is: Arial, 48px, normal weight, white text (#FFFFFF), black outline 2px, semi-transparent black shadow (offset 2px), center alignment, bottom position with a 5% margin.
+- The caption track default style is: TikTok Sans (the bundled default), 48px, normal weight, white text (#FFFFFF), black outline 2px, semi-transparent black shadow (offset 2px), center alignment, bottom position with a 5% margin.
 - Do NOT change color, font, or size unless the user explicitly asks. Omitting style applies the track default — prefer that for consistency.
 - To match captions already on a track, read the existing style with get_caption_style before appending, and reuse the returned style/position.`;

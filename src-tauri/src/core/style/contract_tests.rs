@@ -21,6 +21,9 @@
 //!   stores the exact [`TextClipData`](crate::core::text::TextClipData) the
 //!   registry declares, leaves no preset id behind in the logged op, and
 //!   renders its own typography into the overlay `drawtext` filter;
+//! * every text preset applied today stores a family this build ships - bundled,
+//!   or one of the four documented deliberate host picks - so a fresh clip never
+//!   depends on the back-compat placeholder alias;
 //! * `src/data/textPresets.manifest.json` still equals this registry, which is
 //!   what stops the TypeScript catalog from drifting away from it.
 
@@ -1220,6 +1223,38 @@ fn every_text_preset_alias_resolves_to_the_same_clip_data() {
                 preset.id
             );
         }
+    }
+}
+
+/// Families a preset may name that this build does not compile in.
+///
+/// Each is a deliberate editorial pick - the typeface *is* the preset - and is
+/// documented as such on `TextPresetSpec::font_family`. Anything outside this
+/// list has to be bundled, which is what keeps a freshly applied preset off the
+/// placeholder alias in `core::text::bundled_fonts`.
+const DELIBERATE_HOST_PRESET_FAMILIES: &[&str] = &["Helvetica", "Impact", "Georgia", "Courier New"];
+
+#[test]
+fn every_text_preset_applied_today_stores_a_shipped_family() {
+    for preset in TEXT_PRESETS {
+        let (state, clip) = add_text_clip_with_preset(preset.id, None);
+        let stored = crate::core::commands::get_text_data(&clip, &state)
+            .unwrap_or_else(|| panic!("preset '{}' must store text data", preset.id));
+        let family = stored.style.font_family.as_str();
+
+        assert!(
+            crate::core::text::bundled_fonts::resolve_placeholder_alias(family).is_none(),
+            "preset '{}' stores the placeholder family '{family}': a preset applied today has to              record the face that draws it, not a name that only resolves through the              back-compat alias",
+            preset.id
+        );
+
+        let bundled = crate::core::text::bundled_fonts::resolve_bundled(family).is_some();
+        let deliberate = DELIBERATE_HOST_PRESET_FAMILIES.contains(&family);
+        assert!(
+            bundled || deliberate,
+            "preset '{}' names '{family}', which is neither bundled nor one of the documented              deliberate host families {DELIBERATE_HOST_PRESET_FAMILIES:?}",
+            preset.id
+        );
     }
 }
 

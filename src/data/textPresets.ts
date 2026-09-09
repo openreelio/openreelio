@@ -16,6 +16,7 @@
  */
 
 import type { TextStyle, TextPosition, TextShadow, TextOutline, TextClipData } from '@/types';
+import { DEFAULT_TEXT_FONT_FAMILY } from '@/utils/textFonts';
 
 // =============================================================================
 // Types
@@ -75,7 +76,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'lower-third',
     style: {
       fontSize: 42,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: true,
       italic: false,
@@ -134,7 +135,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'lower-third',
     style: {
       fontSize: 40,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: true,
       italic: false,
@@ -198,7 +199,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'title',
     style: {
       fontSize: 72,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: true,
       italic: false,
@@ -292,7 +293,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'title',
     style: {
       fontSize: 58,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: true,
       italic: false,
@@ -321,7 +322,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'subtitle',
     style: {
       fontSize: 32,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: false,
       italic: false,
@@ -346,7 +347,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'subtitle',
     style: {
       fontSize: 34,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: true,
       italic: false,
@@ -378,7 +379,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'callout',
     style: {
       fontSize: 48,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFD700',
       bold: true,
       italic: false,
@@ -415,7 +416,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'callout',
     style: {
       fontSize: 24,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: false,
       italic: false,
@@ -440,7 +441,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'callout',
     style: {
       fontSize: 82,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#38BDF8',
       bold: true,
       italic: false,
@@ -474,7 +475,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'callout',
     style: {
       fontSize: 46,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#111827',
       bold: true,
       italic: false,
@@ -537,7 +538,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'credit',
     style: {
       fontSize: 24,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#E5E7EB',
       bold: false,
       italic: false,
@@ -562,7 +563,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'brand',
     style: {
       fontSize: 24,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: true,
       italic: false,
@@ -587,7 +588,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'brand',
     style: {
       fontSize: 30,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: true,
       italic: false,
@@ -677,7 +678,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     category: 'creative',
     style: {
       fontSize: 24,
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       color: '#FFFFFF',
       bold: false,
       italic: false,

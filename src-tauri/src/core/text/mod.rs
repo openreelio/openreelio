@@ -63,8 +63,18 @@ pub enum TextAlignment {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TextStyle {
-    /// Font family name (system font)
-    /// Common values: "Arial", "Helvetica", "Times New Roman", "Georgia", "Courier New"
+    /// Font family name.
+    ///
+    /// Prefer a family the app ships, because those are carried inside the
+    /// burn-in script and therefore render the same on every machine:
+    /// `"TikTok Sans"` (the default), `"Montserrat"`, `"Poppins"`, `"Anton"`,
+    /// `"Archivo Black"`, `"Bebas Neue"`, `"Bangers"`, `"Luckiest Guy"`.
+    ///
+    /// Any other name is resolved against the fonts installed on the machine
+    /// doing the render, so the result differs per host and export validation
+    /// warns when it cannot be found at all. `"Arial"` is accepted only as a
+    /// back-compat placeholder from older projects and renders as the bundled
+    /// default; do not choose it for new text.
     pub font_family: String,
 
     /// Font size in points (12-200 typical range)
@@ -125,7 +135,7 @@ fn default_line_height() -> f64 {
 impl Default for TextStyle {
     fn default() -> Self {
         Self {
-            font_family: "Arial".to_string(),
+            font_family: bundled_fonts::DEFAULT_TEXT_FONT_FAMILY.to_string(),
             font_size: 48,
             font_weight: default_font_weight(),
             color: "#FFFFFF".to_string(),
@@ -695,7 +705,7 @@ mod tests {
     #[test]
     fn test_text_style_default() {
         let style = TextStyle::default();
-        assert_eq!(style.font_family, "Arial");
+        assert_eq!(style.font_family, bundled_fonts::DEFAULT_TEXT_FONT_FAMILY);
         assert_eq!(style.font_size, 48);
         assert_eq!(style.font_weight, 400);
         assert_eq!(style.color, "#FFFFFF");
@@ -905,7 +915,10 @@ mod tests {
     fn test_text_clip_data_default() {
         let clip = TextClipData::default();
         assert_eq!(clip.content, "Title");
-        assert_eq!(clip.style.font_family, "Arial");
+        assert_eq!(
+            clip.style.font_family,
+            bundled_fonts::DEFAULT_TEXT_FONT_FAMILY
+        );
         assert_eq!(clip.style.font_size, 48);
         assert!((clip.position.x - 0.5).abs() < 0.001);
         assert!((clip.position.y - 0.5).abs() < 0.001);
