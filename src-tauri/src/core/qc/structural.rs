@@ -20,6 +20,8 @@ use crate::core::captions::{CaptionPosition, CaptionStyle, VerticalPosition};
 use crate::core::commands::{find_gaps, get_text_data, is_text_clip};
 use crate::core::project::ProjectState;
 use crate::core::render::transition_stitch::plan_sequence_transitions;
+use crate::core::text::bundled_fonts::{self, DEFAULT_TEXT_FONT_FAMILY};
+use crate::core::text::coverage::{caption_font_stack, FontStack};
 use crate::core::text::emoji::{self, EmojiClass, EmojiCluster};
 use crate::core::text::TextClipData;
 use crate::core::timeline::{Clip, Sequence, Track};
@@ -1327,18 +1329,44 @@ impl CaptionReadingRateRule {
 /// What the burn-in path can do with a colour emoji.
 ///
 /// An enum rather than a boolean because the answer is a property of the
-/// *renderer*, and there is more than one in play: libass as it is configured
-/// today, libass with a colour-emoji layer over it, and the `drawtext` fallback
-/// the export drops to where no subtitle filter is available. Which one is in
-/// force is [`CaptionEmojiRule::RENDER_CAPABILITY`]'s business; the mapping from
-/// renderer to failure lives here, so teaching the rule about real render state
-/// later changes that one constant and nothing else about the check.
+/// *renderer*, and there is more than one in play. Three states matter, and
+/// only one of them is a rendering defect:
+///
+/// - [`HostFallback`](Self::HostFallback) — **unsupported.** No face the script
+///   carries draws the cluster, so libass reaches the machine's own font set.
+///   It rasterizes outlines and reads no `CBDT`/`COLR` table, so a colour emoji
+///   font contributes its flat base outline or nothing, and no host font is
+///   asked for the ligature that would have made a flag a flag. This is where
+///   the picture stops matching the project, and the only state that earns a
+///   finding.
+/// - [`BundledMonochrome`](Self::BundledMonochrome) — **colour loss only.** The
+///   bundled Noto Emoji face draws the cluster from the script's own `[Fonts]`
+///   section, and its `GSUB` ligates keycaps, regional-indicator flags, ZWJ
+///   sequences and skin-tone modifiers into the single glyph each of them is.
+///   What the frame loses is colour, not the emoji: the picture is right,
+///   monochrome, and identical on every OS. Not a finding — proposing to delete
+///   an emoji that renders is a worse edit than the one the author made.
+/// - [`ColorOverlay`](Self::ColorOverlay) — **fully supported.** A colour layer
+///   over the text; the last of the colour loss goes with it. Nothing
+///   constructs it yet; it is the Phase 3 destination.
+///
+/// [`DrawtextFallback`](Self::DrawtextFallback) is the fourth, and it is the
+/// host case without even a subtitle renderer behind it.
+///
+/// Which one is in force is [`CaptionEmojiRule::capability_for`]'s business,
+/// per caption rather than per build: the same export draws one cue from a
+/// bundled face and the next from the host, because the second cue names a
+/// family we do not ship. The mapping from renderer to failure lives here, so
+/// turning the colour path on changes which variant that function returns and
+/// nothing else about the check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmojiRenderCapability {
     /// Colour emoji are drawn as their own layer over the text.
     ColorOverlay,
-    /// One monochrome outline per glyph, which is what libass draws.
-    MonochromeOnly,
+    /// A bundled monochrome emoji face draws the cluster, colour aside.
+    BundledMonochrome,
+    /// No bundled face draws the cluster; libass falls to the host font set.
+    HostFallback,
     /// No subtitle renderer at all: `drawtext` with a single text font.
     DrawtextFallback,
 }
@@ -1361,31 +1389,45 @@ impl EmojiRenderCapability {
             // turns the capability on has to decide which classes stay
             // findings under it rather than inherit this line.
             EmojiRenderCapability::ColorOverlay => None,
-            EmojiRenderCapability::MonochromeOnly => Some(match class {
+            // The face is in the script, its `GSUB` joins the sequence, and the
+            // frame shows the emoji the project names. Only its colour is gone,
+            // and a caller reached here having already established that the
+            // face covers this exact cluster — see
+            // [`CaptionEmojiRule::capability_for`]. Reporting the colour loss
+            // as a rendering defect is what produced findings against emoji
+            // that render, each carrying a proposal to delete them.
+            EmojiRenderCapability::BundledMonochrome => None,
+            EmojiRenderCapability::HostFallback => Some(match class {
                 EmojiClass::TagFlag => {
-                    "the subdivision tags after the base flag have no glyphs, so the burn-in \
-                     draws a plain black flag or nothing at all"
+                    "no bundled face draws this flag, so the burn-in falls to the host font set, \
+                     where the subdivision tags after the base flag have no glyphs: a plain \
+                     black flag, or nothing at all"
                 }
                 EmojiClass::RegionalFlag => {
-                    "the burn-in has no flag ligature, so the regional indicator pair draws as \
-                     its two letters"
+                    "no bundled face draws this flag, so the burn-in falls to the host font set \
+                     and has no flag ligature: the regional indicator pair draws as its two \
+                     letters"
                 }
                 EmojiClass::Keycap => {
-                    "the combining enclosing keycap has no outline, so the burn-in draws the \
-                     digit followed by a tofu box"
+                    "no bundled face draws this keycap, so the burn-in falls to the host font \
+                     set, where the combining enclosing keycap has no outline: the digit, then a \
+                     tofu box"
                 }
                 EmojiClass::ZwjSequence => {
-                    "the zero width joiner is not honoured, so the burn-in draws each emoji the \
-                     sequence was joined from side by side"
+                    "no bundled face draws this sequence, so the burn-in falls to the host font \
+                     set, where the zero width joiner is not honoured: each emoji it was joined \
+                     from is drawn side by side"
                 }
                 EmojiClass::SkinToneModified => {
-                    "the skin tone modifier has no outline of its own, so the burn-in draws the \
-                     base emoji untinted and the modifier as tofu"
+                    "no bundled face draws this emoji, so the burn-in falls to the host font \
+                     set, where the skin tone modifier has no outline of its own: the base emoji \
+                     untinted, and the modifier as tofu"
                 }
                 EmojiClass::Presentation => {
-                    "the burn-in draws one monochrome outline per glyph, so the colour emoji \
-                     comes out as its flat base shape in the text colour, or as tofu where the \
-                     colour font carries no base outline"
+                    "no bundled face draws this emoji, so the burn-in falls to the host font \
+                     set, which it rasterizes as outlines: the colour emoji comes out as its \
+                     flat base shape in the text colour, or as tofu where the host's colour font \
+                     carries no base outline"
                 }
                 // Answered above; repeated only so the match stays exhaustive
                 // without a wildcard that would swallow a future variant.
@@ -1405,6 +1447,18 @@ impl EmojiRenderCapability {
 /// It covers both surfaces the export burns through the same subtitles node —
 /// caption cues and text-overlay clips — because a title card with a flag in it
 /// fails in exactly the way a caption with a flag in it does.
+///
+/// # What is not a finding
+///
+/// An emoji the burn-in *draws*. Since the script started carrying a bundled
+/// monochrome emoji face, a caption set in a family the app ships gets its
+/// keycaps, flags, ZWJ families and skin-tone modifiers ligated out of that
+/// face's own `GSUB`, identically on every OS — the picture is right and only
+/// its colour is gone. Reporting those named defects the frame does not have,
+/// and proposed deleting emoji that render. The rule reconstructs the same
+/// [`FontStack`] the export builds (see
+/// [`caption_font_stack`](crate::core::text::coverage::caption_font_stack))
+/// and reports only what falls past it to the host.
 ///
 /// Findings stay at warning level. The render succeeds and the file plays; what
 /// is wrong is that the frame does not say what the project says, which is a
@@ -1433,15 +1487,24 @@ enum CaptionSurface {
 }
 
 /// Prose carried by every grouped emoji violation.
-const EMOJI_DETAILS: &str = "Each listed cue names its own clusters under `cues[].clusters`, with \
-                             the class that explains the symptom: `presentation` draws as a flat \
-                             monochrome shape or tofu, `regionalFlag` as its two letters (a \
-                             Korean flag reads KR), `keycap` as the digit plus a tofu box, \
-                             `zwjSequence` as the emoji it was joined from, `skinToneModified` \
-                             as an untinted base, `tagFlag` as a plain black flag. The fix \
+const EMOJI_DETAILS: &str = "Only emoji that reach no bundled face are listed. A caption set in a \
+                             family the app ships draws its emoji from the bundled monochrome \
+                             Noto Emoji face, which ligates keycaps, flags, ZWJ sequences and \
+                             skin-tone modifiers correctly; those render as written, lose only \
+                             their colour, and are not reported. What is left here fell to the \
+                             host font set, because the caption names a family the app does not \
+                             ship or the cluster is a code point the bundled emoji face never \
+                             mapped. Each listed cue names its own clusters under \
+                             `cues[].clusters`, with the class that explains the symptom: \
+                             `presentation` draws as a flat monochrome shape or tofu, \
+                             `regionalFlag` as its two letters (a Korean flag reads KR), \
+                             `keycap` as the digit plus a tofu box, `zwjSequence` as the emoji \
+                             it was joined from, `skinToneModified` as an untinted base, \
+                             `tagFlag` as a plain black flag. Setting the caption in a bundled \
+                             family is usually the better fix than the one proposed here, which \
                              deletes the offending clusters and closes the whitespace they leave \
-                             behind, which is a content decision rather than a repair, so it is \
-                             a proposal to read and the group is never automatically fixable. A \
+                             behind: that is a content decision rather than a repair, so it is a \
+                             proposal to read and the group is never automatically fixable. A \
                              caption cue is rewritten with `UpdateCaption`, a text-overlay clip \
                              with `UpdateTextClip` carrying the clip's own `textData` with only \
                              its `content` replaced; a cue whose text would be left empty \
@@ -1453,26 +1516,63 @@ impl CaptionEmojiRule {
         Self
     }
 
-    /// What the burn-in can currently do with emoji.
-    ///
-    /// Constant on purpose. The export writes an ASS script for libass, which
-    /// paints monochrome outlines, and no code path today asks for anything
-    /// else — so deriving this from state would be a lie dressed as a lookup.
-    /// When a colour path exists, this is the line that changes.
-    const RENDER_CAPABILITY: EmojiRenderCapability = EmojiRenderCapability::MonochromeOnly;
-
     /// Confidence carried by the strip proposal.
     ///
     /// Middling by design: that the cluster will be mis-drawn is certain, that
     /// deleting it is what the author wants is not.
     const FIX_CONFIDENCE: f32 = 0.5;
 
-    /// The clusters in `text` this renderer cannot draw, each with why.
-    fn unsupported_clusters(text: &str) -> Vec<(EmojiCluster<'_>, &'static str)> {
+    /// The bundled family an event's `fontFamily` renders as, if any.
+    ///
+    /// Mirrors the first two steps of the export's own resolver, and stops
+    /// there. The third — probing the fonts installed on *this* machine — is
+    /// what the export does at render time on the render host, and asking it
+    /// here would make a structural check answer differently on two computers
+    /// looking at the same project. So a name we neither ship nor alias is
+    /// reported as reaching no bundled face, which is the conservative reading:
+    /// the render may substitute the bundled default for it, and it may equally
+    /// find the family installed and use it.
+    fn bundled_family_of(requested: &str) -> Option<&'static str> {
+        bundled_fonts::resolve_bundled(requested)
+            .map(|font| font.family)
+            .or_else(|| bundled_fonts::resolve_placeholder_alias(requested))
+    }
+
+    /// What the burn-in can do with `cluster` in a caption set in `stack`.
+    ///
+    /// Per cluster rather than per build, because both halves of the question
+    /// vary within one export. A caption whose family we ship reaches the
+    /// bundled emoji tier, and the tier draws the cluster whole — its `GSUB`
+    /// ligates keycaps, flags, ZWJ sequences and skin-tone modifiers — so all
+    /// the frame loses is colour. A caption set in a family we do not ship
+    /// heads no chain at all, and a cluster the emoji face never mapped (a
+    /// codepoint assigned after Noto Emoji 3.002 was built) is not drawn by the
+    /// chain either. Both of those fall to the host, which is the state that
+    /// actually mis-draws.
+    fn capability_for(stack: &FontStack, cluster: &EmojiCluster<'_>) -> EmojiRenderCapability {
+        if stack.covers(cluster.text) {
+            EmojiRenderCapability::BundledMonochrome
+        } else {
+            EmojiRenderCapability::HostFallback
+        }
+    }
+
+    /// The clusters in `text` the burn-in cannot draw, each with why.
+    ///
+    /// `family` is the event's requested font family, which decides whether
+    /// there is a bundled emoji tier to reach at all.
+    fn unsupported_clusters<'a>(
+        text: &'a str,
+        family: &str,
+    ) -> Vec<(EmojiCluster<'a>, &'static str)> {
+        let stack = Self::bundled_family_of(family)
+            .map(caption_font_stack)
+            .unwrap_or_default();
+
         emoji::scan(text)
             .into_iter()
             .filter_map(|cluster| {
-                Self::RENDER_CAPABILITY
+                Self::capability_for(&stack, &cluster)
                     .unsupported_reason(cluster.class)
                     .map(|reason| (cluster, reason))
             })
@@ -1543,6 +1643,22 @@ impl CaptionEmojiRule {
             Some(out)
         }
     }
+}
+
+/// The font family a caption cue's style names, in either spelling.
+///
+/// `caption_style` reaches QC as raw JSON, which op logs have written both
+/// `camelCase` and `snake_case` into; the export reads both for the same
+/// reason, and a check that read only one would decide the wrong renderer for
+/// half the projects in the tree.
+fn caption_style_font_family(clip: &Clip) -> Option<String> {
+    let style = clip.caption_style.as_ref()?.as_object()?;
+
+    style
+        .get("fontFamily")
+        .or_else(|| style.get("font_family"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 /// Writes the separator a closed seam stands for, if anything precedes it.
@@ -1684,7 +1800,20 @@ impl QCRule for CaptionEmojiRule {
                     continue;
                 }
 
-                let clusters = Self::unsupported_clusters(text);
+                // The family decides whether the burn-in can reach a bundled
+                // emoji face for this event at all, so it is read from the same
+                // place the export reads it: a cue's caption style, a title
+                // card's text style, and the shipped default for either when
+                // nothing was chosen.
+                let family = match &surface {
+                    CaptionSurface::Caption => caption_style_font_family(clip),
+                    CaptionSurface::TextOverlay(data) => Some(data.style.font_family.clone()),
+                };
+                let family = family
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| DEFAULT_TEXT_FONT_FAMILY.to_string());
+
+                let clusters = Self::unsupported_clusters(text, &family);
                 if clusters.is_empty() {
                     continue;
                 }
@@ -3454,16 +3583,68 @@ mod tests {
             .expect("rule runs")
     }
 
+    /// A family the app does not ship, so libass has to reach the host for it.
+    ///
+    /// A caption set in one heads no bundled chain: the emoji face is not
+    /// reachable behind it, and every emoji in the cue falls to whatever the
+    /// render machine has installed. That is the state the rule reports, and
+    /// what most of the cases below are written against.
+    const HOST_FAMILY: &str = "Comic Sans MS";
+
+    /// A code point the bundled emoji face never mapped.
+    ///
+    /// `U+1FAC6` FINGERPRINT is Unicode 16.0; Noto Emoji 3.002 predates it. So
+    /// even a caption set in a bundled family falls to the host for this one,
+    /// which is what keeps the bundled path's silence from being unfalsifiable.
+    /// `an_emoji_outside_the_bundled_face_is_still_reported` asserts the gap is
+    /// real, and will fail loudly if a font bump closes it.
+    const UNMAPPED_EMOJI: &str = "\u{1FAC6}";
+
     /// A sequence holding one caption track with a single four-second cue.
+    ///
+    /// The cue carries no style, so it renders in the shipped default family
+    /// and reaches the bundled emoji face - the path on which an emoji draws.
     ///
     /// Long enough that neither the reading-rate nor the safe-area rule would
     /// have anything to say about it, so a finding here is about the emoji.
     fn sequence_with_caption(text: &str) -> Sequence {
+        sequence_with_caption_in(text, None)
+    }
+
+    /// [`sequence_with_caption`], with the cue set in a named font family.
+    fn sequence_with_caption_in(text: &str, family: Option<&str>) -> Sequence {
         let mut sequence = sequence_30fps();
         let mut track = Track::new_caption("C1");
-        track.add_clip(caption_clip(text, 0.0, 4.0));
+        let mut clip = caption_clip(text, 0.0, 4.0);
+        if let Some(family) = family {
+            clip.caption_style = Some(serde_json::json!({ "fontFamily": family }));
+        }
+        track.add_clip(clip);
         sequence.add_track(track);
         sequence
+    }
+
+    /// A sequence holding one four-second text overlay in a host font family.
+    ///
+    /// Returns the sequence, the state carrying the overlay's effect, and the
+    /// clip and track ids a proposal has to name.
+    fn sequence_with_host_text_overlay(text: &str) -> (Sequence, ProjectState, String, String) {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        let (clip, mut effect) = text_overlay_clip(text, 0.0, 4.0);
+        effect.set_param(
+            "font_family",
+            crate::core::effects::ParamValue::String(HOST_FAMILY.to_string()),
+        );
+        let clip_id = clip.id.clone();
+        track.add_clip(clip);
+        let track_id = track.id.clone();
+        sequence.add_track(track);
+
+        let mut state = ProjectState::new("p");
+        state.effects.insert(effect.id.clone(), effect);
+
+        (sequence, state, track_id, clip_id)
     }
 
     /// The cluster list reported for the first cue of a grouped violation.
@@ -3477,7 +3658,7 @@ mod tests {
     /// Scenario: should report a colour emoji in a cue
     #[tokio::test]
     async fn test_emoji_rule_should_report_a_color_emoji_in_a_cue() {
-        let sequence = sequence_with_caption("Ship it \u{1F389}");
+        let sequence = sequence_with_caption_in("Ship it \u{1F389}", Some(HOST_FAMILY));
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3500,7 +3681,7 @@ mod tests {
     /// Scenario: should report a regional indicator flag as a flag class
     #[tokio::test]
     async fn test_emoji_rule_should_report_a_regional_indicator_flag_as_a_flag_class() {
-        let sequence = sequence_with_caption("Live from \u{1F1F0}\u{1F1F7}");
+        let sequence = sequence_with_caption_in("Live from \u{1F1F0}\u{1F1F7}", Some(HOST_FAMILY));
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3517,7 +3698,7 @@ mod tests {
     /// Scenario: should report a keycap sequence
     #[tokio::test]
     async fn test_emoji_rule_should_report_a_keycap_sequence() {
-        let sequence = sequence_with_caption("Step 1\u{FE0F}\u{20E3}");
+        let sequence = sequence_with_caption_in("Step 1\u{FE0F}\u{20E3}", Some(HOST_FAMILY));
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3529,8 +3710,9 @@ mod tests {
     /// Scenario: should report a ZWJ family as one cluster, not four
     #[tokio::test]
     async fn test_emoji_rule_should_report_a_zwj_family_as_one_cluster_not_four() {
-        let sequence = sequence_with_caption(
+        let sequence = sequence_with_caption_in(
             "Our \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466} plan",
+            Some(HOST_FAMILY),
         );
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
@@ -3556,7 +3738,7 @@ mod tests {
     /// Scenario: should report a skin tone modifier
     #[tokio::test]
     async fn test_emoji_rule_should_report_a_skin_tone_modifier() {
-        let sequence = sequence_with_caption("Nice work \u{1F44D}\u{1F3FD}");
+        let sequence = sequence_with_caption_in("Nice work \u{1F44D}\u{1F3FD}", Some(HOST_FAMILY));
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3605,7 +3787,7 @@ mod tests {
     /// Scenario: should count a flag as one cluster, not as two letters
     #[tokio::test]
     async fn test_emoji_rule_should_count_a_flag_as_one_cluster_not_two_letters() {
-        let sequence = sequence_with_caption("\u{1F1F0}\u{1F1F7}");
+        let sequence = sequence_with_caption_in("\u{1F1F0}\u{1F1F7}", Some(HOST_FAMILY));
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3628,7 +3810,7 @@ mod tests {
     /// Scenario: should propose an UpdateCaption that strips the emoji
     #[tokio::test]
     async fn test_emoji_rule_should_emit_an_update_caption_fix_that_strips_the_emoji() {
-        let sequence = sequence_with_caption("Ship it \u{1F389} today");
+        let sequence = sequence_with_caption_in("Ship it \u{1F389} today", Some(HOST_FAMILY));
         let track_id = sequence.tracks[0].id.clone();
         let clip_id = sequence.tracks[0].clips[0].id.clone();
 
@@ -3681,7 +3863,7 @@ mod tests {
         ];
 
         for (written, expected) in cases {
-            let sequence = sequence_with_caption(written);
+            let sequence = sequence_with_caption_in(written, Some(HOST_FAMILY));
 
             let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3702,7 +3884,7 @@ mod tests {
     /// going quiet on it would confirm a repair that changed nothing.
     #[tokio::test]
     async fn test_emoji_rule_should_still_report_an_ignored_text_selector() {
-        let sequence = sequence_with_caption("Ship it \u{1F389}\u{FE0E}");
+        let sequence = sequence_with_caption_in("Ship it \u{1F389}\u{FE0E}", Some(HOST_FAMILY));
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3714,7 +3896,7 @@ mod tests {
     /// Scenario: should carry no fix when stripping would empty the caption
     #[tokio::test]
     async fn test_emoji_rule_should_not_propose_an_empty_caption() {
-        let sequence = sequence_with_caption("\u{1F389}");
+        let sequence = sequence_with_caption_in("\u{1F389}", Some(HOST_FAMILY));
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3730,7 +3912,7 @@ mod tests {
     /// Scenario: should never claim the group can be fixed automatically
     #[tokio::test]
     async fn test_emoji_rule_should_mark_the_group_as_not_auto_fixable() {
-        let sequence = sequence_with_caption("Ship it \u{1F389} today");
+        let sequence = sequence_with_caption_in("Ship it \u{1F389} today", Some(HOST_FAMILY));
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3748,15 +3930,8 @@ mod tests {
     /// node, so a title card with an emoji in it fails identically.
     #[tokio::test]
     async fn test_emoji_rule_should_report_emoji_in_a_text_overlay_clip() {
-        let mut sequence = sequence_30fps();
-        let mut track = Track::new_video("V1");
-        let (clip, effect) = text_overlay_clip("Big sale \u{1F389}", 0.0, 4.0);
-        let clip_id = clip.id.clone();
-        track.add_clip(clip);
-        sequence.add_track(track);
-
-        let mut state = ProjectState::new("p");
-        state.effects.insert(effect.id.clone(), effect);
+        let (sequence, state, _track_id, clip_id) =
+            sequence_with_host_text_overlay("Big sale \u{1F389}");
 
         let violations = emoji_violations(&sequence, &state).await;
 
@@ -3775,16 +3950,8 @@ mod tests {
     /// field rewritten and everything the author styled left where it was.
     #[tokio::test]
     async fn test_emoji_rule_should_emit_an_update_text_clip_fix_for_an_overlay() {
-        let mut sequence = sequence_30fps();
-        let mut track = Track::new_video("V1");
-        let (clip, effect) = text_overlay_clip("Big sale \u{1F389} today", 0.0, 4.0);
-        let clip_id = clip.id.clone();
-        track.add_clip(clip);
-        let track_id = track.id.clone();
-        sequence.add_track(track);
-
-        let mut state = ProjectState::new("p");
-        state.effects.insert(effect.id.clone(), effect);
+        let (sequence, state, track_id, clip_id) =
+            sequence_with_host_text_overlay("Big sale \u{1F389} today");
 
         let violations = emoji_violations(&sequence, &state).await;
 
@@ -3825,14 +3992,8 @@ mod tests {
     /// described as deleting the clusters and closing their seams may do.
     #[tokio::test]
     async fn test_emoji_rule_should_keep_a_title_cards_outer_whitespace() {
-        let mut sequence = sequence_30fps();
-        let mut track = Track::new_video("V1");
-        let (clip, effect) = text_overlay_clip("  Big sale \u{1F389}\n", 0.0, 4.0);
-        track.add_clip(clip);
-        sequence.add_track(track);
-
-        let mut state = ProjectState::new("p");
-        state.effects.insert(effect.id.clone(), effect);
+        let (sequence, state, _track_id, _clip_id) =
+            sequence_with_host_text_overlay("  Big sale \u{1F389}\n");
 
         let violations = emoji_violations(&sequence, &state).await;
 
@@ -3847,7 +4008,7 @@ mod tests {
     /// Scenario: should ignore a caption track that is never drawn
     #[tokio::test]
     async fn test_emoji_rule_should_ignore_a_hidden_caption_track() {
-        let mut sequence = sequence_with_caption("Ship it \u{1F389}");
+        let mut sequence = sequence_with_caption_in("Ship it \u{1F389}", Some(HOST_FAMILY));
         sequence.tracks[0].visible = false;
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
@@ -3862,7 +4023,8 @@ mod tests {
     /// Scenario: should report the worst class when a cue carries several
     #[tokio::test]
     async fn test_emoji_rule_should_report_the_worst_class_of_a_mixed_cue() {
-        let sequence = sequence_with_caption("Live \u{1F389} from \u{1F1F0}\u{1F1F7}");
+        let sequence =
+            sequence_with_caption_in("Live \u{1F389} from \u{1F1F0}\u{1F1F7}", Some(HOST_FAMILY));
 
         let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
 
@@ -3871,6 +4033,125 @@ mod tests {
         assert_eq!(
             cue["worstClass"], "regionalFlag",
             "a flag reading as its letters beats a picture reading as an outline"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should say nothing about an emoji the bundled face draws
+    ///
+    /// The script carries Noto Emoji now, and its `GSUB` is what assembles
+    /// these: the keycap gets its enclosure, the regional-indicator pair
+    /// becomes a flag, the ZWJ family becomes one picture, the modifier tints
+    /// its base. The frame shows what the project says, monochrome, and
+    /// identically on every OS. Reporting it named a defect that is not there,
+    /// and each finding carried a proposal to delete an emoji that renders.
+    #[tokio::test]
+    async fn test_emoji_rule_should_not_report_emoji_a_bundled_face_draws() {
+        for text in [
+            "Ship it \u{1F389}",
+            "Live from \u{1F1F0}\u{1F1F7}",
+            "Step 1\u{FE0F}\u{20E3}",
+            "Our \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466} plan",
+            "Nice work \u{1F44D}\u{1F3FD}",
+            "Scotland \u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+            "\u{1F525} \u{1F525}",
+        ] {
+            let sequence = sequence_with_caption(text);
+
+            let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+            assert!(
+                violations.is_empty(),
+                "{text:?} is drawn by the bundled emoji face: {violations:?}"
+            );
+        }
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should still report an emoji the bundled face never mapped
+    ///
+    /// The negative control for the test above, and the guard on the claim it
+    /// rests on. Noto Emoji 3.002 has no `U+1FAC6`, so even a caption in the
+    /// shipped default family falls to the host for it — which is exactly the
+    /// state that mis-draws, and the one the rule is still for.
+    #[tokio::test]
+    async fn test_emoji_rule_should_report_an_emoji_outside_the_bundled_face() {
+        let sequence = sequence_with_caption(&format!("New {UNMAPPED_EMOJI} scanner"));
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(violations.len(), 1, "an unmapped emoji still falls to host");
+        let cue = first_cue(&violations[0]);
+        assert_eq!(cue["unsupportedCount"], 1);
+        assert_eq!(cue["worstClass"], "presentation");
+        assert_eq!(cue_clusters(&violations[0])[0]["text"], UNMAPPED_EMOJI);
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should report a well-supported emoji set in a host family
+    ///
+    /// Family and glyph are different questions, and this is the one the rule
+    /// answers now. `🎉` is in the bundled emoji face, but a caption set in a
+    /// family the app does not ship heads no bundled chain at all, so libass
+    /// resolves the whole event off the render machine — and what it finds
+    /// there is the thing that differs per OS.
+    #[tokio::test]
+    async fn test_emoji_rule_should_report_a_bundled_emoji_on_a_host_family_caption() {
+        let bundled = sequence_with_caption("Ship it \u{1F389}");
+        assert!(
+            emoji_violations(&bundled, &ProjectState::new("p"))
+                .await
+                .is_empty(),
+            "the same cue in a shipped family draws from the attachment"
+        );
+
+        let host = sequence_with_caption_in("Ship it \u{1F389}", Some(HOST_FAMILY));
+
+        let violations = emoji_violations(&host, &ProjectState::new("p")).await;
+
+        assert_eq!(violations.len(), 1);
+        let reason = cue_clusters(&violations[0])[0]["reason"]
+            .as_str()
+            .expect("a cluster says why");
+        assert!(
+            reason.contains("host font set"),
+            "the reason has to name the host path: {reason}"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should read the placeholder family as the face it renders as
+    ///
+    /// `"Arial"` is the literal older projects wrote when nothing was picked,
+    /// and the export maps it onto the bundled default rather than onto the
+    /// host's Arial. A check that read it as a host family would report every
+    /// emoji in every pre-alias project as unrenderable.
+    #[tokio::test]
+    async fn test_emoji_rule_should_follow_the_placeholder_family_alias() {
+        let sequence = sequence_with_caption_in("Ship it \u{1F389}", Some("Arial"));
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert!(
+            violations.is_empty(),
+            "the placeholder renders as a bundled family: {violations:?}"
+        );
+    }
+
+    /// Feature: Emoji the burn-in cannot render
+    /// Scenario: should read a caption style written in either spelling
+    #[tokio::test]
+    async fn test_emoji_rule_should_read_a_snake_case_caption_style() {
+        let mut sequence = sequence_with_caption("Ship it \u{1F389}");
+        sequence.tracks[0].clips[0].caption_style =
+            Some(serde_json::json!({ "font_family": HOST_FAMILY }));
+
+        let violations = emoji_violations(&sequence, &ProjectState::new("p")).await;
+
+        assert_eq!(
+            violations.len(),
+            1,
+            "an op log written in snake_case names the same family"
         );
     }
 
