@@ -339,6 +339,18 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
+      # ubuntu-latest ships a pre-installed Google Chrome apt source that none of
+      # our jobs need. When Google's CDN serves a Packages index whose hash does
+      # not match its InRelease ("Err:29 ... Hash Sum mismatch"), apt-get update
+      # exits non-zero and kills the entire step, blocking every Linux job. The
+      # Ubuntu-mirror retry below cannot help because it rewrites a different
+      # repository, so drop the source before any apt use. Playwright downloads
+      # its own browsers and does not use the system Chrome package.
+      - name: Drop third-party apt sources our jobs never use
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         timeout-minutes: 20
