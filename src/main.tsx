@@ -4,6 +4,7 @@ import App from './App';
 import { ErrorBoundary } from './components/shared';
 import { initializeAgentSystem } from './stores/aiStore';
 import { createLogger } from './services/logger';
+import { ensureBundledPreviewFontsLoaded } from './utils/previewFonts';
 import './styles/main.css';
 
 const logger = createLogger('Root');
@@ -17,6 +18,13 @@ try {
 } catch (err) {
   logger.error('Agent system initialization failed — AI features may be unavailable', { err });
 }
+
+// Pull the bundled caption faces in before anything asks a canvas to measure
+// text in one. `@font-face` is lazy and a canvas reports no miss, so a preview
+// that drew before the load would silently measure in a fallback face; the
+// promise is never awaited here because nothing on the first paint depends on
+// it and the players redraw themselves when it lands.
+void ensureBundledPreviewFontsLoaded();
 
 if (import.meta.env.MODE === 'e2e') {
   void import('./e2e/openreelioE2eHooks');

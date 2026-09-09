@@ -1,3 +1,7 @@
+/* Registered before anything else so the preview can resolve the families the
+   export embeds; see the file's own header for why the draft needs them. */
+@import './bundledFonts.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

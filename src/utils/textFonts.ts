@@ -3,10 +3,11 @@
  * host having them installed.
  *
  * Offered first in every font picker because they are the only ones that render
- * the same in the *exported file* on every machine. That guarantee is about the
- * export path only: the live preview draws text with the webview's own fonts,
- * and these faces are not registered as `@font-face` yet, so a preview can wrap
- * differently from the burn-in.
+ * the same in the *exported file* on every machine. `src/styles/bundledFonts.css`
+ * registers the same files as `@font-face` so the live preview draws each of
+ * them in the face the export embeds; the draft still lays text out with the
+ * browser's rules rather than libass', so it can wrap differently, but it no
+ * longer shows a different typeface.
  *
  * A hand-written mirror of `BUNDLED_FONTS` in
  * `src-tauri/src/core/text/bundled_fonts.rs`, which is the source of truth: it
@@ -14,9 +15,6 @@
  * file and fails when the two disagree, because a family listed here but not
  * compiled in there silently falls back to a host font — the opposite of the
  * guarantee this list advertises.
- *
- * TODO(preview-parity): register these faces as `@font-face` and mirror the
- * backend's placeholder alias so the preview draft matches the export.
  */
 export const BUNDLED_TEXT_FONT_FAMILIES = [
   'TikTok Sans',
@@ -41,6 +39,30 @@ export const BUNDLED_TEXT_FONT_FAMILIES = [
  * caption track default — names this rather than a literal of its own.
  */
 export const DEFAULT_TEXT_FONT_FAMILY = 'TikTok Sans';
+
+/**
+ * Families this codebase wrote as its own "no font was chosen" placeholder,
+ * mapped onto the bundled face that renders them.
+ *
+ * A hand-written mirror of `PLACEHOLDER_FAMILY_ALIASES` in
+ * `src-tauri/src/core/text/bundled_fonts.rs`, which is the source of truth;
+ * `textFonts.test.ts` reads that file and fails when the two disagree.
+ *
+ * The preview needs its own copy because it has to resolve a family the same
+ * way the exporter does *before* it draws: a caption stored with the historical
+ * 'Arial' placeholder burns in as TikTok Sans, so a draft that took 'Arial'
+ * literally would show the host's Arial for a caption that ships in a different
+ * typeface. `resolvePreviewFontFamily` in `previewFonts.ts` is what applies it.
+ *
+ * Back-compat only, exactly as on the Rust side: every live default names
+ * {@link DEFAULT_TEXT_FONT_FAMILY} directly, so only op logs written before
+ * that change reach this table. Do not add a family a user can deliberately
+ * pick — Helvetica, Georgia and Impact are choices, and aliasing one away would
+ * silently override it.
+ */
+export const PLACEHOLDER_FONT_FAMILY_ALIASES: ReadonlyArray<readonly [string, string]> = [
+  ['Arial', DEFAULT_TEXT_FONT_FAMILY],
+];
 
 export const DEFAULT_TEXT_FONT_FAMILIES = [
   ...BUNDLED_TEXT_FONT_FAMILIES,
