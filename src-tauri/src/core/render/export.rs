@@ -7343,6 +7343,15 @@ pub(crate) fn build_emoji_overlay_plan(
 /// `Dialogue` line underneath it is already using. Holding the layer does not
 /// extend the render: `overlay` follows its main input's timeline, so the file
 /// is still exactly as long as the picture it was drawn onto.
+///
+/// The gate is `gte(t,start)*lt(t,end)` rather than `between(t,start,end)`
+/// because `between` is closed at both ends and libass is not: a cue is drawn
+/// on `[start, end)`, so the frame presented at exactly `end` carries no text.
+/// `between` would composite the picture onto that frame anyway - a lone emoji
+/// hanging in the air after its caption has gone. It is not a hypothetical: cue
+/// bounds are snapped to the centisecond grid the `Dialogue` line is written
+/// on, which lands on a frame time at every 25 and 50fps cue and every third
+/// frame at 30 and 60.
 pub(super) fn append_emoji_overlays(
     filter_complex: &mut String,
     base_video_label: &str,
@@ -7411,7 +7420,7 @@ pub(super) fn append_emoji_overlays(
         let output_label = format!("[txtemo{index}]");
         filter_complex.push(';');
         filter_complex.push_str(&format!(
-            "{current}[e{}_{use_index}]overlay=x={}:y={}:format=auto:alpha=straight:eof_action=repeat:repeatlast=1:enable='between(t,{:.6},{:.6})'{output_label}",
+            "{current}[e{}_{use_index}]overlay=x={}:y={}:format=auto:alpha=straight:eof_action=repeat:repeatlast=1:enable='gte(t,{:.6})*lt(t,{:.6})'{output_label}",
             draw.input,
             draw.x,
             draw.y,
@@ -10892,7 +10901,7 @@ mod tests {
             "got: {graph}"
         );
         assert!(
-            graph.contains("[txtass0][e0_0]overlay=x=100:y=200:format=auto:alpha=straight:eof_action=repeat:repeatlast=1:enable='between(t,0.000000,2.000000)'[txtemo0]"),
+            graph.contains("[txtass0][e0_0]overlay=x=100:y=200:format=auto:alpha=straight:eof_action=repeat:repeatlast=1:enable='gte(t,0.000000)*lt(t,2.000000)'[txtemo0]"),
             "got: {graph}"
         );
         assert!(
@@ -11006,6 +11015,11 @@ mod tests {
     /// puts the picture on screen up to five milliseconds out of step with the
     /// text - a whole frame at 60fps of an emoji with no caption, or a caption
     /// with a hole in it.
+    ///
+    /// The gate is half-open at the end for the same reason it is snapped at
+    /// the start: libass draws a cue on `[start, end)`, so the closed
+    /// `between(t,start,end)` this used to emit put the picture on the frame
+    /// presented at exactly `end` - the one frame the caption has already left.
     #[test]
     fn an_overlay_is_gated_on_the_same_centisecond_grid_the_event_is() {
         let mut plan = build_emoji_overlay_plan(
@@ -11018,8 +11032,12 @@ mod tests {
         append_emoji_overlays(&mut graph, "[txtass0]", &plan, 3);
 
         assert!(
-            graph.contains("enable='between(t,1.000000,2.010000)'"),
+            graph.contains("enable='gte(t,1.000000)*lt(t,2.010000)'"),
             "got: {graph}"
+        );
+        assert!(
+            !graph.contains("between(t,"),
+            "the closed form draws one frame past the cue. Got: {graph}"
         );
         assert_eq!(ass_timecode(1.0037), "0:00:01.00");
         assert_eq!(ass_timecode(2.0062), "0:00:02.01");
@@ -11030,8 +11048,47 @@ mod tests {
         let mut graph = String::new();
         append_emoji_overlays(&mut graph, "[txtass0]", &plan, 3);
         assert!(
-            graph.contains("enable='between(t,0.500000,1.250000)'"),
+            graph.contains("enable='gte(t,0.500000)*lt(t,1.250000)'"),
             "got: {graph}"
+        );
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: the picture is gone on the frame the caption is gone on
+    ///
+    /// The end of the gate, stated as the arithmetic FFmpeg evaluates. libass
+    /// draws a cue on `[start, end)`: at 30fps a 1.00 -> 2.00 cue is on frames
+    /// 30..=59 and *not* on frame 60, whose presentation time is exactly 2.0.
+    /// `between(t,1,2)` is true there and would composite a lone emoji over a
+    /// frame with no caption on it; the half-open form is false, which is what
+    /// this pins.
+    #[test]
+    fn an_overlay_is_off_on_the_frame_presented_at_the_cue_end() {
+        let plan = build_emoji_overlay_plan(
+            &[placement("1f525", 10, 20, 1.0, 2.0)],
+            &FakeEmojiPack::carrying(&["1f525"]),
+        );
+
+        let mut graph = String::new();
+        append_emoji_overlays(&mut graph, "[txtass0]", &plan, 3);
+
+        let quote = '\'';
+        let gate = graph
+            .split("enable=")
+            .nth(1)
+            .and_then(|rest| rest.strip_prefix(quote))
+            .and_then(|rest| rest.split(quote).next())
+            .expect("an enable expression");
+        assert_eq!(gate, "gte(t,1.000000)*lt(t,2.000000)", "got: {graph}");
+
+        // Read back as the comparison FFmpeg makes: `gte * lt` is its `and`.
+        // Frame 59 (t = 59/30) draws; frame 60, presented at the cue end,
+        // does not - which is exactly where libass stops drawing the text.
+        let drawn_at = |time: f64| -> bool { (1.0..2.0).contains(&time) };
+        assert!(drawn_at(59.0 / 30.0), "the last frame of the cue draws");
+        assert!(
+            !drawn_at(60.0 / 30.0),
+            "the frame at the cue end must not draw"
         );
     }
 
