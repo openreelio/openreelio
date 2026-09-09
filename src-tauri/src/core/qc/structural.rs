@@ -1389,10 +1389,18 @@ impl EmojiRenderCapability {
             // that is still the same emoji - a dropped skin tone or variation
             // selector qualifies, the first member of a ZWJ sequence does not
             // (see `EmojiAssetStep::preserves_sequence`). A sequence the pack
-            // never shipped, a cue whose layout animates, and everything past
-            // the per-render overlay cap all keep the bundled monochrome glyph
-            // and report as `BundledMonochrome`, which is the picture the
-            // project asked for with only its colour missing.
+            // never shipped keeps the bundled monochrome glyph and reports as
+            // `BundledMonochrome`.
+            //
+            // Everything else that can refuse a cell at render time - a cue
+            // whose layout animates, a render past the per-render overlay cap,
+            // a probe that could not measure the cell - is a property of one
+            // render rather than of the project, and this rule deliberately
+            // knows nothing about it: those clusters still report
+            // `ColorOverlay` here. Both variants yield `None`, so nothing is
+            // graded differently either way - which is the point. A project
+            // must not acquire a finding because of what a particular export
+            // could not draw.
             EmojiRenderCapability::ColorOverlay => None,
             // The face is in the script, its `GSUB` joins the sequence, and the
             // frame shows the emoji the project names. Only its colour is gone,

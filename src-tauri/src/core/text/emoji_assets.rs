@@ -216,7 +216,15 @@ pub fn resolution_candidates(sequence_key: &str) -> Vec<(String, EmojiAssetStep)
         .collect();
     push(base.join("-"), EmojiAssetStep::ZwjBase);
 
-    let without_selectors: Vec<&str> = base
+    // Derived from `without_tones`, not from `base`. `base` has already had
+    // everything from the first zero width joiner cut off it, so stripping a
+    // selector from *that* produces a key that is a ZWJ base wearing a
+    // `VariationStripped` label - and `preserves_sequence` lets that label
+    // through. A pack carrying `1f3f3` would then draw a plain white flag for
+    // `1f3f3-fe0f-200d-1f308`, the rainbow flag, in colour, having refused the
+    // monochrome face that ligates it correctly. Every rung has to describe
+    // what was actually dropped to reach it.
+    let without_selectors: Vec<&str> = without_tones
         .iter()
         .copied()
         .filter(|component| !VARIATION_SELECTOR_KEYS.contains(component))
@@ -446,6 +454,11 @@ fn candidate_roots() -> Vec<PathBuf> {
         // macOS bundle puts them one level up in `Resources`. `cargo test` and
         // `cargo run` land on the first form through the `build.rs` copy.
         push(exe_dir.join("emoji"));
+        // The npm platform packages put the binary in `bin/` and the pack
+        // beside it, so the CLI installed with `npm i openreelio-cli` finds
+        // the pack one level up. The GUI-bundled CLI on Linux reaches its
+        // resource copy the same way when the sidecar sits in a `bin/`.
+        push(exe_dir.join("../emoji"));
         push(exe_dir.join("../Resources/emoji"));
         push(exe_dir.join("../lib/openreelio/emoji"));
     }
@@ -505,6 +518,39 @@ mod tests {
         );
     }
 
+    /// Feature: colour emoji resolution
+    /// Scenario: a joined sequence never degrades to its base under a
+    /// selector-stripped label
+    ///
+    /// The rainbow flag is `1f3f3-fe0f-200d-1f308`. Dropping the selector
+    /// leaves the joined sequence; dropping the join leaves a plain white
+    /// flag, which is a different picture and which
+    /// [`EmojiAssetStep::preserves_sequence`] exists to keep a burn-in away
+    /// from. Deriving the selector rung from an already-truncated key labelled
+    /// that white flag `VariationStripped` and let it straight through.
+    #[test]
+    fn stripping_a_selector_never_relabels_a_zwj_base() {
+        let candidates = resolution_candidates("1f3f3-fe0f-200d-1f308");
+
+        assert_eq!(
+            candidates,
+            vec![
+                ("1f3f3-fe0f-200d-1f308".to_string(), EmojiAssetStep::Exact),
+                ("1f3f3-fe0f".to_string(), EmojiAssetStep::ZwjBase),
+                (
+                    "1f3f3-200d-1f308".to_string(),
+                    EmojiAssetStep::VariationStripped
+                ),
+            ]
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|(key, step)| key != "1f3f3" || !step.preserves_sequence()),
+            "the bare flag is not this emoji, whatever rung it is found on"
+        );
+    }
+
     #[test]
     fn a_variation_selector_is_dropped_last() {
         let candidates = resolution_candidates("2764-fe0f");
@@ -535,6 +581,43 @@ mod tests {
             resolution_candidates("31-20e3"),
             vec![("31-20e3".to_string(), EmojiAssetStep::Exact)]
         );
+    }
+
+    /// Feature: colour emoji distribution
+    /// Scenario: the resolver looks in every layout a build is installed as
+    ///
+    /// The pack is a directory beside the binary, and "beside" means something
+    /// different in each layout the CLI ships in: the standalone archive and
+    /// the Windows installer put it next to the executable, an npm platform
+    /// package puts the executable in `bin/` and the pack at the package root,
+    /// the macOS bundle keeps resources in `Contents/Resources`, and a Linux
+    /// package splits `bin` from `lib`. Missing a rung is not a crash - it is
+    /// a CLI that quietly renders every emoji in monochrome while the desktop
+    /// app renders the same project in colour.
+    #[test]
+    fn the_resolver_looks_beside_the_binary_in_every_installed_layout() {
+        let roots = candidate_roots();
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(PathBuf::from))
+            .expect("a test binary has a directory");
+
+        for expected in [
+            exe_dir.join("emoji"),
+            exe_dir.join("../emoji"),
+            exe_dir.join("../Resources/emoji"),
+            exe_dir.join("../lib/openreelio/emoji"),
+        ] {
+            assert!(
+                roots.contains(&expected),
+                "{} is not searched; roots were {roots:?}",
+                expected.display()
+            );
+        }
+
+        // And the checkout, which is how `cargo test` and `cargo run` find the
+        // pack with no install step at all.
+        assert!(roots.contains(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("emoji")));
     }
 
     #[test]
