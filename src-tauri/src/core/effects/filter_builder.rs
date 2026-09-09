@@ -26,6 +26,27 @@ use super::{
 };
 use tracing::warn;
 
+/// Family the `drawtext` fallback names when a text effect carries none.
+///
+/// Deliberately a generic rather than
+/// [`DEFAULT_TEXT_FONT_FAMILY`](crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY).
+/// That constant is the right default everywhere a family is *stored*, because
+/// the libass export path embeds the face it names. This path cannot: it hands
+/// the name to fontconfig verbatim, and no bundled family is installed on any
+/// host, so naming one here resolves to whatever fontconfig ranks first - on a
+/// CJK-locale machine that can be a serif or a Han face, i.e. a worse fallback
+/// than the one this replaced.
+///
+/// `sans-serif` is the alias every fontconfig configuration is required to bind,
+/// so it resolves to the host's own UI sans - the family this fallback is
+/// approximating - on Windows, macOS and Linux alike. It is host-resolvable by
+/// intent: a path that cannot embed is better off asking for a role than for a
+/// name nothing has.
+///
+/// Reachable only when the FFmpeg build lacks the `subtitles` filter; the
+/// bundled binaries all have it.
+pub(crate) const DEFAULT_DRAWTEXT_FONT_FAMILY: &str = "sans-serif";
+
 fn db_to_linear(db: f64) -> f64 {
     10_f64.powf(db / 20.0)
 }
@@ -1748,8 +1769,7 @@ impl Effect {
     /// # Supported Parameters
     ///
     /// - `text`: Text content to display (required)
-    /// - `font_family`: Font family name (default: the bundled
-    ///   [`DEFAULT_TEXT_FONT_FAMILY`](crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY))
+    /// - `font_family`: Font family name (default: [`DEFAULT_DRAWTEXT_FONT_FAMILY`])
     /// - `font_size`: Font size in points (default: 48)
     /// - `font_weight`: Numeric font weight 100-900 (default: 400)
     /// - `color`: Text color as hex string (default: "#FFFFFF")
@@ -1786,7 +1806,11 @@ impl Effect {
     /// every machine. Here the family is handed to fontconfig verbatim - this
     /// builder never consults the render-side family resolver and cannot embed
     /// anything - so which face draws the text depends on what the host has
-    /// installed, the bundled default included.
+    /// installed.
+    ///
+    /// [`DEFAULT_DRAWTEXT_FONT_FAMILY`] is therefore deliberately *not*
+    /// [`DEFAULT_TEXT_FONT_FAMILY`](crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY):
+    /// see the constant for why.
     fn build_drawtext_filter(&self) -> String {
         // Required: text content
         let text = self
@@ -1799,7 +1823,7 @@ impl Effect {
         let font_family = self
             .get_param("font_family")
             .and_then(|v| v.as_str())
-            .unwrap_or(crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY);
+            .unwrap_or(DEFAULT_DRAWTEXT_FONT_FAMILY);
         let font_size = self.get_float("font_size").unwrap_or(48.0) as i64;
         let font_weight = self
             .get_param("font_weight")
@@ -2419,7 +2443,6 @@ fn add_enable_to_each_filter(body: &str, enable_clause: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::effects::{curve_points_to_json, CurvePoint, EffectCategory, ParamValue};
-    use crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY;
 
     #[test]
     fn test_brightness_filter() {
@@ -2928,7 +2951,9 @@ mod tests {
 
         let filter = effect.to_filter_string("in", "out");
         assert!(
-            filter.contains(&format!("font='{DEFAULT_TEXT_FONT_FAMILY}\\:style=Bold'")),
+            filter.contains(&format!(
+                "font='{DEFAULT_DRAWTEXT_FONT_FAMILY}\\:style=Bold'"
+            )),
             "Expected bold style in font pattern, got: {}",
             filter
         );
@@ -2942,7 +2967,9 @@ mod tests {
 
         let filter = effect.to_filter_string("in", "out");
         assert!(
-            filter.contains(&format!("font='{DEFAULT_TEXT_FONT_FAMILY}\\:style=Italic'")),
+            filter.contains(&format!(
+                "font='{DEFAULT_DRAWTEXT_FONT_FAMILY}\\:style=Italic'"
+            )),
             "Expected italic style in font pattern, got: {}",
             filter
         );
@@ -3151,9 +3178,10 @@ mod tests {
             "Expected default text, got: {}",
             filter
         );
-        // The default names the bundled family, not a face we do not ship.
+        // This path cannot embed, so its default names a generic fontconfig
+        // resolves everywhere rather than a bundled family nothing has installed.
         assert!(
-            filter.contains(&format!("font='{DEFAULT_TEXT_FONT_FAMILY}'")),
+            filter.contains(&format!("font='{DEFAULT_DRAWTEXT_FONT_FAMILY}'")),
             "Expected default font, got: {}",
             filter
         );
