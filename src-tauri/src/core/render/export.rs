@@ -5868,6 +5868,19 @@ fn ass_timecode(seconds: f64) -> String {
     format!("{hours}:{mins:02}:{secs:02}.{centiseconds:02}")
 }
 
+/// A cue time on the same centisecond grid [`ass_timecode`] writes.
+///
+/// The `Dialogue` line an emoji sits in carries times rounded to a hundredth of
+/// a second, because that is the only precision the ASS format has. The overlay
+/// that draws the colour picture is gated by an `enable` expression on the
+/// render's own clock, which has no such limit - so gating it on the unrounded
+/// time puts the picture on screen up to five milliseconds before or after the
+/// text it belongs to, which at 60fps is a frame of the emoji alone or of the
+/// caption without it. Both sides are rounded the same way instead.
+fn ass_centisecond(seconds: f64) -> f64 {
+    (seconds.max(0.0) * 100.0).round() / 100.0
+}
+
 fn ass_sanitize_style_field(raw: &str, fallback: &str) -> String {
     let sanitized = raw.replace([',', '\r', '\n', '\t'], " ").trim().to_string();
 
@@ -6012,6 +6025,19 @@ pub(crate) struct EmojiSpacerContext<'a> {
     /// the set names the cells that paint a visible box, and every event has
     /// its text hidden.
     pub markers: Option<&'a HashSet<usize>>,
+    /// Occurrences that must keep the monochrome glyph, by the index the
+    /// emitter assigns them.
+    ///
+    /// The counterpart to `markers`, and the mechanism that makes a refusal
+    /// possible *after* the cells have been laid out. Whether a cluster can
+    /// become a colour overlay is not fully knowable when the script is first
+    /// built - a probe can fail, a cue can turn out to cover no frame - and
+    /// without this the only options were a colour emoji or a blank 1.2 em
+    /// hole where the spacer was. A refused occurrence keeps its index, so
+    /// both builds agree about which cell is which, and is emitted as the
+    /// ordinary `{\fnNoto Emoji}` run it would have been before the pack
+    /// existed.
+    pub refused: Option<&'a HashSet<usize>>,
 }
 
 /// Per-event state for laying colour emoji cells into one `Dialogue` line.
@@ -6020,6 +6046,8 @@ pub(crate) struct AssEmojiSpacers<'a> {
     pack: &'a dyn EmojiRasterSource,
     /// Cells that paint, when this is a measurement script.
     markers: Option<&'a HashSet<usize>>,
+    /// Cells that keep the monochrome glyph despite being eligible.
+    refused: Option<&'a HashSet<usize>>,
     /// Cell edge in `PlayRes` units for this event.
     size: u32,
     /// Which `Dialogue` line this is.
@@ -6031,6 +6059,10 @@ pub(crate) struct AssEmojiSpacers<'a> {
     end_sec: f64,
     /// The event's `\frz`, counter-clockwise degrees.
     rotation_deg: f64,
+    /// The style's `ScaleX`, as a percentage.
+    scale_x_percent: f64,
+    /// The style's `ScaleY`, as a percentage.
+    scale_y_percent: f64,
     /// Every cell the whole script has taken, in emission order.
     out: &'a mut Vec<EmojiOccurrence>,
 }
@@ -6038,12 +6070,13 @@ pub(crate) struct AssEmojiSpacers<'a> {
 impl AssEmojiSpacers<'_> {
     /// Takes a cell for `cluster`, or leaves it to the monochrome face.
     ///
-    /// Four things can refuse, and each of them is a state the QC report can
+    /// Five things can refuse, and each of them is a state the QC report can
     /// name: the cluster is not drawn as a picture at all, the render is at
     /// [`MAX_EMOJI_OVERLAYS_PER_RENDER`], the pack does not carry the sequence,
-    /// or - decided by the caller, before this is ever built - the cue animates.
-    /// A refusal is not a failure: the caption keeps the bundled monochrome
-    /// glyph, which is the right picture in one colour.
+    /// or - decided by the caller, before this is ever built - the cue animates
+    /// or the occurrence is in `refused`. A refusal is not a failure: the
+    /// caption keeps the bundled monochrome glyph, which is the right picture
+    /// in one colour.
     fn take_cell(&mut self, cluster: &str) -> Option<String> {
         if !crate::core::text::emoji::is_emoji_presentation_cluster(cluster) {
             return None;
@@ -6065,8 +6098,18 @@ impl AssEmojiSpacers<'_> {
             sequence_key,
             size_play_res: self.size,
             rotation_deg: self.rotation_deg,
+            scale_x_percent: self.scale_x_percent,
+            scale_y_percent: self.scale_y_percent,
         });
         self.run_index += 1;
+
+        // The occurrence is recorded either way, and only then refused. Both
+        // builds of a script have to agree about which cell carries which
+        // index, and they can only do that if a refusal changes what is
+        // *emitted* rather than what is counted.
+        if self.refused.is_some_and(|refused| refused.contains(&index)) {
+            return None;
+        }
 
         Some(match self.markers {
             Some(markers) if markers.contains(&index) => ass_emoji_marker_run(self.size),
@@ -6558,6 +6601,7 @@ fn append_ass_text_style_and_event(
             context.pack.map(|pack| AssEmojiSpacers {
                 pack,
                 markers: context.markers,
+                refused: context.refused,
                 size: ass_emoji_cell_size(font_size),
                 event_index,
                 run_index: 0,
@@ -6567,6 +6611,8 @@ fn append_ass_text_style_and_event(
                 start_sec: (clip.place.timeline_in_sec - window_start_sec).max(0.0),
                 end_sec: (clip.place.timeline_out_sec() - window_start_sec).max(0.0),
                 rotation_deg: rotation,
+                scale_x_percent,
+                scale_y_percent,
                 out: occurrences,
             })
         });
@@ -7088,13 +7134,19 @@ pub(super) fn append_ass_text_overlay(
 pub(crate) struct EmojiOverlayInput {
     /// The PNG, from the bundled pack.
     pub path: PathBuf,
-    /// Square edge the picture is scaled to.
-    pub size: u32,
+    /// Width the picture is scaled to.
+    pub size_x: u32,
+    /// Height the picture is scaled to. Not always equal to `size_x`: libass
+    /// scales a script into the frame on each axis independently, and the
+    /// style's `ScaleX`/`ScaleY` multiply on top of that.
+    pub size_y: u32,
     /// Clockwise rotation applied, FFmpeg's own sense, in radians.
     pub rotation_rad: f64,
-    /// Edge of the axis-aligned box the rotated picture occupies. Equal to
-    /// `size` when nothing is rotated, which is every caption today.
-    pub extent: u32,
+    /// Width of the axis-aligned box the rotated picture occupies. Equal to
+    /// `size_x` when nothing is rotated, which is every caption today.
+    pub extent_x: u32,
+    /// Height of that box.
+    pub extent_y: u32,
 }
 
 /// One colour emoji composited over the burned-in text.
@@ -7128,16 +7180,64 @@ impl EmojiOverlayPlan {
     }
 }
 
+/// Cells the pack indexes but cannot actually draw, by occurrence index.
+///
+/// [`crate::core::text::emoji_assets::drawable_match`] answers from the
+/// manifest, which is an index rather than the disk - deliberately, because a
+/// `stat` per caption on the render thread is what the manifest exists to
+/// avoid. A half-staged pack, a partial download or a file an installer never
+/// wrote therefore reaches the graph as `-i <missing>.png`, and FFmpeg exits
+/// non-zero: one absent picture and the whole export fails.
+///
+/// So the disk is consulted exactly once per *distinct sequence*, which is at
+/// most [`MAX_EMOJI_OVERLAYS_PER_RENDER`] stats for a whole render however many
+/// captions there are, and a cell whose picture is not there is refused back to
+/// the monochrome glyph before the script that renders is written.
+pub(crate) fn cells_with_no_picture_on_disk(
+    occurrences: &[EmojiOccurrence],
+    pack: &dyn EmojiRasterSource,
+) -> HashSet<usize> {
+    let mut checked: HashMap<&str, bool> = HashMap::new();
+    let mut refused: HashSet<usize> = HashSet::new();
+
+    for (index, occurrence) in occurrences.iter().enumerate() {
+        let key = occurrence.sequence_key.as_str();
+        let drawable = *checked.entry(key).or_insert_with(|| {
+            let found = crate::core::text::emoji_assets::drawable_match(pack, key)
+                .filter(|asset| asset.path.is_file());
+            if found.is_none() {
+                tracing::warn!(
+                    "The colour emoji pack has no readable picture for '{key}'; keeping the \
+                     monochrome glyph"
+                );
+            }
+            found.is_some()
+        });
+
+        if !drawable {
+            refused.insert(index);
+        }
+    }
+
+    refused
+}
+
 /// Turns measured placements into inputs and draws.
 ///
-/// A placement whose sequence the pack can no longer resolve is dropped rather
-/// than drawn from some other file: the cell it was measured for keeps the
-/// monochrome glyph that is already burned into the text layer underneath.
+/// A placement whose sequence the pack can no longer resolve, or whose picture
+/// is not on disk, is dropped rather than drawn from some other file. The cell
+/// it was measured for keeps the monochrome glyph that is already burned into
+/// the text layer underneath - [`cells_with_no_picture_on_disk`] refuses it
+/// before the script is written, and the check here is the second half of that
+/// promise: whatever else happens, no missing file reaches the command line.
 pub(crate) fn build_emoji_overlay_plan(
     placements: &[EmojiPlacement],
     pack: &dyn EmojiRasterSource,
 ) -> EmojiOverlayPlan {
     let mut plan = EmojiOverlayPlan::default();
+    // One `stat` per distinct picture, not per draw: forty identical emoji are
+    // one file, and the map is what keeps this off the per-caption path.
+    let mut readable: HashMap<PathBuf, bool> = HashMap::new();
 
     for placement in placements {
         let Some(asset) =
@@ -7150,6 +7250,19 @@ pub(crate) fn build_emoji_overlay_plan(
             continue;
         };
 
+        let readable = *readable
+            .entry(asset.path.clone())
+            .or_insert_with(|| asset.path.is_file());
+        if !readable {
+            tracing::warn!(
+                "The colour emoji pack lists '{}' at {} but the file is not there; keeping the \
+                 monochrome glyph",
+                placement.sequence_key,
+                asset.path.display()
+            );
+            continue;
+        }
+
         if !asset.step.is_exact() {
             tracing::debug!(
                 "Drawing '{}' from the pack's '{}' ({})",
@@ -7159,14 +7272,18 @@ pub(crate) fn build_emoji_overlay_plan(
             );
         }
 
-        let extent =
-            super::emoji_measure::rotated_extent(f64::from(placement.size), placement.rotation_rad)
-                .max(1.0) as u32;
+        let (extent_x, extent_y) = super::emoji_measure::rotated_extents(
+            f64::from(placement.size_x),
+            f64::from(placement.size_y),
+            placement.rotation_rad,
+        );
         let candidate = EmojiOverlayInput {
             path: asset.path,
-            size: placement.size,
+            size_x: placement.size_x,
+            size_y: placement.size_y,
             rotation_rad: placement.rotation_rad,
-            extent,
+            extent_x: extent_x.max(1.0) as u32,
+            extent_y: extent_y.max(1.0) as u32,
         };
         let input = match plan
             .inputs
@@ -7260,7 +7377,7 @@ pub(super) fn append_emoji_overlays(
             // is.
             format!(
                 ",rotate={:.6}:ow={}:oh={}:c=none",
-                input.rotation_rad, input.extent, input.extent
+                input.rotation_rad, input.extent_x, input.extent_y
             )
         };
         let outputs = (0..count)
@@ -7277,8 +7394,8 @@ pub(super) fn append_emoji_overlays(
         filter_complex.push_str(&format!(
             "[{}:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale={}:{}:flags=lanczos,format=rgba{rotate}{split}",
             first_input_index + index,
-            input.size,
-            input.size,
+            input.size_x,
+            input.size_y,
         ));
     }
 
@@ -7295,7 +7412,11 @@ pub(super) fn append_emoji_overlays(
         filter_complex.push(';');
         filter_complex.push_str(&format!(
             "{current}[e{}_{use_index}]overlay=x={}:y={}:format=auto:alpha=straight:eof_action=repeat:repeatlast=1:enable='between(t,{:.6},{:.6})'{output_label}",
-            draw.input, draw.x, draw.y, draw.start_sec, draw.end_sec,
+            draw.input,
+            draw.x,
+            draw.y,
+            ass_centisecond(draw.start_sec),
+            ass_centisecond(draw.end_sec),
         ));
         current = output_label;
     }
@@ -7306,6 +7427,34 @@ pub(super) fn append_emoji_overlays(
 // =============================================================================
 // Export Engine
 // =============================================================================
+
+/// Everything one render's colour-emoji pass needs to measure its cells.
+///
+/// A struct rather than eight arguments because the pass is run more than once:
+/// a refusal makes the layout it measured obsolete, and the second run has to
+/// be given exactly what the first was.
+pub(crate) struct EmojiColourPass<'a> {
+    /// The sequence being rendered, re-emitted per measurement batch.
+    pub sequence: &'a Sequence,
+    /// Its effects, on the same terms.
+    pub effects: &'a std::collections::HashMap<String, Effect>,
+    /// Where colour pictures come from.
+    pub pack: &'a dyn EmojiRasterSource,
+    /// The cells the first script build laid out, in emission order.
+    pub occurrences: &'a [EmojiOccurrence],
+    /// Where this render's clock starts on the timeline.
+    pub window_start_sec: f64,
+    /// Width of the frames the render writes.
+    pub frame_width: u32,
+    /// Height of those frames.
+    pub frame_height: u32,
+    /// `PlayResX` the script is authored in.
+    pub play_res_x: u32,
+    /// `PlayResY` the script is authored in.
+    pub play_res_y: u32,
+    /// Frame rate of the render.
+    pub fps: f64,
+}
 
 /// Export engine for rendering sequences to video files
 pub struct ExportEngine {
@@ -7321,6 +7470,135 @@ impl ExportEngine {
     /// The FFmpeg binary this engine runs, for the probes that spawn their own.
     pub(crate) fn ffmpeg_path(&self) -> &Path {
         self.ffmpeg.info().ffmpeg_path.as_path()
+    }
+
+    /// Measures this render's colour emoji cells, and names the ones that
+    /// cannot become overlays.
+    ///
+    /// # Why a refusal forces a re-measurement
+    ///
+    /// The whole design rests on the marker script and the rendered script
+    /// laying out identically. Refusing a cell breaks that: the glyph it goes
+    /// back to advances by a different width than the spacer did, which can
+    /// re-wrap the line and move every *other* cell in the same block. So a
+    /// pass that produced refusals cannot also produce placements - it
+    /// produces a refusal set, and the measurement runs again against the
+    /// layout that will actually render.
+    ///
+    /// Twice, at most. A second pass that still cannot measure something gives
+    /// up on colour for this render entirely, which is the one answer that is
+    /// certainly right: every cell keeps the bundled monochrome glyph, exactly
+    /// as it did before the pack existed.
+    async fn measure_colour_emoji_cells(
+        &self,
+        pass: &EmojiColourPass<'_>,
+    ) -> Result<(Vec<EmojiPlacement>, HashSet<usize>), ExportError> {
+        let everything = || -> HashSet<usize> { (0..pass.occurrences.len()).collect() };
+
+        // Refusals that are knowable without spawning anything, so the first
+        // measurement already runs against the layout that will render.
+        let mut refused = super::emoji_measure::cells_no_frame_can_show(pass.occurrences, pass.fps);
+        refused.extend(cells_with_no_picture_on_disk(pass.occurrences, pass.pack));
+
+        // Nothing left to measure means nothing to ask FFmpeg about, and the
+        // half-staged pack - every entry refused - is exactly that case.
+        if refused.len() >= pass.occurrences.len() {
+            return Ok((Vec::new(), everything()));
+        }
+
+        // The probe reads its answer out of `bbox` through `metadata`. A build
+        // whose FFmpeg carries neither cannot measure anything, and asking it
+        // to try would spawn a subprocess per batch to learn that - the same
+        // gate `subtitles` is already behind.
+        for filter in ["bbox", "metadata"] {
+            if !self.ffmpeg_supports_filter(filter).await {
+                tracing::warn!(
+                    "FFmpeg has no {filter} filter, so colour emoji cannot be measured; captions \
+                     keep the bundled monochrome glyph"
+                );
+                return Ok((Vec::new(), everything()));
+            }
+        }
+
+        let mut placements: Vec<EmojiPlacement> = Vec::new();
+
+        for attempt in 0..2 {
+            let measured = {
+                // Rebuilding the whole script per measurement batch, rather
+                // than editing the one already on disk, is what makes the
+                // measured layout provably the rendered layout: the two come
+                // out of the same emitter given the same inputs.
+                let build_marker_script = |markers: &HashSet<usize>| {
+                    build_ass_text_overlay_script_in_window_with_emoji(
+                        pass.sequence,
+                        pass.effects,
+                        pass.window_start_sec,
+                        Some(EmojiSpacerContext {
+                            pack: Some(pass.pack as &dyn EmojiRasterSource),
+                            markers: Some(markers),
+                            refused: Some(&refused),
+                        }),
+                    )
+                    .map(|built| built.map(|built| built.script).unwrap_or_default())
+                };
+
+                super::emoji_measure::measure_emoji_placements(
+                    self,
+                    &super::emoji_measure::EmojiMeasureRequest {
+                        occurrences: pass.occurrences,
+                        build_marker_script: &build_marker_script,
+                        frame_width: pass.frame_width,
+                        frame_height: pass.frame_height,
+                        play_res_x: pass.play_res_x,
+                        play_res_y: pass.play_res_y,
+                        fps: pass.fps,
+                        refused: &refused,
+                    },
+                )
+                .await
+            };
+
+            // A measurement that could not run is not an export that failed.
+            // Every cell it was going to answer for keeps the monochrome
+            // glyph, and the render carries on.
+            let measured = match measured {
+                Ok(measured) => measured,
+                Err(error) => {
+                    tracing::warn!(
+                        "Colour emoji measurement could not run; captions keep the bundled \
+                         monochrome glyph: {error}"
+                    );
+                    Vec::new()
+                }
+            };
+
+            let placed: HashSet<usize> = measured
+                .iter()
+                .map(|placement| placement.occurrence_index)
+                .collect();
+            let missing: Vec<usize> = (0..pass.occurrences.len())
+                .filter(|index| !refused.contains(index) && !placed.contains(index))
+                .collect();
+
+            placements = measured;
+            if missing.is_empty() {
+                break;
+            }
+
+            if attempt == 0 {
+                refused.extend(missing);
+                continue;
+            }
+
+            tracing::warn!(
+                "Colour emoji measurement did not settle; this render keeps the bundled \
+                 monochrome glyph for every emoji"
+            );
+            placements.clear();
+            refused = everything();
+        }
+
+        Ok((placements, refused))
     }
 
     /// Probe all unique assets in a sequence to determine audio stream availability
@@ -7866,6 +8144,7 @@ impl ExportEngine {
             Some(EmojiSpacerContext {
                 pack: emoji_pack.map(|pack| pack as &dyn EmojiRasterSource),
                 markers: None,
+                refused: None,
             }),
         )? {
             if self.ffmpeg_supports_filter("subtitles").await {
@@ -7882,49 +8161,61 @@ impl ExportEngine {
                 // instruction rather than rendering a video with every caption missing.
                 crate::core::fs::validate_filter_safe_path(&ass_path, "Text overlay path")
                     .map_err(ExportError::InvalidSettings)?;
-                tokio::fs::write(&ass_path, ass_script.script)
+                tokio::fs::write(&ass_path, &ass_script.script)
                     .await
                     .map_err(ExportError::IoError)?;
-                ass_text_overlay_path = Some(ass_path);
                 ass_text_overlay_dir = Some(temp_dir);
                 ass_text_overlay_needs_host_fonts = ass_script.uses_host_fonts;
 
                 if let Some(pack) = emoji_pack.filter(|_| !ass_script.emoji_occurrences.is_empty())
                 {
                     let (frame_width, frame_height) = output_video_dimensions(sequence, settings);
-                    let window_start_sec = text_overlay_window.start_sec();
-                    // Rebuilding the whole script per measurement batch, rather
-                    // than editing the one already on disk, is what makes the
-                    // measured layout provably the rendered layout: the two
-                    // come out of the same emitter given the same inputs.
-                    let build_marker_script = |markers: &HashSet<usize>| {
-                        build_ass_text_overlay_script_in_window_with_emoji(
+                    let (play_res_x, play_res_y) = ass_play_resolution(&sequence.format.canvas);
+                    let pass = EmojiColourPass {
+                        sequence,
+                        effects,
+                        pack,
+                        occurrences: &ass_script.emoji_occurrences,
+                        window_start_sec: text_overlay_window.start_sec(),
+                        frame_width,
+                        frame_height,
+                        play_res_x,
+                        play_res_y,
+                        fps: output_video_fps(sequence, settings),
+                    };
+                    let (placements, refused) = self.measure_colour_emoji_cells(&pass).await?;
+
+                    // The script on disk was written with every eligible
+                    // cluster as an empty spacer. A refused one has to become
+                    // the monochrome glyph again *there*, before the graph is
+                    // built - otherwise the overlay that was going to fill the
+                    // hole never arrives and the caption burns in with a blank
+                    // 1.2 em gap in it, which is worse than the grey emoji the
+                    // feature was replacing.
+                    if !refused.is_empty() {
+                        if let Some(rebuilt) = build_ass_text_overlay_script_in_window_with_emoji(
                             sequence,
                             effects,
-                            window_start_sec,
+                            pass.window_start_sec,
                             Some(EmojiSpacerContext {
                                 pack: Some(pack as &dyn EmojiRasterSource),
-                                markers: Some(markers),
+                                markers: None,
+                                refused: Some(&refused),
                             }),
-                        )
-                        .map(|built| built.map(|built| built.script).unwrap_or_default())
-                    };
-
-                    let placements = super::emoji_measure::measure_emoji_placements(
-                        self,
-                        &super::emoji_measure::EmojiMeasureRequest {
-                            occurrences: &ass_script.emoji_occurrences,
-                            build_marker_script: &build_marker_script,
-                            frame_width,
-                            frame_height,
-                            play_res_y: ass_play_resolution(&sequence.format.canvas).1,
-                            fps: output_video_fps(sequence, settings),
-                        },
-                    )
-                    .await?;
+                        )? {
+                            // The glyph a refused cell goes back to may need a
+                            // face the spacer script did not have to embed.
+                            ass_text_overlay_needs_host_fonts = rebuilt.uses_host_fonts;
+                            tokio::fs::write(&ass_path, rebuilt.script)
+                                .await
+                                .map_err(ExportError::IoError)?;
+                        }
+                    }
 
                     emoji_overlay_plan = build_emoji_overlay_plan(&placements, pack);
                 }
+
+                ass_text_overlay_path = Some(ass_path);
             } else {
                 tracing::warn!(
                     "FFmpeg subtitles filter is unavailable; falling back to drawtext overlays"
@@ -10248,12 +10539,45 @@ mod tests {
     ///
     /// Walks the real ladder, so a test about substitution is testing the
     /// shipped resolution order rather than a second copy of it.
+    ///
+    /// [`FakeEmojiPack::carrying`] writes a real (empty) file per key, because
+    /// the graph builder now refuses a picture that is not on disk and a pack
+    /// whose manifest points at nothing is its own test case -
+    /// [`FakeEmojiPack::indexing`].
     #[derive(Debug)]
-    struct FakeEmojiPack(Vec<String>);
+    struct FakeEmojiPack {
+        keys: Vec<String>,
+        /// Where the pictures live. `None` is a pack that indexes files which
+        /// were never written, which is a half-staged install.
+        dir: Option<tempfile::TempDir>,
+    }
 
     impl FakeEmojiPack {
         fn carrying(keys: &[&str]) -> Self {
-            Self(keys.iter().map(|key| (*key).to_string()).collect())
+            let dir = tempfile::tempdir().expect("temp dir");
+            for key in keys {
+                std::fs::write(dir.path().join(format!("{key}.png")), []).expect("write picture");
+            }
+
+            Self {
+                keys: keys.iter().map(|key| (*key).to_string()).collect(),
+                dir: Some(dir),
+            }
+        }
+
+        /// A pack whose manifest names pictures that are not on disk.
+        fn indexing(keys: &[&str]) -> Self {
+            Self {
+                keys: keys.iter().map(|key| (*key).to_string()).collect(),
+                dir: None,
+            }
+        }
+
+        fn root(&self) -> PathBuf {
+            match &self.dir {
+                Some(dir) => dir.path().to_path_buf(),
+                None => PathBuf::from("emoji-pack-that-was-never-staged"),
+            }
         }
     }
 
@@ -10268,10 +10592,10 @@ mod tests {
         ) -> Option<crate::core::text::emoji_assets::EmojiAssetMatch> {
             crate::core::text::emoji_assets::resolution_candidates(sequence_key)
                 .into_iter()
-                .find(|(key, _)| self.0.iter().any(|carried| carried == key))
+                .find(|(key, _)| self.keys.iter().any(|carried| carried == key))
                 .map(
                     |(key, step)| crate::core::text::emoji_assets::EmojiAssetMatch {
-                        path: PathBuf::from(format!("emoji/{key}.png")),
+                        path: self.root().join(format!("{key}.png")),
                         key,
                         step,
                     },
@@ -10284,6 +10608,18 @@ mod tests {
         text: &str,
         pack: Option<&dyn EmojiRasterSource>,
         markers: Option<&HashSet<usize>>,
+        placed_at_sec: f64,
+        window_start_sec: f64,
+    ) -> AssTextOverlayScript {
+        caption_script_refusing(text, pack, markers, None, placed_at_sec, window_start_sec)
+    }
+
+    /// [`caption_script_with_pack`], with some cells refused back to the glyph.
+    fn caption_script_refusing(
+        text: &str,
+        pack: Option<&dyn EmojiRasterSource>,
+        markers: Option<&HashSet<usize>>,
+        refused: Option<&HashSet<usize>>,
         placed_at_sec: f64,
         window_start_sec: f64,
     ) -> AssTextOverlayScript {
@@ -10303,7 +10639,11 @@ mod tests {
             &sequence,
             &HashMap::new(),
             window_start_sec,
-            Some(EmojiSpacerContext { pack, markers }),
+            Some(EmojiSpacerContext {
+                pack,
+                markers,
+                refused,
+            }),
         )
         .expect("script result")
         .expect("script exists")
@@ -10375,12 +10715,15 @@ mod tests {
         let mut spacers = AssEmojiSpacers {
             pack: &pack,
             markers: None,
+            refused: None,
             size: 58,
             event_index: 0,
             run_index: 0,
             start_sec: 0.0,
             end_sec: 2.0,
             rotation_deg: 0.0,
+            scale_x_percent: 100.0,
+            scale_y_percent: 100.0,
             out: &mut occurrences,
         };
 
@@ -10558,6 +10901,249 @@ mod tests {
         );
     }
 
+    /// Feature: colour emoji burn-in
+    /// Scenario: a refused cell goes back to the monochrome glyph
+    ///
+    /// The mechanism the whole refusal path rests on. Whether a cluster can
+    /// become a colour overlay is not fully knowable when the script is first
+    /// built - the probe can fail, the cue can turn out to cover no frame - and
+    /// before this the only two outcomes were a colour emoji or an empty 1.2 em
+    /// gap where the spacer was. A refused occurrence emits exactly what it
+    /// would have emitted with no pack installed.
+    #[test]
+    fn a_refused_cell_keeps_the_monochrome_glyph_instead_of_a_spacer() {
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        let text = "Ship it \u{1F525}";
+        let refused: HashSet<usize> = [0usize].into_iter().collect();
+
+        let built = caption_script_refusing(text, Some(&pack), None, Some(&refused), 0.0, 0.0);
+        let without_pack = caption_script_with_pack(text, None, None, 0.0, 0.0);
+
+        assert_eq!(
+            built.script, without_pack.script,
+            "a refused cell has to leave the script it would have had with no pack at all"
+        );
+        assert!(
+            !built.script.contains("{\\p1}"),
+            "no spacer may survive a refusal. Got: {}",
+            built.script
+        );
+        // The occurrence is still recorded, and still holds index 0: both
+        // builds of a script have to agree about which cell is which, and a
+        // refusal that renumbered them would point every later measurement at
+        // the wrong cluster.
+        assert_eq!(built.emoji_occurrences.len(), 1);
+        assert_eq!(built.emoji_occurrences[0].sequence_key, "1f525");
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: refusing one cell leaves the others alone
+    #[test]
+    fn a_refusal_takes_only_the_cell_it_names() {
+        let pack = FakeEmojiPack::carrying(&["1f525", "1f600"]);
+        let text = "\u{1F525} and \u{1F600}";
+        let refused: HashSet<usize> = [0usize].into_iter().collect();
+
+        let built = caption_script_refusing(text, Some(&pack), None, Some(&refused), 0.0, 0.0);
+        let size = emitted_cell_size(&built.script);
+
+        assert_eq!(
+            first_event_text(&built.script),
+            format!(
+                "{{\\fnNoto Emoji}}\u{1F525}{{\\fn{DEFAULT_TEXT_FONT_FAMILY}}} and {}",
+                ass_emoji_spacer_run(size)
+            ),
+            "got: {}",
+            built.script
+        );
+        assert_eq!(built.emoji_occurrences.len(), 2);
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: a manifest entry whose picture is missing degrades to the glyph
+    ///
+    /// The manifest is an index, not the disk: a half-staged pack, an
+    /// interrupted download or an installer that dropped a file leaves an entry
+    /// pointing at nothing. Handing FFmpeg `-i <missing>.png` fails the whole
+    /// export over one absent picture.
+    #[test]
+    fn a_picture_the_pack_indexes_but_did_not_stage_refuses_its_cell() {
+        let staged = FakeEmojiPack::carrying(&["1f525"]);
+        let half_staged = FakeEmojiPack::indexing(&["1f525"]);
+        let occurrences = vec![occurrence_of("1f525"), occurrence_of("1f525")];
+
+        assert!(cells_with_no_picture_on_disk(&occurrences, &staged).is_empty());
+        assert_eq!(
+            cells_with_no_picture_on_disk(&occurrences, &half_staged),
+            [0usize, 1].into_iter().collect::<HashSet<usize>>()
+        );
+
+        // And even if one slipped through, no missing file reaches the graph.
+        let plan = build_emoji_overlay_plan(&[placement("1f525", 0, 0, 0.0, 1.0)], &half_staged);
+        assert!(plan.is_empty());
+    }
+
+    /// One occurrence of `key`, in the shape the emitter records them.
+    fn occurrence_of(key: &str) -> EmojiOccurrence {
+        EmojiOccurrence {
+            event_index: 0,
+            run_index: 0,
+            start_sec: 0.0,
+            end_sec: 2.0,
+            sequence_key: key.to_string(),
+            size_play_res: 72,
+            rotation_deg: 0.0,
+            scale_x_percent: 100.0,
+            scale_y_percent: 100.0,
+        }
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: the picture appears and disappears with the words
+    ///
+    /// The `Dialogue` line is written on a centisecond grid, because that is
+    /// all the ASS format has. Gating the overlay on the unrounded cue time
+    /// puts the picture on screen up to five milliseconds out of step with the
+    /// text - a whole frame at 60fps of an emoji with no caption, or a caption
+    /// with a hole in it.
+    #[test]
+    fn an_overlay_is_gated_on_the_same_centisecond_grid_the_event_is() {
+        let mut plan = build_emoji_overlay_plan(
+            &[placement("1f525", 10, 20, 1.0037, 2.0062)],
+            &FakeEmojiPack::carrying(&["1f525"]),
+        );
+        assert_eq!(plan.draws.len(), 1);
+
+        let mut graph = String::new();
+        append_emoji_overlays(&mut graph, "[txtass0]", &plan, 3);
+
+        assert!(
+            graph.contains("enable='between(t,1.000000,2.010000)'"),
+            "got: {graph}"
+        );
+        assert_eq!(ass_timecode(1.0037), "0:00:01.00");
+        assert_eq!(ass_timecode(2.0062), "0:00:02.01");
+
+        // And an unrounded cue keeps the times it had.
+        plan.draws[0].start_sec = 0.5;
+        plan.draws[0].end_sec = 1.25;
+        let mut graph = String::new();
+        append_emoji_overlays(&mut graph, "[txtass0]", &plan, 3);
+        assert!(
+            graph.contains("enable='between(t,0.500000,1.250000)'"),
+            "got: {graph}"
+        );
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: a picture is scaled to the cell it was measured in
+    #[test]
+    fn a_non_square_placement_scales_the_picture_to_match() {
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        let mut squashed = placement("1f525", 100, 200, 0.0, 2.0);
+        squashed.size_x = 41;
+        squashed.size_y = 72;
+
+        let plan = build_emoji_overlay_plan(&[squashed], &pack);
+        let mut graph = String::new();
+        append_emoji_overlays(&mut graph, "[txtass0]", &plan, 5);
+
+        assert!(graph.contains("scale=41:72:flags=lanczos"), "got: {graph}");
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: a probe that cannot run leaves the render monochrome
+    ///
+    /// End to end through the refusal path, without needing an FFmpeg that is
+    /// broken in an interesting way: an engine pointed at a binary that does
+    /// not exist cannot answer whether it has `bbox`, so the colour pass
+    /// refuses everything - and the script rebuilt from that refusal is, byte
+    /// for byte, the script this project would have had before the pack
+    /// existed.
+    #[tokio::test]
+    async fn a_render_whose_probe_cannot_run_burns_the_monochrome_glyph() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let engine = ExportEngine::new(FFmpegRunner::new(crate::core::ffmpeg::FFmpegInfo {
+            ffmpeg_path: PathBuf::from("ffmpeg-that-cannot-possibly-exist"),
+            ffprobe_path: PathBuf::from("ffprobe-that-cannot-possibly-exist"),
+            version: "test".to_string(),
+            is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
+        }));
+
+        let text = "Ship it \u{1F525}";
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some(text.to_string());
+        clip.caption_style = Some(default_caption_style());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        let effects = HashMap::new();
+        let with_cells = caption_script_with_pack(text, Some(&pack), None, 0.0, 0.0);
+        assert_eq!(with_cells.emoji_occurrences.len(), 1);
+
+        let (placements, refused) = engine
+            .measure_colour_emoji_cells(&EmojiColourPass {
+                sequence: &sequence,
+                effects: &effects,
+                pack: &pack,
+                occurrences: &with_cells.emoji_occurrences,
+                window_start_sec: 0.0,
+                frame_width: 1920,
+                frame_height: 1080,
+                play_res_x: 1920,
+                play_res_y: 1080,
+                fps: 30.0,
+            })
+            .await
+            .expect("a probe that cannot run is not an export failure");
+
+        assert!(placements.is_empty());
+        assert_eq!(refused, [0usize].into_iter().collect::<HashSet<usize>>());
+
+        let rebuilt = caption_script_refusing(text, Some(&pack), None, Some(&refused), 0.0, 0.0);
+        let without_pack = caption_script_with_pack(text, None, None, 0.0, 0.0);
+        assert_eq!(rebuilt.script, without_pack.script);
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: a cue no frame can show keeps its glyph
+    #[test]
+    fn a_cue_between_two_frames_is_refused_before_anything_is_measured() {
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        // 0.98s to 1.0s: the frames at 30fps are 0.9667 and 1.0, and this cue
+        // is on neither.
+        let built = caption_script_with_pack("Hi \u{1F525}", Some(&pack), None, 0.98, 0.0);
+        let occurrences: Vec<_> = built
+            .emoji_occurrences
+            .iter()
+            .cloned()
+            .map(|mut occurrence| {
+                occurrence.end_sec = 1.0;
+                occurrence
+            })
+            .collect();
+
+        let refused =
+            crate::core::render::emoji_measure::cells_no_frame_can_show(&occurrences, 30.0);
+
+        assert_eq!(refused, [0usize].into_iter().collect::<HashSet<usize>>());
+        let rebuilt =
+            caption_script_refusing("Hi \u{1F525}", Some(&pack), None, Some(&refused), 0.98, 0.0);
+        assert!(
+            !rebuilt.script.contains("{\\p1}"),
+            "got: {}",
+            rebuilt.script
+        );
+        assert!(rebuilt.script.contains("\\fnNoto Emoji"));
+    }
+
     /// Feature: colour emoji compositing
     /// Scenario: a render with no emoji keeps the filtergraph it always had
     #[test]
@@ -10582,9 +11168,11 @@ mod tests {
 
     fn placement(key: &str, x: i32, y: i32, start: f64, end: f64) -> EmojiPlacement {
         EmojiPlacement {
+            occurrence_index: 0,
             x,
             y,
-            size: 64,
+            size_x: 64,
+            size_y: 64,
             rotation_rad: 0.0,
             start_sec: start,
             end_sec: end,
@@ -10631,6 +11219,63 @@ mod tests {
                     .strip_prefix("lavfi.signalstats.SATMAX=")
                     .and_then(|value| value.trim().parse::<f64>().ok())
             })
+    }
+
+    /// The bounding box of everything one frame of `path` draws, after
+    /// `isolate` has been applied to it.
+    ///
+    /// Returned as `(x1, y1, x2, y2)` in output pixels, or `None` when the
+    /// frame is entirely black once isolated - which is what "nothing here"
+    /// looks like to the `bbox` filter.
+    fn bbox_of_frame(
+        ffmpeg: &Path,
+        path: &Path,
+        frame: u32,
+        isolate: &str,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let mut command = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut command);
+        let output = command
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-i",
+                &path.to_string_lossy(),
+                "-vf",
+                &format!(
+                    "select='eq(n\\,{frame})',{isolate}bbox=min_val=24,\
+                     metadata=mode=print:file=-"
+                ),
+                "-vsync",
+                "0",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        let edge = |name: &str| {
+            text.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix(&format!("lavfi.bbox.{name}="))
+                    .and_then(|value| value.trim().parse::<i32>().ok())
+            })
+        };
+
+        Some((edge("x1")?, edge("y1")?, edge("x2")?, edge("y2")?))
+    }
+
+    /// Whether `inner` lies inside `outer`, edges included.
+    fn box_contains(outer: (i32, i32, i32, i32), inner: (i32, i32, i32, i32)) -> bool {
+        inner.0 >= outer.0 && inner.1 >= outer.1 && inner.2 <= outer.2 && inner.3 <= outer.3
     }
 
     /// Feature: colour emoji burn-in
@@ -10718,6 +11363,39 @@ mod tests {
             saturation > 30.0,
             "a caption over black draws only greys unless the colour layer landed; peak \
              saturation was {saturation}"
+        );
+
+        // And it landed *in the caption*, not somewhere else on the frame.
+        // Peak saturation alone would pass on a colour picture composited into
+        // the corner, which is exactly the failure a wrong placement produces.
+        //
+        // The caption's own box is everything the frame draws; the colour box
+        // is what survives subtracting each channel from the next, which is
+        // zero for every grey - the black canvas, the white text, and the
+        // anti-aliased edges between them - and large for anything coloured.
+        let caption = bbox_of_frame(&ffmpeg, &settings.output_path, 15, "format=gray,")
+            .expect("the caption draws something");
+        let colour = bbox_of_frame(
+            &ffmpeg,
+            &settings.output_path,
+            15,
+            "format=rgb24,colorchannelmixer=rr=1:rg=-1:rb=0:gr=0:gg=1:gb=-1:br=-1:bg=0:bb=1,\
+             format=gray,",
+        )
+        .expect("something on the frame is coloured");
+
+        assert!(
+            box_contains(caption, colour),
+            "the colour has to sit inside the caption it belongs to: colour {colour:?} in \
+             caption {caption:?}"
+        );
+        // Inside, and smaller: an emoji is one cell of a line of words, so a
+        // colour box as wide as the whole caption is colour that leaked rather
+        // than a picture in its cell.
+        assert!(
+            colour.2 - colour.0 < caption.2 - caption.0,
+            "the colour is one cell of the line, not the whole line: colour {colour:?} in \
+             caption {caption:?}"
         );
     }
 

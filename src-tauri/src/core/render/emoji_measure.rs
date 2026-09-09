@@ -67,6 +67,12 @@ pub struct EmojiOccurrence {
     pub size_play_res: u32,
     /// The event's `\frz`, in degrees, counter-clockwise as ASS measures it.
     pub rotation_deg: f64,
+    /// The style's `ScaleX`, as a percentage. libass scales a `\p` drawing by
+    /// it exactly as it scales a glyph, so the cell - and the picture
+    /// composited into it - is this much wider than its `PlayRes` edge.
+    pub scale_x_percent: f64,
+    /// The style's `ScaleY`, as a percentage. The vertical half of the same.
+    pub scale_y_percent: f64,
 }
 
 impl EmojiOccurrence {
@@ -82,6 +88,41 @@ impl EmojiOccurrence {
         start + (end - start) / 2.0
     }
 
+    /// The frame this cell can be probed on, or `None` when no frame shows it.
+    ///
+    /// The middle of the cue is only a *candidate*. A probe reads back a frame
+    /// the graph actually produced, and the frames a cue is on are
+    /// `ceil(start*fps) ..= ceil(end*fps) - 1`: frame `n` is presented at
+    /// `n/fps` and draws the cue when `start <= n/fps < end`. Rounding the
+    /// midpoint can land one frame outside that range for a short cue, and
+    /// probing a frame the cue is not on measures nothing at all - so the
+    /// candidate is clamped into the range rather than trusted.
+    ///
+    /// `None` is the sub-frame cue: one shorter than a frame interval can fall
+    /// entirely between two presentation times, so no frame ever shows it and
+    /// there is nothing to measure. The caller refuses that cell back to the
+    /// monochrome glyph before the script it is written into reaches disk.
+    pub fn probe_frame(&self, fps: f64) -> Option<u64> {
+        if !fps.is_finite() || fps <= 0.0 {
+            return None;
+        }
+
+        let start = self.start_sec.max(0.0);
+        let end = self.end_sec;
+        if !start.is_finite() || !end.is_finite() || end <= start {
+            return None;
+        }
+
+        let first = (start * fps).ceil().max(0.0);
+        let last = (end * fps).ceil() - 1.0;
+        if last < first {
+            return None;
+        }
+
+        let candidate = (self.probe_instant_sec() * fps).round();
+        Some(candidate.clamp(first, last) as u64)
+    }
+
     /// Whether two cells can be on screen together.
     ///
     /// Touching windows (`a.end == b.start`) do not overlap: nothing is drawn
@@ -95,12 +136,21 @@ impl EmojiOccurrence {
 /// Where one emoji picture goes, in output pixels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmojiPlacement {
+    /// Which occurrence this measures, as an index into the request's slice.
+    ///
+    /// Carried rather than implied by position: the caller has to know exactly
+    /// which cells came back measured, because every cell that did not has to
+    /// be rebuilt as a monochrome glyph instead of left as an empty spacer.
+    pub occurrence_index: usize,
     /// Left edge of the picture.
     pub x: i32,
     /// Top edge of the picture.
     pub y: i32,
-    /// Square edge the picture is scaled to before it is drawn.
-    pub size: u32,
+    /// Width the picture is scaled to before it is drawn.
+    pub size_x: u32,
+    /// Height the picture is scaled to. Equal to `size_x` only when the frame
+    /// and the script's `PlayRes` share an aspect and the style scales evenly.
+    pub size_y: u32,
     /// Clockwise rotation to apply, in radians - FFmpeg's own sense, already
     /// negated from the ASS angle.
     pub rotation_rad: f64,
@@ -135,11 +185,24 @@ pub struct EmojiMeasureRequest<'a> {
     pub frame_width: u32,
     /// Height of those frames.
     pub frame_height: u32,
-    /// `PlayResY` the script is authored in, which fixes the scale between the
-    /// cell's drawing units and output pixels.
+    /// `PlayResX` the script is authored in. libass scales a script into the
+    /// frame on each axis independently - `frame_w/PlayResX` horizontally,
+    /// `frame_h/PlayResY` vertically - so an export whose frame does not share
+    /// the canvas aspect needs both numbers or the picture is sized wrong.
+    pub play_res_x: u32,
+    /// `PlayResY` the script is authored in, which fixes the vertical scale
+    /// between the cell's drawing units and output pixels.
     pub play_res_y: u32,
     /// Frame rate of the render, so probe instants land on real frames.
     pub fps: f64,
+    /// Occurrences that will *not* be cells in the script that is finally
+    /// rendered, by index into `occurrences`.
+    ///
+    /// They are neither probed nor placed. The set exists because the marker
+    /// script has to be laid out identically to the script that renders, and a
+    /// refused cell is a monochrome glyph in both - measuring against a script
+    /// that still had a spacer there would measure a line that never renders.
+    pub refused: &'a HashSet<usize>,
 }
 
 /// Groups occurrences so no two in one group are ever on screen together.
@@ -148,11 +211,21 @@ pub struct EmojiMeasureRequest<'a> {
 /// first batch none of whose members it overlaps. Optimal for intervals, and
 /// the ordering is the emission order, so the partition is deterministic.
 ///
+/// Occurrences in `refused` are not measured at all: they render as the
+/// monochrome glyph, so there is no rectangle to find and nothing to draw.
+///
 /// Returns batches of indices into the input slice.
-pub fn plan_measurement_batches(occurrences: &[EmojiOccurrence]) -> Vec<Vec<usize>> {
+pub fn plan_measurement_batches(
+    occurrences: &[EmojiOccurrence],
+    refused: &HashSet<usize>,
+) -> Vec<Vec<usize>> {
     let mut batches: Vec<Vec<usize>> = Vec::new();
 
     for (index, occurrence) in occurrences.iter().enumerate() {
+        if refused.contains(&index) {
+            continue;
+        }
+
         let slot = batches.iter().position(|batch| {
             batch
                 .iter()
@@ -168,12 +241,18 @@ pub fn plan_measurement_batches(occurrences: &[EmojiOccurrence]) -> Vec<Vec<usiz
     batches
 }
 
-/// Measures every cell, or explains why it could not.
+/// Measures every cell that can be measured, and says which those were.
 ///
-/// An occurrence the probe could not find a box for is dropped from the result
-/// rather than guessed at: the caller degrades that emoji back to the
-/// monochrome glyph, which is a picture, where a guessed rectangle is a colour
-/// emoji somewhere it does not belong.
+/// An occurrence the probe could not find a box for simply has no placement in
+/// the result. That is not a dropped emoji: the caller reads the placements'
+/// [`EmojiPlacement::occurrence_index`] back, refuses every cell that is
+/// missing, and rebuilds the script so those clusters carry the monochrome
+/// glyph instead of an empty spacer. A guessed rectangle would be a colour
+/// emoji somewhere it does not belong; a blank cell would be a hole.
+///
+/// A probe that fails outright - a binary without `bbox`, a spawn that could
+/// not run - is not an export failure either. The batch is warned about and
+/// left unmeasured, which reaches the same refusal path.
 pub async fn measure_emoji_placements(
     engine: &ExportEngine,
     request: &EmojiMeasureRequest<'_>,
@@ -184,7 +263,11 @@ pub async fn measure_emoji_placements(
         return Ok(Vec::new());
     }
 
-    if request.frame_width == 0 || request.frame_height == 0 || request.play_res_y == 0 {
+    if request.frame_width == 0
+        || request.frame_height == 0
+        || request.play_res_x == 0
+        || request.play_res_y == 0
+    {
         return Err(ExportError::InvalidSettings(
             "Colour emoji measurement needs a non-zero frame size".to_string(),
         ));
@@ -198,10 +281,23 @@ pub async fn measure_emoji_placements(
 
     let mut placements: Vec<EmojiPlacement> = Vec::with_capacity(request.occurrences.len());
 
-    for batch in plan_measurement_batches(request.occurrences) {
+    for batch in plan_measurement_batches(request.occurrences, request.refused) {
         let selection: HashSet<usize> = batch.iter().copied().collect();
         let script = (request.build_marker_script)(&selection)?;
-        let boxes = measure_batch(engine, request, &script, &batch, fps).await?;
+        // One batch that could not run costs its own cells their colour and
+        // nothing else. The alternative - propagating - fails an entire export
+        // over a filter this build's FFmpeg happens not to carry.
+        let boxes = match measure_batch(engine, request, &script, &batch, fps).await {
+            Ok(boxes) => boxes,
+            Err(error) => {
+                tracing::warn!(
+                    "Colour emoji measurement failed for {} cell(s); they keep the monochrome \
+                     glyph: {error}",
+                    batch.len()
+                );
+                continue;
+            }
+        };
 
         for (index, measured) in batch.iter().zip(boxes) {
             let occurrence = &request.occurrences[*index];
@@ -214,7 +310,7 @@ pub async fn measure_emoji_placements(
                 continue;
             };
 
-            placements.push(placement_from_box(occurrence, &measured, request));
+            placements.push(placement_from_box(*index, occurrence, &measured, request));
         }
     }
 
@@ -230,6 +326,22 @@ pub async fn measure_emoji_placements(
     });
 
     Ok(placements)
+}
+
+/// Cells no frame of this render can show, by index into `occurrences`.
+///
+/// Refused before anything is measured, and before the script that renders is
+/// written: a cue shorter than one frame interval can sit entirely between two
+/// presentation times, and there is no rectangle to find for a cell that is
+/// never drawn. Leaving it as a spacer would burn a blank 1.2 em hole into the
+/// caption; refusing it keeps the monochrome glyph.
+pub fn cells_no_frame_can_show(occurrences: &[EmojiOccurrence], fps: f64) -> HashSet<usize> {
+    occurrences
+        .iter()
+        .enumerate()
+        .filter(|(_, occurrence)| occurrence.probe_frame(fps).is_none())
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// A rectangle the `bbox` filter reported, in output pixels.
@@ -257,29 +369,51 @@ impl MeasuredBox {
 }
 
 /// Turns one measured box into the rectangle the overlay filter draws into.
+///
+/// # Why the size is not one number
+///
+/// libass scales a script into the frame on each axis independently:
+/// horizontally by `frame_width/PlayResX`, vertically by
+/// `frame_height/PlayResY`. Those agree only when the frame shares the
+/// script's aspect - which is the usual case and was the assumption here, and
+/// which a vertical sequence exported through a 16:9 preset breaks. On top of
+/// that the style's own `ScaleX`/`ScaleY` are user-settable and multiply in.
+///
+/// So the cell that was measured is `size_play_res` units wide *and* tall in
+/// the script's space, and the pixels it occupies are not a square. The
+/// picture is scaled to match, and stays centred on the measured centre -
+/// which is the one number the probe reports that is immune to all of this.
 fn placement_from_box(
+    occurrence_index: usize,
     occurrence: &EmojiOccurrence,
     measured: &MeasuredBox,
     request: &EmojiMeasureRequest<'_>,
 ) -> EmojiPlacement {
-    let scale = f64::from(request.frame_height) / f64::from(request.play_res_y);
-    let size = (f64::from(occurrence.size_play_res) * scale).round().clamp(
-        1.0,
-        f64::from(request.frame_height.max(request.frame_width)),
-    ) as u32;
+    let cell = f64::from(occurrence.size_play_res);
+    let ceiling = f64::from(request.frame_height.max(request.frame_width));
+    let scale_x = f64::from(request.frame_width) / f64::from(request.play_res_x);
+    let scale_y = f64::from(request.frame_height) / f64::from(request.play_res_y);
+    let size_x = (cell * scale_x * style_scale(occurrence.scale_x_percent))
+        .round()
+        .clamp(1.0, ceiling);
+    let size_y = (cell * scale_y * style_scale(occurrence.scale_y_percent))
+        .round()
+        .clamp(1.0, ceiling);
 
     // ASS measures `\frz` counter-clockwise; FFmpeg's `rotate` takes clockwise
     // radians. The picture has to turn the same way the cell did.
     let rotation_rad = -occurrence.rotation_deg.to_radians();
     let (center_x, center_y) = measured.center();
-    // A rotated square needs its axis-aligned bounding box, and that box is
+    // A rotated rectangle needs its axis-aligned bounding box, and that box is
     // still centred on the cell's centre, so the picture stays put.
-    let extent = rotated_extent(f64::from(size), rotation_rad);
+    let (extent_x, extent_y) = rotated_extents(size_x, size_y, rotation_rad);
 
     EmojiPlacement {
-        x: (center_x - extent / 2.0).round() as i32,
-        y: (center_y - extent / 2.0).round() as i32,
-        size,
+        occurrence_index,
+        x: (center_x - extent_x / 2.0).round() as i32,
+        y: (center_y - extent_y / 2.0).round() as i32,
+        size_x: size_x as u32,
+        size_y: size_y as u32,
         rotation_rad,
         start_sec: occurrence.start_sec,
         end_sec: occurrence.end_sec,
@@ -287,13 +421,33 @@ fn placement_from_box(
     }
 }
 
-/// Edge of the axis-aligned box a square of `size` occupies once rotated.
-pub(crate) fn rotated_extent(size: f64, rotation_rad: f64) -> f64 {
+/// A style's `ScaleX`/`ScaleY` percentage as a multiplier, defensively clamped.
+///
+/// The same bounds `append_ass_text_style_and_event` clamps the effect
+/// parameter to, applied again here because this struct can be built by a
+/// caller that never went through that clamp.
+fn style_scale(percent: f64) -> f64 {
+    if percent.is_finite() {
+        (percent / 100.0).clamp(0.01, 10.0)
+    } else {
+        1.0
+    }
+}
+
+/// Size of the axis-aligned box a `width` x `height` rectangle occupies once
+/// rotated by `rotation_rad`.
+pub(crate) fn rotated_extents(width: f64, height: f64, rotation_rad: f64) -> (f64, f64) {
     if rotation_rad == 0.0 {
-        return size;
+        return (width, height);
     }
 
-    (size * (rotation_rad.cos().abs() + rotation_rad.sin().abs())).ceil()
+    let cos = rotation_rad.cos().abs();
+    let sin = rotation_rad.sin().abs();
+
+    (
+        (width * cos + height * sin).ceil(),
+        (width * sin + height * cos).ceil(),
+    )
 }
 
 /// Runs one probe and reads back one box per occurrence in `batch`.
@@ -307,15 +461,23 @@ async fn measure_batch(
     batch: &[usize],
     fps: f64,
 ) -> Result<Vec<Option<MeasuredBox>>, ExportError> {
+    // `probe_frame` clamps the cue's midpoint into the frames the cue is
+    // actually on, so a short cue is probed on a frame that draws it rather
+    // than on the frame rounding happened to land on. A cell with no such
+    // frame is refused before it ever reaches a batch.
     let instants: Vec<(usize, f64)> = batch
         .iter()
-        .map(|index| {
-            let frame = (request.occurrences[*index].probe_instant_sec() * fps)
-                .round()
-                .max(0.0);
-            (frame as usize, frame / fps)
+        .filter_map(|index| {
+            let frame = request.occurrences[*index].probe_frame(fps)?;
+            Some((frame as usize, frame as f64 / fps))
         })
         .collect();
+
+    if instants.len() != batch.len() {
+        return Err(ExportError::InvalidSettings(
+            "A colour emoji cell with no frame to probe reached measurement".to_string(),
+        ));
+    }
 
     if let Some(cached) = cached_measurement(marker_script, request, &instants) {
         return Ok(cached);
@@ -335,7 +497,13 @@ async fn measure_batch(
     let output = run_probe(engine, request, &script_path, &instants, fps).await?;
     let measured = match_boxes_to_instants(&output, &instants, fps);
 
-    store_measurement(marker_script, request, &instants, &measured);
+    // Only a complete answer is remembered. A `None` is "the probe did not see
+    // this cell", which the caller turns into a refusal for this render - and
+    // caching it would make that refusal stick for the life of the process,
+    // long after whatever made the probe miss has gone away.
+    if measured.iter().all(Option::is_some) {
+        store_measurement(marker_script, request, &instants, &measured);
+    }
 
     Ok(measured)
 }
@@ -546,6 +714,7 @@ fn measurement_key(
     }
     request.frame_width.hash(&mut hasher);
     request.frame_height.hash(&mut hasher);
+    request.play_res_x.hash(&mut hasher);
     request.play_res_y.hash(&mut hasher);
     instants.len().hash(&mut hasher);
     hasher.finish()
@@ -591,6 +760,8 @@ mod tests {
             sequence_key: key.to_string(),
             size_play_res: 72,
             rotation_deg: 0.0,
+            scale_x_percent: 100.0,
+            scale_y_percent: 100.0,
         }
     }
 
@@ -602,7 +773,7 @@ mod tests {
             occurrence(1.0, 3.0, "1f525"),
         ];
 
-        let batches = plan_measurement_batches(&occurrences);
+        let batches = plan_measurement_batches(&occurrences, &HashSet::new());
 
         assert_eq!(batches, vec![vec![0], vec![1], vec![2]]);
     }
@@ -615,7 +786,7 @@ mod tests {
             occurrence(2.0, 3.0, "1f525"),
         ];
 
-        let batches = plan_measurement_batches(&occurrences);
+        let batches = plan_measurement_batches(&occurrences, &HashSet::new());
 
         assert_eq!(batches, vec![vec![0, 1, 2]]);
     }
@@ -628,14 +799,226 @@ mod tests {
             occurrence(2.5, 4.0, "1f525"),
         ];
 
-        let batches = plan_measurement_batches(&occurrences);
+        let batches = plan_measurement_batches(&occurrences, &HashSet::new());
 
         assert_eq!(batches, vec![vec![0, 2], vec![1]]);
     }
 
     #[test]
     fn no_occurrences_means_no_batches_at_all() {
-        assert!(plan_measurement_batches(&[]).is_empty());
+        assert!(plan_measurement_batches(&[], &HashSet::new()).is_empty());
+    }
+
+    /// Feature: colour emoji measurement
+    /// Scenario: a cue no frame shows has nothing to measure
+    ///
+    /// A cue shorter than a frame interval can sit entirely between two
+    /// presentation times. Probing it reads back a frame the caption is not on,
+    /// which measures nothing - and the cell, left as a spacer, would burn a
+    /// blank 1.2 em hole into the caption. It is refused instead.
+    #[test]
+    fn a_cue_that_falls_between_two_frames_has_no_frame_to_probe() {
+        // 0.98s to 1.0s at 30fps: the frames are at 0.9667 and 1.0, and the cue
+        // is on neither - the first is before it and the second is after its
+        // end.
+        let between = occurrence(0.98, 1.0, "1f600");
+        assert_eq!(between.probe_frame(30.0), None);
+
+        // The same cue at 60fps is on frame 59, and is measured normally.
+        assert_eq!(between.probe_frame(60.0), Some(59));
+
+        let occurrences = vec![occurrence(0.0, 1.0, "1f525"), between];
+        assert_eq!(
+            cells_no_frame_can_show(&occurrences, 30.0),
+            [1usize].into_iter().collect::<HashSet<usize>>()
+        );
+    }
+
+    /// Feature: colour emoji measurement
+    /// Scenario: the probe instant is clamped into the cue's own frames
+    ///
+    /// The midpoint is a real number and the probe reads a frame, so rounding
+    /// can land one frame past the cue's last. That frame draws nothing, the
+    /// cell measures as unmeasurable, and a caption that was perfectly
+    /// renderable loses its colour - or worse, before the refusal path existed,
+    /// kept an empty spacer.
+    #[test]
+    fn a_probe_instant_is_clamped_into_the_frames_the_cue_is_on() {
+        // Frames 29 and 30 at 30fps are 0.9667 and 1.0. The cue covers frame 29
+        // and ends exactly on frame 30, so 29 is its last frame - and its
+        // midpoint, 0.9833, rounds to frame 30.
+        let cue = occurrence(29.0 / 30.0, 1.0, "1f600");
+
+        assert_eq!(cue.probe_frame(30.0), Some(29));
+    }
+
+    /// Feature: colour emoji measurement
+    /// Scenario: a probe that cannot run costs the colour, not the export
+    ///
+    /// A binary without `bbox`, a spawn that fails, a non-zero exit: none of
+    /// them are reasons to fail a render. Every cell in the failed batch comes
+    /// back unmeasured, which the caller turns into a refusal back to the
+    /// monochrome glyph.
+    #[tokio::test]
+    async fn a_probe_that_cannot_run_leaves_every_cell_unmeasured() {
+        let engine = ExportEngine::new(crate::core::ffmpeg::FFmpegRunner::new(
+            crate::core::ffmpeg::FFmpegInfo {
+                ffmpeg_path: std::path::PathBuf::from("ffmpeg-that-cannot-possibly-exist"),
+                ffprobe_path: std::path::PathBuf::from("ffprobe-that-cannot-possibly-exist"),
+                version: "test".to_string(),
+                is_bundled: false,
+                source: crate::core::ffmpeg::FFmpegSource::System,
+            },
+        ));
+        let occurrences = vec![occurrence(0.0, 2.0, "1f600")];
+        let request = EmojiMeasureRequest {
+            occurrences: &occurrences,
+            build_marker_script: &|_| Ok("[Events]\n".to_string()),
+            frame_width: 1920,
+            frame_height: 1080,
+            play_res_x: 1920,
+            play_res_y: 1080,
+            fps: 30.0,
+            refused: &HashSet::new(),
+        };
+
+        let placements = measure_emoji_placements(&engine, &request)
+            .await
+            .expect("a probe that cannot run is not an export failure");
+
+        assert!(placements.is_empty());
+    }
+
+    /// Feature: colour emoji measurement
+    /// Scenario: a refused cell is never probed
+    #[test]
+    fn a_refused_cell_is_left_out_of_every_batch() {
+        let occurrences = vec![
+            occurrence(0.0, 1.0, "1f600"),
+            occurrence(2.0, 3.0, "1f44d"),
+            occurrence(4.0, 5.0, "1f525"),
+        ];
+        let refused: HashSet<usize> = [1usize].into_iter().collect();
+
+        assert_eq!(
+            plan_measurement_batches(&occurrences, &refused),
+            vec![vec![0, 2]]
+        );
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: a frame that does not share the script's aspect sizes the
+    /// picture on each axis separately
+    ///
+    /// libass scales a script into the frame by `frame_w/PlayResX` across and
+    /// `frame_h/PlayResY` down. Assuming one number for both drew the emoji at
+    /// the vertical scale in both directions, so a 16:9 script rendered into a
+    /// square frame composited a picture nearly twice as wide as the cell it
+    /// was measured in.
+    #[test]
+    fn a_frame_of_a_different_aspect_sizes_the_picture_on_each_axis() {
+        let request = EmojiMeasureRequest {
+            occurrences: &[],
+            build_marker_script: &|_| Ok(String::new()),
+            frame_width: 1080,
+            frame_height: 1080,
+            play_res_x: 1920,
+            play_res_y: 1080,
+            fps: 30.0,
+            refused: &HashSet::new(),
+        };
+        // A 72-unit cell in a 1920-wide script is 40.5 pixels across a
+        // 1080-wide frame, and a full 72 down a 1080-tall one.
+        let measured = MeasuredBox {
+            x1: 500,
+            y1: 500,
+            x2: 540,
+            y2: 571,
+        };
+
+        let placement = placement_from_box(0, &occurrence(0.0, 1.0, "1f600"), &measured, &request);
+
+        assert_eq!((placement.size_x, placement.size_y), (41, 72));
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: a stretched style stretches the picture with it
+    ///
+    /// `ScaleX` is a caption parameter a user can set, and libass applies it to
+    /// a `\p` drawing exactly as it applies it to a glyph - so the cell that
+    /// was measured really is twice as wide, and the picture composited into it
+    /// has to be too.
+    #[test]
+    fn a_style_scale_stretches_the_picture_the_way_it_stretched_the_cell() {
+        let request = EmojiMeasureRequest {
+            occurrences: &[],
+            build_marker_script: &|_| Ok(String::new()),
+            frame_width: 1920,
+            frame_height: 1080,
+            play_res_x: 1920,
+            play_res_y: 1080,
+            fps: 30.0,
+            refused: &HashSet::new(),
+        };
+        let mut stretched = occurrence(0.0, 1.0, "1f600");
+        stretched.scale_x_percent = 200.0;
+        let measured = MeasuredBox {
+            x1: 100,
+            y1: 100,
+            x2: 243,
+            y2: 171,
+        };
+
+        let placement = placement_from_box(0, &stretched, &measured, &request);
+
+        assert_eq!((placement.size_x, placement.size_y), (144, 72));
+        // Still centred on the box that was measured, which is the whole point
+        // of measuring it.
+        assert_eq!(placement.x, 100);
+        assert_eq!(placement.y, 100);
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: a vertical export sizes the picture from its own frame
+    #[test]
+    fn a_vertical_export_sizes_the_picture_from_its_own_frame() {
+        // A 9:16 canvas authors the script at 608x1080; exporting it at
+        // 1080x1920 scales by 1.776 across and 1.778 down.
+        let request = EmojiMeasureRequest {
+            occurrences: &[],
+            build_marker_script: &|_| Ok(String::new()),
+            frame_width: 1080,
+            frame_height: 1920,
+            play_res_x: 608,
+            play_res_y: 1080,
+            fps: 30.0,
+            refused: &HashSet::new(),
+        };
+        let measured = MeasuredBox {
+            x1: 400,
+            y1: 900,
+            x2: 527,
+            y2: 1027,
+        };
+
+        let placement = placement_from_box(0, &occurrence(0.0, 1.0, "1f600"), &measured, &request);
+
+        assert_eq!((placement.size_x, placement.size_y), (128, 128));
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: a rotated rectangle reports the box it actually occupies
+    #[test]
+    fn a_rotated_rectangle_takes_a_box_of_its_own_shape() {
+        assert_eq!(rotated_extents(100.0, 50.0, 0.0), (100.0, 50.0));
+
+        // A quarter turn swaps the axes. Within a pixel, because `cos` of a
+        // quarter turn is not exactly zero in binary and the extent is ceiled -
+        // which is the direction that matters: an extent is a box the picture
+        // has to fit inside, so rounding it up is never wrong.
+        let (width, height) = rotated_extents(100.0, 50.0, std::f64::consts::FRAC_PI_2);
+        assert!((width - 50.0).abs() <= 1.0, "got {width}");
+        assert!((height - 100.0).abs() <= 1.0, "got {height}");
     }
 
     #[test]
@@ -683,8 +1066,10 @@ mod tests {
             build_marker_script: &|_| Ok(String::new()),
             frame_width: 1920,
             frame_height: 1080,
+            play_res_x: 1920,
             play_res_y: 1080,
             fps: 30.0,
+            refused: &HashSet::new(),
         };
         // The real numbers a 72-unit cell measures at 1080p. `bbox` reports
         // inclusive edges, so the span is 72 pixels and its centre falls on a
@@ -698,9 +1083,9 @@ mod tests {
             y2: 949,
         };
 
-        let placement = placement_from_box(&occurrence(0.0, 1.0, "1f600"), &measured, &request);
+        let placement = placement_from_box(0, &occurrence(0.0, 1.0, "1f600"), &measured, &request);
 
-        assert_eq!(placement.size, 72);
+        assert_eq!((placement.size_x, placement.size_y), (72, 72));
         assert_eq!(placement.x, 924);
         assert_eq!(placement.y, 878);
     }
@@ -712,8 +1097,10 @@ mod tests {
             build_marker_script: &|_| Ok(String::new()),
             frame_width: 3840,
             frame_height: 2160,
+            play_res_x: 1920,
             play_res_y: 1080,
             fps: 30.0,
+            refused: &HashSet::new(),
         };
         let measured = MeasuredBox {
             x1: 1000,
@@ -722,9 +1109,9 @@ mod tests {
             y2: 1144,
         };
 
-        let placement = placement_from_box(&occurrence(0.0, 1.0, "1f600"), &measured, &request);
+        let placement = placement_from_box(0, &occurrence(0.0, 1.0, "1f600"), &measured, &request);
 
-        assert_eq!(placement.size, 144);
+        assert_eq!((placement.size_x, placement.size_y), (144, 144));
         assert_eq!(placement.x, 1000);
         assert_eq!(placement.y, 1000);
     }
@@ -736,8 +1123,10 @@ mod tests {
             build_marker_script: &|_| Ok(String::new()),
             frame_width: 1920,
             frame_height: 1080,
+            play_res_x: 1920,
             play_res_y: 1080,
             fps: 30.0,
+            refused: &HashSet::new(),
         };
         let mut rotated = occurrence(0.0, 1.0, "1f600");
         rotated.rotation_deg = 90.0;
@@ -748,7 +1137,7 @@ mod tests {
             y2: 172,
         };
 
-        let placement = placement_from_box(&rotated, &measured, &request);
+        let placement = placement_from_box(0, &rotated, &measured, &request);
 
         assert!((placement.rotation_rad + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
     }
@@ -773,8 +1162,10 @@ mod tests {
             },
             frame_width: 1920,
             frame_height: 1080,
+            play_res_x: 1920,
             play_res_y: 1080,
             fps: 30.0,
+            refused: &HashSet::new(),
         };
 
         let placements = measure_emoji_placements(&engine, &request)
@@ -1120,6 +1511,8 @@ mod tests {
                 sequence_key: "1f525".to_string(),
                 size_play_res: size,
                 rotation_deg: 0.0,
+                scale_x_percent: 100.0,
+                scale_y_percent: 100.0,
             },
             EmojiOccurrence {
                 event_index: 0,
@@ -1129,6 +1522,8 @@ mod tests {
                 sequence_key: "1f600".to_string(),
                 size_play_res: size,
                 rotation_deg: 0.0,
+                scale_x_percent: 100.0,
+                scale_y_percent: 100.0,
             },
         ];
 
@@ -1160,8 +1555,10 @@ mod tests {
                 build_marker_script: &build_marker_script,
                 frame_width: 1920,
                 frame_height: 1080,
+                play_res_x: 1920,
                 play_res_y: 1080,
                 fps: 30.0,
+                refused: &HashSet::new(),
             },
         )
         .await
@@ -1173,7 +1570,7 @@ mod tests {
             "two cells in one cue are at two different places: {placements:?}"
         );
         for placement in &placements {
-            assert_eq!(placement.size, size);
+            assert_eq!((placement.size_x, placement.size_y), (size, size));
         }
     }
 
@@ -1184,8 +1581,10 @@ mod tests {
             build_marker_script: &|_| Ok(String::new()),
             frame_width: 1920,
             frame_height: 1080,
+            play_res_x: 1920,
             play_res_y: 1080,
             fps: 30.0,
+            refused: &HashSet::new(),
         };
         let at_zero = "[Events]\nDialogue: 0,0:00:01.00,0:00:03.00,S,,0,0,0,,{\\an2}hi\n";
         let rebased = "[Events]\nDialogue: 0,0:00:00.00,0:00:02.00,S,,0,0,0,,{\\an2}hi\n";
@@ -1204,8 +1603,10 @@ mod tests {
             build_marker_script: &|_| Ok(String::new()),
             frame_width: 1920,
             frame_height: 1080,
+            play_res_x: 1920,
             play_res_y: 1080,
             fps: 30.0,
+            refused: &HashSet::new(),
         };
         let one = "[Events]\nDialogue: 0,0:00:01.00,0:00:03.00,S,,0,0,0,,{\\an2}hi\n";
         let other = "[Events]\nDialogue: 0,0:00:01.00,0:00:03.00,S,,0,0,0,,{\\an2}hello\n";
