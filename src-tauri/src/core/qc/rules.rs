@@ -1598,9 +1598,18 @@ impl CaptionSafeAreaRule {
 
     /// Action-safe margin (percentage of canvas)
     ///
-    /// Text outside this band risks being cropped by overscan and covered by
-    /// platform UI overlays, so breaching it is reported at the rule severity
-    /// while breaching only the title-safe margin stays informational.
+    /// Text outside this band risks being cropped by overscan, so breaching it
+    /// is reported at the rule severity while breaching only the title-safe
+    /// margin stays informational.
+    ///
+    /// Broadcast action-safe and nothing more. The band is a fixed symmetric
+    /// percentage with no orientation and no platform in it, so it says
+    /// nothing about whether a vertical platform's own UI - the username,
+    /// description, sound and CTA rail down the bottom of a TikTok, Reel or
+    /// Short, and the action column down the right - is drawn over the words.
+    /// On a 1080x1920 frame that band certifies text well inside both of
+    /// those. A pack that clears them does so through its own anchor (see
+    /// `shorts-bold-outline`), not through this rule.
     const ACTION_SAFE_MARGIN_PERCENT: f64 = 5.0;
 
     /// Average glyph advance as a fraction of the font size

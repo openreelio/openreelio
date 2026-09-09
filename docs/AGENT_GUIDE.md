@@ -1151,6 +1151,14 @@ edge and is anchored at x=10 %, so a sentence-length line in one still runs off
 a vertical frame. Run `verify` after
 styling and read what it says rather than assuming the pack covers it.
 
+`caption.safe_area` is a broadcast title/action-safe band — a fixed symmetric
+5%/10% of the frame, with no orientation and no platform in it. It does not
+model the UI a vertical platform draws over the picture (the username,
+description, sound and CTA rail along the bottom; the action column down the
+right), so a caption it passes on 1080x1920 can still sit under them. Clearing
+that is a matter of the anchor you pick: `shorts-bold-outline` is anchored at a
+26% bottom margin for it.
+
 ```bash
 openreelio-cli packs list --kind caption
 ```
