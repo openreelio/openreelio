@@ -50,6 +50,7 @@ import {
   getLinkedSplitTargets,
 } from '@/utils/clipLinking';
 import { extractTextDataFromClip } from '@/utils/textRenderer';
+import { DEFAULT_TEXT_FONT_FAMILY } from '@/utils/textFonts';
 import {
   buildClipAudioPayload,
   buildClipDeletionMap,
@@ -757,7 +758,7 @@ function createFallbackTextData(label?: string): TextClipData {
   return {
     content: content.length > 0 ? content : 'Text',
     style: {
-      fontFamily: 'Arial',
+      fontFamily: DEFAULT_TEXT_FONT_FAMILY,
       fontSize: 48,
       color: '#FFFFFF',
       backgroundPadding: 10,

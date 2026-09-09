@@ -241,7 +241,7 @@ pub struct CaptionStyle {
 impl Default for CaptionStyle {
     fn default() -> Self {
         Self {
-            font_family: "Arial".to_string(),
+            font_family: crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY.to_string(),
             font_size: 48,
             font_weight: FontWeight::Normal,
             color: Color::white(),
@@ -542,7 +542,10 @@ mod tests {
     #[test]
     fn test_default_style() {
         let style = CaptionStyle::default();
-        assert_eq!(style.font_family, "Arial");
+        assert_eq!(
+            style.font_family,
+            crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY
+        );
         assert_eq!(style.font_size, 48);
         assert!(style.outline_color.is_some());
     }

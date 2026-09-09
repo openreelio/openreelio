@@ -794,7 +794,7 @@ fn extract_text_data_from_effect(effect: &Effect) -> TextClipData {
         font_family: effect
             .get_param("font_family")
             .and_then(|v| v.as_str())
-            .unwrap_or("Arial")
+            .unwrap_or(crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY)
             .to_string(),
         font_size: effect.get_float("font_size").unwrap_or(48.0) as u32,
         font_weight,

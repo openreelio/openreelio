@@ -1748,7 +1748,8 @@ impl Effect {
     /// # Supported Parameters
     ///
     /// - `text`: Text content to display (required)
-    /// - `font_family`: Font family name (default: "Arial")
+    /// - `font_family`: Font family name (default: the bundled
+    ///   [`DEFAULT_TEXT_FONT_FAMILY`](crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY))
     /// - `font_size`: Font size in points (default: 48)
     /// - `font_weight`: Numeric font weight 100-900 (default: 400)
     /// - `color`: Text color as hex string (default: "#FFFFFF")
@@ -1776,6 +1777,16 @@ impl Effect {
     /// The normalized x/y positions (0.0-1.0) are converted to FFmpeg expressions
     /// that calculate actual positions based on video dimensions (w, h) and
     /// text dimensions (text_w, text_h).
+    ///
+    /// # Not the deterministic path
+    ///
+    /// `drawtext` is the fallback for an FFmpeg build without the `subtitles`
+    /// filter; a normal export burns text in through libass instead. Only that
+    /// path embeds the face it names, so only that path renders the same on
+    /// every machine. Here the family is handed to fontconfig verbatim - this
+    /// builder never consults the render-side family resolver and cannot embed
+    /// anything - so which face draws the text depends on what the host has
+    /// installed, the bundled default included.
     fn build_drawtext_filter(&self) -> String {
         // Required: text content
         let text = self
@@ -1788,7 +1799,7 @@ impl Effect {
         let font_family = self
             .get_param("font_family")
             .and_then(|v| v.as_str())
-            .unwrap_or("Arial");
+            .unwrap_or(crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY);
         let font_size = self.get_float("font_size").unwrap_or(48.0) as i64;
         let font_weight = self
             .get_param("font_weight")
@@ -2408,6 +2419,7 @@ fn add_enable_to_each_filter(body: &str, enable_clause: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::effects::{curve_points_to_json, CurvePoint, EffectCategory, ParamValue};
+    use crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY;
 
     #[test]
     fn test_brightness_filter() {
@@ -2916,7 +2928,7 @@ mod tests {
 
         let filter = effect.to_filter_string("in", "out");
         assert!(
-            filter.contains("font='Arial\\:style=Bold'"),
+            filter.contains(&format!("font='{DEFAULT_TEXT_FONT_FAMILY}\\:style=Bold'")),
             "Expected bold style in font pattern, got: {}",
             filter
         );
@@ -2930,7 +2942,7 @@ mod tests {
 
         let filter = effect.to_filter_string("in", "out");
         assert!(
-            filter.contains("font='Arial\\:style=Italic'"),
+            filter.contains(&format!("font='{DEFAULT_TEXT_FONT_FAMILY}\\:style=Italic'")),
             "Expected italic style in font pattern, got: {}",
             filter
         );
@@ -3139,9 +3151,9 @@ mod tests {
             "Expected default text, got: {}",
             filter
         );
-        // Default font should be Arial
+        // The default names the bundled family, not a face we do not ship.
         assert!(
-            filter.contains("font='Arial'"),
+            filter.contains(&format!("font='{DEFAULT_TEXT_FONT_FAMILY}'")),
             "Expected default font, got: {}",
             filter
         );

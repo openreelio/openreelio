@@ -38,6 +38,7 @@ use crate::core::{
         build_ffmpeg_invocation_for_render_plan, build_ffmpeg_invocation_from_args,
         execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
     },
+    text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY,
     timeline::{
         BlendMode, Canvas, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track,
         TrackKind, Transform,
@@ -6146,7 +6147,7 @@ fn append_ass_text_style_and_event(
         window_start_sec,
     } = *context;
     let opacity = effect_float_param(effect, "opacity", 1.0).clamp(0.0, 1.0);
-    let font_family = ass_sanitize_style_field(font_family, "Arial");
+    let font_family = ass_sanitize_style_field(font_family, DEFAULT_TEXT_FONT_FAMILY);
     let font_size = effect_float_param(effect, "font_size", 48.0).clamp(1.0, 500.0);
     let font_weight = effect_int_param(effect, "font_weight", 400).clamp(100, 900);
     let bold = effect_bool_param(effect, "bold", false) || font_weight >= 600;
@@ -6305,6 +6306,39 @@ pub(crate) fn resolve_text_font_family(requested: &str) -> FontResolution {
     }
 }
 
+/// Whether the faces of a bundled `family` can draw every character of `text`.
+///
+/// Family selection and glyph coverage are different questions. Resolving a
+/// style to a bundled family says the script carries *a* face; it says nothing
+/// about whether that face has an outline for the characters this event
+/// actually contains. Every family compiled in today is Latin-only, so a
+/// Korean, Japanese, Chinese or emoji caption on the default path resolves to a
+/// bundled family, embeds it, and still needs libass to reach past the
+/// attachment for the glyphs the face does not have. Reporting that here is
+/// what keeps `fontsdir` on the graph for those events - without it libass has
+/// one fewer place to look and draws notdef boxes.
+///
+/// Whitespace and control characters are laid out rather than drawn, so a face
+/// with no glyph for them still renders the line; everything else is asked of
+/// the family's own `cmap`, short-circuiting on the first character no weight
+/// of the family covers.
+fn bundled_family_covers_text(family: &str, text: &str) -> bool {
+    let faces = crate::core::text::bundled_fonts::bundled_family_faces(family);
+    if faces.is_empty() {
+        return false;
+    }
+
+    !text.chars().any(|ch| {
+        if ch.is_whitespace() || ch.is_control() {
+            return false;
+        }
+
+        !faces
+            .iter()
+            .any(|face| crate::core::text::coverage::face_covers(face, ch))
+    })
+}
+
 /// Ceiling on the bytes one script may carry in its `[Fonts]` section.
 ///
 /// A script is written to a temp file and parsed in full before the first
@@ -6407,7 +6441,7 @@ pub fn build_ass_text_overlay_script(
 pub(crate) struct AssTextOverlayPlan<'a> {
     /// The `.ass` file the `subtitles` filter reads.
     pub path: &'a Path,
-    /// Whether any style named a family only the host font set can supply.
+    /// Whether any event needs a glyph only the host font set can supply.
     pub needs_host_fonts: bool,
 }
 
@@ -6416,13 +6450,20 @@ pub(crate) struct AssTextOverlayPlan<'a> {
 pub(crate) struct AssTextOverlayScript {
     /// The script itself.
     pub script: String,
-    /// Whether any style named a family only the host font provider can supply.
+    /// Whether any event needs a glyph only the host font provider can supply.
     ///
-    /// False for everything this codebase controls: bundled families and the
-    /// placeholder alias are carried inside the script's `[Fonts]` section, so
-    /// the graph needs no `fontsdir` and the render does not depend on the
-    /// machine's font set. It flips only when a user deliberately picked an
-    /// installed system font.
+    /// Two things flip it, and they are different questions:
+    ///
+    /// - *Family*: a user deliberately picked a family that is installed here
+    ///   and nowhere in the binary, so libass has to resolve it off the host.
+    /// - *Glyph*: the resolved family is bundled and embedded, but its faces
+    ///   have no outline for some character of the event's text. Every family
+    ///   compiled in today is Latin-only, so a Korean, Japanese, Chinese or
+    ///   emoji caption lands here even on the default path.
+    ///
+    /// False only when every event's text is drawn end to end by a face the
+    /// script carries; then the graph needs no `fontsdir` and the render does
+    /// not depend on the machine's font set.
     pub uses_host_fonts: bool,
 }
 
@@ -6433,6 +6474,19 @@ pub(crate) struct AssTextOverlayScript {
 /// render needs the events moved back by exactly as much as the graph was.
 /// [`ass_timecode`] floors a negative start at zero, which is what an overlay
 /// already on screen when the window opens should be.
+///
+/// # The preview is not this
+///
+/// Everything this function guarantees is about the rendered file. The live
+/// preview draws captions and text overlays in the webview with CSS and canvas,
+/// against the fonts that webview can see - and the bundled families are not
+/// registered as `@font-face` there, so a default caption previews in the
+/// webview's fallback sans and wraps differently from the burn-in. Closing that
+/// gap (registering the bundled TTFs, mirroring the placeholder alias in the
+/// preview, and the `ctx.font` and astral-char bugs in the canvas path) is a
+/// separate change; do not read any claim here as preview parity.
+// TODO(preview-parity): register the bundled faces as `@font-face` and mirror
+// this resolver in the preview so the draft wraps like the export.
 pub(crate) fn build_ass_text_overlay_script_in_window(
     sequence: &Sequence,
     effects: &HashMap<String, Effect>,
@@ -6491,14 +6545,24 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
             }
 
             let requested_family = ass_sanitize_style_field(
-                &effect_string_param(&effect, "font_family", "Arial"),
-                "Arial",
+                &effect_string_param(&effect, "font_family", DEFAULT_TEXT_FONT_FAMILY),
+                DEFAULT_TEXT_FONT_FAMILY,
             );
             let font_family = match resolve_text_font_family(&requested_family) {
                 FontResolution::Bundled(family)
                 | FontResolution::Aliased(family)
                 | FontResolution::Substituted(family) => {
                     fonts.embed_family(family);
+                    // Embedding the family answers the family question, not the
+                    // glyph one: the bundled faces are Latin-only, so a caption
+                    // in a script none of them covers still needs the host's
+                    // fonts for the characters the attachment cannot draw.
+                    if !bundled_family_covers_text(
+                        family,
+                        &effect_string_param(&effect, "text", "Title"),
+                    ) {
+                        uses_host_fonts = true;
+                    }
                     family.to_string()
                 }
                 FontResolution::System => {
@@ -6570,15 +6634,21 @@ async fn probe_ffmpeg_filters(ffmpeg_path: &Path) -> Option<HashSet<String>> {
 /// # Determinism boundary
 ///
 /// `fontsdir` names a directory on *this* machine, so a graph that carries it
-/// renders against whatever that host has installed. Everything this codebase
-/// chooses - every caption pack, every text default, every bundled family -
-/// resolves to a face the script carries in its own `[Fonts]` section, needs no
-/// directory, and therefore burns in identically on Windows, macOS and Linux.
-/// The option is emitted only when `host_fonts_needed` says a style named a
-/// family that exists nowhere but the host font set, which happens only when a
-/// user deliberately picked an installed system font. That clip renders with
-/// that machine's copy of that font - by the user's own choice, and the export
-/// validation warning already tells them when a pick could not be found at all.
+/// renders against whatever that host has installed. Text that a bundled face
+/// can draw end to end - every caption pack and every text default, in a script
+/// the face covers - travels inside the script's own `[Fonts]` section, needs
+/// no directory, and therefore burns in identically on Windows, macOS and
+/// Linux. The option is emitted only when `host_fonts_needed` says some event
+/// still needs the host, which happens in exactly two cases: a user
+/// deliberately picked an installed system font, or the embedded face has no
+/// glyph for a character of the text. Every bundled family is Latin-only, so
+/// the second case covers CJK, emoji and every other non-Latin script - those
+/// events render with that machine's fonts, and cannot be identical across
+/// machines until a face covering them is compiled in.
+///
+/// This is a statement about the **export** path only. The live DOM/canvas
+/// preview draws text with the webview's own font stack and is a separate
+/// concern; see the note in [`build_ass_text_overlay_script_in_window`].
 pub(super) fn append_ass_text_overlay(
     filter_complex: &mut String,
     base_video_label: &str,
@@ -8232,8 +8302,8 @@ fn validate_text_render_fidelity(
             }
 
             let requested_family = ass_sanitize_style_field(
-                &effect_string_param(&effect, "font_family", "Arial"),
-                "Arial",
+                &effect_string_param(&effect, "font_family", DEFAULT_TEXT_FONT_FAMILY),
+                DEFAULT_TEXT_FONT_FAMILY,
             );
             if let FontResolution::Substituted(replacement) =
                 resolve_text_font_family(&requested_family)
@@ -9246,6 +9316,14 @@ mod tests {
 
     /// Builds the burn-in script for one caption carrying `style`.
     fn caption_script_for_style(style: serde_json::Value) -> AssTextOverlayScript {
+        caption_script_for_style_and_text(style, "Caption")
+    }
+
+    /// Builds the burn-in script for one caption carrying `style` and `text`.
+    fn caption_script_for_style_and_text(
+        style: serde_json::Value,
+        text: &str,
+    ) -> AssTextOverlayScript {
         use crate::core::timeline::{Clip, SequenceFormat, Track};
 
         let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
@@ -9253,7 +9331,7 @@ mod tests {
         let mut clip = Clip::new("caption-asset")
             .with_source_range(0.0, 2.0)
             .place_at(0.0);
-        clip.label = Some("Caption".to_string());
+        clip.label = Some(text.to_string());
         clip.caption_style = Some(style);
         track.add_clip(clip);
         sequence.add_track(track);
@@ -9340,6 +9418,73 @@ mod tests {
             built.script
         );
         assert!(!built.uses_host_fonts);
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: a bundled face that cannot draw the text still needs the host
+    ///
+    /// Resolving to a bundled family answers which face the script carries, not
+    /// whether that face has glyphs for this caption. Every family compiled in
+    /// is Latin-only, so a Hangul caption on the *default* path embeds TikTok
+    /// Sans and still falls back per glyph to the host's fonts. Reporting only
+    /// family selection dropped `fontsdir` from that graph and libass lost a
+    /// place to look, which is how a Korean caption turns into notdef boxes.
+    #[test]
+    fn a_default_caption_needs_the_host_only_for_glyphs_the_bundled_face_lacks() {
+        let default_style = serde_json::to_value(
+            crate::core::style::caption_packs::resolve_caption_pack("default")
+                .expect("the default pack resolves")
+                .style(),
+        )
+        .expect("pack style serializes");
+
+        let latin = caption_script_for_style_and_text(default_style.clone(), "Hello there");
+        assert!(
+            latin.script.contains(&format!(
+                "Style: OpenReelioText0,{DEFAULT_TEXT_FONT_FAMILY},"
+            )),
+            "got: {}",
+            latin.script
+        );
+        assert!(
+            !latin.uses_host_fonts,
+            "the bundled face draws every character, so the graph needs no fontsdir"
+        );
+
+        // "안녕" - Hangul syllables no bundled face maps.
+        let hangul = caption_script_for_style_and_text(default_style, "\u{C548}\u{B155}");
+        assert!(
+            hangul.script.contains(&format!(
+                "Style: OpenReelioText0,{DEFAULT_TEXT_FONT_FAMILY},"
+            )),
+            "the family still resolves to the bundled default. Got: {}",
+            hangul.script
+        );
+        assert!(
+            hangul.uses_host_fonts,
+            "no bundled face covers Hangul, so libass has to reach the host's fonts"
+        );
+    }
+
+    /// Feature: deterministic caption burn-in
+    /// Scenario: whitespace is laid out, not drawn
+    #[test]
+    fn characters_a_face_never_draws_do_not_ask_for_the_host_font_set() {
+        // A tab or a non-breaking space is a layout instruction; a face with no
+        // glyph for one still renders the line. Treating them as uncovered
+        // would put `fontsdir` on every graph and give up the guarantee for
+        // nothing.
+        assert!(bundled_family_covers_text(
+            DEFAULT_TEXT_FONT_FAMILY,
+            "Two\tlines\nof\u{00A0}text"
+        ));
+        assert!(!bundled_family_covers_text(
+            DEFAULT_TEXT_FONT_FAMILY,
+            "mostly latin \u{C548}"
+        ));
+        // A family we do not ship covers nothing here; the caller reaches that
+        // answer through `FontResolution::System` instead.
+        assert!(!bundled_family_covers_text("Definitely Not Bundled", "A"));
     }
 
     /// Feature: deterministic caption burn-in
@@ -10455,7 +10600,7 @@ mod tests {
     /// The script is written into the directory FFmpeg runs in so the
     /// filtergraph can name it without escaping a Windows drive letter. libass
     /// reports its choice at `MSGL_INFO`, which the `subtitles` filter maps to
-    /// FFmpeg's verbose level.
+    /// FFmpeg's debug level - hence `-loglevel debug` below.
     #[cfg(test)]
     fn libass_font_selections(ffmpeg: &Path, script: &str) -> Option<Vec<String>> {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -10551,9 +10696,14 @@ mod tests {
 
         // The control differs only by the missing section, so a pass here is
         // evidence about the section rather than about the rest of the script.
+        // The family is renamed as well as unattached: a machine that happens to
+        // have Luckiest Guy installed would otherwise let the control select a
+        // face by that name, and the assertion below would pass because the host
+        // lacks the font rather than because the attachment is what delivers it.
         let fonts_start = embedded.find("[Fonts]\n").expect("fonts section");
         let events_start = embedded.find("[Events]\n").expect("events section");
-        let control = format!("{}{}", &embedded[..fonts_start], &embedded[events_start..]);
+        let control = format!("{}{}", &embedded[..fonts_start], &embedded[events_start..])
+            .replace("Luckiest Guy", "OpenReelio Absent Family");
 
         let Some(fallbacks) = libass_font_selections(&ffmpeg, &control) else {
             skip_without_ffmpeg("ffmpeg could not burn in the control script");

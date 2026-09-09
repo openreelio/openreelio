@@ -14,6 +14,7 @@ import { TextPresetPicker } from './TextPresetPicker';
 import { getPresetById, presetToTextClipData, type TextPreset } from '@/data/textPresets';
 import { getUserFriendlyError } from '@/utils/errorMessages';
 import { getClipTimelineDurationSec as resolveClipTimelineDurationSec } from '@/utils/clipTiming';
+import { DEFAULT_TEXT_FONT_FAMILY } from '@/utils/textFonts';
 
 /** Payload for adding a text clip */
 export interface AddTextPayload {
@@ -49,7 +50,7 @@ const DEFAULT_PRESET_ID = 'centered-title';
 /** Fallback style when no preset is selected */
 const DEFAULT_TEXT_STYLE: TextClipData['style'] = {
   fontSize: 42,
-  fontFamily: 'Arial',
+  fontFamily: DEFAULT_TEXT_FONT_FAMILY,
   fontWeight: 400,
   color: '#FFFFFF',
   bold: false,

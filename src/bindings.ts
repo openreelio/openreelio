@@ -9660,8 +9660,18 @@ text: string }
  */
 export type TextStyle = { 
 /**
- * Font family name (system font)
- * Common values: "Arial", "Helvetica", "Times New Roman", "Georgia", "Courier New"
+ * Font family name.
+ * 
+ * Prefer a family the app ships, because those are carried inside the
+ * burn-in script and therefore render the same on every machine:
+ * `"TikTok Sans"` (the default), `"Montserrat"`, `"Poppins"`, `"Anton"`,
+ * `"Archivo Black"`, `"Bebas Neue"`, `"Bangers"`, `"Luckiest Guy"`.
+ * 
+ * Any other name is resolved against the fonts installed on the machine
+ * doing the render, so the result differs per host and export validation
+ * warns when it cannot be found at all. `"Arial"` is accepted only as a
+ * back-compat placeholder from older projects and renders as the bundled
+ * default; do not choose it for new text.
  */
 fontFamily: string; 
 /**

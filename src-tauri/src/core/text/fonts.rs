@@ -28,12 +28,18 @@ const MAX_FONT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// These are suggestions, not facts. The list used to be folded into the
 /// scanned catalog, which made [`system_font_family_installed`] answer `true`
 /// for every name in it on every machine - so `"Arial"`, the family every
-/// caption pack and every text default asks for, looked installed on a Linux
+/// caption pack and every text default asked for, looked installed on a Linux
 /// box that has never seen it and the renderer took the host-font path instead
 /// of embedding a face. Keeping the two apart is what makes the burn-in
 /// reproducible: only [`list_font_picker_suggestions`] may read this.
+///
+/// `"Arial"` is deliberately absent. We do not ship it, so offering it hands
+/// the user a name that silently renders as the bundled default; the bundled
+/// family is offered under its own name instead, so a pick and the face that
+/// draws it agree. Everything else here is a family a user may genuinely want
+/// off their own machine, and picking one is a deliberate host-font choice.
 const FONT_PICKER_SUGGESTIONS: &[&str] = &[
-    "Arial",
+    "TikTok Sans",
     "Helvetica",
     "Verdana",
     "Inter",
@@ -95,6 +101,13 @@ pub fn list_font_picker_suggestions() -> Vec<String> {
 /// The scanned catalog with nothing added. Ask this when the answer has to be
 /// a fact about the machine; ask [`list_font_picker_suggestions`] when it only
 /// has to fill a dropdown.
+///
+/// Nothing outside this crate calls it today, and its only caller is a test, so
+/// narrowing it to `pub(crate)` just trades the wide visibility for a dead-code
+/// warning. It stays `pub` as the honest counterpart to
+/// [`list_font_picker_suggestions`]; a caller that only needs a membership test
+/// should use [`system_font_family_installed`] rather than a copy of every name
+/// on the machine.
 pub fn list_installed_font_families() -> Vec<String> {
     system_font_families().to_vec()
 }
@@ -705,15 +718,18 @@ mod tests {
     #[test]
     fn the_picker_does_not_list_an_installed_family_twice() {
         // The scan reports the host's own spelling; the suggestion list carries
-        // a canonical one. Matching case-insensitively keeps "arial" and
-        // "Arial" from both reaching the dropdown.
-        let installed = vec!["arial".to_string()];
+        // a canonical one. Matching case-insensitively keeps "helvetica" and
+        // "Helvetica" from both reaching the dropdown.
+        let duplicated = FONT_PICKER_SUGGESTIONS
+            .first()
+            .expect("the picker offers at least one suggestion");
+        let installed = vec![duplicated.to_lowercase()];
         let suggestions = merge_picker_suggestions(&installed);
 
         assert_eq!(
             suggestions
                 .iter()
-                .filter(|family| family.eq_ignore_ascii_case("Arial"))
+                .filter(|family| family.eq_ignore_ascii_case(duplicated))
                 .count(),
             1,
             "got: {suggestions:?}"
