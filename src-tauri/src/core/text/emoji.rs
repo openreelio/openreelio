@@ -675,6 +675,17 @@ pub fn sequence_key(cluster: &EmojiCluster<'_>) -> String {
     sequence_key_for(&cluster.codepoints)
 }
 
+/// [`sequence_key`] for a grapheme cluster that was never scanned.
+///
+/// The burn-in walks clusters itself once a run has been routed to the emoji
+/// tier, so it holds a `&str` and no [`EmojiCluster`]. Re-scanning to get the
+/// key back would classify the cluster a second time for an answer that is a
+/// pure function of its code points.
+pub fn sequence_key_of(cluster: &str) -> String {
+    let codepoints: Vec<char> = cluster.chars().collect();
+    sequence_key_for(&codepoints)
+}
+
 /// [`sequence_key`] over the code points alone, for use before a cluster exists.
 fn sequence_key_for(codepoints: &[char]) -> String {
     codepoints
