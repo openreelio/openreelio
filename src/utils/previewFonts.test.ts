@@ -17,11 +17,19 @@ import { BUNDLED_TEXT_FONT_FAMILIES, DEFAULT_TEXT_FONT_FAMILY } from './textFont
  */
 
 const BUNDLED_FONTS_CSS = path.resolve(process.cwd(), 'src/styles/bundledFonts.css');
+const BUNDLED_FONTS_RS = path.resolve(process.cwd(), 'src-tauri/src/core/text/bundled_fonts.rs');
 
 interface CssFontFace {
   family: string;
   weight: number;
   src: string;
+}
+
+interface RustFontFace {
+  family: string;
+  weight: number;
+  /** `file_name` from the macro — the TTF basename, without its extension. */
+  fileName: string;
 }
 
 /**
@@ -50,34 +58,60 @@ function cssFontFaces(): CssFontFace[] {
   return faces;
 }
 
+/**
+ * Parses the text faces `bundled_fonts.rs` compiles into the export binary.
+ *
+ * The Rust registry is the side that decides which file a family at a weight
+ * burns in as, so it is what the stylesheet has to be pinned against: a
+ * `@font-face` that declares `font-weight: 700` while pointing at the Regular
+ * TTF passes a file-exists check and still draws the draft in the wrong face.
+ *
+ * `FaceRole::Fallback` entries are skipped. They are reached per glyph, never
+ * named by a style, and `bundledFonts.css` deliberately does not register them.
+ */
+function rustFontFaces(): RustFontFace[] {
+  const source = fs.readFileSync(BUNDLED_FONTS_RS, 'utf8');
+  const faces: RustFontFace[] = [];
+
+  for (const call of source.matchAll(
+    /bundled_font!\(\s*"([^"]+)",\s*"([^"]+)",\s*"[^"]+"(?:\s*,\s*FaceRole::(\w+))?\s*,?\s*\)/g,
+  )) {
+    const [, family, fileName, role] = call;
+    if (role !== undefined && role !== 'Text') {
+      continue;
+    }
+
+    faces.push({ family, weight: fileName.endsWith('-Bold') ? 700 : 400, fileName });
+  }
+
+  return faces;
+}
+
 describe('previewFonts', () => {
   describe('cssFontShorthand', () => {
-    it('should quote a multi-word family so the shorthand parses', () => {
-      // Unquoted, `48px TikTok Sans` is not a valid `font` shorthand: the
-      // canvas discards the whole assignment and stays on `10px sans-serif`.
+    it('should quote a multi-word family', () => {
+      // Not because it has to: `48px Bebas Neue` is a valid shorthand, an
+      // identifier *sequence* being one of the two family syntaxes. It is
+      // quoted because one form for every name is what keeps the three
+      // surfaces that build this string from drifting apart again.
       expect(cssFontShorthand({ fontFamily: 'Bebas Neue', fontSizePx: 48, fontWeight: 400 })).toBe(
         '400 48px "Bebas Neue"',
       );
     });
 
-    it('should produce a shorthand a canvas actually accepts for a multi-word family', () => {
-      const context = document.createElement('canvas').getContext('2d');
-      // jsdom without `canvas` installed has no 2D context; the parse check is
-      // the point of this test, so it is skipped rather than faked when the
-      // environment cannot make one.
-      if (!context) {
-        return;
-      }
-
-      const before = context.font;
-      context.font = cssFontShorthand({
-        fontFamily: 'Archivo Black',
-        fontSizePx: 32,
-        fontWeight: 700,
-      });
-
-      expect(context.font).not.toBe(before);
-      expect(context.font).toContain('32px');
+    it('should quote a family an identifier sequence cannot spell', () => {
+      // These are the names quoting is actually load-bearing for, and a family
+      // name arrives straight out of a style a user, an imported project or an
+      // agent wrote, so none of them can be ruled out: a leading digit and a
+      // CSS-wide keyword are both invalid unquoted, and punctuation would end
+      // the family component early.
+      expect(cssFontShorthand({ fontFamily: '4Real Display', fontSizePx: 12 })).toBe(
+        '12px "4Real Display"',
+      );
+      expect(cssFontShorthand({ fontFamily: 'inherit', fontSizePx: 12 })).toBe('12px "inherit"');
+      expect(cssFontShorthand({ fontFamily: 'Comic, Sans', fontSizePx: 12 })).toBe(
+        '12px "Comic, Sans"',
+      );
     });
 
     it('should work for a single-word family', () => {
@@ -114,9 +148,33 @@ describe('previewFonts', () => {
       );
     });
 
+    it('should clamp a weight the shorthand would not accept', () => {
+      // A numeric `font-weight` outside 100-900 invalidates the declaration,
+      // and the browser drops the whole shorthand rather than the one bad
+      // component — the same failure mode a broken size has.
+      expect(cssFontShorthand({ fontFamily: 'Anton', fontSizePx: 24, fontWeight: 0 })).toBe(
+        '100 24px "Anton"',
+      );
+      expect(cssFontShorthand({ fontFamily: 'Anton', fontSizePx: 24, fontWeight: -400 })).toBe(
+        '100 24px "Anton"',
+      );
+      expect(cssFontShorthand({ fontFamily: 'Anton', fontSizePx: 24, fontWeight: 1500 })).toBe(
+        '900 24px "Anton"',
+      );
+    });
+
+    it('should pass a weight inside the accepted range through untouched', () => {
+      expect(cssFontShorthand({ fontFamily: 'Anton', fontSizePx: 24, fontWeight: 100 })).toBe(
+        '100 24px "Anton"',
+      );
+      expect(cssFontShorthand({ fontFamily: 'Anton', fontSizePx: 24, fontWeight: 900 })).toBe(
+        '900 24px "Anton"',
+      );
+    });
+
     it('should fall back to a drawable size when the style carries a broken one', () => {
-      // A zero or NaN size invalidates the whole shorthand, which is the exact
-      // silent failure this helper exists to remove.
+      // A NaN size spells `NaNpx` and invalidates the whole shorthand; a zero
+      // one parses and then draws nothing. Neither is what the style meant.
       expect(cssFontShorthand({ fontFamily: 'Anton', fontSizePx: Number.NaN })).toBe('1px "Anton"');
       expect(cssFontShorthand({ fontFamily: 'Anton', fontSizePx: 0 })).toBe('1px "Anton"');
     });
@@ -181,13 +239,29 @@ describe('previewFonts', () => {
       expect(fromCss).toEqual([...BUNDLED_PREVIEW_FONT_FACES]);
     });
 
-    it('should point every declared face at a font file that exists', () => {
+    it('should point every declared face at the exact file the exporter embeds', () => {
       // The URLs are relative to the stylesheet and reach out of `src/` into
       // the crate's font directory, so a moved file breaks the preview and
-      // nothing else.
+      // nothing else. Existence alone is not enough, though: a bold face whose
+      // `src` pointed at the Regular TTF would satisfy it and still draw the
+      // draft in a face the export does not use, so the basename is pinned to
+      // the registry entry for that family and weight.
+      const rustFaces = rustFontFaces();
+      expect(rustFaces.length).toBeGreaterThan(0);
+
       for (const face of cssFontFaces()) {
+        const label = `${face.family} @ ${face.weight}: ${face.src}`;
         const resolved = path.resolve(path.dirname(BUNDLED_FONTS_CSS), face.src);
-        expect(fs.existsSync(resolved), `${face.family} @ ${face.weight}: ${face.src}`).toBe(true);
+        expect(fs.existsSync(resolved), label).toBe(true);
+
+        const rustFace = rustFaces.find(
+          (candidate) => candidate.family === face.family && candidate.weight === face.weight,
+        );
+        expect(
+          rustFace,
+          `${label} — bundled_fonts.rs compiles in no such family at that weight.`,
+        ).toBeDefined();
+        expect(path.basename(face.src), label).toBe(`${rustFace?.fileName}.ttf`);
       }
     });
 
@@ -195,15 +269,11 @@ describe('previewFonts', () => {
       // Without its own `@font-face` the browser synthesizes a bold from the
       // regular outlines while the export embeds a drawn one, so a bold caption
       // is the case where the draft and the file disagree most visibly.
-      const rustSource = fs.readFileSync(
-        path.resolve(process.cwd(), 'src-tauri/src/core/text/bundled_fonts.rs'),
-        'utf8',
-      );
       const rustBoldFamilies = [
         ...new Set(
-          [...rustSource.matchAll(/bundled_font!\(\s*"([^"]+)",\s*"([^"]+)-Bold"/g)].map(
-            (match) => match[1],
-          ),
+          rustFontFaces()
+            .filter((face) => face.weight === 700)
+            .map((face) => face.family),
         ),
       ];
 

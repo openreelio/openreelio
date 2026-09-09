@@ -9,12 +9,16 @@
  *    `src-tauri/src/core/text/bundled_fonts.rs`). A preview that skipped that
  *    step drew a projected-in-'Arial' caption in the host's Arial while the
  *    export burned it in TikTok Sans.
- * 2. **A font string the browser accepts.** The canvas `font` property takes
- *    the CSS `font` *shorthand*, whose family component is an identifier
- *    sequence or a string. `24px TikTok Sans` parses as far as `TikTok`, fails,
- *    and is discarded whole — leaving the context on its `10px sans-serif`
- *    default with no error anywhere. Every multi-word bundled family (six of
- *    the eight, including the default) hit that.
+ * 2. **A font string built one way.** The canvas `font` property takes the CSS
+ *    `font` *shorthand*, whose family component is an identifier sequence or a
+ *    string. A multi-word name is fine unquoted — `24px TikTok Sans` is a valid
+ *    shorthand — so this was never the parity bug; (1) was. Quoting is here
+ *    because it is the form that holds for *every* name, including the ones an
+ *    identifier sequence cannot spell: a family that starts with a digit,
+ *    carries punctuation, or collides with a CSS-wide keyword such as
+ *    `inherit`. Family names reach the preview out of styles a user, an
+ *    imported project or an agent wrote, so the string is built defensively,
+ *    and in one place.
  *
  * The three canvas surfaces that draw or measure text — `textRenderer`,
  * `TimelinePreviewPlayer`'s caption pass and `transformOverlayGeometry` — all
@@ -137,16 +141,29 @@ export function resolvePreviewFontFamily(family: string | null | undefined): str
 /**
  * Quotes a family name for a CSS `font-family` component.
  *
- * A quoted string is the only family syntax that survives a multi-word name in
- * the `font` shorthand. The escaping is not paranoia: a family name reaches
- * here straight from a style a user, an imported project or an agent wrote, and
- * an unescaped quote in one would terminate the string and turn the rest of the
- * shorthand into garbage the browser discards — the same silent failure this
- * function exists to remove.
+ * A quoted string is the one family syntax that holds for any name. The
+ * unquoted alternative is an identifier *sequence*, which cannot spell a family
+ * that starts with a digit, carries punctuation, or is a CSS-wide keyword —
+ * and a family name reaches here straight from a style a user, an imported
+ * project or an agent wrote, so none of those can be ruled out. The escaping is
+ * part of the same reasoning: an unescaped quote in such a name would terminate
+ * the string and turn the rest of the shorthand into garbage the browser
+ * discards.
  */
 function quoteCssFontFamily(family: string): string {
   return `"${family.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
+
+/**
+ * Bounds of the numeric `font-weight` the `font` shorthand accepts.
+ *
+ * The shorthand's numeric weights run 100-900 in hundreds; a value outside that
+ * makes the whole declaration invalid, and an invalid shorthand is discarded
+ * rather than partly applied. Both bundled weight helpers only ever produce 400
+ * or 700, so this bites on a hand-edited or agent-written style.
+ */
+const MIN_CSS_FONT_WEIGHT = 100;
+const MAX_CSS_FONT_WEIGHT = 900;
 
 /** The pieces of a text style a CSS `font` shorthand is built from. */
 export interface PreviewFontShorthandInput {
@@ -178,12 +195,19 @@ export function cssFontShorthand(input: PreviewFontShorthandInput): string {
   }
 
   if (typeof input.fontWeight === 'number' && Number.isFinite(input.fontWeight)) {
-    parts.push(String(Math.round(input.fontWeight)));
+    // Clamped for the same reason the size is: a stored 0 or 1500 is outside
+    // the range the shorthand accepts, and the browser drops the declaration
+    // whole rather than the one bad component.
+    parts.push(
+      String(
+        Math.min(MAX_CSS_FONT_WEIGHT, Math.max(MIN_CSS_FONT_WEIGHT, Math.round(input.fontWeight))),
+      ),
+    );
   }
 
-  // A non-finite or non-positive size makes the whole shorthand invalid, which
-  // is the failure this helper exists to prevent, so it is clamped rather than
-  // passed through.
+  // A non-finite size spells `NaNpx` and invalidates the whole shorthand; a
+  // zero or negative one draws nothing. Both are clamped rather than passed
+  // through, so a broken stored size still leaves something on screen.
   const sizePx = Number.isFinite(input.fontSizePx) && input.fontSizePx > 0 ? input.fontSizePx : 1;
 
   parts.push(`${sizePx}px ${quoteCssFontFamily(resolvePreviewFontFamily(input.fontFamily))}`);
