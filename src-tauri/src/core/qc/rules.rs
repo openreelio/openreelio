@@ -1760,7 +1760,8 @@ impl CaptionSafeAreaRule {
     /// wrap inside. Text that fits nowhere is not turned into extra lines
     /// unless it *can* break: libass needs a break opportunity, so a run
     /// without one - unspaced CJK, a bare URL - stays on one line and runs off
-    /// the side, which is a horizontal breach and is reported as one.
+    /// the side, which is a horizontal breach and is reported as one. That is
+    /// measured, not assumed; the numbers are in the no-break branch below.
     pub(super) fn estimate_text_box_percent(
         clip: &Clip,
         canvas_width: u32,
@@ -1809,8 +1810,31 @@ impl CaptionSafeAreaRule {
                 (bounded / wrap_box_width_percent).ceil().max(1.0),
             )
         } else {
-            // Deliberately uncapped: the whole point of this branch is that the
-            // width is the breach, so clamping it would clamp away the finding.
+            // Deliberately uncapped, and deliberately one line: the whole point
+            // of this branch is that the width is the breach, so clamping it
+            // would clamp away the finding.
+            //
+            // The tempting "fix" is to spare CJK here, on the theory that a
+            // renderer can break between ideographs even with no space to break
+            // at. Measured against the ffmpeg this app ships (gyan 9.0.1,
+            // libass 0.17.5, built with freetype/fribidi/harfbuzz and *no*
+            // libunibreak), it cannot. Rendering the app's own 9:16 script
+            // space - `PlayResX 608`, `WrapStyle: 0`, 72px style, 61px side
+            // margins - on a 1080x1920 frame and measuring with `bbox`:
+            //
+            // - unspaced Japanese (19 chars, `これは非常に長い日本語の字幕テストです`):
+            //   `w:1050 h:86`, `x1:0` - one 86px line, running off both sides,
+            //   with white pixels in column 0 (`signalstats` YMAX 235 over the
+            //   leftmost 2px strip). Cropped, not wrapped.
+            // - unspaced Chinese (20 chars): `w:1080 h:90`, `x1:0 x2:1079` -
+            //   one line, spanning the frame edge to edge. Cropped.
+            // - spaced Korean control (24 chars incl. spaces): `w:785 h:350`,
+            //   `x1:152` - four lines, wholly inside the frame. Wrapped.
+            //
+            // So an unbreakable run really is drawn off-frame and really is a
+            // breach; libass has an optional libunibreak path that would break
+            // CJK per character, but this build does not carry it. Do not turn
+            // this branch into a wrap without re-measuring first.
             (unwrapped_width_percent, 1.0)
         };
 

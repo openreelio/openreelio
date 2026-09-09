@@ -4898,6 +4898,13 @@ fn parse_json_bool(value: &Value) -> Option<bool> {
     }
 }
 
+/// Reads a stored caption axis as a fraction of the canvas.
+///
+/// A percentage above 1 is divided down, and the result is clamped to the frame
+/// deliberately: `\pos` past the edge is not a place the renderer will draw, so
+/// an `xPercent: 150` is drawn at 100%. QC measures through this helper for the
+/// same reason - it reports the block as drawn, so an out-of-range coordinate
+/// is a finding only when the block it resolves to still leaves the frame.
 fn normalize_caption_axis(raw: f64) -> f64 {
     if !raw.is_finite() {
         return 0.0;

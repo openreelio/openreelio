@@ -71,7 +71,7 @@ openreelio-cli packs list --kind caption
 | `clean-minimal` | No outline or shadow — controlled, consistently dark footage only. |
 | `boxed-contrast` | Translucent black box; survives busy or bright backgrounds. |
 | `yellow-classic` | Legacy broadcast yellow; reads as dialogue subtitling. |
-| `shorts-bold-outline` | Large bold with thick outline, lifted clear of vertical-platform UI. |
+| `shorts-bold-outline` | Large bold with thick outline, at a 26% bottom margin so it clears the vertical-platform UI band. |
 | `broadcast-lower` | Left-aligned boxed name plate anchored in the lower-left third. |
 | `high-contrast-accessible` | Oversized bold on a near-opaque box; highest legibility floor. |
 | `caption-top` | Top-anchored, for shots whose lower half is already busy. |

@@ -1993,6 +1993,17 @@ impl CaptionOutOfBoundsRule {
     ///
     /// [`caption_anchor_percent`] is the renderer's own resolution, so this
     /// rule and `caption.safe_area` cannot disagree about where a caption sits.
+    /// Borrowing it also borrows its clamps, deliberately: a custom anchor
+    /// stored as `xPercent: 150` is resolved at 100%, because 100% is where the
+    /// renderer draws it. This rule measures the drawn block, not the stored
+    /// number, so an out-of-range anchor is reported only if the block it
+    /// resolves to actually leaves the frame. A stored coordinate that is
+    /// merely nonsense is a data complaint, and not this Error's job.
+    ///
+    /// Every input reaching the estimate is likewise clamped - the font size to
+    /// `1..=500`, the anchor axes to `0..=1`, the preset margin to `0..=50`,
+    /// and a canvas with a zero side to 16:9 - so the edges below are always
+    /// finite and there is no unmeasurable box for this rule to skip.
     fn box_edges(clip: &Clip, canvas_width: u32, canvas_height: u32) -> (f64, f64, f64, f64) {
         let alignment = CaptionSafeAreaRule::alignment(clip.caption_style.as_ref());
         let anchor = caption_anchor_percent(
@@ -2071,18 +2082,6 @@ impl QCRule for CaptionOutOfBoundsRule {
             for clip in &track.clips {
                 let (left, right, top, bottom) =
                     Self::box_edges(clip, context.canvas_width, context.canvas_height);
-
-                // A pathological style can produce a box that is not a number.
-                // This rule reports at Error, and an Error on an unmeasurable
-                // box is a guess; `caption.safe_area` is the pass that still
-                // speaks up for those, at a severity that suits a guess.
-                if !left.is_finite()
-                    || !right.is_finite()
-                    || !top.is_finite()
-                    || !bottom.is_finite()
-                {
-                    continue;
-                }
 
                 if left >= -tolerance
                     && right <= 100.0 + tolerance
@@ -4424,6 +4423,68 @@ mod tests {
         assert!(
             (cue["leftPercent"].as_f64().expect("a left") + 1.25).abs() < 0.001,
             "the box is measured from the font size, not from a character count: {cue}"
+        );
+    }
+
+    /// Feature: Captions pushed off the canvas
+    /// Scenario: should report an unspaced CJK cue the renderer cannot wrap
+    ///
+    /// Pins a measured fact about the renderer, not a guess. Sparing CJK from
+    /// the no-break branch looks right - surely a renderer breaks between
+    /// ideographs - and it is wrong for the ffmpeg this app ships (gyan 9.0.1,
+    /// libass 0.17.5, built with no libunibreak). Rendering the app's own 9:16
+    /// script space (`PlayResX 608`, `WrapStyle: 0`, 72px, 61px side margins)
+    /// onto a 1080x1920 frame and measuring with `bbox`:
+    ///
+    /// - the 19-character Japanese run below: `w:1050 h:86`, `x1:0`, with white
+    ///   pixels in column 0 - one line, cropped at the frame edge,
+    /// - a 20-character unspaced Chinese run: `w:1080 h:90`, `x1:0 x2:1079` -
+    ///   one line, edge to edge,
+    /// - a spaced Korean control: `w:785 h:350`, `x1:152` - four lines, wholly
+    ///   inside the frame.
+    ///
+    /// So the run really is drawn off-frame and this Error is a true one. The
+    /// estimate charges each ideograph a full em: 19 x 72 = 1368 of a 608-wide
+    /// script is 225%, centred on the preset anchor from -62.5% to 162.5%.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_report_an_unspaced_cjk_cue_libass_cannot_wrap() {
+        async fn violations_for(label: &str) -> Vec<QCViolation> {
+            let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
+            let mut track = Track::new_caption("C1");
+            let mut clip = caption_clip(label, 0.0, 2.0);
+            clip.caption_style = Some(serde_json::json!({ "fontSize": 72 }));
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let context = context_for(&sequence);
+            CaptionOutOfBoundsRule::new()
+                .check(
+                    &sequence,
+                    &ProjectState::new("p"),
+                    &RuleConfig::default(),
+                    &context,
+                )
+                .await
+                .expect("rule runs")
+        }
+
+        let japanese = violations_for("これは非常に長い日本語の字幕テストです").await;
+        assert_eq!(
+            japanese.len(),
+            1,
+            "libass draws this on one line and crops it, so it is one Error"
+        );
+        let cue = first_cue(&japanese[0]);
+        assert!(
+            (cue["leftPercent"].as_f64().expect("a left") + 62.5).abs() < 0.001,
+            "every ideograph is charged a full em: {cue}"
+        );
+
+        // The control: a run short enough to be drawn inside the frame stays
+        // quiet, so the rule is reporting the width and not the script.
+        assert!(
+            violations_for("字幕テスト").await.is_empty(),
+            "five ideographs are 59% of the script and fit"
         );
     }
 
