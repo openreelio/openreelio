@@ -1598,9 +1598,18 @@ impl CaptionSafeAreaRule {
 
     /// Action-safe margin (percentage of canvas)
     ///
-    /// Text outside this band risks being cropped by overscan and covered by
-    /// platform UI overlays, so breaching it is reported at the rule severity
-    /// while breaching only the title-safe margin stays informational.
+    /// Text outside this band risks being cropped by overscan, so breaching it
+    /// is reported at the rule severity while breaching only the title-safe
+    /// margin stays informational.
+    ///
+    /// Broadcast action-safe and nothing more. The band is a fixed symmetric
+    /// percentage with no orientation and no platform in it, so it says
+    /// nothing about whether a vertical platform's own UI - the username,
+    /// description, sound and CTA rail down the bottom of a TikTok, Reel or
+    /// Short, and the action column down the right - is drawn over the words.
+    /// On a 1080x1920 frame that band certifies text well inside both of
+    /// those. A pack that clears them does so through its own anchor (see
+    /// `shorts-bold-outline`), not through this rule.
     const ACTION_SAFE_MARGIN_PERCENT: f64 = 5.0;
 
     /// Average glyph advance as a fraction of the font size
@@ -1751,8 +1760,9 @@ impl CaptionSafeAreaRule {
     /// wrap inside. Text that fits nowhere is not turned into extra lines
     /// unless it *can* break: libass needs a break opportunity, so a run
     /// without one - unspaced CJK, a bare URL - stays on one line and runs off
-    /// the side, which is a horizontal breach and is reported as one.
-    fn estimate_text_box_percent(
+    /// the side, which is a horizontal breach and is reported as one. That is
+    /// measured, not assumed; the numbers are in the no-break branch below.
+    pub(super) fn estimate_text_box_percent(
         clip: &Clip,
         canvas_width: u32,
         canvas_height: u32,
@@ -1800,8 +1810,31 @@ impl CaptionSafeAreaRule {
                 (bounded / wrap_box_width_percent).ceil().max(1.0),
             )
         } else {
-            // Deliberately uncapped: the whole point of this branch is that the
-            // width is the breach, so clamping it would clamp away the finding.
+            // Deliberately uncapped, and deliberately one line: the whole point
+            // of this branch is that the width is the breach, so clamping it
+            // would clamp away the finding.
+            //
+            // The tempting "fix" is to spare CJK here, on the theory that a
+            // renderer can break between ideographs even with no space to break
+            // at. Measured against the ffmpeg this app ships (gyan 9.0.1,
+            // libass 0.17.5, built with freetype/fribidi/harfbuzz and *no*
+            // libunibreak), it cannot. Rendering the app's own 9:16 script
+            // space - `PlayResX 608`, `WrapStyle: 0`, 72px style, 61px side
+            // margins - on a 1080x1920 frame and measuring with `bbox`:
+            //
+            // - unspaced Japanese (19 chars, `これは非常に長い日本語の字幕テストです`):
+            //   `w:1050 h:86`, `x1:0` - one 86px line, running off both sides,
+            //   with white pixels in column 0 (`signalstats` YMAX 235 over the
+            //   leftmost 2px strip). Cropped, not wrapped.
+            // - unspaced Chinese (20 chars): `w:1080 h:90`, `x1:0 x2:1079` -
+            //   one line, spanning the frame edge to edge. Cropped.
+            // - spaced Korean control (24 chars incl. spaces): `w:785 h:350`,
+            //   `x1:152` - four lines, wholly inside the frame. Wrapped.
+            //
+            // So an unbreakable run really is drawn off-frame and really is a
+            // breach; libass has an optional libunibreak path that would break
+            // CJK per character, but this build does not carry it. Do not turn
+            // this branch into a wrap without re-measuring first.
             (unwrapped_width_percent, 1.0)
         };
 
@@ -1815,7 +1848,7 @@ impl CaptionSafeAreaRule {
     ///
     /// Mirrors the render path's alias list; anything unrecognized is centered,
     /// which is the renderer's own default.
-    fn alignment(style: Option<&serde_json::Value>) -> TextAlignment {
+    pub(super) fn alignment(style: Option<&serde_json::Value>) -> TextAlignment {
         let Some(value) = style.and_then(serde_json::Value::as_object) else {
             return TextAlignment::Center;
         };
@@ -1838,7 +1871,7 @@ impl CaptionSafeAreaRule {
     ///
     /// Matches both render paths: a left-aligned run starts at the anchor,
     /// a right-aligned one ends there, and a centered one straddles it.
-    fn horizontal_span(
+    pub(super) fn horizontal_span(
         anchor_percent: f64,
         width_percent: f64,
         alignment: &TextAlignment,
@@ -1860,7 +1893,7 @@ impl CaptionSafeAreaRule {
     /// canvas above the bottom edge, and the block grows upward from there.
     /// So the margin always protects the edge it names, and what a large font
     /// or a wrapped caption threatens is the *opposite* edge.
-    fn preset_vertical_span(
+    pub(super) fn preset_vertical_span(
         vertical: &VerticalPosition,
         margin_percent: f64,
         box_height_percent: f64,
@@ -1949,7 +1982,7 @@ pub(super) const MIN_CAPTION_SPAN_WIDTH_PERCENT: f64 = 10.0;
 const CAPTION_SPAN_SAFETY_FACTOR: f64 = 1.5;
 
 /// The alignment spelling the render path's anchor helpers take.
-fn alignment_key(alignment: &TextAlignment) -> &'static str {
+pub(super) fn alignment_key(alignment: &TextAlignment) -> &'static str {
     match alignment {
         TextAlignment::Left => "left",
         TextAlignment::Right => "right",

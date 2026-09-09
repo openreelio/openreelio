@@ -11242,7 +11242,7 @@ fn test_caption_style_pack_never_overrides_an_explicit_placement() {
 
     let anchored_caption = find(&list, &anchored_id);
     assert_eq!(anchored_caption["position"]["vertical"], "bottom");
-    assert_eq!(anchored_caption["position"]["marginPercent"], 18.0);
+    assert_eq!(anchored_caption["position"]["marginPercent"], 26.0);
 
     // Restyling is not a move.
     run_cli_ok(&[

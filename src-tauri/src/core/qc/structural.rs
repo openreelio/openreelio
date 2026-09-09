@@ -14,11 +14,12 @@ use async_trait::async_trait;
 use super::caption_group::{group_caption_findings, CaptionFinding, CaptionGroup};
 use super::context::QCContext;
 use super::engine::QCReport;
-use super::rules::{QCRule, RuleConfig};
+use super::rules::{alignment_key, CaptionSafeAreaRule, QCRule, RuleConfig};
 use super::violation::{merged_span_duration_sec, QCViolation, Severity, ViolationFix};
-use crate::core::captions::{CaptionPosition, CaptionStyle, VerticalPosition};
+use crate::core::captions::CAPTION_WRAP_BOX_WIDTH_PERCENT;
 use crate::core::commands::{find_gaps, get_text_data, is_text_clip};
 use crate::core::project::ProjectState;
+use crate::core::render::export::caption_anchor_percent;
 use crate::core::render::transition_stitch::plan_sequence_transitions;
 use crate::core::text::bundled_fonts::{self, DEFAULT_TEXT_FONT_FAMILY};
 use crate::core::text::coverage::{caption_font_stack, FontStack};
@@ -1968,81 +1969,81 @@ impl CaptionOutOfBoundsRule {
         Self
     }
 
-    /// Characters that fit across the canvas width at the default font size
-    ///
-    /// Core has no text shaping, so the box is an approximation; the check only
-    /// fires when the box leaves the canvas entirely, which keeps the estimate
-    /// from producing false errors.
-    const CHARS_PER_CANVAS_WIDTH: f64 = 42.0;
-
-    /// Maximum estimated text-box width as a percentage of canvas width
-    const MAX_TEXT_BOX_WIDTH_PERCENT: f64 = 90.0;
-
-    /// Line height as a multiple of the font size
-    const LINE_HEIGHT_FACTOR: f64 = 1.2;
-
     /// Tolerance in percent for float noise at the canvas edge
     const EDGE_TOLERANCE_PERCENT: f64 = 0.01;
 
-    /// Estimates the caption box as (width_percent, height_percent).
-    fn estimate_box_percent(clip: &Clip, canvas_height: u32) -> (f64, f64) {
-        let char_count = clip
-            .label
-            .as_ref()
-            .map(|label| label.chars().count())
-            .unwrap_or(0) as f64;
-
-        let width_percent = (char_count / Self::CHARS_PER_CANVAS_WIDTH * 100.0)
-            .min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
-
-        let canvas_height = if canvas_height > 0 { canvas_height } else { 1 };
-        let font_size = clip
-            .caption_style
-            .as_ref()
-            .and_then(|value| serde_json::from_value::<CaptionStyle>(value.clone()).ok())
-            .map(|style| f64::from(style.font_size))
-            .or_else(|| {
-                clip.caption_style
-                    .as_ref()
-                    .and_then(|value| value.get("fontSize").or_else(|| value.get("font_size")))
-                    .and_then(serde_json::Value::as_f64)
-            })
-            .filter(|size| size.is_finite() && *size > 0.0)
-            .unwrap_or_else(|| f64::from(CaptionStyle::default().font_size));
-
-        let height_percent =
-            font_size * Self::LINE_HEIGHT_FACTOR / f64::from(canvas_height) * 100.0;
-
-        (width_percent, height_percent)
-    }
-
     /// Returns the caption box edges as (left, right, top, bottom) percentages.
-    fn box_edges(
-        position: &CaptionPosition,
-        box_width: f64,
-        box_height: f64,
-    ) -> (f64, f64, f64, f64) {
-        let (center_x, center_y) = match position {
-            CaptionPosition::Preset {
-                vertical,
-                margin_percent,
-            } => {
-                let center_y = match vertical {
-                    VerticalPosition::Bottom => 100.0 - margin_percent - box_height / 2.0,
-                    VerticalPosition::Top => margin_percent + box_height / 2.0,
-                    VerticalPosition::Center => 50.0,
-                };
-                (50.0, center_y)
+    ///
+    /// The same geometry `caption.safe_area` measures, borrowed rather than
+    /// restated. The private estimate this replaced diverged from the renderer
+    /// three ways, and every one of them pointed the same direction - a block
+    /// measured smaller and lower than it is drawn, which is a missed Error on
+    /// an Error-severity rule:
+    ///
+    /// - width came from a fixed characters-per-canvas figure, blind to both
+    ///   the font size and the aspect ratio, so a 72px caption on a 9:16 frame
+    ///   was measured at roughly a third of the width it is drawn at,
+    /// - height was divided by the output height instead of the ASS `PlayResY`
+    ///   the script is authored against, understating a block on a 1920-tall
+    ///   canvas by the full 1.78x, and
+    /// - the position was mirrored with `serde`, which reads a bare `"bottom"`
+    ///   or a preset carrying no `marginPercent` - the shape
+    ///   `caption add --position-json` writes - as the default bottom anchor,
+    ///   so a caption drawn along the top was measured along the bottom.
+    ///
+    /// [`caption_anchor_percent`] is the renderer's own resolution, so this
+    /// rule and `caption.safe_area` cannot disagree about where a caption sits.
+    /// Borrowing it also borrows its clamps, deliberately: a custom anchor
+    /// stored as `xPercent: 150` is resolved at 100%, because 100% is where the
+    /// renderer draws it. This rule measures the drawn block, not the stored
+    /// number, so an out-of-range anchor is reported only if the block it
+    /// resolves to actually leaves the frame. A stored coordinate that is
+    /// merely nonsense is a data complaint, and not this Error's job.
+    ///
+    /// Every input reaching the estimate is likewise clamped - the font size to
+    /// `1..=500`, the anchor axes to `0..=1`, the preset margin to `0..=50`,
+    /// and a canvas with a zero side to 16:9 - so the edges below are always
+    /// finite and there is no unmeasurable box for this rule to skip.
+    fn box_edges(clip: &Clip, canvas_width: u32, canvas_height: u32) -> (f64, f64, f64, f64) {
+        let alignment = CaptionSafeAreaRule::alignment(clip.caption_style.as_ref());
+        let anchor = caption_anchor_percent(
+            clip.caption_position.as_ref(),
+            clip.caption_style.as_ref(),
+            alignment_key(&alignment),
+        );
+
+        // A preset caption wraps inside the ASS event margins; a custom one is
+        // placed with a `pos` override, which has none, so it wraps only at the
+        // frame edge. The wrap width decides the line count, and so the height.
+        let wrap_box_width_percent = if anchor.is_preset() {
+            CAPTION_WRAP_BOX_WIDTH_PERCENT
+        } else {
+            100.0
+        };
+        let (box_width, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
+            clip,
+            canvas_width,
+            canvas_height,
+            wrap_box_width_percent,
+        );
+
+        let (left, right) =
+            CaptionSafeAreaRule::horizontal_span(anchor.x * 100.0, box_width, &alignment);
+
+        let (top, bottom) = match (anchor.vertical.as_ref(), anchor.margin_percent) {
+            // A preset margin is a gap to the block's near edge, so the block
+            // grows away from the edge the margin names.
+            (Some(vertical), Some(margin_percent)) => {
+                CaptionSafeAreaRule::preset_vertical_span(vertical, margin_percent, box_height)
             }
-            CaptionPosition::Custom(custom) => (custom.x_percent, custom.y_percent),
+            // A custom anchor names a point the block is centred on.
+            _ => {
+                let center = anchor.y * 100.0;
+                (center - box_height / 2.0, center + box_height / 2.0)
+            }
         };
 
-        (
-            center_x - box_width / 2.0,
-            center_x + box_width / 2.0,
-            center_y - box_height / 2.0,
-            center_y + box_height / 2.0,
-        )
+        (left, right, top, bottom)
     }
 }
 
@@ -2079,17 +2080,8 @@ impl QCRule for CaptionOutOfBoundsRule {
             let mut findings: Vec<CaptionFinding> = Vec::new();
 
             for clip in &track.clips {
-                // A missing or unreadable position renders with the caption
-                // default, so the check follows the same fallback.
-                let position = clip
-                    .caption_position
-                    .as_ref()
-                    .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok())
-                    .unwrap_or_default();
-
-                let (box_width, box_height) =
-                    Self::estimate_box_percent(clip, context.canvas_height);
-                let (left, right, top, bottom) = Self::box_edges(&position, box_width, box_height);
+                let (left, right, top, bottom) =
+                    Self::box_edges(clip, context.canvas_width, context.canvas_height);
 
                 if left >= -tolerance
                     && right <= 100.0 + tolerance
@@ -4285,6 +4277,215 @@ mod tests {
             .expect("rule runs");
 
         assert!(violations.is_empty());
+    }
+
+    /// Feature: Captions pushed off the canvas
+    /// Scenario: should measure a 72px caption against the script it is drawn in
+    ///
+    /// The block is authored in the ASS `PlayRes` space, which is pinned to
+    /// 1080 tall and 608 wide on a 1080x1920 canvas — not in output pixels. The
+    /// estimate this rule used to carry divided the height by the 1920-pixel
+    /// canvas and derived the width from a fixed 42-characters-per-canvas
+    /// figure, so it read a 72px caption as one 4.5%-tall line and passed it.
+    ///
+    /// Measured the way the renderer draws it: a 46-character label at 72px
+    /// spans 272% of the 608-wide script, wraps to three lines at the frame
+    /// edge (a custom anchor carries no event margins), and so stands
+    /// 3 x 72 x 1.2 / 1080 = 24% of the frame tall. Centred on a point 90%
+    /// down, its last line lands at 102% — off the frame.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_measure_a_vertical_canvas_in_script_space() {
+        let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
+        let mut track = Track::new_caption("C1");
+        let mut clip = caption_clip("The shorts pack draws its captions at 72 px ok", 0.0, 2.0);
+        clip.caption_style = Some(serde_json::json!({ "fontSize": 72 }));
+        clip.caption_position = Some(serde_json::json!({
+            "type": "custom",
+            "xPercent": 50.0,
+            "yPercent": 90.0
+        }));
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let context = context_for(&sequence);
+        let violations = CaptionOutOfBoundsRule::new()
+            .check(
+                &sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &context,
+            )
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1, "a block hanging 2% off the frame");
+        let cue = first_cue(&violations[0]);
+        assert!(
+            (cue["topPercent"].as_f64().expect("a top") - 78.0).abs() < 0.001,
+            "a custom anchor names the point the block is centred on: {cue}"
+        );
+        assert!(
+            (cue["bottomPercent"].as_f64().expect("a bottom") - 102.0).abs() < 0.001,
+            "three 72px lines measured against PlayResY=1080 are 24% tall: {cue}"
+        );
+    }
+
+    /// Feature: Captions pushed off the canvas
+    /// Scenario: should read a position shape the renderer accepts
+    ///
+    /// `serde` refuses a bare `"top"` string, and the mirror this rule used to
+    /// run took the refusal as "no position" and measured the default bottom
+    /// 5% band — so a caption drawn along the top was checked along the bottom,
+    /// which is the mirror-parse bug `caption.safe_area` already removed. The
+    /// burn-in resolves the same string to a top preset at the default 5%
+    /// margin, and so now does this rule: a 150px block six lines deep stands
+    /// 100% of the frame tall and runs off the bottom at 105%.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_locate_a_bare_string_position() {
+        let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
+        let mut track = Track::new_caption("C1");
+        let mut clip = caption_clip("Oversized caption on a tall frame.", 0.0, 2.0);
+        clip.caption_style = Some(serde_json::json!({ "fontSize": 150 }));
+        clip.caption_position = Some(serde_json::json!("top"));
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let context = context_for(&sequence);
+        let violations = CaptionOutOfBoundsRule::new()
+            .check(
+                &sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &context,
+            )
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        let cue = first_cue(&violations[0]);
+        assert!(
+            (cue["topPercent"].as_f64().expect("a top") - 5.0).abs() < 0.001,
+            "a bare \"top\" anchors at the top, not at the default bottom band: {cue}"
+        );
+        assert!(
+            (cue["bottomPercent"].as_f64().expect("a bottom") - 105.0).abs() < 0.001,
+            "six 150px lines measured against PlayResY=1080 fill the frame: {cue}"
+        );
+    }
+
+    /// Feature: Captions pushed off the canvas
+    /// Scenario: should scale the estimated width with the font size
+    ///
+    /// The width came from a fixed characters-per-canvas count, so the same
+    /// words measured the same box at any size and a caption twice as large as
+    /// the frame allows was reported as fitting. The same unbreakable run —
+    /// libass has nowhere to wrap it, so it stays on one line — is half the
+    /// frame at 48px and wider than the frame at 96px.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_scale_width_with_font_size() {
+        const UNBREAKABLE: &str = "https://example.com/a-very-long-caption-x";
+
+        async fn violations_at(font_size: u32) -> Vec<QCViolation> {
+            let mut sequence = sequence_30fps();
+            let mut track = Track::new_caption("C1");
+            let mut clip = caption_clip(UNBREAKABLE, 0.0, 2.0);
+            clip.caption_style = Some(serde_json::json!({ "fontSize": font_size }));
+            clip.caption_position = Some(serde_json::json!({
+                "type": "custom",
+                "xPercent": 50.0,
+                "yPercent": 50.0
+            }));
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let context = context_for(&sequence);
+            CaptionOutOfBoundsRule::new()
+                .check(
+                    &sequence,
+                    &ProjectState::new("p"),
+                    &RuleConfig::default(),
+                    &context,
+                )
+                .await
+                .expect("rule runs")
+        }
+
+        // 41 chars x 24px of advance is 984 of 1920, centred: 24.4% to 75.6%.
+        assert!(
+            violations_at(48).await.is_empty(),
+            "the same run fits the frame at 48px"
+        );
+
+        // 41 chars x 48px of advance is 1968 of 1920, centred: -1.25% to 101.25%.
+        let large = violations_at(96).await;
+        assert_eq!(large.len(), 1, "and does not at 96px");
+        let cue = first_cue(&large[0]);
+        assert!(
+            (cue["leftPercent"].as_f64().expect("a left") + 1.25).abs() < 0.001,
+            "the box is measured from the font size, not from a character count: {cue}"
+        );
+    }
+
+    /// Feature: Captions pushed off the canvas
+    /// Scenario: should report an unspaced CJK cue the renderer cannot wrap
+    ///
+    /// Pins a measured fact about the renderer, not a guess. Sparing CJK from
+    /// the no-break branch looks right - surely a renderer breaks between
+    /// ideographs - and it is wrong for the ffmpeg this app ships (gyan 9.0.1,
+    /// libass 0.17.5, built with no libunibreak). Rendering the app's own 9:16
+    /// script space (`PlayResX 608`, `WrapStyle: 0`, 72px, 61px side margins)
+    /// onto a 1080x1920 frame and measuring with `bbox`:
+    ///
+    /// - the 19-character Japanese run below: `w:1050 h:86`, `x1:0`, with white
+    ///   pixels in column 0 - one line, cropped at the frame edge,
+    /// - a 20-character unspaced Chinese run: `w:1080 h:90`, `x1:0 x2:1079` -
+    ///   one line, edge to edge,
+    /// - a spaced Korean control: `w:785 h:350`, `x1:152` - four lines, wholly
+    ///   inside the frame.
+    ///
+    /// So the run really is drawn off-frame and this Error is a true one. The
+    /// estimate charges each ideograph a full em: 19 x 72 = 1368 of a 608-wide
+    /// script is 225%, centred on the preset anchor from -62.5% to 162.5%.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_report_an_unspaced_cjk_cue_libass_cannot_wrap() {
+        async fn violations_for(label: &str) -> Vec<QCViolation> {
+            let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
+            let mut track = Track::new_caption("C1");
+            let mut clip = caption_clip(label, 0.0, 2.0);
+            clip.caption_style = Some(serde_json::json!({ "fontSize": 72 }));
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let context = context_for(&sequence);
+            CaptionOutOfBoundsRule::new()
+                .check(
+                    &sequence,
+                    &ProjectState::new("p"),
+                    &RuleConfig::default(),
+                    &context,
+                )
+                .await
+                .expect("rule runs")
+        }
+
+        let japanese = violations_for("これは非常に長い日本語の字幕テストです").await;
+        assert_eq!(
+            japanese.len(),
+            1,
+            "libass draws this on one line and crops it, so it is one Error"
+        );
+        let cue = first_cue(&japanese[0]);
+        assert!(
+            (cue["leftPercent"].as_f64().expect("a left") + 62.5).abs() < 0.001,
+            "every ideograph is charged a full em: {cue}"
+        );
+
+        // The control: a run short enough to be drawn inside the frame stays
+        // quiet, so the rule is reporting the width and not the script.
+        assert!(
+            violations_for("字幕テスト").await.is_empty(),
+            "five ideographs are 59% of the script and fit"
+        );
     }
 
     // ========================================================================

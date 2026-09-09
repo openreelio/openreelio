@@ -22,6 +22,12 @@
 //!   `caption.safe_area` is what answers the question for real text, and
 //! - reach the export `drawtext` filter with the typography it advertises.
 //!
+//! That guarantee is a broadcast one. `CaptionSafeAreaRule` measures a fixed
+//! symmetric title/action-safe band with no orientation and no platform in it,
+//! so a pack passing it on 1080x1920 has not been checked against the UI a
+//! vertical platform draws over the picture. Only a pack whose own anchor is
+//! lifted for it clears that band, and only by the margin it names.
+//!
 //! Most packs anchor with [`CaptionPosition::Preset`] at a margin at or above
 //! the 10% title-safe band. A pack whose alignment is not centered anchors with
 //! [`CaptionPosition::Custom`] instead, because the renderer reads a preset
@@ -302,8 +308,9 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
     },
     CaptionPackSpec {
         id: "shorts-bold-outline",
-        description: "Large bold white text with a thick black outline, lifted to an 18% bottom \
-                      margin so vertical-platform UI does not cover it.",
+        description: "Large bold white text with a thick black outline, lifted to a 26% bottom \
+                      margin so the block sits above the bottom UI band vertical platforms draw \
+                      over the picture.",
         aliases: &["shorts", "reels", "tiktok", "vertical"],
         font_family: BUNDLED_CAPTION_FAMILY,
         font_size: 72,
@@ -322,7 +329,7 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         alignment: TextAlignment::Center,
         anchor: PackAnchor::Preset {
             vertical: VerticalPosition::Bottom,
-            margin_percent: 18.0,
+            margin_percent: 26.0,
         },
     },
     CaptionPackSpec {
