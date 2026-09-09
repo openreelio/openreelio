@@ -38,8 +38,8 @@ use crate::core::{
         build_ffmpeg_invocation_for_render_plan, build_ffmpeg_invocation_from_args,
         execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
     },
-    text::bundled_fonts::{DEFAULT_TEXT_FONT_FAMILY, EMOJI_FALLBACK_FAMILY},
-    text::coverage::FontStack,
+    text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY,
+    text::coverage::{caption_font_stack, FontStack},
     timeline::{
         BlendMode, Canvas, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track,
         TrackKind, Transform,
@@ -6373,38 +6373,6 @@ pub(crate) fn resolve_text_font_family(requested: &str) -> FontResolution {
     } else {
         FontResolution::Substituted(crate::core::text::bundled_fonts::DEFAULT_BUNDLED_FAMILY)
     }
-}
-
-/// The bundled faces a caption in `family` may draw from, most preferred first.
-///
-/// Family selection and glyph coverage are different questions. Resolving a
-/// style to a bundled family says the script carries *a* face; it says nothing
-/// about whether that face has an outline for the characters this event
-/// actually contains. Every *text* family compiled in is Latin-only, so an
-/// emoji on the default path used to resolve to a bundled family, embed it, and
-/// then need libass to reach past the attachment - onto whichever colour emoji
-/// font the machine happened to have, or onto nothing at all.
-///
-/// The second tier closes that: [`EMOJI_FALLBACK_FAMILY`] is a monochrome face
-/// we ship, so an emoji is drawn from the script's own `[Fonts]` section on
-/// every OS. What is left over - Korean, Japanese, Chinese, Arabic, Thai, every
-/// script we bundle no face for - still comes back uncovered, which is what
-/// keeps `fontsdir` on the graph for those events.
-///
-/// Any weight of a tier vouching for the whole family is an approximation, and
-/// it is sound only while a family's weights agree on their coverage.
-/// `every_weight_of_a_bundled_family_covers_the_same_codepoints` in
-/// [`crate::core::text::coverage`] is the guard that keeps it that way.
-fn caption_font_stack(family: &str) -> FontStack {
-    // A chain needs a primary the script carries. Without one there is nothing
-    // to fall back *from* - and building the stack anyway would quietly promote
-    // the emoji face to primary, which is the one face a caption must never be
-    // set in.
-    if crate::core::text::bundled_fonts::resolve_bundled(family).is_none() {
-        return FontStack::default();
-    }
-
-    FontStack::new(&[family, EMOJI_FALLBACK_FAMILY])
 }
 
 /// Ceiling on the bytes one script may carry in its `[Fonts]` section.
