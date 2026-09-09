@@ -25,6 +25,7 @@ use crate::core::{
     },
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
+    render::emoji_measure::{EmojiOccurrence, EmojiPlacement},
     render::hdr::{build_tonemap_filter, HdrMetadata, TonemapMode, TonemapParams},
     render::render_window::RenderWindow,
     render::transform_layout::{
@@ -38,8 +39,9 @@ use crate::core::{
         build_ffmpeg_invocation_for_render_plan, build_ffmpeg_invocation_from_args,
         execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
     },
-    text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY,
+    text::bundled_fonts::{DEFAULT_TEXT_FONT_FAMILY, EMOJI_FALLBACK_FAMILY},
     text::coverage::{caption_font_stack, FontStack},
+    text::emoji_assets::EmojiRasterSource,
     timeline::{
         BlendMode, Canvas, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track,
         TrackKind, Transform,
@@ -5894,6 +5896,185 @@ fn ass_escape_text(raw: &str) -> String {
     escaped
 }
 
+// =============================================================================
+// Colour emoji cells
+// =============================================================================
+
+/// Width of the cell an emoji-presentation cluster is laid out in, in ems.
+///
+/// A colour emoji is a picture, not a glyph, so nothing in the font metrics
+/// decides how wide it should be. 1.2 em is what the emoji faces themselves
+/// advance by, and what every platform's emoji sits in, so a caption with the
+/// cell in it wraps where the same caption with the monochrome glyph wrapped.
+pub(crate) const EMOJI_CELL_EM: f64 = 1.20;
+
+/// Height of the marker box, as a share of the cell width.
+///
+/// This number decides where the colour picture lands vertically, and it is the
+/// one piece of the design that had to be measured rather than reasoned about.
+/// libass places a `\p` drawing so that its own bounding box is lifted by that
+/// box's *height*: with the box drawn from `y = 0` down to `y = D`, the origin
+/// lands at `baseline - D` and the box therefore sits in `baseline - D ..=
+/// baseline`, its centre `D/2` above the baseline. (Measured against the
+/// bundled binary across three font sizes and five box geometries: the offset
+/// tracks the drawing's bounding-box height exactly, and nothing else.)
+///
+/// The picture is composited centred on what was measured, so `D` is how the
+/// emoji is made to sit on the same baseline as the words. An emoji is drawn in
+/// a square about `1.2 em` on a side whose bottom hangs roughly `0.2 em` below
+/// the baseline, putting its centre `0.4 em` above it - and with the cell
+/// itself `1.2 em` wide, `0.4 em` is two thirds of the cell's width, halved.
+///
+/// Getting this wrong is not subtle. The first geometry tried here put the box
+/// above the baseline as well as lifting it, and the emoji rendered a full line
+/// height above the caption they belonged to.
+const EMOJI_MARKER_DEPTH_RATIO: f64 = 2.0 / 3.0;
+
+/// Ceiling on colour emoji one render will composite.
+///
+/// Each one is an input, a scaled branch and an `overlay` node, and the graph
+/// is built in memory before FFmpeg ever sees it. A caption track with
+/// thousands of emoji on it is a project that should still render: past the
+/// cap, the remaining clusters keep the monochrome glyph they had in Phase 2
+/// and the QC report says how many did.
+pub(crate) const MAX_EMOJI_OVERLAYS_PER_RENDER: usize = 200;
+
+/// Override tags that leave a marker script drawing nothing but its boxes.
+///
+/// Primary, outline and shadow alphas, all fully transparent. `bbox` reports
+/// one rectangle for the whole frame, so anything else the frame draws is
+/// measured *together with* the marker and the answer is the caption's box
+/// rather than the cell's. Alpha cannot move a glyph, so hiding the text leaves
+/// the layout the real render will use exactly where it was.
+pub(crate) const ASS_EMOJI_MARKER_HIDE_TAGS: &str = r"\1a&HFF&\3a&HFF&\4a&HFF&";
+
+/// The cell edge, in `PlayRes` units, for an event at `font_size`.
+pub(crate) fn ass_emoji_cell_size(font_size: f64) -> u32 {
+    (font_size * EMOJI_CELL_EM).round().clamp(1.0, 4000.0) as u32
+}
+
+/// The advance-only drawing the real render carries where an emoji goes.
+///
+/// A degenerate path: it moves to the origin, draws one horizontal line and
+/// closes nothing, so it paints no pixels and still advances the full cell
+/// width. That is the whole trick - libass lays the line out around a cell that
+/// is not there, and the colour picture is composited into the hole afterwards.
+pub(crate) fn ass_emoji_spacer_run(size: u32) -> String {
+    format!(r"{{\p1}}m 0 0 l {size} 0{{\p0}}")
+}
+
+/// The same cell, painted, for the measurement pre-pass.
+///
+/// The leading `m 0 0 l {size} 0` sub-path is the spacer verbatim, so the
+/// drawing's bounding-box *width* - and therefore the advance, and therefore
+/// the whole line's layout - is identical to the real render's by construction
+/// rather than by arithmetic that could drift. The second sub-path is the box
+/// that gets measured, forced opaque and white so it is findable on the black
+/// probe source whatever colour the caption is set in.
+///
+/// The box is taller than nothing and the spacer is not, which is the one
+/// dimension the two differ in. It cannot move anything: a drawing contributes
+/// only its width to the line it sits in, so a cell of any height wraps and
+/// spaces the caption identically (measured; see
+/// `a_cell_advances_the_line_by_exactly_its_own_width`). Height decides only
+/// where the drawing itself is lifted to, which is what
+/// [`EMOJI_MARKER_DEPTH_RATIO`] exists to set.
+pub(crate) fn ass_emoji_marker_run(size: u32) -> String {
+    let depth = (f64::from(size) * EMOJI_MARKER_DEPTH_RATIO)
+        .round()
+        .max(1.0) as i64;
+
+    format!(
+        r"{{\1c&HFFFFFF&\1a&H00&\p1}}m 0 0 l {size} 0 l {size} {depth} l 0 {depth}{{\p0\1a&HFF&}}"
+    )
+}
+
+/// Whether an override block moves what it applies to after it is laid out.
+///
+/// A cell is measured at exactly one instant, which is only the right answer
+/// for a cue that sits still. `\move` and a geometry `\t` walk the block across
+/// the frame; `\k` re-times it. None of those are emitted here today, so the
+/// refusal costs nothing - and it has to exist anyway, because the day one is
+/// emitted the colour layer would silently drift away from the text.
+fn ass_tags_animate_layout(tags: &str) -> bool {
+    [r"\move", r"\t(", r"\k", r"\K"]
+        .iter()
+        .any(|tag| tags.contains(tag))
+}
+
+/// What a script build needs to know about colour emoji.
+#[derive(Clone, Copy)]
+pub(crate) struct EmojiSpacerContext<'a> {
+    /// Where colour pictures come from. `None` turns cells off entirely and
+    /// yields the script this path emitted before there were any.
+    pub pack: Option<&'a dyn EmojiRasterSource>,
+    /// `Some` when this build is a measurement script rather than the render's:
+    /// the set names the cells that paint a visible box, and every event has
+    /// its text hidden.
+    pub markers: Option<&'a HashSet<usize>>,
+}
+
+/// Per-event state for laying colour emoji cells into one `Dialogue` line.
+pub(crate) struct AssEmojiSpacers<'a> {
+    /// Where colour pictures come from.
+    pack: &'a dyn EmojiRasterSource,
+    /// Cells that paint, when this is a measurement script.
+    markers: Option<&'a HashSet<usize>>,
+    /// Cell edge in `PlayRes` units for this event.
+    size: u32,
+    /// Which `Dialogue` line this is.
+    event_index: usize,
+    /// How many cells this event has taken so far.
+    run_index: usize,
+    /// Cue bounds, already rebased onto the render's clock.
+    start_sec: f64,
+    end_sec: f64,
+    /// The event's `\frz`, counter-clockwise degrees.
+    rotation_deg: f64,
+    /// Every cell the whole script has taken, in emission order.
+    out: &'a mut Vec<EmojiOccurrence>,
+}
+
+impl AssEmojiSpacers<'_> {
+    /// Takes a cell for `cluster`, or leaves it to the monochrome face.
+    ///
+    /// Four things can refuse, and each of them is a state the QC report can
+    /// name: the cluster is not drawn as a picture at all, the render is at
+    /// [`MAX_EMOJI_OVERLAYS_PER_RENDER`], the pack does not carry the sequence,
+    /// or - decided by the caller, before this is ever built - the cue animates.
+    /// A refusal is not a failure: the caption keeps the bundled monochrome
+    /// glyph, which is the right picture in one colour.
+    fn take_cell(&mut self, cluster: &str) -> Option<String> {
+        if !crate::core::text::emoji::is_emoji_presentation_cluster(cluster) {
+            return None;
+        }
+
+        if self.out.len() >= MAX_EMOJI_OVERLAYS_PER_RENDER {
+            return None;
+        }
+
+        let sequence_key = crate::core::text::emoji::sequence_key_of(cluster);
+        crate::core::text::emoji_assets::drawable_match(self.pack, &sequence_key)?;
+
+        let index = self.out.len();
+        self.out.push(EmojiOccurrence {
+            event_index: self.event_index,
+            run_index: self.run_index,
+            start_sec: self.start_sec,
+            end_sec: self.end_sec,
+            sequence_key,
+            size_play_res: self.size,
+            rotation_deg: self.rotation_deg,
+        });
+        self.run_index += 1;
+
+        Some(match self.markers {
+            Some(markers) if markers.contains(&index) => ass_emoji_marker_run(self.size),
+            _ => ass_emoji_spacer_run(self.size),
+        })
+    }
+}
+
 /// Escapes an event's text, naming a fallback face wherever a run needs one.
 ///
 /// libass carries an `\fn` forward to the end of the line, so this cannot just
@@ -5913,7 +6094,12 @@ fn ass_escape_text(raw: &str) -> String {
 /// user typed is escaped as text while the braces this function writes are
 /// syntax. Escaping the assembled string instead would turn every `\fn` into
 /// literal text.
-fn ass_text_with_font_runs(raw: &str, stack: &FontStack, style_family: &str) -> String {
+fn ass_text_with_font_runs(
+    raw: &str,
+    stack: &FontStack,
+    style_family: &str,
+    mut spacers: Option<&mut AssEmojiSpacers<'_>>,
+) -> String {
     // The reset target has to be the family the `Style` line actually names, or
     // a run going "back to the primary" would go somewhere else. They are built
     // from the same resolution, so a mismatch means the stack does not describe
@@ -5927,6 +6113,17 @@ fn ass_text_with_font_runs(raw: &str, stack: &FontStack, style_family: &str) -> 
 
     for run in crate::core::text::coverage::split_runs(raw, stack) {
         let wanted = run.family.unwrap_or(primary);
+
+        // Only the emoji tier is ever broken up. A run routed there is the one
+        // place a colour picture could replace what libass would have drawn;
+        // every other run is emitted exactly as it was before cells existed.
+        if run.family == Some(EMOJI_FALLBACK_FAMILY) {
+            if let Some(spacers) = spacers.as_deref_mut() {
+                append_emoji_tier_run(&mut markup, run.text, wanted, &mut current, spacers);
+                continue;
+            }
+        }
+
         if wanted != current {
             markup.push_str(&format!("{{\\fn{}}}", ass_font_name_override(wanted)));
             current = wanted;
@@ -5936,6 +6133,35 @@ fn ass_text_with_font_runs(raw: &str, stack: &FontStack, style_family: &str) -> 
     }
 
     markup
+}
+
+/// Writes an emoji-tier run, replacing every cluster that gets a colour cell.
+///
+/// A cell is a vector drawing rather than text, so it never changes which face
+/// is in effect: a cluster the pack does not carry, sitting next to one it
+/// does, still reaches the emoji face behind a single `\fn`.
+fn append_emoji_tier_run(
+    markup: &mut String,
+    text: &str,
+    wanted: &'static str,
+    current: &mut &'static str,
+    spacers: &mut AssEmojiSpacers<'_>,
+) {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    for cluster in text.graphemes(true) {
+        if let Some(cell) = spacers.take_cell(cluster) {
+            markup.push_str(&cell);
+            continue;
+        }
+
+        if wanted != *current {
+            markup.push_str(&format!("{{\\fn{}}}", ass_font_name_override(wanted)));
+            *current = wanted;
+        }
+
+        markup.push_str(&ass_escape_text(cluster));
+    }
 }
 
 /// Strips anything from a family name that could escape an override block.
@@ -6194,6 +6420,9 @@ struct AssEventContext<'a> {
     /// Where this render's own clock starts on the timeline, so the event lands
     /// at the same picture a full render would have put it on.
     window_start_sec: f64,
+    /// Position of this `Dialogue` line in the script, which is how a measured
+    /// colour emoji finds its way back to the cue it belongs to.
+    event_index: usize,
 }
 
 fn append_ass_text_style_and_event(
@@ -6202,6 +6431,8 @@ fn append_ass_text_style_and_event(
     context: &AssEventContext<'_>,
     clip: &Clip,
     effect: &Effect,
+    emoji: Option<EmojiSpacerContext<'_>>,
+    occurrences: &mut Vec<EmojiOccurrence>,
 ) {
     let AssEventContext {
         style_name,
@@ -6210,6 +6441,7 @@ fn append_ass_text_style_and_event(
         font_stack,
         anchor,
         window_start_sec,
+        event_index,
     } = *context;
     let opacity = effect_float_param(effect, "opacity", 1.0).clamp(0.0, 1.0);
     let font_family = ass_sanitize_style_field(font_family, DEFAULT_TEXT_FONT_FAMILY);
@@ -6310,6 +6542,34 @@ fn append_ass_text_style_and_event(
 
     let rotation = effect_float_param(effect, "rotation", 0.0);
     let shadow_blur = effect_int_param(effect, "shadow_blur", 0).clamp(0, 500);
+    let event_border_width = style_outline_width;
+    let start = ass_timecode(clip.place.timeline_in_sec - window_start_sec);
+    let end = ass_timecode(clip.place.timeline_out_sec() - window_start_sec);
+    let position = anchor.position_override();
+    // The tag block every run of this event inherits, assembled before the text
+    // rather than inside the `format!` below, so the colour-emoji pass can read
+    // it and refuse an event whose layout moves while it is on screen.
+    let tags = format!(
+        "{position}\\an{alignment}\\frz{rotation:.2}\\b{font_weight}\\bord{event_border_width:.2}\\xshad{shadow_x}\\yshad{shadow_y}\\blur{shadow_blur}\\fsp{letter_spacing}"
+    );
+    let mut spacers = emoji
+        .filter(|_| !ass_tags_animate_layout(&tags))
+        .and_then(|context| {
+            context.pack.map(|pack| AssEmojiSpacers {
+                pack,
+                markers: context.markers,
+                size: ass_emoji_cell_size(font_size),
+                event_index,
+                run_index: 0,
+                // The same clamp `ass_timecode` applies, so a cell's `enable`
+                // window and its `Dialogue` line agree about a cue that was
+                // already on screen when a ranged render opened.
+                start_sec: (clip.place.timeline_in_sec - window_start_sec).max(0.0),
+                end_sec: (clip.place.timeline_out_sec() - window_start_sec).max(0.0),
+                rotation_deg: rotation,
+                out: occurrences,
+            })
+        });
     // One event per clip, with the line breaks the author wrote carried as
     // `\N`. Splitting the block into a positioned event per line made libass
     // draw a `BorderStyle: 3` background box around each line instead of around
@@ -6318,14 +6578,19 @@ fn append_ass_text_style_and_event(
         &effect_string_param(effect, "text", "Title"),
         font_stack,
         &font_family,
+        spacers.as_mut(),
     );
-    let event_border_width = style_outline_width;
-    let start = ass_timecode(clip.place.timeline_in_sec - window_start_sec);
-    let end = ass_timecode(clip.place.timeline_out_sec() - window_start_sec);
-    let position = anchor.position_override();
+    // A measurement script hides every event, not only the ones carrying a
+    // cell: `bbox` measures the frame, so one unhidden caption elsewhere on the
+    // timeline would be the rectangle that comes back.
+    let hide = if emoji.is_some_and(|context| context.markers.is_some()) {
+        ASS_EMOJI_MARKER_HIDE_TAGS
+    } else {
+        ""
+    };
 
     events.push_str(&format!(
-        "Dialogue: {layer},{start},{end},{style_name},,{margin_l},{margin_r},{margin_v},,{{{position}\\an{alignment}\\frz{rotation:.2}\\b{font_weight}\\bord{event_border_width:.2}\\xshad{shadow_x}\\yshad{shadow_y}\\blur{shadow_blur}\\fsp{letter_spacing}}}{text}\n",
+        "Dialogue: {layer},{start},{end},{style_name},,{margin_l},{margin_r},{margin_v},,{{{tags}{hide}}}{text}\n",
     ));
 }
 
@@ -6521,6 +6786,12 @@ pub(crate) struct AssTextOverlayScript {
     /// script carries; then the graph needs no `fontsdir` and the render does
     /// not depend on the machine's font set.
     pub uses_host_fonts: bool,
+    /// Every colour-emoji cell this script laid out, in emission order.
+    ///
+    /// Empty whenever colour overlays are off, no pack is installed, or the
+    /// project simply has no emoji - which is the overwhelming majority of
+    /// renders, and the case that must cost nothing.
+    pub emoji_occurrences: Vec<EmojiOccurrence>,
 }
 
 /// [`build_ass_text_overlay_script`], with every event's timing rebased.
@@ -6548,7 +6819,25 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
     effects: &HashMap<String, Effect>,
     window_start_sec: f64,
 ) -> Result<Option<AssTextOverlayScript>, ExportError> {
+    build_ass_text_overlay_script_in_window_with_emoji(sequence, effects, window_start_sec, None)
+}
+
+/// [`build_ass_text_overlay_script_in_window`], with colour emoji cells.
+///
+/// Called twice per render that has any: once with `emoji.markers` unset, which
+/// produces the script that is actually burned in, and once per measurement
+/// batch with the cells of that batch selected. The two differ only in the tags
+/// inside the cells and the alpha overrides that hide the text, neither of
+/// which libass lets influence layout - which is what makes the rectangle
+/// measured from one the rectangle the other left empty.
+pub(crate) fn build_ass_text_overlay_script_in_window_with_emoji(
+    sequence: &Sequence,
+    effects: &HashMap<String, Effect>,
+    window_start_sec: f64,
+    emoji: Option<EmojiSpacerContext<'_>>,
+) -> Result<Option<AssTextOverlayScript>, ExportError> {
     let (play_res_x, play_res_y) = ass_play_resolution(&sequence.format.canvas);
+    let mut emoji_occurrences: Vec<EmojiOccurrence> = Vec::new();
     let mut styles = String::new();
     let mut events = String::new();
     let mut fonts = AssFontEmbedder::default();
@@ -6656,9 +6945,12 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
                     font_stack: &font_stack,
                     anchor: ass_text_anchor(clip, &track.kind, &effect, play_res_x, play_res_y),
                     window_start_sec,
+                    event_index: event_count,
                 },
                 clip,
                 &effect,
+                emoji,
+                &mut emoji_occurrences,
             );
             event_count += 1;
         }
@@ -6676,6 +6968,7 @@ pub(crate) fn build_ass_text_overlay_script_in_window(
             fonts.into_section()
         ),
         uses_host_fonts,
+        emoji_occurrences,
     }))
 }
 
@@ -6786,6 +7079,230 @@ pub(super) fn append_ass_text_overlay(
     output_label.to_string()
 }
 
+/// One picture the graph reads, and the branch every use of it comes through.
+///
+/// Distinct by file *and* by the size and angle it is drawn at: two captions in
+/// different sizes cannot share a scaled branch, and re-decoding the same PNG
+/// for each of forty identical emoji would be forty inputs where one will do.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EmojiOverlayInput {
+    /// The PNG, from the bundled pack.
+    pub path: PathBuf,
+    /// Square edge the picture is scaled to.
+    pub size: u32,
+    /// Clockwise rotation applied, FFmpeg's own sense, in radians.
+    pub rotation_rad: f64,
+    /// Edge of the axis-aligned box the rotated picture occupies. Equal to
+    /// `size` when nothing is rotated, which is every caption today.
+    pub extent: u32,
+}
+
+/// One colour emoji composited over the burned-in text.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EmojiOverlayDraw {
+    /// Which [`EmojiOverlayInput`] draws it.
+    pub input: usize,
+    /// Left edge, in output pixels.
+    pub x: i32,
+    /// Top edge, in output pixels.
+    pub y: i32,
+    /// When it appears, on the render's own clock.
+    pub start_sec: f64,
+    /// When it goes away, on the same clock.
+    pub end_sec: f64,
+}
+
+/// Everything the graph needs to composite this render's colour emoji.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct EmojiOverlayPlan {
+    /// The `-i` inputs, in the order they are appended to the command line.
+    pub inputs: Vec<EmojiOverlayInput>,
+    /// The overlays, in the order they are chained onto the picture.
+    pub draws: Vec<EmojiOverlayDraw>,
+}
+
+impl EmojiOverlayPlan {
+    /// Whether this plan changes the graph at all.
+    pub fn is_empty(&self) -> bool {
+        self.draws.is_empty()
+    }
+}
+
+/// Turns measured placements into inputs and draws.
+///
+/// A placement whose sequence the pack can no longer resolve is dropped rather
+/// than drawn from some other file: the cell it was measured for keeps the
+/// monochrome glyph that is already burned into the text layer underneath.
+pub(crate) fn build_emoji_overlay_plan(
+    placements: &[EmojiPlacement],
+    pack: &dyn EmojiRasterSource,
+) -> EmojiOverlayPlan {
+    let mut plan = EmojiOverlayPlan::default();
+
+    for placement in placements {
+        let Some(asset) =
+            crate::core::text::emoji_assets::drawable_match(pack, &placement.sequence_key)
+        else {
+            tracing::warn!(
+                "The colour emoji pack no longer resolves '{}'; keeping the monochrome glyph",
+                placement.sequence_key
+            );
+            continue;
+        };
+
+        if !asset.step.is_exact() {
+            tracing::debug!(
+                "Drawing '{}' from the pack's '{}' ({})",
+                placement.sequence_key,
+                asset.key,
+                asset.step.as_str()
+            );
+        }
+
+        let extent =
+            super::emoji_measure::rotated_extent(f64::from(placement.size), placement.rotation_rad)
+                .max(1.0) as u32;
+        let candidate = EmojiOverlayInput {
+            path: asset.path,
+            size: placement.size,
+            rotation_rad: placement.rotation_rad,
+            extent,
+        };
+        let input = match plan
+            .inputs
+            .iter()
+            .position(|existing| *existing == candidate)
+        {
+            Some(index) => index,
+            None => {
+                plan.inputs.push(candidate);
+                plan.inputs.len() - 1
+            }
+        };
+
+        plan.draws.push(EmojiOverlayDraw {
+            input,
+            x: placement.x,
+            y: placement.y,
+            start_sec: placement.start_sec,
+            end_sec: placement.end_sec,
+        });
+    }
+
+    plan
+}
+
+/// Composites the colour emoji over the burned-in text layer.
+///
+/// Returns the label the rest of the graph should read, which is
+/// `base_video_label` unchanged when there is nothing to draw - the same
+/// contract [`append_window_frame_cap`] follows, so a project with no emoji
+/// gets the filtergraph it has always had, byte for byte.
+///
+/// `first_input_index` is the stream index of the first PNG the argument
+/// builder appended; the inputs are consumed in the order
+/// [`build_emoji_overlay_plan`] put them in.
+///
+/// # Shape of the branch
+///
+/// A still image reaches the graph as an ordinary input rather than through
+/// `-loop 1`, so it has to be pinned to its single frame before anything else
+/// touches it: `trim=end_frame=1,setpts=PTS-STARTPTS` is the idiom the rest of
+/// this pipeline already uses for exactly that. `split` then hands the one
+/// scaled copy to every place the same emoji is drawn.
+///
+/// `format=auto:alpha=straight` is lifted from [`super::pip_stitch`], where the
+/// reasoning for the pair is written out.
+///
+/// The `eof_action`/`repeatlast` pair is the one place this deliberately parts
+/// company with that module, and it is worth being exact about why. A
+/// picture-in-picture layer is a *segment*: it ends, and
+/// `eof_action=pass:repeatlast=0` is what stops its last frame freezing over
+/// the rest of the render. An emoji is a single still frame, which reaches EOF
+/// after one frame - so the same pair draws it on the first frame of the file
+/// and nowhere else, which is a caption whose emoji vanish four hundredths of a
+/// second in. The still is *held* instead (`eof_action=repeat:repeatlast=1`)
+/// and `enable` decides when it is on screen, which is the same gate the
+/// `Dialogue` line underneath it is already using. Holding the layer does not
+/// extend the render: `overlay` follows its main input's timeline, so the file
+/// is still exactly as long as the picture it was drawn onto.
+pub(super) fn append_emoji_overlays(
+    filter_complex: &mut String,
+    base_video_label: &str,
+    plan: &EmojiOverlayPlan,
+    first_input_index: usize,
+) -> String {
+    if plan.is_empty() {
+        return base_video_label.to_string();
+    }
+
+    // How many draws each input feeds, so `split` is emitted with the right
+    // number of outputs and no branch is left dangling.
+    let mut uses: Vec<usize> = vec![0; plan.inputs.len()];
+    for draw in &plan.draws {
+        if let Some(count) = uses.get_mut(draw.input) {
+            *count += 1;
+        }
+    }
+
+    for (index, input) in plan.inputs.iter().enumerate() {
+        let count = uses[index];
+        if count == 0 {
+            continue;
+        }
+
+        let rotate = if input.rotation_rad == 0.0 {
+            String::new()
+        } else {
+            // `c=none` keeps the corners transparent instead of filling them
+            // black, and naming the output size explicitly means the placement
+            // arithmetic and the filter agree about how big the turned picture
+            // is.
+            format!(
+                ",rotate={:.6}:ow={}:oh={}:c=none",
+                input.rotation_rad, input.extent, input.extent
+            )
+        };
+        let outputs = (0..count)
+            .map(|use_index| format!("[e{index}_{use_index}]"))
+            .collect::<Vec<_>>()
+            .join("");
+        let split = if count > 1 {
+            format!(",split={count}{outputs}")
+        } else {
+            outputs
+        };
+
+        filter_complex.push(';');
+        filter_complex.push_str(&format!(
+            "[{}:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale={}:{}:flags=lanczos,format=rgba{rotate}{split}",
+            first_input_index + index,
+            input.size,
+            input.size,
+        ));
+    }
+
+    let mut taken: Vec<usize> = vec![0; plan.inputs.len()];
+    let mut current = base_video_label.to_string();
+
+    for (index, draw) in plan.draws.iter().enumerate() {
+        let use_index = taken.get(draw.input).copied().unwrap_or(0);
+        if let Some(slot) = taken.get_mut(draw.input) {
+            *slot += 1;
+        }
+
+        let output_label = format!("[txtemo{index}]");
+        filter_complex.push(';');
+        filter_complex.push_str(&format!(
+            "{current}[e{}_{use_index}]overlay=x={}:y={}:format=auto:alpha=straight:eof_action=repeat:repeatlast=1:enable='between(t,{:.6},{:.6})'{output_label}",
+            draw.input, draw.x, draw.y, draw.start_sec, draw.end_sec,
+        ));
+        current = output_label;
+    }
+
+    current
+}
+
 // =============================================================================
 // Export Engine
 // =============================================================================
@@ -6799,6 +7316,11 @@ impl ExportEngine {
     /// Create a new export engine
     pub fn new(ffmpeg: FFmpegRunner) -> Self {
         Self { ffmpeg }
+    }
+
+    /// The FFmpeg binary this engine runs, for the probes that spawn their own.
+    pub(crate) fn ffmpeg_path(&self) -> &Path {
+        self.ffmpeg.info().ffmpeg_path.as_path()
     }
 
     /// Probe all unique assets in a sequence to determine audio stream availability
@@ -7187,6 +7709,7 @@ impl ExportEngine {
                 settings,
                 render_plan: None,
                 ass_text_overlay,
+                emoji_overlays: None,
             },
         )
     }
@@ -7320,6 +7843,7 @@ impl ExportEngine {
         let mut ass_text_overlay_dir: Option<tempfile::TempDir> = None;
         let mut ass_text_overlay_path: Option<PathBuf> = None;
         let mut ass_text_overlay_needs_host_fonts = false;
+        let mut emoji_overlay_plan = EmojiOverlayPlan::default();
         // The script is written before the graph is built, so it has to resolve
         // the same window the builder will: `subtitles` reads its timings
         // against the graph's clock, and that clock now starts at the window.
@@ -7329,10 +7853,20 @@ impl ExportEngine {
             settings.end_time,
             output_video_fps(sequence, settings),
         );
-        if let Some(ass_script) = build_ass_text_overlay_script_in_window(
+        // Which emoji get a colour picture is a property of the pack this build
+        // installed, not of the project, so it is resolved once here and the
+        // script builder is simply told what is available. A build with no pack
+        // - and every project with no emoji in it - takes the `None` branch all
+        // the way down and emits the script it always did.
+        let emoji_pack = crate::core::text::emoji_assets::discover();
+        if let Some(ass_script) = build_ass_text_overlay_script_in_window_with_emoji(
             sequence,
             effects,
             text_overlay_window.start_sec(),
+            Some(EmojiSpacerContext {
+                pack: emoji_pack.map(|pack| pack as &dyn EmojiRasterSource),
+                markers: None,
+            }),
         )? {
             if self.ffmpeg_supports_filter("subtitles").await {
                 let temp_dir = tempfile::Builder::new()
@@ -7354,6 +7888,43 @@ impl ExportEngine {
                 ass_text_overlay_path = Some(ass_path);
                 ass_text_overlay_dir = Some(temp_dir);
                 ass_text_overlay_needs_host_fonts = ass_script.uses_host_fonts;
+
+                if let Some(pack) = emoji_pack.filter(|_| !ass_script.emoji_occurrences.is_empty())
+                {
+                    let (frame_width, frame_height) = output_video_dimensions(sequence, settings);
+                    let window_start_sec = text_overlay_window.start_sec();
+                    // Rebuilding the whole script per measurement batch, rather
+                    // than editing the one already on disk, is what makes the
+                    // measured layout provably the rendered layout: the two
+                    // come out of the same emitter given the same inputs.
+                    let build_marker_script = |markers: &HashSet<usize>| {
+                        build_ass_text_overlay_script_in_window_with_emoji(
+                            sequence,
+                            effects,
+                            window_start_sec,
+                            Some(EmojiSpacerContext {
+                                pack: Some(pack as &dyn EmojiRasterSource),
+                                markers: Some(markers),
+                            }),
+                        )
+                        .map(|built| built.map(|built| built.script).unwrap_or_default())
+                    };
+
+                    let placements = super::emoji_measure::measure_emoji_placements(
+                        self,
+                        &super::emoji_measure::EmojiMeasureRequest {
+                            occurrences: &ass_script.emoji_occurrences,
+                            build_marker_script: &build_marker_script,
+                            frame_width,
+                            frame_height,
+                            play_res_y: ass_play_resolution(&sequence.format.canvas).1,
+                            fps: output_video_fps(sequence, settings),
+                        },
+                    )
+                    .await?;
+
+                    emoji_overlay_plan = build_emoji_overlay_plan(&placements, pack);
+                }
             } else {
                 tracing::warn!(
                     "FFmpeg subtitles filter is unavailable; falling back to drawtext overlays"
@@ -7376,6 +7947,7 @@ impl ExportEngine {
                         path,
                         needs_host_fonts: ass_text_overlay_needs_host_fonts,
                     }),
+                emoji_overlays: Some(&emoji_overlay_plan),
             },
         )?;
 
@@ -8916,6 +9488,7 @@ pub fn build_complex_filter_args_with_audio_info(
         settings,
         render_plan: None,
         ass_text_overlay: None,
+        emoji_overlays: None,
     })
 }
 /// Detect gaps in the timeline between clips
@@ -9667,6 +10240,487 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // Colour emoji cells
+    // =========================================================================
+
+    /// A pack carrying exactly the sequences it was built with.
+    ///
+    /// Walks the real ladder, so a test about substitution is testing the
+    /// shipped resolution order rather than a second copy of it.
+    #[derive(Debug)]
+    struct FakeEmojiPack(Vec<String>);
+
+    impl FakeEmojiPack {
+        fn carrying(keys: &[&str]) -> Self {
+            Self(keys.iter().map(|key| (*key).to_string()).collect())
+        }
+    }
+
+    impl EmojiRasterSource for FakeEmojiPack {
+        fn pixel_size(&self) -> u32 {
+            128
+        }
+
+        fn lookup(
+            &self,
+            sequence_key: &str,
+        ) -> Option<crate::core::text::emoji_assets::EmojiAssetMatch> {
+            crate::core::text::emoji_assets::resolution_candidates(sequence_key)
+                .into_iter()
+                .find(|(key, _)| self.0.iter().any(|carried| carried == key))
+                .map(
+                    |(key, step)| crate::core::text::emoji_assets::EmojiAssetMatch {
+                        path: PathBuf::from(format!("emoji/{key}.png")),
+                        key,
+                        step,
+                    },
+                )
+        }
+    }
+
+    /// One caption, in the default pack's style, built with a colour pack.
+    fn caption_script_with_pack(
+        text: &str,
+        pack: Option<&dyn EmojiRasterSource>,
+        markers: Option<&HashSet<usize>>,
+        placed_at_sec: f64,
+        window_start_sec: f64,
+    ) -> AssTextOverlayScript {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(placed_at_sec);
+        clip.label = Some(text.to_string());
+        clip.caption_style = Some(default_caption_style());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        build_ass_text_overlay_script_in_window_with_emoji(
+            &sequence,
+            &HashMap::new(),
+            window_start_sec,
+            Some(EmojiSpacerContext { pack, markers }),
+        )
+        .expect("script result")
+        .expect("script exists")
+    }
+
+    /// The cell width a script actually emitted, read back out of it.
+    fn emitted_cell_size(script: &str) -> u32 {
+        let opening = "{\\p1}m 0 0 l ";
+        let at = script.find(opening).expect("the script carries a cell");
+        let rest = &script[at + opening.len()..];
+        rest[..rest.find(' ').expect("the cell names a width")]
+            .parse()
+            .expect("the cell width is a number")
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: an emoji the pack carries is laid out as an empty cell
+    ///
+    /// The cell is a degenerate `\p` drawing: it advances the full width and
+    /// paints nothing, which is what leaves a hole for the colour picture
+    /// without changing where the line wraps.
+    #[test]
+    fn an_emoji_the_pack_carries_is_laid_out_as_an_advance_only_cell() {
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        let built = caption_script_with_pack("Ship it \u{1F525}", Some(&pack), None, 0.0, 0.0);
+
+        let size = emitted_cell_size(&built.script);
+        assert_eq!(
+            first_event_text(&built.script),
+            format!("Ship it {}", ass_emoji_spacer_run(size)),
+            "got: {}",
+            built.script
+        );
+        assert!(
+            !built.script.contains("\\fnNoto Emoji"),
+            "the monochrome glyph must not be drawn under the picture. Got: {}",
+            built.script
+        );
+        assert_eq!(built.emoji_occurrences.len(), 1);
+        assert_eq!(built.emoji_occurrences[0].sequence_key, "1f525");
+        assert_eq!(built.emoji_occurrences[0].run_index, 0);
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: an emoji the pack never shipped keeps the glyph it had
+    #[test]
+    fn an_emoji_the_pack_does_not_carry_keeps_the_monochrome_glyph() {
+        let pack = FakeEmojiPack::carrying(&["1f600"]);
+        let with_pack = caption_script_with_pack("Ship it \u{1F525}", Some(&pack), None, 0.0, 0.0);
+        let without_pack = caption_script_with_pack("Ship it \u{1F525}", None, None, 0.0, 0.0);
+
+        assert_eq!(with_pack.script, without_pack.script);
+        assert!(with_pack.emoji_occurrences.is_empty());
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: colour never reaches a caption set in a host family
+    ///
+    /// The colour layer replaces what the *bundled* emoji tier would have
+    /// drawn. A family the user picked off this machine heads no chain at all -
+    /// there is no bundled primary to fall back from - so there is nothing to
+    /// replace, and `CaptionEmojiRule` keeps reporting those cues exactly as it
+    /// did before colour existed.
+    #[test]
+    fn a_host_family_caption_is_never_given_a_cell() {
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        let text = "Ship it \u{1F525}";
+        let mut occurrences = Vec::new();
+        let mut spacers = AssEmojiSpacers {
+            pack: &pack,
+            markers: None,
+            size: 58,
+            event_index: 0,
+            run_index: 0,
+            start_sec: 0.0,
+            end_sec: 2.0,
+            rotation_deg: 0.0,
+            out: &mut occurrences,
+        };
+
+        let emitted = ass_text_with_font_runs(
+            text,
+            &FontStack::default(),
+            "Some Host Family",
+            Some(&mut spacers),
+        );
+
+        assert_eq!(emitted, ass_escape_text(text));
+        assert!(occurrences.is_empty());
+    }
+
+    /// Feature: colour emoji measurement
+    /// Scenario: the measured script and the rendered script lay out the same
+    ///
+    /// The correctness property the whole feature rests on. The marker script
+    /// is derived from the render script by exactly two edits - the alpha tags
+    /// that hide the text, and the paint inside the cell - and neither of them
+    /// is something libass lets influence layout. Asserting it as a *diff*
+    /// rather than as two independent expectations is what makes a future
+    /// change to the emitter break this test instead of quietly moving the
+    /// colour layer away from the words.
+    #[test]
+    fn the_marker_script_differs_from_the_render_script_only_in_its_cells() {
+        let pack = FakeEmojiPack::carrying(&["1f525", "1f600"]);
+        let text = "Ship \u{1F525} it \u{1F600} now";
+        let render = caption_script_with_pack(text, Some(&pack), None, 0.0, 0.0);
+
+        let size = emitted_cell_size(&render.script);
+        let markers: HashSet<usize> = [1usize].into_iter().collect();
+        let measured = caption_script_with_pack(text, Some(&pack), Some(&markers), 0.0, 0.0);
+
+        // Rebuild the marker script from the render script by hand.
+        let expected: String = render
+            .script
+            .lines()
+            .map(|line| {
+                if !line.starts_with("Dialogue: ") {
+                    return format!("{line}\n");
+                }
+                let close = line.find('}').expect("the leading override block");
+                let mut rebuilt = String::new();
+                rebuilt.push_str(&line[..close]);
+                rebuilt.push_str(ASS_EMOJI_MARKER_HIDE_TAGS);
+                rebuilt.push_str(&line[close..]);
+                // Only the *second* cell paints, so only the second is replaced.
+                let cell = ass_emoji_spacer_run(size);
+                let first = rebuilt.find(&cell).expect("the first cell");
+                let second = rebuilt[first + cell.len()..]
+                    .find(&cell)
+                    .expect("the second cell")
+                    + first
+                    + cell.len();
+                rebuilt.replace_range(second..second + cell.len(), &ass_emoji_marker_run(size));
+                format!("{rebuilt}\n")
+            })
+            .collect();
+
+        assert_eq!(measured.script, expected);
+    }
+
+    /// Feature: colour emoji measurement
+    /// Scenario: two emoji in one cue are two independent cells
+    #[test]
+    fn two_emoji_in_one_cue_are_recorded_as_separate_cells() {
+        let pack = FakeEmojiPack::carrying(&["1f525", "1f600"]);
+        let built =
+            caption_script_with_pack("\u{1F525} and \u{1F600}", Some(&pack), None, 0.0, 0.0);
+
+        assert_eq!(built.emoji_occurrences.len(), 2);
+        assert_eq!(built.emoji_occurrences[0].run_index, 0);
+        assert_eq!(built.emoji_occurrences[1].run_index, 1);
+        assert_eq!(built.emoji_occurrences[0].event_index, 0);
+        assert_eq!(built.emoji_occurrences[1].event_index, 0);
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: a ranged render rebases a cell onto its own clock
+    ///
+    /// The overlay's `enable` and the `Dialogue` line have to agree, because
+    /// they are read against the same graph clock. `ass_timecode` floors a
+    /// negative start at zero and so does the cell.
+    #[test]
+    fn a_cell_is_rebased_onto_the_render_clock_like_the_event_it_sits_in() {
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        let built = caption_script_with_pack("Hi \u{1F525}", Some(&pack), None, 4.0, 1.5);
+
+        let occurrence = &built.emoji_occurrences[0];
+        assert!((occurrence.start_sec - 2.5).abs() < 1e-9);
+        assert!((occurrence.end_sec - 4.5).abs() < 1e-9);
+
+        // And a cue already on screen when the window opened starts at zero,
+        // exactly where its `Dialogue` line does.
+        let clamped = caption_script_with_pack("Hi \u{1F525}", Some(&pack), None, 0.0, 1.0);
+        assert_eq!(clamped.emoji_occurrences[0].start_sec, 0.0);
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: a very long caption stops taking cells at the cap
+    #[test]
+    fn a_render_stops_laying_cells_at_the_overlay_cap() {
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        let text = "\u{1F525}".repeat(MAX_EMOJI_OVERLAYS_PER_RENDER + 25);
+        let built = caption_script_with_pack(&text, Some(&pack), None, 0.0, 0.0);
+
+        assert_eq!(built.emoji_occurrences.len(), MAX_EMOJI_OVERLAYS_PER_RENDER);
+        assert!(
+            built.script.contains("\\fnNoto Emoji"),
+            "everything past the cap has to keep the glyph it had"
+        );
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: a cue whose layout animates is refused colour
+    ///
+    /// Nothing this emitter writes animates, which is what makes the refusal
+    /// free today; the second half of this test is the guard that says so, so
+    /// the day a `\move` is added the refusal starts firing instead of the
+    /// colour layer silently drifting off the words.
+    #[test]
+    fn an_animating_override_block_is_refused_colour() {
+        assert!(ass_tags_animate_layout("\\pos(10,10)\\move(0,0,10,10)"));
+        assert!(ass_tags_animate_layout("\\an2\\t(0,500,\\frz30)"));
+        assert!(ass_tags_animate_layout("\\an2\\k50"));
+
+        let pack = FakeEmojiPack::carrying(&["1f525"]);
+        let built = caption_script_with_pack("Hi \u{1F525}", Some(&pack), None, 0.0, 0.0);
+        let dialogue = built
+            .script
+            .lines()
+            .find(|line| line.starts_with("Dialogue: "))
+            .expect("an event");
+        let tags = &dialogue[..dialogue.find('}').expect("the override block")];
+
+        assert!(
+            !ass_tags_animate_layout(tags),
+            "this emitter must keep writing static blocks: {tags}"
+        );
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: one picture is decoded once and split to every use
+    #[test]
+    fn the_overlay_chain_reuses_one_scaled_branch_per_picture() {
+        let pack = FakeEmojiPack::carrying(&["1f525", "1f600"]);
+        let placements = vec![
+            placement("1f525", 100, 200, 0.0, 2.0),
+            placement("1f600", 300, 200, 0.0, 2.0),
+            placement("1f525", 500, 200, 3.0, 5.0),
+        ];
+
+        let plan = build_emoji_overlay_plan(&placements, &pack);
+
+        assert_eq!(plan.inputs.len(), 2, "two pictures, three draws");
+        assert_eq!(plan.draws.len(), 3);
+
+        let mut graph = String::new();
+        let label = append_emoji_overlays(&mut graph, "[txtass0]", &plan, 7);
+
+        assert_eq!(label, "[txtemo2]");
+        assert!(graph.contains("[7:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale=64:64:flags=lanczos,format=rgba,split=2[e0_0][e0_1]"), "got: {graph}");
+        assert!(
+            graph.contains("[8:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale=64:64:flags=lanczos,format=rgba[e1_0]"),
+            "got: {graph}"
+        );
+        assert!(
+            graph.contains("[txtass0][e0_0]overlay=x=100:y=200:format=auto:alpha=straight:eof_action=repeat:repeatlast=1:enable='between(t,0.000000,2.000000)'[txtemo0]"),
+            "got: {graph}"
+        );
+        assert!(
+            graph.contains("[txtemo1][e0_1]overlay=x=500:y=200"),
+            "the second use of a picture reads the second split output. Got: {graph}"
+        );
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: a render with no emoji keeps the filtergraph it always had
+    #[test]
+    fn a_render_with_no_colour_emoji_leaves_the_graph_untouched() {
+        let mut graph = String::from("[0:v]null[outv]");
+        let label = append_emoji_overlays(&mut graph, "[txtass0]", &EmojiOverlayPlan::default(), 3);
+
+        assert_eq!(label, "[txtass0]");
+        assert_eq!(graph, "[0:v]null[outv]");
+    }
+
+    /// Feature: colour emoji compositing
+    /// Scenario: a lossy substitution is refused rather than drawn
+    #[test]
+    fn the_first_member_of_a_zwj_sequence_is_never_composited() {
+        let pack = FakeEmojiPack::carrying(&["1f469"]);
+        let plan =
+            build_emoji_overlay_plan(&[placement("1f469-200d-1f4bb", 0, 0, 0.0, 1.0)], &pack);
+
+        assert!(plan.is_empty());
+    }
+
+    fn placement(key: &str, x: i32, y: i32, start: f64, end: f64) -> EmojiPlacement {
+        EmojiPlacement {
+            x,
+            y,
+            size: 64,
+            rotation_rad: 0.0,
+            start_sec: start,
+            end_sec: end,
+            sequence_key: key.to_string(),
+        }
+    }
+
+    /// The peak saturation of one frame of `path`, as `signalstats` measures it.
+    ///
+    /// Black canvas and white text are both fully desaturated, so anything much
+    /// above zero on a caption-only render is colour that came from somewhere -
+    /// and the only thing in this pipeline that puts colour on such a frame is
+    /// the emoji overlay.
+    fn peak_saturation_of_frame(ffmpeg: &Path, path: &Path, frame: u32) -> Option<f64> {
+        let mut command = std::process::Command::new(ffmpeg);
+        crate::core::process::configure_std_command(&mut command);
+        let output = command
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-i",
+                &path.to_string_lossy(),
+                "-vf",
+                &format!("select='eq(n\\,{frame})',signalstats,metadata=mode=print:file=-"),
+                "-vsync",
+                "0",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("lavfi.signalstats.SATMAX=")
+                    .and_then(|value| value.trim().parse::<f64>().ok())
+            })
+    }
+
+    /// Feature: colour emoji burn-in
+    /// Scenario: a caption's emoji really reaches the file in colour
+    ///
+    /// The end-to-end assertion, and the only one that exercises every layer at
+    /// once: the cell in the script, the measurement pre-pass, the pack lookup,
+    /// the inputs on the command line and the overlay chain. It renders a
+    /// caption over black - where every pixel libass can draw is grey - and
+    /// then asks the file whether anything on the frame is coloured.
+    ///
+    /// A checked-in golden PNG was the alternative and is worse: libass, the
+    /// bundled font and FFmpeg's scaler all move pixels between versions, so a
+    /// golden would need a perceptual tolerance wide enough to accept a
+    /// half-broken frame, and would still have to be regenerated on every
+    /// upgrade. "There is saturated colour where the cell was, and there is
+    /// none without the pack" is the property the feature actually promises.
+    #[tokio::test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    async fn a_caption_burns_its_emoji_into_the_file_in_colour() {
+        use crate::core::test_ffmpeg::{require_or_skip_ffmpeg, skip_without_ffmpeg};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let Some(ffmpeg) = require_or_skip_ffmpeg() else {
+            return;
+        };
+        let Some(pack) = crate::core::text::emoji_assets::discover() else {
+            skip_without_ffmpeg("no colour emoji pack is installed for this build");
+            return;
+        };
+        // One of each kind the pack is expected to carry, so a regression in
+        // any of keycap, ZWJ sequence, skin tone or plain presentation shows up
+        // here rather than only in the resolution unit tests.
+        for key in ["1f525", "31-20e3", "1f469-200d-1f4bb", "1f44d"] {
+            assert!(
+                crate::core::text::emoji_assets::drawable_match(pack, key).is_some(),
+                "the shipped pack has to carry {key}"
+            );
+        }
+
+        let mut sequence = Sequence::new("Emoji", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some(
+            "Ship it \u{1F525} 1\u{FE0F}\u{20E3} \u{1F469}\u{200D}\u{1F4BB} \u{1F44D}\u{1F3FD}"
+                .to_string(),
+        );
+        clip.caption_style = Some(default_caption_style());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let engine = ExportEngine::new(FFmpegRunner::new(crate::core::ffmpeg::FFmpegInfo {
+            ffmpeg_path: ffmpeg.clone(),
+            ffprobe_path: ffmpeg.with_file_name("ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
+        }));
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let settings = ExportSettings {
+            output_path: dir.path().join("emoji.mp4"),
+            crf: Some(10),
+            ..Default::default()
+        };
+
+        engine
+            .export_sequence_with_effects(
+                &sequence,
+                &HashMap::new(),
+                &HashMap::new(),
+                &settings,
+                None,
+                None,
+            )
+            .await
+            .expect("the render succeeds");
+
+        let saturation = peak_saturation_of_frame(&ffmpeg, &settings.output_path, 15)
+            .expect("signalstats reports a peak saturation");
+
+        assert!(
+            saturation > 30.0,
+            "a caption over black draws only greys unless the colour layer landed; peak \
+             saturation was {saturation}"
+        );
+    }
+
     /// The `Dialogue:` text of the first event, past the leading override.
     fn first_event_text(script: &str) -> String {
         let dialogue = script
@@ -9903,7 +10957,7 @@ mod tests {
         let stack = FontStack::default();
 
         assert_eq!(
-            ass_text_with_font_runs(text, &stack, "Some Host Family"),
+            ass_text_with_font_runs(text, &stack, "Some Host Family", None),
             ass_escape_text(text)
         );
         // And a stack whose primary is not the family the `Style` line names
@@ -9912,7 +10966,8 @@ mod tests {
             ass_text_with_font_runs(
                 text,
                 &caption_font_stack(DEFAULT_TEXT_FONT_FAMILY),
-                "Some Host Family"
+                "Some Host Family",
+                None
             ),
             ass_escape_text(text)
         );
@@ -10465,6 +11520,7 @@ mod tests {
                 font_family: "Arial",
                 font_stack: &FontStack::default(),
                 window_start_sec: 0.0,
+                event_index: 0,
                 anchor: ass_text_anchor(
                     &sequence.tracks[0].clips[0],
                     &TrackKind::Caption,
@@ -10475,6 +11531,8 @@ mod tests {
             },
             &sequence.tracks[0].clips[0],
             &effect,
+            None,
+            &mut Vec::new(),
         );
 
         let emitted = format!("{styles}{events}");

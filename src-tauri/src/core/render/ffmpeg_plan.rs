@@ -18,19 +18,20 @@ use super::{
     audio_presence::clip_carries_audio,
     export::{
         append_animated_video_transform_composition, append_ass_text_overlay,
-        append_black_video_gap, append_drawtext_text_overlays, append_master_audio_output,
-        append_timeline_video_output, append_video_stream_normalization,
-        append_video_transform_composition, append_window_frame_cap, append_window_silence_audio,
-        append_windowed_output_duration_arg, apply_audio_mix_settings, build_audio_trim_filter,
-        build_video_trim_filter, clip_composition_is_motion_only, clip_needs_transform_composition,
+        append_black_video_gap, append_drawtext_text_overlays, append_emoji_overlays,
+        append_master_audio_output, append_timeline_video_output,
+        append_video_stream_normalization, append_video_transform_composition,
+        append_window_frame_cap, append_window_silence_audio, append_windowed_output_duration_arg,
+        apply_audio_mix_settings, build_audio_trim_filter, build_video_trim_filter,
+        clip_composition_is_motion_only, clip_needs_transform_composition,
         collect_audio_companion_keys, collect_drawtext_text_overlays, collect_enabled_clips_sorted,
         effective_source_dimensions, generated_text_visual_end_sec, hdr_metadata_for_asset,
         is_text_clip, output_video_dimensions, output_video_fps, output_video_pixel_format,
         resolve_asset_source_dimensions, resolve_asset_source_duration, resolve_trim_source_kind,
         seed_source_dimension_cache, seed_source_duration_cache, shape_video_segments_to_window,
-        unmeasurable_effect_message, AssTextOverlayPlan, AssetAudioInfo, ExportEngine, ExportError,
-        ExportSettings, SourceFrameCountCache, VideoCodec, VideoTimelineSegment,
-        TIMELINE_EPSILON_SEC,
+        unmeasurable_effect_message, AssTextOverlayPlan, AssetAudioInfo, EmojiOverlayPlan,
+        ExportEngine, ExportError, ExportSettings, SourceFrameCountCache, VideoCodec,
+        VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
     pip_stitch::{fold_pip_groups, plan_pip_groups, PipPlan},
     render_window::RenderWindow,
@@ -59,6 +60,11 @@ pub(super) struct SequenceFfmpegBuildContext<'a> {
     /// the `subtitles` node names a `fontsdir`. See [`append_ass_text_overlay`]
     /// for the determinism boundary that draws.
     pub ass_text_overlay: Option<AssTextOverlayPlan<'a>>,
+    /// The colour emoji to composite over that script, already measured.
+    ///
+    /// `None`, or an empty plan, leaves the graph exactly as it was: a project
+    /// with no emoji must not pay an input, a branch or a node for the feature.
+    pub emoji_overlays: Option<&'a EmojiOverlayPlan>,
 }
 
 pub(super) struct AudioOnlyFfmpegBuildContext<'a> {
@@ -563,6 +569,19 @@ pub(super) fn build_sequence_ffmpeg_args(
         input_index += 1;
     }
 
+    // The colour emoji pictures are the last inputs on the command line, after
+    // every clip, so the stream indices the clip loop handed out keep the
+    // values its filter labels already carry.
+    let emoji_overlays = ctx.emoji_overlays.filter(|plan| !plan.is_empty());
+    let first_emoji_input_index = input_index;
+    if let Some(plan) = emoji_overlays {
+        for input in &plan.inputs {
+            args.push("-i".to_string());
+            args.push(input.path.to_string_lossy().to_string());
+            input_index += 1;
+        }
+    }
+
     // Every emitted `-i` advanced `input_index` exactly once, and every filter
     // label is `{prefix}{input_index}`, so the counter must equal the number of
     // inputs actually on the command line. A drift here would silently point a
@@ -705,6 +724,19 @@ pub(super) fn build_sequence_ffmpeg_args(
         )
     } else {
         append_drawtext_text_overlays(&mut filter_complex, "[outv]", &drawtext_text_overlays)
+    };
+    // Colour emoji go on after the text, because they are a layer over what
+    // libass drew rather than something libass could have drawn, and before the
+    // frame cap, which is about how many frames the file holds rather than what
+    // is on them.
+    let final_video_label = match emoji_overlays {
+        Some(plan) => append_emoji_overlays(
+            &mut filter_complex,
+            &final_video_label,
+            plan,
+            first_emoji_input_index,
+        ),
+        None => final_video_label,
     };
     let final_video_label =
         append_window_frame_cap(&mut filter_complex, &final_video_label, &window);
