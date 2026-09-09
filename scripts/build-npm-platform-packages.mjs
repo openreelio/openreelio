@@ -92,7 +92,9 @@ const CHECKOUT_EMOJI_PACK = join(PROJECT_ROOT, 'src-tauri', EMOJI_PACK_DIR);
  * The release archives carry the pack beside the binary, and that copy is the
  * one to publish: it came out of the archive whose checksum was verified. A
  * local run against a bare `--binary` has no such copy, so the checkout's pack
- * stands in.
+ * stands in. Coming back empty is only survivable on that local path: see
+ * `writePlatformPackage`, which refuses to write a pack-less package when the
+ * binaries came from release archives.
  *
  * @param {string} binaryPath Binary the package is being built around.
  * @returns {string|null} Directory holding `manifest.json` and `png/`, or null.
@@ -449,9 +451,13 @@ function resolveBinary(target, explicitPath, inputDir, version) {
  * @param {string} binaryPath Source binary.
  * @param {string} version Version to stamp.
  * @param {string} outDir Output root.
+ * @param {boolean} requireEmojiPack Whether a missing colour emoji pack is
+ *                                   fatal rather than a warning. True on the
+ *                                   release path, where the package written
+ *                                   here is the one that gets published.
  * @returns {string} The package directory that was written.
  */
-function writePlatformPackage(target, binaryPath, version, outDir) {
+function writePlatformPackage(target, binaryPath, version, outDir, requireEmojiPack) {
   const packageName = `${SCOPE}/cli-${target.platform}`;
   const packageDir = join(outDir, `cli-${target.platform}`);
 
@@ -511,6 +517,16 @@ function writePlatformPackage(target, binaryPath, version, outDir) {
   const emojiPack = resolveEmojiPack(binaryPath);
   if (emojiPack) {
     cpSync(emojiPack, join(packageDir, EMOJI_PACK_DIR), { recursive: true });
+  } else if (requireEmojiPack) {
+    // The release path builds the very packages that get published, so a
+    // warning here is a warning nobody reads until an installed CLI is already
+    // burning captions in monochrome while the desktop app draws them in
+    // colour. Refuse to write a pack-less package instead.
+    fail(
+      `no colour emoji pack found for ${packageName}. The release archive for ` +
+        `${target.triple} must carry ${EMOJI_PACK_DIR}/manifest.json beside the binary; ` +
+        'without it the published CLI renders every caption emoji in monochrome.',
+    );
   } else {
     console.warn(
       `  warning: no colour emoji pack found for ${packageName}; the published CLI will render emoji in monochrome.`,
@@ -641,7 +657,13 @@ async function main() {
       );
     }
 
-    const packageDir = writePlatformPackage(target, binaryPath, version, outDir);
+    const packageDir = writePlatformPackage(
+      target,
+      binaryPath,
+      version,
+      outDir,
+      Boolean(archivesDir),
+    );
     console.log(`  ${SCOPE}/cli-${target.platform} -> ${packageDir}`);
   }
 
