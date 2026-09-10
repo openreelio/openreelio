@@ -4381,9 +4381,12 @@ mod tests {
     /// the frame allows was reported as fitting. The same unbreakable run —
     /// libass has nowhere to wrap it, so it stays on one line — is half the
     /// frame at 48px and wider than the frame at 96px.
+    ///
+    /// A bare run of letters, because it has to be one libass genuinely cannot
+    /// break: no whitespace, no wide-script character and none of `/ - ? !`.
     #[tokio::test]
     async fn test_out_of_bounds_rule_should_scale_width_with_font_size() {
-        const UNBREAKABLE: &str = "https://example.com/a-very-long-caption-x";
+        const UNBREAKABLE: &str = "averylongunbreakablecaptionwordwithnogaps";
 
         async fn violations_at(font_size: u32) -> Vec<QCViolation> {
             let mut sequence = sequence_30fps();
@@ -4430,8 +4433,10 @@ mod tests {
     /// Scenario: should treat unspaced CJK as wrapping rather than cropped
     ///
     /// Pins a measured fact about the renderer, not a guess - and the earlier
-    /// reading of that fact was wrong. The bundled ffmpeg (gyan 8.0.1, libass
-    /// 0.17.4) *is* built with libunibreak; what suppressed the wrap was the
+    /// reading of that fact was wrong. The bundled gyan build *is* built with
+    /// libunibreak - the bundle is pulled from an unpinned "latest" URL, so the
+    /// ffmpeg and libass releases move and it is the library rather than the
+    /// version number that matters here; what suppressed the wrap was the
     /// `subtitles` filter defaulting `wrap_unicode` to `auto`, which is off for
     /// a native `.ass` input, and the burn-in never setting it. Rendering the
     /// app's own 9:16 script space (`PlayResX 608`, `WrapStyle: 0`, 72px, 61px
@@ -4443,9 +4448,13 @@ mod tests {
     ///   several lines, wholly inside the 1080-wide frame,
     /// - `wrap_unicode=0` reproduces the first result, confirming the default.
     ///
-    /// The export now names the option, so the estimator models a cue that
-    /// wraps: no breach to report. What still bleeds off the side is a run with
-    /// no break opportunity of any kind, and the control below is one.
+    /// The same run of measurements settles what else the option breaks at:
+    /// after whitespace, on both sides of a wide-script character, and after
+    /// `/`, `-`, `?` and `!` - but nowhere inside a run of letters. So the
+    /// estimator sizes a cue by its widest *unbreakable run* rather than by the
+    /// whole label, and the controls below are the three cases that separates:
+    /// a URL whose permalink slug still overflows, a hyphenated compound that
+    /// wraps, and a bare letter run that can break nowhere at all.
     #[tokio::test]
     async fn test_out_of_bounds_rule_should_treat_unspaced_cjk_as_wrapping_not_cropped() {
         async fn violations_for(label: &str) -> Vec<QCViolation> {
@@ -4481,18 +4490,41 @@ mod tests {
             "five ideographs are 59% of the script and fit"
         );
 
-        // The other control, and the case this branch of the estimator now
-        // exists for: a bare URL has neither whitespace nor a script the
-        // Unicode line-breaking algorithm breaks inside, so libass really does
-        // draw it on one line and run it off both sides.
-        let url =
-            violations_for("https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await;
+        // A URL is not one unbreakable run - it breaks at its slashes - but
+        // one of its runs is: the permalink slug, which at 27 half-em glyphs of
+        // a 72px font is 160% of the 608-wide script and is drawn straight off
+        // both sides. A single trailing ideograph does not rescue it, and
+        // asking merely whether the label carried a break opportunity somewhere
+        // answered yes on the strength of that one character and reported
+        // nothing at all.
+        let slug =
+            violations_for("https://example.com/watch/somereallylongpermalinkslug\u{3042}").await;
         assert_eq!(
-            url.len(),
+            slug.len(),
             1,
-            "an unbreakable run is still an Error: {url:?}"
+            "a run wider than the frame is still an Error: {slug:?}"
         );
-        assert_eq!(url[0].severity, Severity::Error);
+        assert_eq!(slug[0].severity, Severity::Error);
+
+        // And the reverse case: every run of a hyphenated compound is short, so
+        // libass wraps the whole thing inside the frame. Reporting it was a
+        // false Error - and the single line it was measured as became the band
+        // the contrast pass sampled.
+        let compound = violations_for("state-of-the-art-multi-part-compound-word-here").await;
+        assert!(
+            compound.is_empty(),
+            "a hyphenated compound breaks after every hyphen and wraps: {compound:?}"
+        );
+
+        // The genuine unbreakable control: no whitespace, no wide script and
+        // none of `/ - ? !`, so libass has nowhere to break it.
+        let letters = violations_for("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await;
+        assert_eq!(
+            letters.len(),
+            1,
+            "an unbreakable run is still an Error: {letters:?}"
+        );
+        assert_eq!(letters[0].severity, Severity::Error);
     }
 
     // ========================================================================

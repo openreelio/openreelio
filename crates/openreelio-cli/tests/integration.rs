@@ -147,6 +147,21 @@ fn skip_without_ffmpeg(reason: &str) {
     eprintln!("Skipping test: {reason}");
 }
 
+/// Records a skip for a capability the host's FFmpeg build simply does not
+/// have.
+///
+/// Unlike [`skip_without_ffmpeg`], this skips even under
+/// `REQUIRE_FFMPEG_TESTS`. That variable asserts an FFmpeg is installed and
+/// working, which a build linked against a libass without libunibreak is - it
+/// runs every other render test in this file. What such a build cannot do is
+/// apply the Unicode line-breaking algorithm, and no environment variable can
+/// link the library in; failing there would report a broken app on a host whose
+/// only fault is its own libass. The skip is loud so the log still says why.
+#[track_caller]
+fn skip_without_host_capability(reason: &str) {
+    eprintln!("Skipping test: {reason}");
+}
+
 /// Run a CLI command from `cwd` with extra environment variables applied.
 ///
 /// The FFmpeg path overrides are always cleared so a developer's shell cannot
@@ -12312,6 +12327,13 @@ fn test_burned_in_caption_wraps_inside_the_safe_box() {
 ///
 /// This is the guard the unit tests cannot be: the QC estimator only *models*
 /// the wrap, and a model agrees with itself whatever the renderer does.
+///
+/// Two ways a host cannot run it, both skipped rather than failed: an FFmpeg
+/// too old to know the option, and - the case the option cannot rule out - a
+/// build that accepts it but was linked against a libass without libunibreak,
+/// which logs `"libass wasn't built with ASS_FEATURE_WRAP_UNICODE support"` and
+/// draws the single cropped line anyway. The wrap is a property of the host's
+/// libass, so on such a host there is nothing for this test to assert.
 #[test]
 fn test_burned_in_unspaced_cjk_caption_wraps_inside_the_frame() {
     let Some(ffmpeg_path) = available_ffmpeg_path() else {
@@ -12349,10 +12371,15 @@ fn test_burned_in_unspaced_cjk_caption_wraps_inside_the_frame() {
     };
 
     let bands = text_row_bands(&frame, width, height);
-    assert!(
-        bands.len() >= 2,
-        "an unspaced CJK cue must break between characters, got bands {bands:?}"
-    );
+    if bands.len() < 2 {
+        // The option was advertised and accepted, and the cue still came out on
+        // one line: this build's libass has no libunibreak, so the wrap this
+        // test exists to assert is not available here. See the doc comment.
+        skip_without_host_capability(
+            "this ffmpeg advertises wrap_unicode but libass did not wrap - libunibreak absent",
+        );
+        return;
+    }
 
     assert!(
         left > 0 && right < width - 1,

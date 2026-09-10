@@ -630,10 +630,27 @@ fn version_line_supports_fps_mode(first_line: &str) -> bool {
 /// The option arrived in FFmpeg 6.1, and an FFmpeg that does not know an option
 /// exits before decoding a frame ("Option not found"), so naming it
 /// unconditionally would turn a caption export into a hard failure on an older
-/// system binary. The version number cannot answer the question on its own
-/// either: whether libass can break these scripts also depends on the build
-/// carrying libunibreak. So the probe asks the binary itself, once per path,
-/// and the answer is cached for the life of the process.
+/// system binary. This probe therefore asks each binary, once per path, and
+/// caches the answer for the life of the process.
+///
+/// # What it actually detects
+///
+/// The *option*, and only the option: it greps `-h filter=subtitles` for the
+/// `wrap_unicode` token, which every FFmpeg from 6.1 on prints whatever libass
+/// it was linked against. That is a necessary condition and not a sufficient
+/// one - the wrap itself is performed by libass, which needs libunibreak
+/// compiled in. Every standard build that exposes the option also links it
+/// (gyan and BtbN on Windows, Debian and Ubuntu's `ffmpeg` package, the
+/// Homebrew bottle), so in practice the two travel together.
+///
+/// The residual risk is a build carrying the option without libunibreak.
+/// FFmpeg accepts the option there, logs `"libass wasn't built with
+/// ASS_FEATURE_WRAP_UNICODE support"`, and silently does not wrap - while QC,
+/// which models the wrap this answer promises, stays quiet about the crop.
+/// A rare degrade, documented rather than detected: distinguishing the two
+/// would mean burning a Japanese cue in and counting the rows it lands on,
+/// which is what the CLI integration test does and what a synchronous
+/// graph-build probe cannot afford.
 ///
 /// A probe that cannot run answers **no** - the opposite default from
 /// [`binary_supports_fps_mode`], and deliberately: the cost of a wrong "no" is
@@ -662,30 +679,93 @@ pub fn binary_supports_subtitles_wrap_unicode(ffmpeg_path: &Path) -> bool {
     supports
 }
 
+/// How long the `subtitles` help probe is given before it is killed.
+///
+/// Printing one filter's option table is instant on every working binary, so
+/// this is not a budget but a deadlock guard: the probe is spawned from the
+/// synchronous filtergraph build (see
+/// [`crate::core::render::ffmpeg_plan`]), and a binary that never exits -
+/// a half-written download, a path that resolved to something that is not
+/// FFmpeg, a process wedged on a network mount - would otherwise wedge the
+/// render that asked. Timing out lands on the safe `false`, which costs a CJK
+/// caption its wrap rather than costing the app the export.
+const SUBTITLES_HELP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often the probe checks whether the child has exited.
+const SUBTITLES_HELP_PROBE_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Runs `ffmpeg -h filter=subtitles` and returns everything it printed.
 ///
 /// Both streams are kept: the option table goes to stdout on a current build,
 /// and a build that cannot describe the filter says so on stderr - either way
 /// the token is looked for in the same text.
+///
+/// The child is killed if it outlives [`SUBTITLES_HELP_PROBE_TIMEOUT`]. Its
+/// pipes are drained on threads of their own so the wait cannot deadlock on a
+/// full pipe buffer, and the exit is polled rather than waited on so there is
+/// still a live handle to kill when the deadline passes.
 fn run_subtitles_filter_help(ffmpeg_path: &Path) -> FFmpegResult<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::thread::JoinHandle;
+
     let mut cmd = Command::new(ffmpeg_path);
     configure_std_command(&mut cmd);
-    let output = cmd
+    let mut child = cmd
         .args(["-hide_banner", "-h", "filter=subtitles"])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(FFmpegError::ProcessError)?;
 
-    if !output.status.success() {
+    /// Reads one pipe to exhaustion on a thread of its own.
+    fn drain<R: Read + Send + 'static>(stream: Option<R>) -> JoinHandle<String> {
+        std::thread::spawn(move || {
+            let Some(mut stream) = stream else {
+                return String::new();
+            };
+            let mut bytes = Vec::new();
+            match stream.read_to_end(&mut bytes) {
+                Ok(_) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(_) => String::new(),
+            }
+        })
+    }
+
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+
+    let deadline = std::time::Instant::now() + SUBTITLES_HELP_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(FFmpegError::ExecutionFailed(
+                        "The FFmpeg subtitles filter help probe timed out".to_string(),
+                    ));
+                }
+                std::thread::sleep(SUBTITLES_HELP_PROBE_POLL);
+            }
+            Err(error) => return Err(FFmpegError::ProcessError(error)),
+        }
+    };
+
+    if !status.success() {
         return Err(FFmpegError::ExecutionFailed(
             "Failed to describe the FFmpeg subtitles filter".to_string(),
         ));
     }
 
-    Ok(format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    ))
+    // The writers are closed, so both readers have already finished or are
+    // about to; a panicked reader is simply no text from that stream.
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+
+    Ok(format!("{stdout}{stderr}"))
 }
 
 /// Decides `wrap_unicode` support from the text of `-h filter=subtitles`.

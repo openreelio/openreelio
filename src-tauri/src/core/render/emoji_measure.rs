@@ -502,7 +502,10 @@ async fn measure_batch(
         ));
     }
 
-    if let Some(cached) = cached_measurement(marker_script, request, &instants) {
+    // The same answer the probe's own filtergraph is built from, read once so
+    // the key and the graph cannot disagree about how this script wraps.
+    let wraps_unicode = engine.wraps_unicode_captions();
+    if let Some(cached) = cached_measurement(marker_script, request, &instants, wraps_unicode) {
         return Ok(cached);
     }
 
@@ -525,7 +528,7 @@ async fn measure_batch(
     // caching it would make that refusal stick for the life of the process,
     // long after whatever made the probe miss has gone away.
     if measured.iter().all(Option::is_some) {
-        store_measurement(marker_script, request, &instants, &measured);
+        store_measurement(marker_script, request, &instants, wraps_unicode, &measured);
     }
 
     Ok(measured)
@@ -737,10 +740,18 @@ fn measurement_cache() -> &'static Mutex<MeasurementCache> {
 const MAX_CACHED_MEASUREMENTS: usize = 512;
 
 /// The cache key: what the boxes actually depend on.
+///
+/// `wraps_unicode` is one of them. It is a property of the binary rather than
+/// of the script, and a process can change binaries under this cache - the
+/// resolver picks a different FFmpeg after a managed install, a test drives two
+/// engines - so a key without it would hand a render measured with the Unicode
+/// line-breaking algorithm the boxes measured without it, which is a different
+/// set of line breaks and so a different place for every cell.
 fn measurement_key(
     marker_script: &str,
     request: &EmojiMeasureRequest<'_>,
     instants: &[(usize, f64)],
+    wraps_unicode: bool,
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for line in marker_script.lines() {
@@ -765,6 +776,7 @@ fn measurement_key(
     request.play_res_x.hash(&mut hasher);
     request.play_res_y.hash(&mut hasher);
     instants.len().hash(&mut hasher);
+    wraps_unicode.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -772,8 +784,9 @@ fn cached_measurement(
     marker_script: &str,
     request: &EmojiMeasureRequest<'_>,
     instants: &[(usize, f64)],
+    wraps_unicode: bool,
 ) -> Option<Vec<Option<MeasuredBox>>> {
-    let key = measurement_key(marker_script, request, instants);
+    let key = measurement_key(marker_script, request, instants, wraps_unicode);
     measurement_cache()
         .lock()
         .ok()
@@ -784,9 +797,10 @@ fn store_measurement(
     marker_script: &str,
     request: &EmojiMeasureRequest<'_>,
     instants: &[(usize, f64)],
+    wraps_unicode: bool,
     measured: &[Option<MeasuredBox>],
 ) {
-    let key = measurement_key(marker_script, request, instants);
+    let key = measurement_key(marker_script, request, instants, wraps_unicode);
     if let Ok(mut cache) = measurement_cache().lock() {
         if cache.len() >= MAX_CACHED_MEASUREMENTS {
             cache.clear();
@@ -1680,8 +1694,8 @@ mod tests {
         let instants = [(30usize, 1.0_f64)];
 
         assert_eq!(
-            measurement_key(at_zero, &request, &instants),
-            measurement_key(rebased, &request, &instants)
+            measurement_key(at_zero, &request, &instants, true),
+            measurement_key(rebased, &request, &instants, true)
         );
     }
 
@@ -1702,8 +1716,17 @@ mod tests {
         let instants = [(30usize, 1.0_f64)];
 
         assert_ne!(
-            measurement_key(one, &request, &instants),
-            measurement_key(other, &request, &instants)
+            measurement_key(one, &request, &instants, true),
+            measurement_key(other, &request, &instants, true)
+        );
+
+        // And the wrap setting is part of the layout, not part of the request:
+        // the same script laid out with and without the Unicode line-breaking
+        // algorithm breaks in different places, so it cannot share a key.
+        assert_ne!(
+            measurement_key(one, &request, &instants, true),
+            measurement_key(one, &request, &instants, false),
+            "boxes measured under one wrap setting must not be served for the other"
         );
     }
 }
