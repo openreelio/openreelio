@@ -631,7 +631,9 @@ fn version_line_supports_fps_mode(first_line: &str) -> bool {
 /// exits before decoding a frame ("Option not found"), so naming it
 /// unconditionally would turn a caption export into a hard failure on an older
 /// system binary. This probe therefore asks each binary, once per path, and
-/// caches the answer for the life of the process.
+/// caches the answer for the life of the process - but only an answer the
+/// binary really gave. A probe that could not run is not an answer about the
+/// binary, so it is not remembered as one.
 ///
 /// # What it actually detects
 ///
@@ -655,7 +657,8 @@ fn version_line_supports_fps_mode(first_line: &str) -> bool {
 /// A probe that cannot run answers **no** - the opposite default from
 /// [`binary_supports_fps_mode`], and deliberately: the cost of a wrong "no" is
 /// a CJK caption that wraps the way it did before this option existed, while
-/// the cost of a wrong "yes" is an export that does not run at all.
+/// the cost of a wrong "yes" is an export that does not run at all. That "no"
+/// is not cached, so the next caller asks the binary again.
 pub fn binary_supports_subtitles_wrap_unicode(ffmpeg_path: &Path) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -669,10 +672,17 @@ pub fn binary_supports_subtitles_wrap_unicode(ffmpeg_path: &Path) -> bool {
         }
     }
 
-    let supports = run_subtitles_filter_help(ffmpeg_path)
-        .map(|help| filter_help_advertises_wrap_unicode(&help))
-        .unwrap_or(false);
+    // Only an answer the binary actually gave is remembered. A probe that
+    // could not run - a spawn that failed, a deadline that passed, a binary
+    // that refused to describe the filter - says nothing about the binary, so
+    // caching its `false` would hold a working FFmpeg to the no-wrap path for
+    // the rest of the process on the strength of one bad moment. It answers
+    // `false` for this call and leaves the next one free to ask again.
+    let Ok(help) = run_subtitles_filter_help(ffmpeg_path) else {
+        return false;
+    };
 
+    let supports = filter_help_advertises_wrap_unicode(&help);
     if let Ok(mut map) = cache.lock() {
         map.insert(ffmpeg_path.to_path_buf(), supports);
     }

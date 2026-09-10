@@ -11988,17 +11988,15 @@ fn render_ass_over_black(
     render_ass_over_color(ffmpeg_path, script, width, height, "black")
 }
 
-/// A burned-in frame, the `subtitles` node that drew it, and what FFmpeg said.
+/// A burned-in frame and what FFmpeg said while drawing it.
 ///
-/// The frame alone cannot tell a caption that was never asked to wrap apart
-/// from one libass could not wrap, and those two want opposite verdicts: the
-/// first is this app's bug and must fail, the second is the host's build and
-/// may skip. The node and the diagnostics are what separate them.
+/// The frame alone cannot tell a caption libass chose not to wrap apart from
+/// one libass could not wrap, and those two want opposite verdicts: the first
+/// is this app's bug and must fail, the second is the host's build and may
+/// skip. The diagnostics are what separate them.
 struct BurnIn {
     /// The rendered frame, 8-bit grayscale.
     frame: Vec<u8>,
-    /// The `subtitles` filter the render actually ran.
-    filter: String,
     /// FFmpeg's stderr, captured at `-v warning` so libass's own capability
     /// warnings survive.
     diagnostics: String,
@@ -12098,7 +12096,6 @@ fn burn_in_ass_over_color(
     }
     Some(BurnIn {
         frame: output.stdout[..expected].to_vec(),
-        filter: subtitles_filter,
         diagnostics,
     })
 }
@@ -12392,19 +12389,16 @@ fn test_burned_in_caption_wraps_inside_the_safe_box() {
 /// a `wrap_unicode` splice dropped from the graph would simply stop running
 /// here.
 ///
-/// Two signals separate them, and neither can be satisfied by a broken splice:
+/// What separates them is the skip condition itself: it requires libass to have
+/// said [`LIBASS_NO_WRAP_UNICODE`] on stderr. That warning is libass reporting
+/// its own build, and it is emitted only when the filter *did* ask for the
+/// feature, so a graph that never asked cannot produce it. Asked-for and
+/// unwrapped with no warning is a real failure, and fails.
 ///
-/// - the node the render ran is asserted to carry `:wrap_unicode=1`, so a
-///   splice that is dropped or lands on the wrong filter fails before a pixel
-///   is measured. (Its counterpart on the export side - that the *app's* graph
-///   carries the same option, and omits it on a binary too old for it - is
-///   `the_subtitles_node_asks_for_unicode_wrapping_only_where_the_option_exists`
-///   in `core::render::export`.)
-/// - the skip itself requires libass to have said [`LIBASS_NO_WRAP_UNICODE`] on
-///   stderr. That warning is libass reporting its own build, and it is emitted
-///   only when the filter *did* ask for the feature, so a graph that never
-///   asked cannot produce it. Asked-for and unwrapped with no warning is a real
-///   failure, and fails.
+/// This test burns in the node it builds itself, so it cannot also be the guard
+/// on the *app's* graph carrying the option - that is
+/// `the_subtitles_node_asks_for_unicode_wrapping_only_where_the_option_exists`
+/// in `core::render::export`, which reads the graph the export writes.
 ///
 /// The residue that leaves is a host whose FFmpeg is new enough to advertise
 /// the option but whose libass predates the feature so completely that the
@@ -12440,15 +12434,6 @@ fn test_burned_in_unspaced_cjk_caption_wraps_inside_the_frame() {
         skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
         return;
     };
-
-    // The graph that just ran has to have asked for the wrap. Checked on this
-    // side of the pixels because everything below can only observe what libass
-    // did with the request, never whether one was made.
-    assert!(
-        burn_in.filter.contains(":wrap_unicode=1"),
-        "the burn-in must ask libass to wrap unspaced scripts, got node {}",
-        burn_in.filter
-    );
 
     // No bundled family covers CJK, so these glyphs come from the host. A
     // machine with no CJK font draws nothing at all, which is a font problem

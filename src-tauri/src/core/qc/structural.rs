@@ -4289,12 +4289,10 @@ mod tests {
     /// figure, so it read a 72px caption as one 4.5%-tall line and passed it.
     ///
     /// Measured the way the renderer draws it: a 46-character label at 72px
-    /// spans 272% of the 608-wide script and wraps at the frame edge (a custom
-    /// anchor carries no event margins), which its words pack into four lines —
-    /// `The shorts pack` / `draws its` / `captions at 72` / `px ok`, since the
-    /// next word never fits the 16-character remainder of the line before it —
-    /// and so stands 4 x 72 x 1.2 / 1080 = 32% of the frame tall. Centred on a
-    /// point 90% down, its last line lands at 106% — off the frame.
+    /// spans 272% of the 608-wide script, wraps to three lines at the frame
+    /// edge (a custom anchor carries no event margins), and so stands
+    /// 3 x 72 x 1.2 / 1080 = 24% of the frame tall. Centred on a point 90%
+    /// down, its last line lands at 102% — off the frame.
     #[tokio::test]
     async fn test_out_of_bounds_rule_should_measure_a_vertical_canvas_in_script_space() {
         let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
@@ -4323,12 +4321,12 @@ mod tests {
         assert_eq!(violations.len(), 1, "a block hanging 2% off the frame");
         let cue = first_cue(&violations[0]);
         assert!(
-            (cue["topPercent"].as_f64().expect("a top") - 74.0).abs() < 0.001,
+            (cue["topPercent"].as_f64().expect("a top") - 78.0).abs() < 0.001,
             "a custom anchor names the point the block is centred on: {cue}"
         );
         assert!(
-            (cue["bottomPercent"].as_f64().expect("a bottom") - 106.0).abs() < 0.001,
-            "four 72px lines measured against PlayResY=1080 are 32% tall: {cue}"
+            (cue["bottomPercent"].as_f64().expect("a bottom") - 102.0).abs() < 0.001,
+            "three 72px lines measured against PlayResY=1080 are 24% tall: {cue}"
         );
     }
 
@@ -4340,12 +4338,8 @@ mod tests {
     /// 5% band — so a caption drawn along the top was checked along the bottom,
     /// which is the mirror-parse bug `caption.safe_area` already removed. The
     /// burn-in resolves the same string to a top preset at the default 5%
-    /// margin, and so now does this rule: the block hangs from 5% rather than
-    /// from the bottom band. At 150px on a 608-wide script every word is most
-    /// of a line - `Oversized` alone is 111% of the wrap box, so it is drawn
-    /// past it and off the side, which is the breach reported - and the six
-    /// words pack onto five lines standing 5 x 150 x 1.2 / 1080 = 83.3% tall,
-    /// ending at 88.3%.
+    /// margin, and so now does this rule: a 150px block six lines deep stands
+    /// 100% of the frame tall and runs off the bottom at 105%.
     #[tokio::test]
     async fn test_out_of_bounds_rule_should_locate_a_bare_string_position() {
         let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
@@ -4374,12 +4368,8 @@ mod tests {
             "a bare \"top\" anchors at the top, not at the default bottom band: {cue}"
         );
         assert!(
-            (cue["bottomPercent"].as_f64().expect("a bottom") - 88.3333).abs() < 0.001,
-            "five 150px lines measured against PlayResY=1080 are 83.3% tall: {cue}"
-        );
-        assert!(
-            cue["leftPercent"].as_f64().expect("a left") < 0.0,
-            "and the breach is the unbreakable first word running off the side: {cue}"
+            (cue["bottomPercent"].as_f64().expect("a bottom") - 105.0).abs() < 0.001,
+            "six 150px lines measured against PlayResY=1080 fill the frame: {cue}"
         );
     }
 
@@ -4391,12 +4381,9 @@ mod tests {
     /// the frame allows was reported as fitting. The same unbreakable run —
     /// libass has nowhere to wrap it, so it stays on one line — is half the
     /// frame at 48px and wider than the frame at 96px.
-    ///
-    /// A bare run of letters, because it has to be one libass genuinely cannot
-    /// break: no whitespace, no wide-script character and none of `/ - ? !`.
     #[tokio::test]
     async fn test_out_of_bounds_rule_should_scale_width_with_font_size() {
-        const UNBREAKABLE: &str = "averylongunbreakablecaptionwordwithnogaps";
+        const UNBREAKABLE: &str = "https://example.com/a-very-long-caption-x";
 
         async fn violations_at(font_size: u32) -> Vec<QCViolation> {
             let mut sequence = sequence_30fps();
@@ -4440,33 +4427,28 @@ mod tests {
     }
 
     /// Feature: Captions pushed off the canvas
-    /// Scenario: should treat unspaced CJK as wrapping rather than cropped
+    /// Scenario: should treat an unspaced CJK cue as wrapping, not as cropped
     ///
     /// Pins a measured fact about the renderer, not a guess - and the earlier
-    /// reading of that fact was wrong. The bundled gyan build *is* built with
-    /// libunibreak - the bundle is pulled from an unpinned "latest" URL, so the
-    /// ffmpeg and libass releases move and it is the library rather than the
-    /// version number that matters here; what suppressed the wrap was the
-    /// `subtitles` filter defaulting `wrap_unicode` to `auto`, which is off for
-    /// a native `.ass` input, and the burn-in never setting it. Rendering the
-    /// app's own 9:16 script space (`PlayResX 608`, `WrapStyle: 0`, 72px, 61px
-    /// side margins) onto a 1080x1920 frame and measuring with `bbox`:
+    /// reading of that fact was wrong. The bundled build does carry
+    /// libunibreak; what suppressed the wrap was the `subtitles` filter
+    /// defaulting `wrap_unicode` to `auto`, which is off for a native `.ass`
+    /// input, and the burn-in never setting it. Rendering the app's own 9:16
+    /// script space (`PlayResX 608`, `WrapStyle: 0`, 72px, 61px side margins)
+    /// onto a 1080x1920 frame and measuring with `bbox`:
     ///
     /// - the 19-character Japanese run below, as the filter was called before:
-    ///   `w:1051 h:85`, `x1:0 x2:1050` - one line, cropped at the frame edge,
+    ///   `w:1051 h:85`, `x1:0` - one line, cropped at the frame edge,
     /// - the same run with `wrap_unicode=1`: `w:655 h:341`, `x1:208 x2:862` -
     ///   several lines, wholly inside the 1080-wide frame,
     /// - `wrap_unicode=0` reproduces the first result, confirming the default.
     ///
-    /// The same run of measurements settles what else the option breaks at:
-    /// after whitespace, on both sides of a wide-script character, and after
-    /// `/`, `-`, `?` and `!` - but nowhere inside a run of letters. So the
-    /// estimator sizes a cue by its widest *unbreakable run* rather than by the
-    /// whole label, and the controls below are the three cases that separates:
-    /// a URL whose permalink slug still overflows, a hyphenated compound that
-    /// wraps, and a bare letter run that can break nowhere at all.
+    /// So the cue wraps and this rule must stay quiet about it. What it must
+    /// still report is a run with no wide-script break inside it, which is why
+    /// the controls below are a bare letter run and a URL slug that a single
+    /// trailing ideograph does not rescue.
     #[tokio::test]
-    async fn test_out_of_bounds_rule_should_treat_unspaced_cjk_as_wrapping_not_cropped() {
+    async fn test_out_of_bounds_rule_should_treat_an_unspaced_cjk_cue_as_wrapping() {
         async fn violations_for(label: &str) -> Vec<QCViolation> {
             let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
             let mut track = Track::new_caption("C1");
@@ -4500,13 +4482,21 @@ mod tests {
             "five ideographs are 59% of the script and fit"
         );
 
-        // A URL is not one unbreakable run - it breaks at its slashes - but
-        // one of its runs is: the permalink slug, which at 27 half-em glyphs of
-        // a 72px font is 160% of the 608-wide script and is drawn straight off
-        // both sides. A single trailing ideograph does not rescue it, and
-        // asking merely whether the label carried a break opportunity somewhere
-        // answered yes on the strength of that one character and reported
-        // nothing at all.
+        // The controls that must still fail. A bare run of letters has no
+        // break of any kind in it, so libass draws it on one line off both
+        // sides of the frame.
+        let letters = violations_for("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await;
+        assert_eq!(
+            letters.len(),
+            1,
+            "a run with nowhere to break is still an Error: {letters:?}"
+        );
+        assert_eq!(letters[0].severity, Severity::Error);
+
+        // And a single trailing ideograph does not rescue the Latin run before
+        // it: the permalink slug is still drawn in one piece, straight off the
+        // side. Asking merely whether the label carried a wide-script character
+        // somewhere would answer yes here and report nothing at all.
         let slug =
             violations_for("https://example.com/watch/somereallylongpermalinkslug\u{3042}").await;
         assert_eq!(
@@ -4515,26 +4505,6 @@ mod tests {
             "a run wider than the frame is still an Error: {slug:?}"
         );
         assert_eq!(slug[0].severity, Severity::Error);
-
-        // And the reverse case: every run of a hyphenated compound is short, so
-        // libass wraps the whole thing inside the frame. Reporting it was a
-        // false Error - and the single line it was measured as became the band
-        // the contrast pass sampled.
-        let compound = violations_for("state-of-the-art-multi-part-compound-word-here").await;
-        assert!(
-            compound.is_empty(),
-            "a hyphenated compound breaks after every hyphen and wraps: {compound:?}"
-        );
-
-        // The genuine unbreakable control: no whitespace, no wide script and
-        // none of `/ - ? !`, so libass has nowhere to break it.
-        let letters = violations_for("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await;
-        assert_eq!(
-            letters.len(),
-            1,
-            "an unbreakable run is still an Error: {letters:?}"
-        );
-        assert_eq!(letters[0].severity, Severity::Error);
     }
 
     // ========================================================================

@@ -6,7 +6,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ops::Range;
 
 use super::caption_contrast::json_number;
 use super::caption_group::{group_caption_findings, CaptionFinding, CaptionGroup};
@@ -1565,23 +1564,6 @@ const ZERO_ADVANCE_RANGES: [(u32, u32); 1] = [
     (0x0300, 0x036F), // Combining diacritical marks
 ];
 
-/// ASCII characters libass breaks a line *after* under the Unicode
-/// line-breaking algorithm.
-///
-/// Measured on the bundled build with `wrap_unicode=1` rather than read off
-/// the spec: a line breaks after whitespace, on both sides of a wide-script
-/// character (each one is its own break boundary), and after `/`, `-`, `?` and
-/// `!`. It does not break after `:`, `.`, `,`, `_`, `=`, `&` or `;`, and it
-/// never breaks inside a run of letters - forty identical ones stay on one
-/// line and are cropped at the frame edge.
-///
-/// The set is deliberately conservative. Naming fewer break opportunities than
-/// the algorithm really has joins two runs into one and so over-states the
-/// widest unbreakable run, which errs toward *reporting* an overflow - the
-/// safe direction for an Error-severity rule. Naming one the renderer does not
-/// have would do the reverse and let a real crop go unreported.
-const ASCII_BREAK_AFTER: [char; 4] = ['/', '-', '?', '!'];
-
 /// Rule that ensures captions remain within the title-safe area
 ///
 /// Works purely from timeline structure: caption clips carry their position and
@@ -1599,15 +1581,9 @@ const ASCII_BREAK_AFTER: [char; 4] = ['/', '-', '?', '!'];
 /// enough font overruns the edge in both directions.
 ///
 /// Horizontal extent is modelled for both, but they wrap differently: a preset
-/// caption wraps inside [`CAPTION_WRAP_BOX_WIDTH_PERCENT`] and a custom one at
-/// the frame edge. What overflows either box is never the label as a whole -
-/// a long label wraps - but its widest *unbreakable* run: the burn-in asks
-/// libass for the Unicode line-breaking algorithm, so the label breaks at
-/// spaces, on both sides of a wide-script character, and after `/`, `-`, `?`
-/// and `!`. Only a run carrying none of those is drawn past the box and off
-/// the side. Unspaced CJK is not such a run - every ideograph is its own break
-/// boundary - and neither is a bare URL, which breaks at its slashes. See
-/// [`CaptionSafeAreaRule::unbreakable_segments`].
+/// caption wraps inside [`CAPTION_WRAP_BOX_WIDTH_PERCENT`], a custom one at the
+/// frame edge, and a run with nowhere to break - a bare URL, a long token -
+/// does not wrap anywhere and simply bleeds off the side.
 #[derive(Debug, Default)]
 pub struct CaptionSafeAreaRule;
 
@@ -1647,12 +1623,11 @@ impl CaptionSafeAreaRule {
     /// Maximum estimated text-box width as a percentage of canvas width
     ///
     /// Keeps a pathological font size from putting a nonsense span in the
-    /// violation message. It bounds the width only: the line count is packed
-    /// from the runs themselves (see [`CaptionSafeAreaRule::packed_line_count`])
-    /// and so is not clipped along with it, which is what stops a very long
-    /// label being reported shorter than the renderer draws it. Five canvases
-    /// is far past every wrap box, so applying the ceiling to the width of an
-    /// overflowing run cannot clamp a breach away either.
+    /// violation message. It is not free: because the line count is derived
+    /// from the same width, a caption more than five canvases wide is reported
+    /// with fewer lines - and so less height - than it would really have. That
+    /// understates an already-reported breach rather than hiding one, since a
+    /// block that long has breached the band several lines earlier.
     const MAX_TEXT_BOX_WIDTH_PERCENT: f64 = 500.0;
 
     /// Line height as a multiple of the font size (typographic default)
@@ -1747,11 +1722,11 @@ impl CaptionSafeAreaRule {
 
     /// Whether this character is drawn on a full-em square.
     ///
-    /// One list answers two questions - how wide the glyph is, and whether the
-    /// renderer may break beside it - because UAX #14 gives an ideographic
-    /// break class to exactly the blocks that are set on a full em (see
-    /// [`WIDE_SCRIPT_RANGES`]). Keeping them on one list is what stops the two
-    /// answers drifting apart.
+    /// One list answers two questions — how wide the glyph is, and whether the
+    /// renderer may break beside it — because the blocks set on a full em (see
+    /// [`WIDE_SCRIPT_RANGES`]) are the ones libass breaks between when the
+    /// burn-in asks it for Unicode line breaking. Keeping them on one list is
+    /// what stops the two answers drifting apart.
     fn is_wide_script(character: char) -> bool {
         let code = u32::from(character);
         WIDE_SCRIPT_RANGES
@@ -1759,152 +1734,50 @@ impl CaptionSafeAreaRule {
             .any(|(first, last)| code >= *first && code <= *last)
     }
 
-    /// The advance of one run of text, in pixels of the ASS script.
+    /// Advance of one character, in pixels of the ASS script.
     ///
-    /// Per character, because the advance is not one number: a run that mixes
-    /// scripts is as wide as the sum of what each glyph takes, and the style's
-    /// own tracking is added to every one of them - except a combining mark,
-    /// which has no advance to add it to because it is drawn over the glyph it
-    /// follows.
-    fn advance_px(text: &str, font_size: f64, letter_spacing: f64) -> f64 {
-        text.chars()
-            .map(|character| {
-                let factor = Self::glyph_advance_factor(character);
-                if factor <= 0.0 {
-                    0.0
-                } else {
-                    font_size * factor + letter_spacing
-                }
-            })
-            .sum()
-    }
-
-    /// Splits a label into the runs the renderer cannot break apart.
-    ///
-    /// A caption does not overflow because it is long - a long label wraps. It
-    /// overflows because one run inside it has nowhere to break, so what
-    /// decides whether the words leave the box is the width of the *widest
-    /// run*, not the width of the label and not whether the label happens to
-    /// carry a break opportunity somewhere. Asking only the latter answered
-    /// yes for `https://example.com/watch/somereallylongpermalinkslug` plus a
-    /// single trailing ideograph, on the strength of that one character, and
-    /// clamped the whole cue to the wrap box - hiding a six-line, edge-to-edge
-    /// crop.
-    ///
-    /// The breaks modelled are the ones the burn-in's libass actually takes,
-    /// now that the export names `wrap_unicode` (see
-    /// [`crate::core::render::export::append_ass_text_overlay`]): after
-    /// whitespace, on both sides of a wide-script character - which is why
-    /// unspaced Japanese, Chinese and Korean wrap like anything else - and
-    /// after the ASCII characters in [`ASCII_BREAK_AFTER`]. Whitespace is a
-    /// boundary rather than ink, so it belongs to no segment: the segments are
-    /// the drawn runs.
-    fn unbreakable_segments(label: &str) -> Vec<&str> {
-        Self::unbreakable_segment_ranges(label)
-            .into_iter()
-            .map(|range| &label[range])
-            .collect()
-    }
-
-    /// The same runs as [`Self::unbreakable_segments`], as byte ranges into
-    /// `label`.
-    ///
-    /// Ranges rather than slices because the packer needs what sits *between*
-    /// two runs as well as the runs themselves: the whitespace a break falls
-    /// on is drawn like any other glyph while it stays inside a line, so a line
-    /// is only as long as its runs plus the gaps that survive on it. Recovering
-    /// those gaps from bare slices would mean searching the label for each run,
-    /// which finds the wrong occurrence as soon as a word repeats.
-    fn unbreakable_segment_ranges(label: &str) -> Vec<Range<usize>> {
-        let mut segments: Vec<Range<usize>> = Vec::new();
-        let mut start: Option<usize> = None;
-
-        for (index, character) in label.char_indices() {
-            if character.is_whitespace() {
-                if let Some(begin) = start.take() {
-                    segments.push(begin..index);
-                }
-                continue;
-            }
-
-            if Self::is_wide_script(character) {
-                // A wide-script character breaks on both sides, so it closes
-                // whatever ran up to it and then stands as a run of its own.
-                if let Some(begin) = start.take() {
-                    segments.push(begin..index);
-                }
-                segments.push(index..index + character.len_utf8());
-                continue;
-            }
-
-            let begin = *start.get_or_insert(index);
-            if ASCII_BREAK_AFTER.contains(&character) {
-                segments.push(begin..index + character.len_utf8());
-                start = None;
-            }
+    /// The style's own tracking is added to every glyph that has an advance to
+    /// add it to — a combining mark has none, because it is drawn over the
+    /// glyph it follows.
+    fn char_advance_px(character: char, font_size: f64, letter_spacing: f64) -> f64 {
+        let factor = Self::glyph_advance_factor(character);
+        if factor <= 0.0 {
+            0.0
+        } else {
+            font_size * factor + letter_spacing
         }
-
-        if let Some(begin) = start {
-            segments.push(begin..label.len());
-        }
-
-        segments
     }
 
-    /// Counts the lines the renderer draws `label` on, by packing its
-    /// unbreakable runs into the wrap box the way libass does.
+    /// The widest run of `label` that has no wide-script break inside it, as a
+    /// percentage of the `script_width`-wide ASS script.
     ///
-    /// Greedy, left to right: each run joins the line being built while it
-    /// still fits, and starts a new one when it does not. The whitespace
-    /// between two runs is charged to the line only when both runs stay on it,
-    /// because a break consumes the space it falls on - which is also how
-    /// `total_percent` counts spaces, so an ordinary spaced caption comes out
-    /// on the same number of lines it always did.
-    ///
-    /// A run wider than the box occupies exactly **one** line by itself. It has
-    /// nowhere to break, so libass draws it on a single line running off the
-    /// side of the frame rather than folding it into `width / box` lines - it
-    /// is a crop, not a wrap. Measured on the bundled binary with
-    /// `wrap_unicode=1`: forty letters at 96px, a full canvas wide against an
-    /// 80% box, land on one row 62px tall and are cut at both edges.
-    ///
-    /// Dividing the label's total advance by the box - which this did - got
-    /// both directions wrong on exactly the labels the wrap model exists for:
-    /// two lines for that cropped run, and three for a nineteen-ideograph
-    /// Japanese cue that lands on four, because a full-em run only fits six
-    /// glyphs of an 80% box and the remainder of each line is thrown away
-    /// rather than carried into the next. The count is not cosmetic: it is the
-    /// block height, and so the band [`caption_band_percent`] hands the
-    /// contrast pass to sample.
-    fn packed_line_count(
+    /// Only for a label with no whitespace in it. Each wide-script character is
+    /// its own run — libass may break on either side of one — and every maximal
+    /// stretch between them is a run, so unspaced CJK comes out one glyph wide
+    /// while a bare URL, a numeric range or a long token comes out whole. That
+    /// width is what decides whether the words leave the box: a label wider
+    /// than the box wraps, a *run* wider than the box cannot and is drawn off
+    /// the side.
+    fn widest_unbroken_run_percent(
         label: &str,
-        wrap_box_width_percent: f64,
-        advance_percent: &dyn Fn(&str) -> f64,
+        font_size: f64,
+        letter_spacing: f64,
+        script_width: f64,
     ) -> f64 {
-        let mut lines = 0_u32;
-        let mut current_width = 0.0_f64;
-        let mut previous_end: Option<usize> = None;
+        let mut widest = 0.0_f64;
+        let mut current = 0.0_f64;
 
-        for range in Self::unbreakable_segment_ranges(label) {
-            let segment_width = advance_percent(&label[range.clone()]);
-            let gap_width = previous_end
-                .map(|end| advance_percent(&label[end..range.start]))
-                .unwrap_or(0.0);
-
-            if lines == 0 {
-                lines = 1;
-                current_width = segment_width;
-            } else if current_width + gap_width + segment_width > wrap_box_width_percent {
-                lines += 1;
-                current_width = segment_width;
+        for character in label.chars() {
+            let advance = Self::char_advance_px(character, font_size, letter_spacing);
+            if Self::is_wide_script(character) {
+                widest = widest.max(current).max(advance);
+                current = 0.0;
             } else {
-                current_width += gap_width + segment_width;
+                current += advance;
             }
-
-            previous_end = Some(range.end);
         }
 
-        f64::from(lines.max(1))
+        (widest.max(current) / script_width * 100.0).max(0.0)
     }
 
     /// Returns the estimated text box size as (width, height) percentages.
@@ -1942,44 +1815,17 @@ impl CaptionSafeAreaRule {
     /// before breaking it: [`CAPTION_WRAP_BOX_WIDTH_PERCENT`] for a preset
     /// caption, whose ASS event carries side margins, and the full frame for a
     /// custom one, which is positioned with `\pos` and so has no margins to
-    /// wrap inside.
-    ///
-    /// Two numbers come out of the label, because the box has two questions to
-    /// answer and one number cannot answer both:
-    ///
-    /// - the **total advance**, everything the renderer has to lay out,
-    ///   whitespace included, because a space inside a line is drawn like any
-    ///   other glyph. It is the width of a label that fits the box;
-    /// - the **widest unbreakable run** (see [`Self::unbreakable_segments`]),
-    ///   which is what decides whether the words leave the box at all. A label
-    ///   longer than the box wraps; a *run* longer than the box cannot, so it
-    ///   is drawn past the box and off the side of the frame.
-    ///
-    /// So a run wider than the box is reported at its own uncapped width -
-    /// that width is the finding, and clamping it to the box would clamp the
-    /// finding away - while a label whose every run fits is reported at the
-    /// box it wraps inside. Asking instead whether the label carried *a* break
-    /// opportunity anywhere, which this did while `wrap_unicode` was first
-    /// wired up, got both halves wrong: it hid a cropped URL because the cue
-    /// ended in one ideograph, and it reported a hyphenated compound - which
-    /// wraps perfectly well - as a single line bleeding off both sides, whose
-    /// wrong line count then handed [`caption_span_percent`] a one-line band
-    /// for the contrast pass to sample.
-    ///
-    /// The height comes from the same runs, packed into the box by
-    /// [`Self::packed_line_count`] rather than divided out of the total: the
-    /// box holds whole runs, so what does not fit leaves the rest of the line
-    /// empty instead of spilling into the next one.
-    ///
-    /// This models the burn-in as the app configures it, which since the
-    /// `wrap_unicode` fix means libass applying the Unicode line-breaking
-    /// algorithm on every export (see
-    /// [`crate::core::render::export::append_ass_text_overlay`]). A binary too
-    /// old to know that option is not modelled here - the estimator has no
-    /// FFmpeg to ask - so on such a host a CJK caption really is cropped and
-    /// this rule stays quiet about it. The guard for that is the CLI
-    /// integration test that burns a Japanese cue with a real libass and counts
-    /// the rows it lands on; a unit test cannot make that assertion.
+    /// wrap inside. Text that fits nowhere is not turned into extra lines
+    /// unless it *can* break, and this is a coarse predictor of where the
+    /// renderer breaks rather than a model of the line-breaking algorithm: it
+    /// assumes libass breaks at whitespace and between wide-script glyphs -
+    /// which the burn-in's `wrap_unicode` option is what enables (see
+    /// [`crate::core::render::export::append_ass_text_overlay`]) - and nowhere
+    /// else. So a label with no whitespace and no wide-script break inside it
+    /// is measured as one line running off the side, which is a horizontal
+    /// breach and is reported as one. A fuller UAX #14 model, and a width taken
+    /// from the font the renderer actually loads rather than from a flat
+    /// per-script advance, are tracked separately.
     pub(super) fn estimate_text_box_percent(
         clip: &Clip,
         canvas_width: u32,
@@ -1991,6 +1837,14 @@ impl CaptionSafeAreaRule {
         let font_size = Self::font_size_px(clip);
         let letter_spacing = Self::letter_spacing_px(clip.caption_style.as_ref());
 
+        // Per character, because the advance is not one number: a line that
+        // mixes scripts is as wide as the sum of what each glyph takes, and the
+        // style's own tracking is added to every one of them.
+        let advance_px: f64 = label
+            .chars()
+            .map(|character| Self::char_advance_px(character, font_size, letter_spacing))
+            .sum();
+
         // The script the renderer authors in, not the frame it is scaled onto,
         // and read from the export's own `PlayRes` writer rather than
         // recomputed: it rounds the width to an even number so the script never
@@ -1999,44 +1853,54 @@ impl CaptionSafeAreaRule {
         let (script_width, script_height) =
             ass_play_resolution(&Canvas::new(canvas_width, canvas_height));
         let script_width = f64::from(script_width);
+        // Negative tracking can pull the sum below zero on a short line, and a
+        // negative width is not a box; the renderer draws nothing narrower than
+        // nothing either.
+        let unwrapped_width_percent = (advance_px / script_width * 100.0).max(0.0);
 
-        // Negative tracking can pull a run's advance below zero, and a negative
-        // width is not a box; the renderer draws nothing narrower than nothing
-        // either.
-        let advance_percent = |text: &str| {
-            (Self::advance_px(text, font_size, letter_spacing) / script_width * 100.0).max(0.0)
-        };
-
-        // Everything the renderer lays out, spaces included: a space between
-        // two words on the same line is drawn like any other glyph, and
-        // dropping it here would under-count the lines. An under-counted line
-        // count is a block reported shorter than the words really are, which is
-        // exactly what hands the contrast pass a band the caption overflows.
-        let total_percent = advance_percent(label);
-
-        // What decides whether the words leave the box: the widest run libass
-        // has nowhere to break.
-        let widest_segment_percent = Self::unbreakable_segments(label)
-            .into_iter()
-            .map(advance_percent)
-            .fold(0.0_f64, f64::max);
-
-        // The lines the renderer lands on, packed run by run rather than
-        // divided out of the total: what the box holds is whole runs, so the
-        // remainder of a line the next run does not fit into is left empty
-        // instead of being carried over.
-        let line_count = Self::packed_line_count(label, wrap_box_width_percent, &advance_percent);
-
-        let width_percent = if widest_segment_percent > wrap_box_width_percent {
-            // A run wider than the box has nowhere to break, so the renderer
-            // draws it past the box and off the side. That width is the
-            // finding, so it is reported rather than clamped to the box; only
-            // the pathological ceiling applies, and it sits five canvases out.
-            widest_segment_percent.min(Self::MAX_TEXT_BOX_WIDTH_PERCENT)
+        let (width_percent, line_count) = if label.chars().any(char::is_whitespace) {
+            let bounded = unwrapped_width_percent.min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
+            (
+                bounded.min(wrap_box_width_percent),
+                (bounded / wrap_box_width_percent).ceil().max(1.0),
+            )
         } else {
-            // Every run fits, so the label wraps inside the box, however long
-            // it is.
-            total_percent.min(wrap_box_width_percent)
+            // No whitespace to break at, so the only breaks left are the ones
+            // beside a wide-script glyph. What decides the outcome is therefore
+            // the widest run carrying none of those: unspaced CJK is one glyph
+            // per run and wraps like anything else, while a bare URL, a numeric
+            // range or a long token is one run and cannot break at all.
+            //
+            // Measured on the bundled ffmpeg at the app's own 9:16 geometry -
+            // `PlayResX 608`, `WrapStyle: 0`, 72px style, 61px side margins, on
+            // a 1080x1920 frame, `bbox` on the burned-in frame: the 19-glyph
+            // Japanese cue `これは非常に長い日本語の字幕テストです` is drawn
+            // `w:1051 h:85` starting in column 0 (one cropped line) as the
+            // filter was called before, and `w:655 h:341` starting at column
+            // 208 (several lines, wholly inside the frame) once the burn-in
+            // names `wrap_unicode=1`. Estimating it as one uncapped line
+            // invented a breach the render does not produce.
+            let widest_run_percent =
+                Self::widest_unbroken_run_percent(label, font_size, letter_spacing, script_width);
+
+            if widest_run_percent > wrap_box_width_percent {
+                // The width is the breach, so it is reported rather than
+                // clamped to the box; only the pathological ceiling applies,
+                // and it sits five canvases out. One line, because a run with
+                // nowhere to break is drawn off the side rather than folded.
+                (
+                    widest_run_percent.min(Self::MAX_TEXT_BOX_WIDTH_PERCENT),
+                    1.0,
+                )
+            } else {
+                // Every run fits, so the label wraps inside the box the same
+                // way a spaced one does.
+                let bounded = unwrapped_width_percent.min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
+                (
+                    bounded.min(wrap_box_width_percent),
+                    (bounded / wrap_box_width_percent).ceil().max(1.0),
+                )
+            }
         };
 
         let height_percent =
@@ -2444,10 +2308,9 @@ impl QCRule for CaptionSafeAreaRule {
                             // construction. What is not is the far one: the
                             // block grows inward, one wrapped line at a time,
                             // until a large enough font or a long enough
-                            // caption reaches across the frame. A run the
-                            // renderer cannot break does not wrap at the box at
-                            // all and runs off the side instead, so both axes
-                            // are measured.
+                            // caption reaches across the frame. Text with no
+                            // break opportunity does not wrap at all and runs
+                            // off the side instead, so both axes are measured.
                             if context.canvas_height == 0 {
                                 continue;
                             }
@@ -3793,17 +3656,12 @@ mod tests {
     #[tokio::test]
     async fn test_caption_safe_area_rule_should_report_an_unbreakable_run_that_bleeds_off_the_side()
     {
-        // libass needs a break opportunity, and a run of letters carries none:
-        // no whitespace, no wide-script character - each of those is its own
-        // break boundary - and none of the ASCII break characters `/ - ? !`.
-        // So it does not wrap at the box, it runs past it, and the wrap box
+        // libass needs a break opportunity. A run without one - unspaced CJK, a
+        // bare URL - does not wrap at the box, it runs past it, so the wrap box
         // must not be allowed to hide the width.
-        //
-        // Deliberately a bare letter run rather than a URL: a URL breaks at
-        // its slashes and wraps, which is the opposite of the case under test.
-        let letters = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let url = "https://example.com/watch/a-very-long-permalink-slug-that-never-breaks-anywhere";
         let sequence = sequence_with_caption(
-            letters,
+            url,
             Some(serde_json::json!({
                 "type": "preset",
                 "vertical": "bottom",
@@ -3822,17 +3680,9 @@ mod tests {
             box_width > CAPTION_WRAP_BOX_WIDTH_PERCENT,
             "an unbreakable run must be measured past the wrap box, got {box_width}"
         );
-        // Forty half-em glyphs of a 96px font are 1920 of a 1920-wide script -
-        // a whole canvas, against a box that wraps at 80% of one. It still
-        // lands on ONE line: the run has nowhere to break, so libass draws it
-        // on a single row and lets both ends run off the frame. Measured on the
-        // bundled binary with `wrap_unicode=1`, this cue's bounding box is 62px
-        // tall and cropped edge to edge. Dividing the total by the box called
-        // it two lines and so reported a block twice the height the renderer
-        // draws - which is the band the contrast pass then samples.
         assert!(
-            (box_height - 1.0 * 96.0 * 1.2 / 1080.0 * 100.0).abs() < 1e-9,
-            "an unbreakable run is one cropped line, not a wrapped block, got {box_height}"
+            (box_height - 96.0 * 1.2 / 1080.0 * 100.0).abs() < 1e-9,
+            "an unbreakable run stays on one line, got {box_height}"
         );
 
         let state = ProjectState::new("QC Test");
@@ -3858,19 +3708,18 @@ mod tests {
     /// Given a Japanese caption with no whitespace in it, far too wide for one
     ///       line
     /// When the safe-area estimator sizes its block
-    /// Then the block is bounded by the wrap box and runs to several lines
+    /// Then the block is bounded by the wrap box and runs to more than one line
     ///
     /// The burn-in names `wrap_unicode` on the `subtitles` filter, so libass
-    /// applies the Unicode line-breaking algorithm and breaks between kana and
-    /// ideographs. Estimating these as one uncapped line - which this did while
-    /// the option went unset - both invented a safe-area breach that the render
-    /// does not produce and handed the contrast pass a column the words never
-    /// covered.
+    /// breaks between kana and ideographs: the same cue that came out
+    /// `w:1051 h:85` from column 0 - one line, cropped at the frame edge - is
+    /// drawn `w:655 h:341` from column 208 once the option is set. Estimating
+    /// it as one uncapped line invented a breach the render does not produce,
+    /// and handed the contrast pass a column the words never covered.
     #[test]
     fn test_caption_safe_area_rule_should_wrap_an_unspaced_cjk_cue() {
-        let japanese = "これは非常に長い日本語の字幕テストです";
         let sequence = sequence_with_caption(
-            japanese,
+            "これは非常に長い日本語の字幕テストです",
             Some(serde_json::json!({
                 "type": "preset",
                 "vertical": "bottom",
@@ -3889,209 +3738,77 @@ mod tests {
             box_width <= CAPTION_WRAP_BOX_WIDTH_PERCENT,
             "a wrapping run is bounded by the box it wraps inside, got {box_width}"
         );
-        // Each ideograph is a run of its own, 72 of a 608-wide script - 11.84%
-        // - so six of them fill an 80% box (7 would be 82.9%) and the 19 of
-        // them land on four lines: 6 + 6 + 6 + 1. Dividing the 225% total by
-        // the box called it three, because that throws away the 3.1% left over
-        // on each line instead of carrying the count.
         assert!(
-            (box_height - 4.0 * 72.0 * 1.2 / 1080.0 * 100.0).abs() < 1e-9,
-            "a full-em run packs six glyphs to a line, so 19 of them need four, got {box_height}"
+            box_height > 72.0 * 1.2 / 1080.0 * 100.0,
+            "and a cue this long needs more than the one line a crop would take, \
+             got {box_height}"
         );
     }
 
     /// Feature: Caption safe area
-    /// Scenario: a label is split into the runs the renderer cannot break
+    /// Scenario: a space-less label is sized by its widest unbroken run
     ///
-    /// Given labels carrying each kind of break opportunity libass takes
-    /// When they are split into unbreakable runs
-    /// Then the runs are the ones the burn-in was measured to draw
+    /// Given labels with no whitespace to break at
+    /// When their widest run between wide-script glyphs is measured
+    /// Then a CJK label comes out one glyph wide and a Latin one comes out
+    ///      whole
     ///
-    /// Measured on the bundled binary with `wrap_unicode=1`: whitespace, both
-    /// sides of a wide-script character, and after `/`, `-`, `?` and `!` - and
-    /// nowhere else, `:`, `.`, `,`, `_`, `=`, `&` and `;` included.
+    /// This is the whole of the space-less refinement: each wide-script
+    /// character is a break boundary on both sides, and everything between two
+    /// of them is a run the renderer draws in one piece.
     #[test]
-    fn test_caption_safe_area_rule_should_split_a_label_into_unbreakable_runs() {
-        assert_eq!(
-            CaptionSafeAreaRule::unbreakable_segments("https://example.com/watch/slug\u{3042}"),
-            vec!["https:/", "/", "example.com/", "watch/", "slug", "\u{3042}"],
-            "a URL breaks at its slashes, and an ideograph breaks on both sides"
-        );
-        assert_eq!(
-            CaptionSafeAreaRule::unbreakable_segments("two words here"),
-            vec!["two", "words", "here"],
-            "whitespace is a boundary and is not ink, so it joins no run"
-        );
-        assert_eq!(
-            CaptionSafeAreaRule::unbreakable_segments("state-of-the-art"),
-            vec!["state-", "of-", "the-", "art"],
-            "a hyphen ends the run it belongs to"
-        );
-        assert_eq!(
-            CaptionSafeAreaRule::unbreakable_segments("really?yes!"),
-            vec!["really?", "yes!"],
-            "so do a question mark and an exclamation mark"
-        );
-        assert_eq!(
-            CaptionSafeAreaRule::unbreakable_segments("a:b.c,d_e=f&g;h"),
-            vec!["a:b.c,d_e=f&g;h"],
-            "none of the other ASCII punctuation is a break opportunity"
+    fn test_caption_safe_area_rule_should_measure_the_widest_run_of_a_space_less_label() {
+        // A 608-wide script and a 72px font, which is the shorts geometry:
+        // one full-em glyph is 72 of 608.
+        let widest =
+            |label: &str| CaptionSafeAreaRule::widest_unbroken_run_percent(label, 72.0, 0.0, 608.0);
+        let one_ideograph = 72.0 / 608.0 * 100.0;
+
+        assert!(
+            (widest("これは非常に長い日本語の字幕テストです") - one_ideograph).abs() < 1e-9,
+            "every ideograph is its own run, however many of them the cue carries"
         );
         assert!(
-            CaptionSafeAreaRule::unbreakable_segments("   ").is_empty(),
-            "whitespace alone inks nothing"
-        );
-    }
-
-    /// Feature: Caption safe area
-    /// Scenario: lines are packed run by run, not divided out of the total
-    ///
-    /// Given labels whose runs pack differently from the way their total
-    ///       advance divides
-    /// When the estimator counts the lines the renderer draws them on
-    /// Then a run wider than the box takes one line, runs that do not fit take
-    ///      a line each, and a spaced sentence is unchanged
-    ///
-    /// The box holds whole runs. Dividing the total advance by it assumed the
-    /// leftover at the end of a line is carried into the next, which over-counts
-    /// a run that cannot break (a crop is one line, however wide) and
-    /// under-counts runs too fat to share a line (unspaced CJK, where every
-    /// ideograph is its own run).
-    #[test]
-    fn test_caption_safe_area_rule_should_pack_lines_greedily() {
-        // A tenth of the box per character, so the box holds ten of them.
-        let advance = |text: &str| text.chars().count() as f64 * 10.0;
-        let box_width = 100.0;
-        let packed =
-            |label: &str| CaptionSafeAreaRule::packed_line_count(label, box_width, &advance);
-        let divided = |label: &str| (advance(label) / box_width).ceil().max(1.0);
-
-        // A single run two and a half boxes wide has nowhere to break, so the
-        // renderer draws it on one line and crops it - it does not become three.
-        let cropped = "a".repeat(25);
-        assert_eq!(packed(&cropped), 1.0, "an unbreakable run is one line");
-        assert_eq!(divided(&cropped), 3.0, "which is not what dividing said");
-
-        // Three six-character runs: no two of them fit a ten-character box
-        // together, so each takes a line of its own even though their total is
-        // under two boxes.
-        let fat_runs = "aaaaa-bbbbb-ccccc-";
-        assert_eq!(
-            packed(fat_runs),
-            3.0,
-            "a run that does not fit starts a line"
-        );
-        assert_eq!(divided(fat_runs), 2.0, "which is not what dividing said");
-
-        // An ordinary spaced sentence packs exactly as it always did: the space
-        // between two runs on the same line is charged to that line, which is
-        // how the total counted it too.
-        let sentence = "aaa bbb ccc ddd";
-        assert_eq!(packed(sentence), 2.0, "aaa bbb / ccc ddd");
-        assert_eq!(
-            packed(sentence),
-            divided(sentence),
-            "a spaced caption keeps the line count it had"
-        );
-    }
-
-    /// Feature: Caption safe area
-    /// Scenario: a URL whose slug is wider than the box is still a breach
-    ///
-    /// Given a URL ending in one ideograph, whose permalink slug alone is
-    ///       wider than the wrap box
-    /// When the safe-area estimator sizes its block
-    /// Then the block is reported at the slug's width, past the box
-    ///
-    /// The regression this guards: asking whether the label carried *a* break
-    /// opportunity anywhere answered yes on the strength of that one trailing
-    /// ideograph and clamped the whole cue to the wrap box, so the six-line,
-    /// edge-to-edge crop the renderer actually draws went unreported.
-    #[test]
-    fn test_caption_safe_area_rule_should_report_a_run_wider_than_the_box_inside_a_breakable_label()
-    {
-        let sequence = sequence_with_caption(
-            "https://example.com/watch/somereallylongpermalinkslug\u{3042}",
-            Some(serde_json::json!({
-                "type": "preset",
-                "vertical": "bottom",
-                "marginPercent": 10.0
-            })),
-            Some(serde_json::json!({ "fontSize": 72 })),
+            (widest("\u{c11c}\u{c6b8}") - one_ideograph).abs() < 1e-9,
+            "and so is every Hangul syllable"
         );
 
-        let (box_width, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
-            &sequence.tracks[0].clips[0],
-            1080,
-            1920,
-            CAPTION_WRAP_BOX_WIDTH_PERCENT,
-        );
+        // A run of narrow glyphs has no wide-script break in it at all, so it
+        // is one run however long it is - a numeric range and a URL included,
+        // neither of which this splits at its punctuation.
+        let half_em = 36.0 / 608.0 * 100.0;
+        for label in [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "1234567890-1234567890-1234567890",
+            "https://example.com/watch/somereallylongpermalinkslug",
+        ] {
+            let measured = widest(label);
+            let expected = half_em * label.chars().count() as f64;
+            assert!(
+                (measured - expected).abs() < 1e-9,
+                "{label} has nowhere to break: {measured} vs {expected}"
+            );
+        }
 
-        // The slug is 27 half-em glyphs of a 72px font - 972 of a 608-wide
-        // script, or 160% - and there is no break inside it.
+        // A single trailing ideograph does not rescue the run before it: the
+        // Latin slug is still drawn in one piece.
+        let slug = "https://example.com/watch/somereallylongpermalinkslug";
         assert!(
-            box_width > CAPTION_WRAP_BOX_WIDTH_PERCENT,
-            "the widest run is the finding, not the wrap box, got {box_width}"
-        );
-        assert!(
-            box_height > 72.0 * 1.2 / 1920.0 * 100.0,
-            "the rest of the label still wraps onto several lines, got {box_height}"
-        );
-    }
-
-    /// Feature: Caption safe area
-    /// Scenario: a hyphenated compound wraps instead of bleeding off the side
-    ///
-    /// Given a long compound whose every run is short, and no whitespace in it
-    /// When the safe-area estimator sizes its block
-    /// Then the block is bounded by the wrap box and runs to several lines
-    ///
-    /// Measured: `wrap_unicode=1` breaks after a hyphen, and this cue renders
-    /// at x 200..881 of a 1080-wide frame. Estimating it as one uncapped line -
-    /// which the whitespace-or-nothing test did - invented a safe-area breach,
-    /// and its single line was then the band [`caption_span_percent`] handed
-    /// the contrast pass to sample.
-    #[test]
-    fn test_caption_safe_area_rule_should_wrap_a_hyphenated_compound() {
-        let sequence = sequence_with_caption(
-            "state-of-the-art-multi-part-compound-word-here",
-            Some(serde_json::json!({
-                "type": "preset",
-                "vertical": "bottom",
-                "marginPercent": 10.0
-            })),
-            Some(serde_json::json!({ "fontSize": 72 })),
-        );
-
-        let (box_width, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
-            &sequence.tracks[0].clips[0],
-            1080,
-            1920,
-            CAPTION_WRAP_BOX_WIDTH_PERCENT,
+            (widest(&format!("{slug}\u{3042}")) - widest(slug)).abs() < 1e-9,
+            "a trailing ideograph closes the run, it does not shorten it"
         );
 
         assert!(
-            box_width <= CAPTION_WRAP_BOX_WIDTH_PERCENT,
-            "every run fits the box, so the label wraps inside it, got {box_width}"
-        );
-        // Half an em of a 72px font is 5.92% of a 608-wide script, so an 80%
-        // box holds thirteen characters. Packing the runs - `state-` `of-`
-        // `the-` `art-` `multi-` `part-` `compound-` `word-` `here` - fills the
-        // lines 13, 10, 5, 9, 9: five of them, one more than dividing the 266%
-        // total by the box claimed, because a run that does not fit leaves the
-        // rest of its line empty.
-        assert!(
-            (box_height - 5.0 * 72.0 * 1.2 / 1080.0 * 100.0).abs() < 1e-9,
-            "a wrapped compound is as tall as the lines its runs pack into, got {box_height}"
+            widest("").abs() < 1e-9,
+            "an empty label has no run to measure"
         );
     }
 
     /// The estimated `(width, height)` of one caption, in percent of the frame.
     ///
-    /// Every label passed here is short enough to fit the wrap box on one line,
-    /// so whichever branch the estimate takes the number under test is the
-    /// advance itself rather than the wrap box the advance would be folded
-    /// into.
+    /// Every label passed here is short enough to sit well inside the wrap box,
+    /// so the number under test is the advance itself rather than the box the
+    /// advance would otherwise be folded into.
     fn estimated_box_percent(
         label: &str,
         style: serde_json::Value,
