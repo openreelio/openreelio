@@ -799,7 +799,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli render start --path ./project --proxy --start 0 --end 5 --progress --output proxy.mp4"
             },
             "ffmpeg.info": {
-                "description": "Resolve the FFmpeg/FFprobe binaries this CLI will use and report their version and source (explicit, env, bundled, managed, dev, or system)",
+                "description": "Resolve the FFmpeg/FFprobe binaries this CLI will use and report their version and source (explicit, env, bundled, managed, dev, or system), plus wrapsUnicodeCaptions — whether this binary's subtitles filter accepts wrap_unicode, without which a caption written with no word spaces (Japanese, Chinese) is burned in on one line and cropped at the frame edge",
                 "params": {},
                 "example": "openreelio-cli ffmpeg info"
             },

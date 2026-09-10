@@ -294,14 +294,20 @@ jobs:
       # The CLI end-to-end suite burns captions in with real libass and renders
       # real files, so it needs a real FFmpeg. Ubuntu's build links libass,
       # which is what the burn-in tests probe for.
-      - name: Install FFmpeg for the CLI end-to-end suite
+      #
+      # `fonts-noto-cjk` is here for the same reason: no bundled family covers
+      # Japanese, so the burn-in test that proves an unspaced CJK cue *wraps*
+      # needs a host font to draw with. Without one libass draws nothing, the
+      # test finds no glyphs, and under REQUIRE_FFMPEG_TESTS that is a failure
+      # rather than a silently green run.
+      - name: Install FFmpeg and a CJK font for the CLI end-to-end suite
         timeout-minutes: 20
         # Same shape as the Linux dependency step above: mirror outages make apt
         # hang until the job timeout, so bound each attempt and retry.
         run: |
           for attempt in 1 2 3; do
             if sudo timeout 300 apt-get update && \
-               sudo timeout 600 apt-get install -y ffmpeg; then
+               sudo timeout 600 apt-get install -y ffmpeg fonts-noto-cjk; then
               exit 0
             fi
             echo "apt attempt ${attempt} failed or timed out; switching to archive.ubuntu.com and retrying"

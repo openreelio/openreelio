@@ -7070,11 +7070,26 @@ async fn probe_ffmpeg_filters(ffmpeg_path: &Path) -> Option<HashSet<String>> {
 /// This is a statement about the **export** path only. The live DOM/canvas
 /// preview draws text with the webview's own font stack and is a separate
 /// concern; see the note in [`build_ass_text_overlay_script_in_window`].
+///
+/// # Wrapping unspaced scripts
+///
+/// `wrap_unicode` is what makes libass break a run with no space in it -
+/// Japanese and Chinese above all, which are written without word spaces. The
+/// filter defaults the option to `auto`, and `auto` is *off* for a native
+/// `.ass` input, so a script that is only ever handed to this filter has to
+/// name it: without it an unspaced cue is laid out as a single line and cropped
+/// at the frame edge, whatever the script's `WrapStyle` and event margins say.
+/// `wrap_unicode` reached the filter in FFmpeg 6.1 and an unknown option is an
+/// exit before decoding, so the caller passes what
+/// [`crate::core::ffmpeg::binary_supports_subtitles_wrap_unicode`] answered
+/// for the binary this graph will run on, and the option is omitted rather
+/// than risked when the answer is no.
 pub(super) fn append_ass_text_overlay(
     filter_complex: &mut String,
     base_video_label: &str,
     ass_path: &Path,
     host_fonts_needed: bool,
+    wrap_unicode_supported: bool,
 ) -> String {
     use crate::core::effects::escape_ffmpeg_filter_value;
 
@@ -7125,12 +7140,25 @@ pub(super) fn append_ass_text_overlay(
     // the canvas here distorted glyphs by frame-AR/canvas-AR whenever an export
     // preset overrode the output to a different aspect than the sequence canvas
     // (a vertical canvas exported through a 16:9 preset stretched 3.16x).
+    let wrap_unicode_option = if wrap_unicode_supported {
+        SUBTITLES_WRAP_UNICODE_OPTION
+    } else {
+        ""
+    };
     filter_complex.push(';');
     filter_complex.push_str(&format!(
-        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}{output_label}"
+        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}{wrap_unicode_option}{output_label}"
     ));
     output_label.to_string()
 }
+
+/// The `subtitles` option that turns the Unicode line-breaking algorithm on.
+///
+/// One spelling, shared by the burn-in graph and by the emoji measurement
+/// probe: the probe's whole job is to find where libass puts each cell, and a
+/// probe that wraps differently from the render measures a layout the render
+/// never draws.
+pub(crate) const SUBTITLES_WRAP_UNICODE_OPTION: &str = ":wrap_unicode=1";
 
 /// One picture the graph reads, and the branch every use of it comes through.
 ///
@@ -7505,6 +7533,17 @@ impl ExportEngine {
     /// The FFmpeg binary this engine runs, for the probes that spawn their own.
     pub(crate) fn ffmpeg_path(&self) -> &Path {
         self.ffmpeg.info().ffmpeg_path.as_path()
+    }
+
+    /// Whether this engine's FFmpeg can be asked to wrap unspaced scripts.
+    ///
+    /// Answered by [`crate::core::ffmpeg::binary_supports_subtitles_wrap_unicode`],
+    /// which probes the binary once and caches the answer for the life of the
+    /// process. Every graph that reads an `.ass` script - the burn-in and the
+    /// emoji measurement probe alike - asks through here, so the two can never
+    /// disagree about how the same script wraps.
+    pub(crate) fn wraps_unicode_captions(&self) -> bool {
+        crate::core::ffmpeg::binary_supports_subtitles_wrap_unicode(self.ffmpeg_path())
     }
 
     /// Measures this render's colour emoji cells, and names the ones that
@@ -12931,6 +12970,7 @@ mod tests {
             "[outv]",
             &PathBuf::from("/tmp/vertical.ass"),
             false,
+            true,
         );
 
         assert_eq!(label, "[txtass0]");
@@ -12939,6 +12979,52 @@ mod tests {
             "got: {filter_complex}"
         );
         assert!(filter_complex.contains("subtitles=filename='/tmp/vertical.ass'"));
+    }
+
+    /// Feature: Caption burn-in
+    /// Scenario: the graph asks libass to wrap unspaced scripts
+    ///
+    /// Given a burn-in graph for an ASS script
+    /// When the resolved FFmpeg knows the `subtitles` option `wrap_unicode`
+    /// Then the node names it, and when the binary does not, the node omits it
+    ///
+    /// Japanese and Chinese are written without word spaces, and libass only
+    /// breaks a run with no space in it when the Unicode line-breaking
+    /// algorithm is switched on. The filter defaults the option to `auto`,
+    /// which is *off* for a native `.ass` input, so a graph that stays silent
+    /// draws the whole cue on one line and crops it at the frame edge. The
+    /// option reached the filter in FFmpeg 6.1 and an unknown option is an exit
+    /// before decoding, which is why the "off" half of this test is not merely
+    /// a tidiness assertion: naming it on an older binary fails the export.
+    #[test]
+    fn the_subtitles_node_asks_for_unicode_wrapping_only_where_the_option_exists() {
+        let graph_for = |wrap_unicode_supported: bool| {
+            let mut filter_complex = String::from("[0:v]null[outv]");
+            append_ass_text_overlay(
+                &mut filter_complex,
+                "[outv]",
+                &PathBuf::from("/tmp/cjk.ass"),
+                false,
+                wrap_unicode_supported,
+            );
+            filter_complex
+        };
+
+        let wrapping = graph_for(true);
+        assert!(
+            wrapping.contains("subtitles=filename='/tmp/cjk.ass':wrap_unicode=1[txtass0]"),
+            "an unspaced cue only wraps when the option is named. Got: {wrapping}"
+        );
+
+        let legacy = graph_for(false);
+        assert!(
+            !legacy.contains("wrap_unicode"),
+            "an FFmpeg without the option exits on it rather than ignoring it. Got: {legacy}"
+        );
+        assert!(
+            legacy.contains("subtitles=filename='/tmp/cjk.ass'[txtass0]"),
+            "the rest of the node is unchanged. Got: {legacy}"
+        );
     }
 
     /// Feature: deterministic caption burn-in
@@ -12956,6 +13042,7 @@ mod tests {
             "[outv]",
             &PathBuf::from("/tmp/embedded.ass"),
             false,
+            true,
         );
         assert!(
             !deterministic.contains("fontsdir"),
@@ -12963,7 +13050,13 @@ mod tests {
         );
 
         let mut host = String::from("[0:v]null[outv]");
-        append_ass_text_overlay(&mut host, "[outv]", &PathBuf::from("/tmp/host.ass"), true);
+        append_ass_text_overlay(
+            &mut host,
+            "[outv]",
+            &PathBuf::from("/tmp/host.ass"),
+            true,
+            true,
+        );
 
         let host_directory_is_usable = crate::core::text::fonts::primary_system_font_directory()
             .is_some_and(|directory| {
@@ -13188,6 +13281,7 @@ mod tests {
             "[outv]",
             &PathBuf::from("/tmp/x';[in]movie=filename=/etc/passwd[out];[out].ass"),
             false,
+            true,
         );
 
         assert_eq!(label, "[txtass0]");

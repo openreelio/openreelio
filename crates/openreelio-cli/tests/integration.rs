@@ -147,6 +147,25 @@ fn skip_without_ffmpeg(reason: &str) {
     eprintln!("Skipping test: {reason}");
 }
 
+/// Records a skip for a capability the host's FFmpeg build simply does not
+/// have.
+///
+/// Unlike [`skip_without_ffmpeg`], this skips even under
+/// `REQUIRE_FFMPEG_TESTS`. That variable asserts an FFmpeg is installed and
+/// working, which a build linked against a libass without libunibreak is - it
+/// runs every other render test in this file. What such a build cannot do is
+/// apply the Unicode line-breaking algorithm, and no environment variable can
+/// link the library in; failing there would report a broken app on a host whose
+/// only fault is its own libass. The skip is loud so the log still says why.
+///
+/// Callers must establish the missing capability from the host itself - libass
+/// logging [`LIBASS_NO_WRAP_UNICODE`] - and never from the symptom, which the
+/// app's own bugs produce just as readily.
+#[track_caller]
+fn skip_without_host_capability(reason: &str) {
+    eprintln!("Skipping test: {reason}");
+}
+
 /// Run a CLI command from `cwd` with extra environment variables applied.
 ///
 /// The FFmpeg path overrides are always cleared so a developer's shell cannot
@@ -3505,6 +3524,15 @@ fn test_ffmpeg_info_reports_resolved_binaries() {
         ["explicit", "env", "bundled", "managed", "dev", "system"].contains(&source),
         "Unexpected ffmpeg source: {}",
         source
+    );
+
+    // Self-diagnosis for the perception loop: an agent looking at a cropped
+    // Japanese caption needs to know whether the binary in front of it can be
+    // asked to wrap unspaced scripts at all.
+    assert!(
+        result["wrapsUnicodeCaptions"].is_boolean(),
+        "Expected a caption-wrapping capability, got: {}",
+        result
     );
 }
 
@@ -11960,6 +11988,34 @@ fn render_ass_over_black(
     render_ass_over_color(ffmpeg_path, script, width, height, "black")
 }
 
+/// A burned-in frame and what FFmpeg said while drawing it.
+///
+/// The frame alone cannot tell a caption libass chose not to wrap apart from
+/// one libass could not wrap, and those two want opposite verdicts: the first
+/// is this app's bug and must fail, the second is the host's build and may
+/// skip. The diagnostics are what separate them.
+struct BurnIn {
+    /// The rendered frame, 8-bit grayscale.
+    frame: Vec<u8>,
+    /// FFmpeg's stderr, captured at `-v warning` so libass's own capability
+    /// warnings survive.
+    diagnostics: String,
+}
+
+/// The `subtitles` options the export's burn-in node carries, for this binary.
+///
+/// Only `wrap_unicode` today, and only where the binary knows it: the option
+/// arrived in FFmpeg 6.1 and an older one exits on it before decoding a frame.
+/// Resolved through the same probe the render path uses, so what these tests
+/// burn in is what an export burns in.
+fn burn_in_subtitles_options(ffmpeg_path: &std::path::Path) -> &'static str {
+    if openreelio_core::ffmpeg::binary_supports_subtitles_wrap_unicode(ffmpeg_path) {
+        ":wrap_unicode=1"
+    } else {
+        ""
+    }
+}
+
 /// Renders `script` over a flat `color` and returns the frame as 8-bit grayscale.
 ///
 /// The script is written into the directory FFmpeg runs in so the filtergraph
@@ -11973,20 +12029,48 @@ fn render_ass_over_color(
     height: u32,
     color: &str,
 ) -> Option<Vec<u8>> {
+    burn_in_ass_over_color(ffmpeg_path, script, width, height, color).map(|burn_in| burn_in.frame)
+}
+
+/// The same render as [`render_ass_over_color`], keeping the node it ran and
+/// FFmpeg's own diagnostics.
+fn burn_in_ass_over_color(
+    ffmpeg_path: &std::path::Path,
+    script: &str,
+    width: u32,
+    height: u32,
+    color: &str,
+) -> Option<BurnIn> {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("overlay.ass"), script).expect("write script");
 
+    // The same options the export's own `subtitles` node carries. Without
+    // `wrap_unicode` these tests would measure a burn-in the app never
+    // produces - and the one script that most depends on it, unspaced CJK,
+    // would be measured on the cropped single line the option exists to
+    // prevent.
+    let subtitles_filter = format!(
+        "subtitles=overlay.ass{}",
+        burn_in_subtitles_options(ffmpeg_path)
+    );
+
+    // `warning`, not `error`: libass reports a build without libunibreak by
+    // logging an `ASS_FEATURE_WRAP_UNICODE` warning and drawing the unwrapped
+    // line anyway. That warning is the only signal that separates "this host
+    // cannot wrap" from "the burn-in never asked it to", and at `error` it is
+    // thrown away. Nothing here reads stderr as data otherwise, so the extra
+    // lines cost nothing.
     let output = Command::new(ffmpeg_path)
         .current_dir(dir.path())
         .args([
             "-v",
-            "error",
+            "warning",
             "-f",
             "lavfi",
             "-i",
             &format!("color=c={color}:s={width}x{height}:d=2"),
             "-vf",
-            "subtitles=overlay.ass",
+            &subtitles_filter,
             "-ss",
             "1",
             "-frames:v",
@@ -12000,11 +12084,9 @@ fn render_ass_over_color(
         .output()
         .ok()?;
 
+    let diagnostics = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
-        eprintln!(
-            "ffmpeg could not burn in the ASS script: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        eprintln!("ffmpeg could not burn in the ASS script: {diagnostics}");
         return None;
     }
 
@@ -12012,8 +12094,19 @@ fn render_ass_over_color(
     if output.stdout.len() < expected {
         return None;
     }
-    Some(output.stdout[..expected].to_vec())
+    Some(BurnIn {
+        frame: output.stdout[..expected].to_vec(),
+        diagnostics,
+    })
 }
+
+/// The token libass logs when it was linked without libunibreak.
+///
+/// FFmpeg words it two ways depending on which side of the build the support is
+/// missing - "libass wasn't built with ASS_FEATURE_WRAP_UNICODE support" from
+/// the runtime call, "ASS_FEATURE_WRAP_UNICODE not supported by libass version"
+/// from the compile-time guard - so the constant is the part both share.
+const LIBASS_NO_WRAP_UNICODE: &str = "ASS_FEATURE_WRAP_UNICODE";
 
 /// Threshold above which a grayscale sample counts as text rather than backing.
 const CAPTION_INK_THRESHOLD: u8 = 96;
@@ -12259,6 +12352,125 @@ fn test_burned_in_caption_wraps_inside_the_safe_box() {
     assert!(
         first_band_top > height / 2 && last_band_bottom < height - 80,
         "a bottom caption must sit above the bottom margin, got rows {first_band_top}..{last_band_bottom}"
+    );
+}
+
+/// Feature: Caption burn-in
+/// Scenario: an unspaced Japanese caption wraps instead of running off the side
+///
+/// Given a vertical sequence and a Japanese caption with no whitespace in it
+/// When the export's ASS script is burned in by libass as the export burns it
+/// Then the text occupies several lines and touches neither frame edge
+///
+/// Japanese and Chinese are written without word spaces, so `WrapStyle: 0` and
+/// event margins buy nothing on their own: libass breaks between kana and
+/// ideographs only when it is applying the Unicode line-breaking algorithm, and
+/// the `subtitles` filter leaves that off by default for a native `.ass` input.
+/// Measured on the bundled binary at this exact geometry, the same cue came out
+/// as one 1051px-wide line starting in column 0 - cropped - until the burn-in
+/// named `wrap_unicode`, after which it is 655px wide across several lines.
+///
+/// This is the guard the unit tests cannot be: the QC estimator only *models*
+/// the wrap, and a model agrees with itself whatever the renderer does.
+///
+/// Two ways a host cannot run it, both skipped rather than failed: an FFmpeg
+/// too old to know the option, and - the case the option cannot rule out - a
+/// build that accepts it but was linked against a libass without libunibreak,
+/// which logs [`LIBASS_NO_WRAP_UNICODE`] and draws the single cropped line
+/// anyway. The wrap is a property of the host's libass, so on such a host there
+/// is nothing for this test to assert.
+///
+/// # Why a single line is not, on its own, a reason to skip
+///
+/// A cue on one line has two possible causes and they want opposite verdicts:
+/// the host cannot wrap (skip), or the burn-in never asked it to (fail).
+/// Skipping on the symptom alone conflated them, which left the one test that
+/// watches a real libass wrap silent about the regression it exists to catch -
+/// a `wrap_unicode` splice dropped from the graph would simply stop running
+/// here.
+///
+/// What separates them is the skip condition itself: it requires libass to have
+/// said [`LIBASS_NO_WRAP_UNICODE`] on stderr. That warning is libass reporting
+/// its own build, and it is emitted only when the filter *did* ask for the
+/// feature, so a graph that never asked cannot produce it. Asked-for and
+/// unwrapped with no warning is a real failure, and fails.
+///
+/// This test burns in the node it builds itself, so it cannot also be the guard
+/// on the *app's* graph carrying the option - that is
+/// `the_subtitles_node_asks_for_unicode_wrapping_only_where_the_option_exists`
+/// in `core::render::export`, which reads the graph the export writes.
+///
+/// The residue that leaves is a host whose FFmpeg is new enough to advertise
+/// the option but whose libass predates the feature so completely that the
+/// filter has nothing to ask and says nothing: it fails here. That is the
+/// deliberate side of the trade - such a host is indistinguishable from the
+/// regression by anything the render can show - and the failure message names
+/// the possibility so the log does not send anyone hunting the wrong bug.
+#[test]
+fn test_burned_in_unspaced_cjk_caption_wraps_inside_the_frame() {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return;
+    };
+
+    if burn_in_subtitles_options(&ffmpeg_path).is_empty() {
+        // Pre-6.1: the option the wrap depends on does not exist, so there is
+        // no wrap to assert. Loud where FFmpeg is required, quiet elsewhere.
+        skip_without_ffmpeg("this ffmpeg's subtitles filter has no wrap_unicode option");
+        return;
+    }
+
+    let (width, height) = (1080u32, 1920u32);
+    // Nineteen characters, no whitespace anywhere: "this is a very long
+    // Japanese subtitle test".
+    let script = vertical_caption_ass_script("これは非常に長い日本語の字幕テストです", "Arial", 72);
+    assert!(script.contains("WrapStyle: 0"));
+    assert!(
+        !script.contains("\\pos("),
+        "a wrapped caption must not be positioned"
+    );
+
+    let Some(burn_in) = burn_in_ass_over_color(&ffmpeg_path, &script, width, height, "black")
+    else {
+        skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
+        return;
+    };
+
+    // No bundled family covers CJK, so these glyphs come from the host. A
+    // machine with no CJK font draws nothing at all, which is a font problem
+    // rather than a wrap problem - and is a failure on CI, which installs one.
+    let Some((left, right)) = text_column_extent(&burn_in.frame, width, height) else {
+        skip_without_ffmpeg("this host has no font covering Japanese, so nothing was drawn");
+        return;
+    };
+
+    let bands = text_row_bands(&burn_in.frame, width, height);
+    if bands.len() < 2 {
+        // One line, from a graph that did ask for the wrap. Only libass saying
+        // it has no libunibreak excuses that; anything else is the app failing
+        // to wrap a cue on a host that can. See the doc comment.
+        assert!(
+            burn_in.diagnostics.contains(LIBASS_NO_WRAP_UNICODE),
+            "this ffmpeg accepted wrap_unicode and libass raised no \
+             {LIBASS_NO_WRAP_UNICODE} warning, so this host can wrap - a single line means \
+             the cue was not wrapped (or, far less likely, this libass is too old to know \
+             the feature at all). Bands {bands:?}, ffmpeg said: {}",
+            burn_in.diagnostics.trim()
+        );
+        skip_without_host_capability(
+            "this ffmpeg advertises wrap_unicode but libass has no libunibreak, and said so",
+        );
+        return;
+    }
+
+    assert!(
+        left > 0 && right < width - 1,
+        "wrapped CJK must not reach either frame edge, got columns {left}..{right}"
+    );
+    // The same generous safe-box bound the Latin sibling checks: outline and
+    // antialiasing bleed a few pixels either side of the glyphs.
+    assert!(
+        left >= 40 && right <= width - 40,
+        "wrapped CJK must stay well inside the frame, got columns {left}..{right}"
     );
 }
 
