@@ -4289,10 +4289,12 @@ mod tests {
     /// figure, so it read a 72px caption as one 4.5%-tall line and passed it.
     ///
     /// Measured the way the renderer draws it: a 46-character label at 72px
-    /// spans 272% of the 608-wide script, wraps to three lines at the frame
-    /// edge (a custom anchor carries no event margins), and so stands
-    /// 3 x 72 x 1.2 / 1080 = 24% of the frame tall. Centred on a point 90%
-    /// down, its last line lands at 102% — off the frame.
+    /// spans 272% of the 608-wide script and wraps at the frame edge (a custom
+    /// anchor carries no event margins), which its words pack into four lines —
+    /// `The shorts pack` / `draws its` / `captions at 72` / `px ok`, since the
+    /// next word never fits the 16-character remainder of the line before it —
+    /// and so stands 4 x 72 x 1.2 / 1080 = 32% of the frame tall. Centred on a
+    /// point 90% down, its last line lands at 106% — off the frame.
     #[tokio::test]
     async fn test_out_of_bounds_rule_should_measure_a_vertical_canvas_in_script_space() {
         let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
@@ -4321,12 +4323,12 @@ mod tests {
         assert_eq!(violations.len(), 1, "a block hanging 2% off the frame");
         let cue = first_cue(&violations[0]);
         assert!(
-            (cue["topPercent"].as_f64().expect("a top") - 78.0).abs() < 0.001,
+            (cue["topPercent"].as_f64().expect("a top") - 74.0).abs() < 0.001,
             "a custom anchor names the point the block is centred on: {cue}"
         );
         assert!(
-            (cue["bottomPercent"].as_f64().expect("a bottom") - 102.0).abs() < 0.001,
-            "three 72px lines measured against PlayResY=1080 are 24% tall: {cue}"
+            (cue["bottomPercent"].as_f64().expect("a bottom") - 106.0).abs() < 0.001,
+            "four 72px lines measured against PlayResY=1080 are 32% tall: {cue}"
         );
     }
 
@@ -4338,8 +4340,12 @@ mod tests {
     /// 5% band — so a caption drawn along the top was checked along the bottom,
     /// which is the mirror-parse bug `caption.safe_area` already removed. The
     /// burn-in resolves the same string to a top preset at the default 5%
-    /// margin, and so now does this rule: a 150px block six lines deep stands
-    /// 100% of the frame tall and runs off the bottom at 105%.
+    /// margin, and so now does this rule: the block hangs from 5% rather than
+    /// from the bottom band. At 150px on a 608-wide script every word is most
+    /// of a line - `Oversized` alone is 111% of the wrap box, so it is drawn
+    /// past it and off the side, which is the breach reported - and the six
+    /// words pack onto five lines standing 5 x 150 x 1.2 / 1080 = 83.3% tall,
+    /// ending at 88.3%.
     #[tokio::test]
     async fn test_out_of_bounds_rule_should_locate_a_bare_string_position() {
         let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
@@ -4368,8 +4374,12 @@ mod tests {
             "a bare \"top\" anchors at the top, not at the default bottom band: {cue}"
         );
         assert!(
-            (cue["bottomPercent"].as_f64().expect("a bottom") - 105.0).abs() < 0.001,
-            "six 150px lines measured against PlayResY=1080 fill the frame: {cue}"
+            (cue["bottomPercent"].as_f64().expect("a bottom") - 88.3333).abs() < 0.001,
+            "five 150px lines measured against PlayResY=1080 are 83.3% tall: {cue}"
+        );
+        assert!(
+            cue["leftPercent"].as_f64().expect("a left") < 0.0,
+            "and the breach is the unbreakable first word running off the side: {cue}"
         );
     }
 

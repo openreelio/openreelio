@@ -157,6 +157,10 @@ fn skip_without_ffmpeg(reason: &str) {
 /// apply the Unicode line-breaking algorithm, and no environment variable can
 /// link the library in; failing there would report a broken app on a host whose
 /// only fault is its own libass. The skip is loud so the log still says why.
+///
+/// Callers must establish the missing capability from the host itself - libass
+/// logging [`LIBASS_NO_WRAP_UNICODE`] - and never from the symptom, which the
+/// app's own bugs produce just as readily.
 #[track_caller]
 fn skip_without_host_capability(reason: &str) {
     eprintln!("Skipping test: {reason}");
@@ -11984,6 +11988,22 @@ fn render_ass_over_black(
     render_ass_over_color(ffmpeg_path, script, width, height, "black")
 }
 
+/// A burned-in frame, the `subtitles` node that drew it, and what FFmpeg said.
+///
+/// The frame alone cannot tell a caption that was never asked to wrap apart
+/// from one libass could not wrap, and those two want opposite verdicts: the
+/// first is this app's bug and must fail, the second is the host's build and
+/// may skip. The node and the diagnostics are what separate them.
+struct BurnIn {
+    /// The rendered frame, 8-bit grayscale.
+    frame: Vec<u8>,
+    /// The `subtitles` filter the render actually ran.
+    filter: String,
+    /// FFmpeg's stderr, captured at `-v warning` so libass's own capability
+    /// warnings survive.
+    diagnostics: String,
+}
+
 /// The `subtitles` options the export's burn-in node carries, for this binary.
 ///
 /// Only `wrap_unicode` today, and only where the binary knows it: the option
@@ -12011,6 +12031,18 @@ fn render_ass_over_color(
     height: u32,
     color: &str,
 ) -> Option<Vec<u8>> {
+    burn_in_ass_over_color(ffmpeg_path, script, width, height, color).map(|burn_in| burn_in.frame)
+}
+
+/// The same render as [`render_ass_over_color`], keeping the node it ran and
+/// FFmpeg's own diagnostics.
+fn burn_in_ass_over_color(
+    ffmpeg_path: &std::path::Path,
+    script: &str,
+    width: u32,
+    height: u32,
+    color: &str,
+) -> Option<BurnIn> {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("overlay.ass"), script).expect("write script");
 
@@ -12024,11 +12056,17 @@ fn render_ass_over_color(
         burn_in_subtitles_options(ffmpeg_path)
     );
 
+    // `warning`, not `error`: libass reports a build without libunibreak by
+    // logging an `ASS_FEATURE_WRAP_UNICODE` warning and drawing the unwrapped
+    // line anyway. That warning is the only signal that separates "this host
+    // cannot wrap" from "the burn-in never asked it to", and at `error` it is
+    // thrown away. Nothing here reads stderr as data otherwise, so the extra
+    // lines cost nothing.
     let output = Command::new(ffmpeg_path)
         .current_dir(dir.path())
         .args([
             "-v",
-            "error",
+            "warning",
             "-f",
             "lavfi",
             "-i",
@@ -12048,11 +12086,9 @@ fn render_ass_over_color(
         .output()
         .ok()?;
 
+    let diagnostics = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
-        eprintln!(
-            "ffmpeg could not burn in the ASS script: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        eprintln!("ffmpeg could not burn in the ASS script: {diagnostics}");
         return None;
     }
 
@@ -12060,8 +12096,20 @@ fn render_ass_over_color(
     if output.stdout.len() < expected {
         return None;
     }
-    Some(output.stdout[..expected].to_vec())
+    Some(BurnIn {
+        frame: output.stdout[..expected].to_vec(),
+        filter: subtitles_filter,
+        diagnostics,
+    })
 }
+
+/// The token libass logs when it was linked without libunibreak.
+///
+/// FFmpeg words it two ways depending on which side of the build the support is
+/// missing - "libass wasn't built with ASS_FEATURE_WRAP_UNICODE support" from
+/// the runtime call, "ASS_FEATURE_WRAP_UNICODE not supported by libass version"
+/// from the compile-time guard - so the constant is the part both share.
+const LIBASS_NO_WRAP_UNICODE: &str = "ASS_FEATURE_WRAP_UNICODE";
 
 /// Threshold above which a grayscale sample counts as text rather than backing.
 const CAPTION_INK_THRESHOLD: u8 = 96;
@@ -12331,9 +12379,39 @@ fn test_burned_in_caption_wraps_inside_the_safe_box() {
 /// Two ways a host cannot run it, both skipped rather than failed: an FFmpeg
 /// too old to know the option, and - the case the option cannot rule out - a
 /// build that accepts it but was linked against a libass without libunibreak,
-/// which logs `"libass wasn't built with ASS_FEATURE_WRAP_UNICODE support"` and
-/// draws the single cropped line anyway. The wrap is a property of the host's
-/// libass, so on such a host there is nothing for this test to assert.
+/// which logs [`LIBASS_NO_WRAP_UNICODE`] and draws the single cropped line
+/// anyway. The wrap is a property of the host's libass, so on such a host there
+/// is nothing for this test to assert.
+///
+/// # Why a single line is not, on its own, a reason to skip
+///
+/// A cue on one line has two possible causes and they want opposite verdicts:
+/// the host cannot wrap (skip), or the burn-in never asked it to (fail).
+/// Skipping on the symptom alone conflated them, which left the one test that
+/// watches a real libass wrap silent about the regression it exists to catch -
+/// a `wrap_unicode` splice dropped from the graph would simply stop running
+/// here.
+///
+/// Two signals separate them, and neither can be satisfied by a broken splice:
+///
+/// - the node the render ran is asserted to carry `:wrap_unicode=1`, so a
+///   splice that is dropped or lands on the wrong filter fails before a pixel
+///   is measured. (Its counterpart on the export side - that the *app's* graph
+///   carries the same option, and omits it on a binary too old for it - is
+///   `the_subtitles_node_asks_for_unicode_wrapping_only_where_the_option_exists`
+///   in `core::render::export`.)
+/// - the skip itself requires libass to have said [`LIBASS_NO_WRAP_UNICODE`] on
+///   stderr. That warning is libass reporting its own build, and it is emitted
+///   only when the filter *did* ask for the feature, so a graph that never
+///   asked cannot produce it. Asked-for and unwrapped with no warning is a real
+///   failure, and fails.
+///
+/// The residue that leaves is a host whose FFmpeg is new enough to advertise
+/// the option but whose libass predates the feature so completely that the
+/// filter has nothing to ask and says nothing: it fails here. That is the
+/// deliberate side of the trade - such a host is indistinguishable from the
+/// regression by anything the render can show - and the failure message names
+/// the possibility so the log does not send anyone hunting the wrong bug.
 #[test]
 fn test_burned_in_unspaced_cjk_caption_wraps_inside_the_frame() {
     let Some(ffmpeg_path) = available_ffmpeg_path() else {
@@ -12357,26 +12435,44 @@ fn test_burned_in_unspaced_cjk_caption_wraps_inside_the_frame() {
         "a wrapped caption must not be positioned"
     );
 
-    let Some(frame) = render_ass_over_black(&ffmpeg_path, &script, width, height) else {
+    let Some(burn_in) = burn_in_ass_over_color(&ffmpeg_path, &script, width, height, "black")
+    else {
         skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
         return;
     };
 
+    // The graph that just ran has to have asked for the wrap. Checked on this
+    // side of the pixels because everything below can only observe what libass
+    // did with the request, never whether one was made.
+    assert!(
+        burn_in.filter.contains(":wrap_unicode=1"),
+        "the burn-in must ask libass to wrap unspaced scripts, got node {}",
+        burn_in.filter
+    );
+
     // No bundled family covers CJK, so these glyphs come from the host. A
     // machine with no CJK font draws nothing at all, which is a font problem
     // rather than a wrap problem - and is a failure on CI, which installs one.
-    let Some((left, right)) = text_column_extent(&frame, width, height) else {
+    let Some((left, right)) = text_column_extent(&burn_in.frame, width, height) else {
         skip_without_ffmpeg("this host has no font covering Japanese, so nothing was drawn");
         return;
     };
 
-    let bands = text_row_bands(&frame, width, height);
+    let bands = text_row_bands(&burn_in.frame, width, height);
     if bands.len() < 2 {
-        // The option was advertised and accepted, and the cue still came out on
-        // one line: this build's libass has no libunibreak, so the wrap this
-        // test exists to assert is not available here. See the doc comment.
+        // One line, from a graph that did ask for the wrap. Only libass saying
+        // it has no libunibreak excuses that; anything else is the app failing
+        // to wrap a cue on a host that can. See the doc comment.
+        assert!(
+            burn_in.diagnostics.contains(LIBASS_NO_WRAP_UNICODE),
+            "this ffmpeg accepted wrap_unicode and libass raised no \
+             {LIBASS_NO_WRAP_UNICODE} warning, so this host can wrap - a single line means \
+             the cue was not wrapped (or, far less likely, this libass is too old to know \
+             the feature at all). Bands {bands:?}, ffmpeg said: {}",
+            burn_in.diagnostics.trim()
+        );
         skip_without_host_capability(
-            "this ffmpeg advertises wrap_unicode but libass did not wrap - libunibreak absent",
+            "this ffmpeg advertises wrap_unicode but libass has no libunibreak, and said so",
         );
         return;
     }

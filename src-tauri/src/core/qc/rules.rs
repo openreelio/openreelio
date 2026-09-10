@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::Range;
 
 use super::caption_contrast::json_number;
 use super::caption_group::{group_caption_findings, CaptionFinding, CaptionGroup};
@@ -1646,13 +1647,12 @@ impl CaptionSafeAreaRule {
     /// Maximum estimated text-box width as a percentage of canvas width
     ///
     /// Keeps a pathological font size from putting a nonsense span in the
-    /// violation message. It is not free: because the line count is derived
-    /// from the same total advance, a caption more than five canvases wide is
-    /// reported with fewer lines - and so less height - than it would really
-    /// have. That understates an already-reported breach rather than hiding
-    /// one, since a block that long has breached the band several lines
-    /// earlier. Five canvases is also far past every wrap box, so applying it
-    /// to the width of an overflowing run cannot clamp a breach away either.
+    /// violation message. It bounds the width only: the line count is packed
+    /// from the runs themselves (see [`CaptionSafeAreaRule::packed_line_count`])
+    /// and so is not clipped along with it, which is what stops a very long
+    /// label being reported shorter than the renderer draws it. Five canvases
+    /// is far past every wrap box, so applying the ceiling to the width of an
+    /// overflowing run cannot clamp a breach away either.
     const MAX_TEXT_BOX_WIDTH_PERCENT: f64 = 500.0;
 
     /// Line height as a multiple of the font size (typographic default)
@@ -1800,13 +1800,29 @@ impl CaptionSafeAreaRule {
     /// boundary rather than ink, so it belongs to no segment: the segments are
     /// the drawn runs.
     fn unbreakable_segments(label: &str) -> Vec<&str> {
-        let mut segments: Vec<&str> = Vec::new();
+        Self::unbreakable_segment_ranges(label)
+            .into_iter()
+            .map(|range| &label[range])
+            .collect()
+    }
+
+    /// The same runs as [`Self::unbreakable_segments`], as byte ranges into
+    /// `label`.
+    ///
+    /// Ranges rather than slices because the packer needs what sits *between*
+    /// two runs as well as the runs themselves: the whitespace a break falls
+    /// on is drawn like any other glyph while it stays inside a line, so a line
+    /// is only as long as its runs plus the gaps that survive on it. Recovering
+    /// those gaps from bare slices would mean searching the label for each run,
+    /// which finds the wrong occurrence as soon as a word repeats.
+    fn unbreakable_segment_ranges(label: &str) -> Vec<Range<usize>> {
+        let mut segments: Vec<Range<usize>> = Vec::new();
         let mut start: Option<usize> = None;
 
         for (index, character) in label.char_indices() {
             if character.is_whitespace() {
                 if let Some(begin) = start.take() {
-                    segments.push(&label[begin..index]);
+                    segments.push(begin..index);
                 }
                 continue;
             }
@@ -1815,24 +1831,80 @@ impl CaptionSafeAreaRule {
                 // A wide-script character breaks on both sides, so it closes
                 // whatever ran up to it and then stands as a run of its own.
                 if let Some(begin) = start.take() {
-                    segments.push(&label[begin..index]);
+                    segments.push(begin..index);
                 }
-                segments.push(&label[index..index + character.len_utf8()]);
+                segments.push(index..index + character.len_utf8());
                 continue;
             }
 
             let begin = *start.get_or_insert(index);
             if ASCII_BREAK_AFTER.contains(&character) {
-                segments.push(&label[begin..index + character.len_utf8()]);
+                segments.push(begin..index + character.len_utf8());
                 start = None;
             }
         }
 
         if let Some(begin) = start {
-            segments.push(&label[begin..]);
+            segments.push(begin..label.len());
         }
 
         segments
+    }
+
+    /// Counts the lines the renderer draws `label` on, by packing its
+    /// unbreakable runs into the wrap box the way libass does.
+    ///
+    /// Greedy, left to right: each run joins the line being built while it
+    /// still fits, and starts a new one when it does not. The whitespace
+    /// between two runs is charged to the line only when both runs stay on it,
+    /// because a break consumes the space it falls on - which is also how
+    /// `total_percent` counts spaces, so an ordinary spaced caption comes out
+    /// on the same number of lines it always did.
+    ///
+    /// A run wider than the box occupies exactly **one** line by itself. It has
+    /// nowhere to break, so libass draws it on a single line running off the
+    /// side of the frame rather than folding it into `width / box` lines - it
+    /// is a crop, not a wrap. Measured on the bundled binary with
+    /// `wrap_unicode=1`: forty letters at 96px, a full canvas wide against an
+    /// 80% box, land on one row 62px tall and are cut at both edges.
+    ///
+    /// Dividing the label's total advance by the box - which this did - got
+    /// both directions wrong on exactly the labels the wrap model exists for:
+    /// two lines for that cropped run, and three for a nineteen-ideograph
+    /// Japanese cue that lands on four, because a full-em run only fits six
+    /// glyphs of an 80% box and the remainder of each line is thrown away
+    /// rather than carried into the next. The count is not cosmetic: it is the
+    /// block height, and so the band [`caption_band_percent`] hands the
+    /// contrast pass to sample.
+    fn packed_line_count(
+        label: &str,
+        wrap_box_width_percent: f64,
+        advance_percent: &dyn Fn(&str) -> f64,
+    ) -> f64 {
+        let mut lines = 0_u32;
+        let mut current_width = 0.0_f64;
+        let mut previous_end: Option<usize> = None;
+
+        for range in Self::unbreakable_segment_ranges(label) {
+            let segment_width = advance_percent(&label[range.clone()]);
+            let gap_width = previous_end
+                .map(|end| advance_percent(&label[end..range.start]))
+                .unwrap_or(0.0);
+
+            if lines == 0 {
+                lines = 1;
+                current_width = segment_width;
+            } else if current_width + gap_width + segment_width > wrap_box_width_percent {
+                lines += 1;
+                current_width = segment_width;
+            } else {
+                current_width += gap_width + segment_width;
+            }
+
+            previous_end = Some(range.end);
+        }
+
+        f64::from(lines.max(1))
     }
 
     /// Returns the estimated text box size as (width, height) percentages.
@@ -1877,8 +1949,7 @@ impl CaptionSafeAreaRule {
     ///
     /// - the **total advance**, everything the renderer has to lay out,
     ///   whitespace included, because a space inside a line is drawn like any
-    ///   other glyph. Divided by the wrap box it gives the line count, and so
-    ///   the height;
+    ///   other glyph. It is the width of a label that fits the box;
     /// - the **widest unbreakable run** (see [`Self::unbreakable_segments`]),
     ///   which is what decides whether the words leave the box at all. A label
     ///   longer than the box wraps; a *run* longer than the box cannot, so it
@@ -1894,6 +1965,11 @@ impl CaptionSafeAreaRule {
     /// wraps perfectly well - as a single line bleeding off both sides, whose
     /// wrong line count then handed [`caption_span_percent`] a one-line band
     /// for the contrast pass to sample.
+    ///
+    /// The height comes from the same runs, packed into the box by
+    /// [`Self::packed_line_count`] rather than divided out of the total: the
+    /// box holds whole runs, so what does not fit leaves the rest of the line
+    /// empty instead of spilling into the next one.
     ///
     /// This models the burn-in as the app configures it, which since the
     /// `wrap_unicode` fix means libass applying the Unicode line-breaking
@@ -1945,13 +2021,11 @@ impl CaptionSafeAreaRule {
             .map(advance_percent)
             .fold(0.0_f64, f64::max);
 
-        // The lines the total needs at the width the renderer wraps at. The
-        // ceiling only bites on a pathologically large font, where the block
-        // has breached every band several lines earlier anyway.
-        let line_count = (total_percent.min(Self::MAX_TEXT_BOX_WIDTH_PERCENT)
-            / wrap_box_width_percent)
-            .ceil()
-            .max(1.0);
+        // The lines the renderer lands on, packed run by run rather than
+        // divided out of the total: what the box holds is whole runs, so the
+        // remainder of a line the next run does not fit into is left empty
+        // instead of being carried over.
+        let line_count = Self::packed_line_count(label, wrap_box_width_percent, &advance_percent);
 
         let width_percent = if widest_segment_percent > wrap_box_width_percent {
             // A run wider than the box has nowhere to break, so the renderer
@@ -3749,11 +3823,16 @@ mod tests {
             "an unbreakable run must be measured past the wrap box, got {box_width}"
         );
         // Forty half-em glyphs of a 96px font are 1920 of a 1920-wide script -
-        // a whole canvas, against a box that wraps at 80% of one - so the total
-        // needs two passes of the box.
+        // a whole canvas, against a box that wraps at 80% of one. It still
+        // lands on ONE line: the run has nowhere to break, so libass draws it
+        // on a single row and lets both ends run off the frame. Measured on the
+        // bundled binary with `wrap_unicode=1`, this cue's bounding box is 62px
+        // tall and cropped edge to edge. Dividing the total by the box called
+        // it two lines and so reported a block twice the height the renderer
+        // draws - which is the band the contrast pass then samples.
         assert!(
-            (box_height - 2.0 * 96.0 * 1.2 / 1080.0 * 100.0).abs() < 1e-9,
-            "the height follows the lines the total needs, got {box_height}"
+            (box_height - 1.0 * 96.0 * 1.2 / 1080.0 * 100.0).abs() < 1e-9,
+            "an unbreakable run is one cropped line, not a wrapped block, got {box_height}"
         );
 
         let state = ProjectState::new("QC Test");
@@ -3810,11 +3889,14 @@ mod tests {
             box_width <= CAPTION_WRAP_BOX_WIDTH_PERCENT,
             "a wrapping run is bounded by the box it wraps inside, got {box_width}"
         );
-        // 19 ideographs at a full 72px em is 1368 of a 608-wide script - 225%,
-        // which needs three passes of an 80% box.
+        // Each ideograph is a run of its own, 72 of a 608-wide script - 11.84%
+        // - so six of them fill an 80% box (7 would be 82.9%) and the 19 of
+        // them land on four lines: 6 + 6 + 6 + 1. Dividing the 225% total by
+        // the box called it three, because that throws away the 3.1% left over
+        // on each line instead of carrying the count.
         assert!(
-            box_height > 72.0 * 1.2 / 1080.0 * 100.0 * 1.5,
-            "a wrapped run is taller than a single line, got {box_height}"
+            (box_height - 4.0 * 72.0 * 1.2 / 1080.0 * 100.0).abs() < 1e-9,
+            "a full-em run packs six glyphs to a line, so 19 of them need four, got {box_height}"
         );
     }
 
@@ -3858,6 +3940,58 @@ mod tests {
         assert!(
             CaptionSafeAreaRule::unbreakable_segments("   ").is_empty(),
             "whitespace alone inks nothing"
+        );
+    }
+
+    /// Feature: Caption safe area
+    /// Scenario: lines are packed run by run, not divided out of the total
+    ///
+    /// Given labels whose runs pack differently from the way their total
+    ///       advance divides
+    /// When the estimator counts the lines the renderer draws them on
+    /// Then a run wider than the box takes one line, runs that do not fit take
+    ///      a line each, and a spaced sentence is unchanged
+    ///
+    /// The box holds whole runs. Dividing the total advance by it assumed the
+    /// leftover at the end of a line is carried into the next, which over-counts
+    /// a run that cannot break (a crop is one line, however wide) and
+    /// under-counts runs too fat to share a line (unspaced CJK, where every
+    /// ideograph is its own run).
+    #[test]
+    fn test_caption_safe_area_rule_should_pack_lines_greedily() {
+        // A tenth of the box per character, so the box holds ten of them.
+        let advance = |text: &str| text.chars().count() as f64 * 10.0;
+        let box_width = 100.0;
+        let packed =
+            |label: &str| CaptionSafeAreaRule::packed_line_count(label, box_width, &advance);
+        let divided = |label: &str| (advance(label) / box_width).ceil().max(1.0);
+
+        // A single run two and a half boxes wide has nowhere to break, so the
+        // renderer draws it on one line and crops it - it does not become three.
+        let cropped = "a".repeat(25);
+        assert_eq!(packed(&cropped), 1.0, "an unbreakable run is one line");
+        assert_eq!(divided(&cropped), 3.0, "which is not what dividing said");
+
+        // Three six-character runs: no two of them fit a ten-character box
+        // together, so each takes a line of its own even though their total is
+        // under two boxes.
+        let fat_runs = "aaaaa-bbbbb-ccccc-";
+        assert_eq!(
+            packed(fat_runs),
+            3.0,
+            "a run that does not fit starts a line"
+        );
+        assert_eq!(divided(fat_runs), 2.0, "which is not what dividing said");
+
+        // An ordinary spaced sentence packs exactly as it always did: the space
+        // between two runs on the same line is charged to that line, which is
+        // how the total counted it too.
+        let sentence = "aaa bbb ccc ddd";
+        assert_eq!(packed(sentence), 2.0, "aaa bbb / ccc ddd");
+        assert_eq!(
+            packed(sentence),
+            divided(sentence),
+            "a spaced caption keeps the line count it had"
         );
     }
 
@@ -3940,11 +4074,15 @@ mod tests {
             box_width <= CAPTION_WRAP_BOX_WIDTH_PERCENT,
             "every run fits the box, so the label wraps inside it, got {box_width}"
         );
-        // 45 half-em glyphs of a 72px font are 1620 of a 608-wide script -
-        // 266%, which needs four passes of an 80% box.
+        // Half an em of a 72px font is 5.92% of a 608-wide script, so an 80%
+        // box holds thirteen characters. Packing the runs - `state-` `of-`
+        // `the-` `art-` `multi-` `part-` `compound-` `word-` `here` - fills the
+        // lines 13, 10, 5, 9, 9: five of them, one more than dividing the 266%
+        // total by the box claimed, because a run that does not fit leaves the
+        // rest of its line empty.
         assert!(
-            box_height > 72.0 * 1.2 / 1920.0 * 100.0 * 3.0,
-            "a wrapped compound is several lines tall, got {box_height}"
+            (box_height - 5.0 * 72.0 * 1.2 / 1080.0 * 100.0).abs() < 1e-9,
+            "a wrapped compound is as tall as the lines its runs pack into, got {box_height}"
         );
     }
 
