@@ -4427,27 +4427,27 @@ mod tests {
     }
 
     /// Feature: Captions pushed off the canvas
-    /// Scenario: should report an unspaced CJK cue the renderer cannot wrap
+    /// Scenario: should treat unspaced CJK as wrapping rather than cropped
     ///
-    /// Pins a measured fact about the renderer, not a guess. Sparing CJK from
-    /// the no-break branch looks right - surely a renderer breaks between
-    /// ideographs - and it is wrong for the ffmpeg this app ships (gyan 9.0.1,
-    /// libass 0.17.5, built with no libunibreak). Rendering the app's own 9:16
-    /// script space (`PlayResX 608`, `WrapStyle: 0`, 72px, 61px side margins)
-    /// onto a 1080x1920 frame and measuring with `bbox`:
+    /// Pins a measured fact about the renderer, not a guess - and the earlier
+    /// reading of that fact was wrong. The bundled ffmpeg (gyan 8.0.1, libass
+    /// 0.17.4) *is* built with libunibreak; what suppressed the wrap was the
+    /// `subtitles` filter defaulting `wrap_unicode` to `auto`, which is off for
+    /// a native `.ass` input, and the burn-in never setting it. Rendering the
+    /// app's own 9:16 script space (`PlayResX 608`, `WrapStyle: 0`, 72px, 61px
+    /// side margins) onto a 1080x1920 frame and measuring with `bbox`:
     ///
-    /// - the 19-character Japanese run below: `w:1050 h:86`, `x1:0`, with white
-    ///   pixels in column 0 - one line, cropped at the frame edge,
-    /// - a 20-character unspaced Chinese run: `w:1080 h:90`, `x1:0 x2:1079` -
-    ///   one line, edge to edge,
-    /// - a spaced Korean control: `w:785 h:350`, `x1:152` - four lines, wholly
-    ///   inside the frame.
+    /// - the 19-character Japanese run below, as the filter was called before:
+    ///   `w:1051 h:85`, `x1:0 x2:1050` - one line, cropped at the frame edge,
+    /// - the same run with `wrap_unicode=1`: `w:655 h:341`, `x1:208 x2:862` -
+    ///   several lines, wholly inside the 1080-wide frame,
+    /// - `wrap_unicode=0` reproduces the first result, confirming the default.
     ///
-    /// So the run really is drawn off-frame and this Error is a true one. The
-    /// estimate charges each ideograph a full em: 19 x 72 = 1368 of a 608-wide
-    /// script is 225%, centred on the preset anchor from -62.5% to 162.5%.
+    /// The export now names the option, so the estimator models a cue that
+    /// wraps: no breach to report. What still bleeds off the side is a run with
+    /// no break opportunity of any kind, and the control below is one.
     #[tokio::test]
-    async fn test_out_of_bounds_rule_should_report_an_unspaced_cjk_cue_libass_cannot_wrap() {
+    async fn test_out_of_bounds_rule_should_treat_unspaced_cjk_as_wrapping_not_cropped() {
         async fn violations_for(label: &str) -> Vec<QCViolation> {
             let mut sequence = Sequence::new("QC Structural", SequenceFormat::shorts_1080());
             let mut track = Track::new_caption("C1");
@@ -4469,15 +4469,9 @@ mod tests {
         }
 
         let japanese = violations_for("これは非常に長い日本語の字幕テストです").await;
-        assert_eq!(
-            japanese.len(),
-            1,
-            "libass draws this on one line and crops it, so it is one Error"
-        );
-        let cue = first_cue(&japanese[0]);
         assert!(
-            (cue["leftPercent"].as_f64().expect("a left") + 62.5).abs() < 0.001,
-            "every ideograph is charged a full em: {cue}"
+            japanese.is_empty(),
+            "libass breaks between kana and ideographs, so this stays in frame: {japanese:?}"
         );
 
         // The control: a run short enough to be drawn inside the frame stays
@@ -4486,6 +4480,19 @@ mod tests {
             violations_for("字幕テスト").await.is_empty(),
             "five ideographs are 59% of the script and fit"
         );
+
+        // The other control, and the case this branch of the estimator now
+        // exists for: a bare URL has neither whitespace nor a script the
+        // Unicode line-breaking algorithm breaks inside, so libass really does
+        // draw it on one line and run it off both sides.
+        let url =
+            violations_for("https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await;
+        assert_eq!(
+            url.len(),
+            1,
+            "an unbreakable run is still an Error: {url:?}"
+        );
+        assert_eq!(url[0].severity, Severity::Error);
     }
 
     // ========================================================================

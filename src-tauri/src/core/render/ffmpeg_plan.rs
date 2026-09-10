@@ -715,12 +715,19 @@ pub(super) fn build_sequence_ffmpeg_args(
         filter_complex.push_str(&format!("[{}]null[outv]", adj_video_label));
     }
 
+    let engine = ctx.engine;
     let final_video_label = if let Some(overlay) = ctx.ass_text_overlay {
         append_ass_text_overlay(
             &mut filter_complex,
             "[outv]",
             overlay.path,
             overlay.needs_host_fonts,
+            // An unspaced Japanese or Chinese cue only wraps when the filter is
+            // told to apply the Unicode line-breaking algorithm, and only a
+            // binary that knows the option may be told. Asked here rather than
+            // above so a render with no burn-in never pays for the probe. See
+            // [`append_ass_text_overlay`].
+            engine.wraps_unicode_captions(),
         )
     } else {
         append_drawtext_text_overlays(&mut filter_complex, "[outv]", &drawtext_text_overlays)

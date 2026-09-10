@@ -618,6 +618,85 @@ fn version_line_supports_fps_mode(first_line: &str) -> bool {
     major > 5 || (major == 5 && minor >= 1)
 }
 
+/// Whether this FFmpeg's `subtitles` filter accepts `wrap_unicode`.
+///
+/// libass only breaks a run that has no space in it - unspaced Japanese and
+/// Chinese, above all - when it is asked to apply the Unicode line-breaking
+/// algorithm. The `subtitles` filter exposes that as `wrap_unicode`, and
+/// defaults it to `auto`, which means *off* for a native `.ass` input: the
+/// unspaced cue is then laid out as one line and cropped at the frame edge.
+/// Every burn-in this app emits therefore names the option explicitly.
+///
+/// The option arrived in FFmpeg 6.1, and an FFmpeg that does not know an option
+/// exits before decoding a frame ("Option not found"), so naming it
+/// unconditionally would turn a caption export into a hard failure on an older
+/// system binary. The version number cannot answer the question on its own
+/// either: whether libass can break these scripts also depends on the build
+/// carrying libunibreak. So the probe asks the binary itself, once per path,
+/// and the answer is cached for the life of the process.
+///
+/// A probe that cannot run answers **no** - the opposite default from
+/// [`binary_supports_fps_mode`], and deliberately: the cost of a wrong "no" is
+/// a CJK caption that wraps the way it did before this option existed, while
+/// the cost of a wrong "yes" is an export that does not run at all.
+pub fn binary_supports_subtitles_wrap_unicode(ffmpeg_path: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(map) = cache.lock() {
+        if let Some(&known) = map.get(ffmpeg_path) {
+            return known;
+        }
+    }
+
+    let supports = run_subtitles_filter_help(ffmpeg_path)
+        .map(|help| filter_help_advertises_wrap_unicode(&help))
+        .unwrap_or(false);
+
+    if let Ok(mut map) = cache.lock() {
+        map.insert(ffmpeg_path.to_path_buf(), supports);
+    }
+    supports
+}
+
+/// Runs `ffmpeg -h filter=subtitles` and returns everything it printed.
+///
+/// Both streams are kept: the option table goes to stdout on a current build,
+/// and a build that cannot describe the filter says so on stderr - either way
+/// the token is looked for in the same text.
+fn run_subtitles_filter_help(ffmpeg_path: &Path) -> FFmpegResult<String> {
+    let mut cmd = Command::new(ffmpeg_path);
+    configure_std_command(&mut cmd);
+    let output = cmd
+        .args(["-hide_banner", "-h", "filter=subtitles"])
+        .output()
+        .map_err(FFmpegError::ProcessError)?;
+
+    if !output.status.success() {
+        return Err(FFmpegError::ExecutionFailed(
+            "Failed to describe the FFmpeg subtitles filter".to_string(),
+        ));
+    }
+
+    Ok(format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+/// Decides `wrap_unicode` support from the text of `-h filter=subtitles`.
+///
+/// The option name is what is looked for, not a version: a build without the
+/// option simply does not list it, and a build that has it prints a
+/// `wrap_unicode <boolean>` row whatever the release number says.
+fn filter_help_advertises_wrap_unicode(help_text: &str) -> bool {
+    help_text.contains("wrap_unicode")
+}
+
 /// Validate that FFmpeg binaries are functional
 pub fn validate_ffmpeg(info: &FFmpegInfo) -> FFmpegResult<()> {
     // Test ffmpeg
@@ -945,5 +1024,36 @@ mod tests {
     fn should_spell_the_policy_with_the_flag_the_binary_understands() {
         assert_eq!(FrameRatePolicy::Passthrough.value(), "passthrough");
         assert_eq!(FrameRatePolicy::Vfr.value(), "vfr");
+    }
+
+    #[test]
+    fn should_read_wrap_unicode_support_out_of_the_filter_help() {
+        // Trimmed from the bundled binary's own `-h filter=subtitles`. The
+        // token is the whole answer: a build that has the option lists it.
+        let modern = "Filter subtitles\n  Render text subtitles onto input video using the libass library.\n\
+             subtitles AVOptions:\n\
+             \x20  filename          <string>     ..FV....... set the filename of file to read\n\
+             \x20  fontsdir          <string>     ..FV....... set the directory containing the fonts to read\n\
+             \x20  alpha             <boolean>    ..FV....... enable processing of alpha channel (default false)\n\
+             \x20  wrap_unicode      <boolean>    ..FV....... break lines according to the Unicode Line Breaking Algorithm (default auto)\n";
+        assert!(filter_help_advertises_wrap_unicode(modern));
+    }
+
+    #[test]
+    fn should_refuse_wrap_unicode_when_the_filter_help_does_not_list_it() {
+        // A pre-6.1 build describes the same filter without the option, and
+        // naming it anyway is an "Option not found" exit before any frame is
+        // decoded - so anything that does not advertise it must answer no.
+        let legacy = "Filter subtitles\n  Render text subtitles onto input video using the libass library.\n\
+             subtitles AVOptions:\n\
+             \x20  filename          <string>     ..FV....... set the filename of file to read\n\
+             \x20  original_size     <image_size> ..FV....... set the size of the original video\n\
+             \x20  fontsdir          <string>     ..FV....... set the directory containing the fonts to read\n\
+             \x20  charenc           <string>     ..FV....... set input character encoding\n";
+        assert!(!filter_help_advertises_wrap_unicode(legacy));
+        assert!(!filter_help_advertises_wrap_unicode(""));
+        assert!(!filter_help_advertises_wrap_unicode(
+            "Unknown filter 'subtitles'."
+        ));
     }
 }

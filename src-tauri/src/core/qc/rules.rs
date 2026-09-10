@@ -1582,8 +1582,11 @@ const ZERO_ADVANCE_RANGES: [(u32, u32); 1] = [
 ///
 /// Horizontal extent is modelled for both, but they wrap differently: a preset
 /// caption wraps inside [`CAPTION_WRAP_BOX_WIDTH_PERCENT`], a custom one at the
-/// frame edge, and text with no break opportunity at all - CJK, a bare URL -
-/// does not wrap anywhere and simply bleeds off the side.
+/// frame edge, and text with no break opportunity at all - a bare URL, one
+/// long unbroken Latin token - does not wrap anywhere and simply bleeds off the
+/// side. Unspaced CJK is not in that last group: the burn-in asks libass for
+/// the Unicode line-breaking algorithm, so it wraps like anything else. See
+/// [`CaptionSafeAreaRule::has_break_opportunity`].
 #[derive(Debug, Default)]
 pub struct CaptionSafeAreaRule;
 
@@ -1722,6 +1725,39 @@ impl CaptionSafeAreaRule {
         }
     }
 
+    /// Whether the renderer can break this label onto a second line.
+    ///
+    /// Whitespace is the obvious break opportunity, and for a long time it was
+    /// the only one this estimator recognised - which said, in effect, that a
+    /// Japanese or Chinese caption can never wrap, because those scripts are
+    /// written without word spaces. That was true of the burn-in only because
+    /// the `subtitles` filter defaults `wrap_unicode` to `auto`, and `auto` is
+    /// *off* for a native `.ass` input. The export now names the option (see
+    /// [`crate::core::render::export::append_ass_text_overlay`]), so libass
+    /// applies the Unicode line-breaking algorithm and breaks between
+    /// ideographs, kana and Hangul the way every other renderer of those
+    /// scripts does.
+    ///
+    /// The wide-script blocks are exactly the ones UAX #14 gives an
+    /// ideographic break class to, and exactly the ones
+    /// [`Self::glyph_advance_factor`] charges a full em, so one list answers
+    /// both questions and the two cannot drift apart.
+    ///
+    /// What is left in the unbreakable branch is a run with no break
+    /// opportunity of any kind: a bare URL, a single long Latin token. Those
+    /// still run off the side, and reporting them is the point of the rule.
+    fn has_break_opportunity(label: &str) -> bool {
+        label.chars().any(|character| {
+            if character.is_whitespace() {
+                return true;
+            }
+            let code = u32::from(character);
+            WIDE_SCRIPT_RANGES
+                .iter()
+                .any(|(first, last)| code >= *first && code <= *last)
+        })
+    }
+
     /// Returns the estimated text box size as (width, height) percentages.
     ///
     /// Both axes are measured in the space the renderer authors in, not in
@@ -1759,9 +1795,19 @@ impl CaptionSafeAreaRule {
     /// custom one, which is positioned with `\pos` and so has no margins to
     /// wrap inside. Text that fits nowhere is not turned into extra lines
     /// unless it *can* break: libass needs a break opportunity, so a run
-    /// without one - unspaced CJK, a bare URL - stays on one line and runs off
-    /// the side, which is a horizontal breach and is reported as one. That is
-    /// measured, not assumed; the numbers are in the no-break branch below.
+    /// without one stays on one line and runs off the side, which is a
+    /// horizontal breach and is reported as one. See
+    /// [`Self::has_break_opportunity`] for which runs those actually are.
+    ///
+    /// This models the burn-in as the app configures it, which since the
+    /// `wrap_unicode` fix means libass applying the Unicode line-breaking
+    /// algorithm on every export (see
+    /// [`crate::core::render::export::append_ass_text_overlay`]). A binary too
+    /// old to know that option is not modelled here - the estimator has no
+    /// FFmpeg to ask - so on such a host a CJK caption really is cropped and
+    /// this rule stays quiet about it. The guard for that is the CLI
+    /// integration test that burns a Japanese cue with a real libass and counts
+    /// the rows it lands on; a unit test cannot make that assertion.
     pub(super) fn estimate_text_box_percent(
         clip: &Clip,
         canvas_width: u32,
@@ -1803,7 +1849,7 @@ impl CaptionSafeAreaRule {
         // nothing either.
         let unwrapped_width_percent = (advance_px / script_width * 100.0).max(0.0);
 
-        let (width_percent, line_count) = if label.chars().any(char::is_whitespace) {
+        let (width_percent, line_count) = if Self::has_break_opportunity(label) {
             let bounded = unwrapped_width_percent.min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
             (
                 bounded.min(wrap_box_width_percent),
@@ -1814,27 +1860,11 @@ impl CaptionSafeAreaRule {
             // of this branch is that the width is the breach, so clamping it
             // would clamp away the finding.
             //
-            // The tempting "fix" is to spare CJK here, on the theory that a
-            // renderer can break between ideographs even with no space to break
-            // at. Measured against the ffmpeg this app ships (gyan 9.0.1,
-            // libass 0.17.5, built with freetype/fribidi/harfbuzz and *no*
-            // libunibreak), it cannot. Rendering the app's own 9:16 script
-            // space - `PlayResX 608`, `WrapStyle: 0`, 72px style, 61px side
-            // margins - on a 1080x1920 frame and measuring with `bbox`:
-            //
-            // - unspaced Japanese (19 chars, `これは非常に長い日本語の字幕テストです`):
-            //   `w:1050 h:86`, `x1:0` - one 86px line, running off both sides,
-            //   with white pixels in column 0 (`signalstats` YMAX 235 over the
-            //   leftmost 2px strip). Cropped, not wrapped.
-            // - unspaced Chinese (20 chars): `w:1080 h:90`, `x1:0 x2:1079` -
-            //   one line, spanning the frame edge to edge. Cropped.
-            // - spaced Korean control (24 chars incl. spaces): `w:785 h:350`,
-            //   `x1:152` - four lines, wholly inside the frame. Wrapped.
-            //
-            // So an unbreakable run really is drawn off-frame and really is a
-            // breach; libass has an optional libunibreak path that would break
-            // CJK per character, but this build does not carry it. Do not turn
-            // this branch into a wrap without re-measuring first.
+            // What reaches here is a run libass genuinely cannot break at all -
+            // a bare URL, a single long Latin token - and such a run really is
+            // drawn past the wrap box and off the side of the frame. Unspaced
+            // CJK is *not* one of those: it wraps, and it takes the branch
+            // above. See [`Self::has_break_opportunity`].
             (unwrapped_width_percent, 1.0)
         };
 
@@ -3591,10 +3621,13 @@ mod tests {
     #[tokio::test]
     async fn test_caption_safe_area_rule_should_report_an_unbreakable_run_that_bleeds_off_the_side()
     {
-        // libass needs a break opportunity. A run without one - unspaced CJK, a
-        // bare URL - does not wrap at the box, it runs past it, so the wrap box
-        // must not be allowed to hide the width.
-        let url = "https://example.com/watch/a-very-long-permalink-slug-that-never-breaks-anywhere";
+        // libass needs a break opportunity. A bare URL carries none - no space
+        // to break at, and none of the scripts the Unicode line-breaking
+        // algorithm breaks between characters of - so it does not wrap at the
+        // box, it runs past it, and the wrap box must not be allowed to hide
+        // the width. (Deliberately hyphen-free: a hyphen is a break
+        // opportunity, and the case under test is a run with none.)
+        let url = "https://example.com/watch/averylongpermalinkslugthatneverbreaksanywhereatall";
         let sequence = sequence_with_caption(
             url,
             Some(serde_json::json!({
@@ -3636,11 +3669,58 @@ mod tests {
             "the breach must be reported on the horizontal axis: {cue}"
         );
     }
+
+    /// Feature: Caption safe area
+    /// Scenario: an unspaced CJK cue is estimated as wrapping, not as bleeding
+    ///
+    /// Given a Japanese caption with no whitespace in it, far too wide for one
+    ///       line
+    /// When the safe-area estimator sizes its block
+    /// Then the block is bounded by the wrap box and runs to several lines
+    ///
+    /// The burn-in names `wrap_unicode` on the `subtitles` filter, so libass
+    /// applies the Unicode line-breaking algorithm and breaks between kana and
+    /// ideographs. Estimating these as one uncapped line - which this did while
+    /// the option went unset - both invented a safe-area breach that the render
+    /// does not produce and handed the contrast pass a column the words never
+    /// covered.
+    #[test]
+    fn test_caption_safe_area_rule_should_wrap_an_unspaced_cjk_cue() {
+        let japanese = "これは非常に長い日本語の字幕テストです";
+        let sequence = sequence_with_caption(
+            japanese,
+            Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": 10.0
+            })),
+            Some(serde_json::json!({ "fontSize": 72 })),
+        );
+
+        let (box_width, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
+            &sequence.tracks[0].clips[0],
+            1080,
+            1920,
+            CAPTION_WRAP_BOX_WIDTH_PERCENT,
+        );
+        assert!(
+            box_width <= CAPTION_WRAP_BOX_WIDTH_PERCENT,
+            "a wrapping run is bounded by the box it wraps inside, got {box_width}"
+        );
+        // 19 ideographs at a full 72px em is 1368 of a 608-wide script - 225%,
+        // which needs three passes of an 80% box.
+        assert!(
+            box_height > 72.0 * 1.2 / 1080.0 * 100.0 * 1.5,
+            "a wrapped run is taller than a single line, got {box_height}"
+        );
+    }
+
     /// The estimated `(width, height)` of one caption, in percent of the frame.
     ///
-    /// Every label passed here is unbroken, so the estimate takes its unwrapped
-    /// branch and the number under test is the advance itself rather than the
-    /// wrap box the advance is folded into.
+    /// Every label passed here is short enough to fit the wrap box on one line,
+    /// so whichever branch the estimate takes the number under test is the
+    /// advance itself rather than the wrap box the advance would be folded
+    /// into.
     fn estimated_box_percent(
         label: &str,
         style: serde_json::Value,

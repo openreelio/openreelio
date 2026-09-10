@@ -574,8 +574,19 @@ async fn run_probe(
     // every cell is unmeasurable while FFmpeg exits cleanly. `file=-` sends the
     // report to stdout instead, where nothing else in this command writes: the
     // `null` muxer produces no bytes.
+    //
+    // The same `wrap_unicode` the burn-in graph names, from the same probe.
+    // This measurement exists to find where libass puts each cell, so a probe
+    // that breaks lines differently from the render measures a layout the
+    // render never draws - and every emoji in an unspaced Japanese or Chinese
+    // cue would be composited against the wrong line.
+    let wrap_unicode_option = if engine.wraps_unicode_captions() {
+        super::export::SUBTITLES_WRAP_UNICODE_OPTION
+    } else {
+        ""
+    };
     let filter = format!(
-        "select='{select}',subtitles=filename='{escaped_script}',format=gray,bbox=min_val=32,metadata=mode=print:file=-"
+        "select='{select}',subtitles=filename='{escaped_script}'{wrap_unicode_option},format=gray,bbox=min_val=32,metadata=mode=print:file=-"
     );
 
     let args = vec![
@@ -1294,8 +1305,18 @@ mod tests {
     ///
     /// `None` when the frame is entirely black, which is what libass drawing
     /// nothing at all looks like from here.
+    ///
+    /// Carries `wrap_unicode` under the same probe the render path uses, so a
+    /// script measured here is laid out the way the burn-in lays it out.
     fn measure_script(ffmpeg: &Path, script: &str) -> Option<MeasuredBox> {
         use crate::core::effects::escape_ffmpeg_filter_value;
+
+        let wrap_unicode_option =
+            if crate::core::ffmpeg::binary_supports_subtitles_wrap_unicode(ffmpeg) {
+                super::super::export::SUBTITLES_WRAP_UNICODE_OPTION
+            } else {
+                ""
+            };
 
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("probe.ass");
@@ -1316,8 +1337,8 @@ mod tests {
                 "color=c=black:s=1920x1080:r=30:d=1",
                 "-vf",
                 &format!(
-                    "select='eq(n\\,10)',subtitles=filename='{}',format=gray,bbox=min_val=32,\
-                     metadata=mode=print:file=-",
+                    "select='eq(n\\,10)',subtitles=filename='{}'{wrap_unicode_option},\
+                     format=gray,bbox=min_val=32,metadata=mode=print:file=-",
                     escape_ffmpeg_filter_value(&path_text)
                 ),
                 // Matches `run_probe`; see the note there for why this is not

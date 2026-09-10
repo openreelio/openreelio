@@ -3506,6 +3506,15 @@ fn test_ffmpeg_info_reports_resolved_binaries() {
         "Unexpected ffmpeg source: {}",
         source
     );
+
+    // Self-diagnosis for the perception loop: an agent looking at a cropped
+    // Japanese caption needs to know whether the binary in front of it can be
+    // asked to wrap unspaced scripts at all.
+    assert!(
+        result["wrapsUnicodeCaptions"].is_boolean(),
+        "Expected a caption-wrapping capability, got: {}",
+        result
+    );
 }
 
 #[test]
@@ -11960,6 +11969,20 @@ fn render_ass_over_black(
     render_ass_over_color(ffmpeg_path, script, width, height, "black")
 }
 
+/// The `subtitles` options the export's burn-in node carries, for this binary.
+///
+/// Only `wrap_unicode` today, and only where the binary knows it: the option
+/// arrived in FFmpeg 6.1 and an older one exits on it before decoding a frame.
+/// Resolved through the same probe the render path uses, so what these tests
+/// burn in is what an export burns in.
+fn burn_in_subtitles_options(ffmpeg_path: &std::path::Path) -> &'static str {
+    if openreelio_core::ffmpeg::binary_supports_subtitles_wrap_unicode(ffmpeg_path) {
+        ":wrap_unicode=1"
+    } else {
+        ""
+    }
+}
+
 /// Renders `script` over a flat `color` and returns the frame as 8-bit grayscale.
 ///
 /// The script is written into the directory FFmpeg runs in so the filtergraph
@@ -11976,6 +11999,16 @@ fn render_ass_over_color(
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("overlay.ass"), script).expect("write script");
 
+    // The same options the export's own `subtitles` node carries. Without
+    // `wrap_unicode` these tests would measure a burn-in the app never
+    // produces - and the one script that most depends on it, unspaced CJK,
+    // would be measured on the cropped single line the option exists to
+    // prevent.
+    let subtitles_filter = format!(
+        "subtitles=overlay.ass{}",
+        burn_in_subtitles_options(ffmpeg_path)
+    );
+
     let output = Command::new(ffmpeg_path)
         .current_dir(dir.path())
         .args([
@@ -11986,7 +12019,7 @@ fn render_ass_over_color(
             "-i",
             &format!("color=c={color}:s={width}x{height}:d=2"),
             "-vf",
-            "subtitles=overlay.ass",
+            &subtitles_filter,
             "-ss",
             "1",
             "-frames:v",
@@ -12259,6 +12292,77 @@ fn test_burned_in_caption_wraps_inside_the_safe_box() {
     assert!(
         first_band_top > height / 2 && last_band_bottom < height - 80,
         "a bottom caption must sit above the bottom margin, got rows {first_band_top}..{last_band_bottom}"
+    );
+}
+
+/// Feature: Caption burn-in
+/// Scenario: an unspaced Japanese caption wraps instead of running off the side
+///
+/// Given a vertical sequence and a Japanese caption with no whitespace in it
+/// When the export's ASS script is burned in by libass as the export burns it
+/// Then the text occupies several lines and touches neither frame edge
+///
+/// Japanese and Chinese are written without word spaces, so `WrapStyle: 0` and
+/// event margins buy nothing on their own: libass breaks between kana and
+/// ideographs only when it is applying the Unicode line-breaking algorithm, and
+/// the `subtitles` filter leaves that off by default for a native `.ass` input.
+/// Measured on the bundled binary at this exact geometry, the same cue came out
+/// as one 1051px-wide line starting in column 0 - cropped - until the burn-in
+/// named `wrap_unicode`, after which it is 655px wide across several lines.
+///
+/// This is the guard the unit tests cannot be: the QC estimator only *models*
+/// the wrap, and a model agrees with itself whatever the renderer does.
+#[test]
+fn test_burned_in_unspaced_cjk_caption_wraps_inside_the_frame() {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return;
+    };
+
+    if burn_in_subtitles_options(&ffmpeg_path).is_empty() {
+        // Pre-6.1: the option the wrap depends on does not exist, so there is
+        // no wrap to assert. Loud where FFmpeg is required, quiet elsewhere.
+        skip_without_ffmpeg("this ffmpeg's subtitles filter has no wrap_unicode option");
+        return;
+    }
+
+    let (width, height) = (1080u32, 1920u32);
+    // Nineteen characters, no whitespace anywhere: "this is a very long
+    // Japanese subtitle test".
+    let script = vertical_caption_ass_script("これは非常に長い日本語の字幕テストです", "Arial", 72);
+    assert!(script.contains("WrapStyle: 0"));
+    assert!(
+        !script.contains("\\pos("),
+        "a wrapped caption must not be positioned"
+    );
+
+    let Some(frame) = render_ass_over_black(&ffmpeg_path, &script, width, height) else {
+        skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
+        return;
+    };
+
+    // No bundled family covers CJK, so these glyphs come from the host. A
+    // machine with no CJK font draws nothing at all, which is a font problem
+    // rather than a wrap problem - and is a failure on CI, which installs one.
+    let Some((left, right)) = text_column_extent(&frame, width, height) else {
+        skip_without_ffmpeg("this host has no font covering Japanese, so nothing was drawn");
+        return;
+    };
+
+    let bands = text_row_bands(&frame, width, height);
+    assert!(
+        bands.len() >= 2,
+        "an unspaced CJK cue must break between characters, got bands {bands:?}"
+    );
+
+    assert!(
+        left > 0 && right < width - 1,
+        "wrapped CJK must not reach either frame edge, got columns {left}..{right}"
+    );
+    // The same generous safe-box bound the Latin sibling checks: outline and
+    // antialiasing bleed a few pixels either side of the glyphs.
+    assert!(
+        left >= 40 && right <= width - 40,
+        "wrapped CJK must stay well inside the frame, got columns {left}..{right}"
     );
 }
 
