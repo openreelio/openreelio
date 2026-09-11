@@ -57,10 +57,7 @@ use std::{collections::HashMap, path::Path};
 use super::export::{
     build_ass_text_overlay_script_in_window_with_emoji, ExportEngine, ExportError,
 };
-use crate::core::{
-    effects::Effect,
-    timeline::{Sequence, TrackKind},
-};
+use crate::core::{effects::Effect, timeline::Sequence};
 
 /// How far inside a cue's end a frame time has to be to count as on the cue.
 ///
@@ -342,54 +339,63 @@ fn touches_frame_edge(measured: MeasuredBox, width: u32, height: u32) -> bool {
         || i64::from(measured.y2) >= bottom_edge
 }
 
-/// Enumerates the cues the ASS script builder will emit, in emission order.
+/// Turns the script builder's own event list into the cues the probe measures.
 ///
-/// Mirrors the loop in `build_ass_text_overlay_script_in_window_with_emoji`
-/// exactly - same track filter, same clip filter, same timing rejections, same
-/// window rejection - because the whole design rests on this list and that
-/// builder's `Dialogue` lines describing the same set of cues in the same order.
-/// A test in this module holds the two against each other.
+/// The builder writes one `Dialogue` line per clip it accepts and reports the
+/// clip behind each line in
+/// [`AssTextOverlayScript::event_clip_ids`](super::export::AssTextOverlayScript::event_clip_ids),
+/// so the set of cues and their order come from the code that emits them rather
+/// than from a second walk of the sequence re-implementing its selection
+/// clauses. That mirrored walk is what this replaced: it agreed with the builder
+/// on the day it was written, and the first clause to drift - one more reason to
+/// drop a clip, one fewer - would have shifted every attribution past the
+/// divergence onto the wrong caption.
 ///
-/// The builder has no per-cue identity to hand back (its events are named
-/// `OpenReelioText<n>` by position), so identity is taken from the clip, which
-/// is what the caller reports against anyway.
-fn enumerate_caption_cues(sequence: &Sequence, window_start_sec: f64) -> Vec<CaptionCue> {
-    let mut cues = Vec::new();
+/// Only the *timing* is read back off the clip here, and it is the same timing
+/// the builder wrote into the event.
+///
+/// `None` means the events cannot be attributed at all: an id the sequence does
+/// not hold, or two clips sharing one id. Neither is reachable from a builder
+/// that took its ids from this same sequence, and both would silently measure
+/// the wrong caption, so the answer is to measure nothing and say so.
+fn cues_for_events(
+    sequence: &Sequence,
+    window_start_sec: f64,
+    event_clip_ids: &[String],
+) -> Option<Vec<CaptionCue>> {
+    let wanted: std::collections::HashSet<&str> =
+        event_clip_ids.iter().map(String::as_str).collect();
 
+    let mut spans: HashMap<&str, (f64, f64)> = HashMap::new();
     for track in &sequence.tracks {
-        if !super::export::track_included_in_media_collection(track) {
-            continue;
-        }
-
         for clip in &track.clips {
-            if !clip.enabled {
+            if !wanted.contains(clip.id.as_str()) {
                 continue;
             }
-
-            let carries_text = match track.kind {
-                TrackKind::Caption => super::export::build_caption_text_effect(clip).is_some(),
-                TrackKind::Video | TrackKind::Overlay => super::export::is_text_clip(clip),
-                _ => false,
-            };
-            if !carries_text {
-                continue;
+            let span = (clip.place.timeline_in_sec, clip.place.timeline_out_sec());
+            if spans.insert(clip.id.as_str(), span).is_some() {
+                // Two clips answering to one id: whichever box is measured, it
+                // cannot be said which of them drew it.
+                return None;
             }
+        }
+    }
 
-            let start = clip.place.timeline_in_sec;
-            let end = clip.place.timeline_out_sec();
+    event_clip_ids
+        .iter()
+        .map(|clip_id| {
+            let (start, end) = *spans.get(clip_id.as_str())?;
             if !start.is_finite() || !end.is_finite() || end <= start {
-                continue;
+                return None;
             }
 
-            // A clip that ended before the window opened contributes no event,
-            // exactly as the builder drops it.
             let render_end = end - window_start_sec;
             if render_end < 0.0 {
-                continue;
+                return None;
             }
 
-            cues.push(CaptionCue {
-                clip_id: clip.id.clone(),
+            Some(CaptionCue {
+                clip_id: clip_id.clone(),
                 timeline_in_sec: start,
                 timeline_end_sec: end,
                 // `ass_timecode` floors a negative start at zero, so a cue
@@ -397,11 +403,9 @@ fn enumerate_caption_cues(sequence: &Sequence, window_start_sec: f64) -> Vec<Cap
                 // window's first frame.
                 render_start_sec: (start - window_start_sec).max(0.0),
                 render_end_sec: render_end,
-            });
-        }
-    }
-
-    cues
+            })
+        })
+        .collect()
 }
 
 /// A cue with its probe frames, and whether it can be attributed a box.
@@ -499,14 +503,11 @@ pub async fn measure_caption_extents(
         30.0
     };
 
-    let cues = enumerate_caption_cues(request.sequence, request.window_start_sec);
-    if cues.is_empty() {
-        return Ok(CaptionExtentMeasurement::default());
-    }
-
-    // Built once. Every probe run reads the same script the burn-in would, so
-    // the fonts, the `PlayRes`, the margins and the wrapping are the export's
-    // and not a reconstruction of them.
+    // Built once, and built *first*: it is the script that decides which clips
+    // become events, so the cue list is derived from it rather than guessed
+    // alongside it. Every probe run then reads the same script the burn-in
+    // would, so the fonts, the `PlayRes`, the margins and the wrapping are the
+    // export's and not a reconstruction of them.
     let Some(script) = build_ass_text_overlay_script_in_window_with_emoji(
         request.sequence,
         request.effects,
@@ -516,6 +517,30 @@ pub async fn measure_caption_extents(
     else {
         return Ok(CaptionExtentMeasurement::default());
     };
+
+    let Some(cues) = cues_for_events(
+        request.sequence,
+        request.window_start_sec,
+        &script.event_clip_ids,
+    ) else {
+        // Measuring on an identity this module cannot vouch for would report
+        // one caption's rectangle under another caption's name, which is worse
+        // than the predictor the caller falls back to.
+        return Ok(CaptionExtentMeasurement {
+            extents: Vec::new(),
+            coverage: CaptionExtentCoverage {
+                notes: vec![
+                    "The burn-in script's events could not be matched to clips, so no cue was \
+                     measured"
+                        .to_string(),
+                ],
+                ..CaptionExtentCoverage::default()
+            },
+        });
+    };
+    if cues.is_empty() {
+        return Ok(CaptionExtentMeasurement::default());
+    }
 
     let planned = plan_cues(cues, fps);
     let mut coverage = CaptionExtentCoverage::default();
@@ -1311,40 +1336,128 @@ mod tests {
     // Cue enumeration
     // =========================================================================
 
-    /// Feature: caption extent measurement
-    /// Scenario: the cue list and the script describe the same events
-    ///
-    /// The load-bearing parity claim. The script builder names its events by
-    /// position, so this module re-walks the sequence to attach a clip id to
-    /// each one. If the two loops ever disagree about which clips become events,
-    /// every measurement after the first disagreement is attributed to the wrong
-    /// caption.
-    #[test]
-    fn every_enumerated_cue_is_an_event_the_script_emits() {
-        let sequence = sequence_with_captions(&[
-            ("First cue", 0.0, 2.0),
-            ("Second cue", 2.0, 4.0),
-            ("Third cue", 4.0, 6.0),
-        ]);
-
-        let cues = enumerate_caption_cues(&sequence, 0.0);
+    /// The script's own event list, turned into cues exactly as the pass does.
+    fn cues_from_script(sequence: &Sequence, window_start_sec: f64) -> Vec<CaptionCue> {
         let script = build_ass_text_overlay_script_in_window_with_emoji(
-            &sequence,
+            sequence,
             &HashMap::new(),
-            0.0,
+            window_start_sec,
             None,
         )
-        .expect("the script builds")
-        .expect("the script has events");
+        .expect("the script builds");
 
-        let dialogue_lines = script
+        let Some(script) = script else {
+            return Vec::new();
+        };
+
+        cues_for_events(sequence, window_start_sec, &script.event_clip_ids)
+            .expect("every event names a clip of this sequence")
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: the Nth cue is the clip that drew the Nth `Dialogue` line
+    ///
+    /// The load-bearing identity claim, and the reason the builder reports its
+    /// event list at all. A count-only check passed happily while the mapping
+    /// was off by one; this pins *which* clip each event belongs to, over a
+    /// sequence whose clips are deliberately not all accepted: a blank label and
+    /// a disabled clip draw nothing, a text overlay on a video track draws
+    /// through the same script, and the caption track is emitted after it.
+    #[test]
+    fn each_event_is_matched_to_the_clip_that_drew_it() {
+        use crate::core::effects::{EffectType, ParamValue};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut video = Track::new_video("Video");
+        let mut title = Clip::new(&format!(
+            "{}title",
+            crate::core::commands::TEXT_ASSET_PREFIX
+        ))
+        .with_source_range(0.0, 2.0)
+        .place_at(0.0);
+        title.id = "clip-title".to_string();
+        title.effects.push("text-effect".to_string());
+        video.add_clip(title);
+        sequence.add_track(video);
+
+        let mut title_effect = Effect::with_id("text-effect", EffectType::TextOverlay);
+        title_effect.set_param("text", ParamValue::String("A title card".to_string()));
+        let effects: HashMap<String, Effect> =
+            HashMap::from([("text-effect".to_string(), title_effect)]);
+
+        let mut captions = Track::new_caption("Captions");
+        for (id, label, start, enabled) in [
+            ("clip-blank", "   ", 2.0, true),
+            ("clip-first", "First cue", 4.0, true),
+            ("clip-hidden", "Hidden cue", 6.0, false),
+            ("clip-second", "Second cue", 8.0, true),
+        ] {
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(start);
+            clip.id = id.to_string();
+            clip.label = Some(label.to_string());
+            clip.caption_style = Some(caption_style(64.0));
+            clip.enabled = enabled;
+            captions.add_clip(clip);
+        }
+        sequence.add_track(captions);
+
+        let script =
+            build_ass_text_overlay_script_in_window_with_emoji(&sequence, &effects, 0.0, None)
+                .expect("the script builds")
+                .expect("the script has events");
+
+        let dialogue_lines: Vec<&str> = script
             .script
             .lines()
             .filter(|line| line.starts_with("Dialogue:"))
-            .count();
+            .collect();
 
-        assert_eq!(cues.len(), 3);
-        assert_eq!(cues.len(), dialogue_lines);
+        assert_eq!(
+            script.event_clip_ids,
+            vec!["clip-title", "clip-first", "clip-second"],
+            "the blank label and the disabled clip draw nothing"
+        );
+        assert_eq!(script.event_clip_ids.len(), dialogue_lines.len());
+
+        // The Nth event is styled `OpenReelioText<n>`, so the position the id
+        // list records really is the position the script writes.
+        for (index, line) in dialogue_lines.iter().enumerate() {
+            assert!(
+                line.contains(&format!("OpenReelioText{index}")),
+                "event {index} is not the {index}th style: {line}"
+            );
+        }
+
+        let cues = cues_for_events(&sequence, 0.0, &script.event_clip_ids).expect("cues resolve");
+        let identified: Vec<(&str, f64)> = cues
+            .iter()
+            .map(|cue| (cue.clip_id.as_str(), cue.timeline_in_sec))
+            .collect();
+        assert_eq!(
+            identified,
+            vec![
+                ("clip-title", 0.0),
+                ("clip-first", 4.0),
+                ("clip-second", 8.0)
+            ],
+            "each cue carries the timing of the clip its event came from"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: an id the sequence cannot resolve measures nothing at all
+    ///
+    /// Unreachable from a builder fed this same sequence, and the one failure
+    /// mode that would report a caption's rectangle under another caption's
+    /// name - so it refuses rather than guesses.
+    #[test]
+    fn an_event_naming_an_unknown_clip_refuses_the_whole_pass() {
+        let sequence = sequence_with_captions(&[("First cue", 0.0, 2.0)]);
+
+        assert!(cues_for_events(&sequence, 0.0, &["clip-that-is-not-here".to_string()]).is_none());
     }
 
     /// Feature: caption extent measurement
@@ -1357,7 +1470,7 @@ mod tests {
     fn a_caption_with_no_words_is_not_enumerated() {
         let sequence = sequence_with_captions(&[("   ", 0.0, 2.0), ("Real cue", 2.0, 4.0)]);
 
-        let cues = enumerate_caption_cues(&sequence, 0.0);
+        let cues = cues_from_script(&sequence, 0.0);
 
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].timeline_in_sec, 2.0);
@@ -1370,7 +1483,7 @@ mod tests {
         let mut sequence = sequence_with_captions(&[("Hidden", 0.0, 2.0), ("Shown", 2.0, 4.0)]);
         sequence.tracks[0].clips[0].enabled = false;
 
-        let cues = enumerate_caption_cues(&sequence, 0.0);
+        let cues = cues_from_script(&sequence, 0.0);
 
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].timeline_in_sec, 2.0);
@@ -1387,7 +1500,7 @@ mod tests {
     fn a_ranged_render_rebases_the_cue_onto_the_windows_clock() {
         let sequence = sequence_with_captions(&[("Spanning", 8.0, 14.0)]);
 
-        let cues = enumerate_caption_cues(&sequence, 10.0);
+        let cues = cues_from_script(&sequence, 10.0);
 
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].timeline_in_sec, 8.0);
@@ -1402,7 +1515,7 @@ mod tests {
     fn a_cue_that_ended_before_the_window_opened_is_not_enumerated() {
         let sequence = sequence_with_captions(&[("Gone", 0.0, 2.0), ("Here", 10.0, 12.0)]);
 
-        let cues = enumerate_caption_cues(&sequence, 10.0);
+        let cues = cues_from_script(&sequence, 10.0);
 
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].timeline_in_sec, 10.0);

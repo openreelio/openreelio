@@ -49,8 +49,18 @@ pub async fn verify_sequence(
         .await
         .map_err(|error| format!("Verification planning failed: {error}"))??;
 
+    // A rendered file makes FFmpeg a requirement and a failure to resolve it an
+    // error. Without one, FFmpeg is merely an *improvement*: the caption-extent
+    // pass measures where the burn-in puts each caption rather than estimating
+    // it, and needs a binary but no deliverable. So it is offered when the
+    // engine says it has a use for it, and a machine that cannot resolve one
+    // verifies exactly as it did before.
     let runner = if plan.requires_ffmpeg() {
         Some(resolve_ffmpeg_runner_for(&ffmpeg_state, "verification").await?)
+    } else if plan.can_use_ffmpeg() {
+        resolve_ffmpeg_runner_for(&ffmpeg_state, "verification")
+            .await
+            .ok()
     } else {
         None
     };

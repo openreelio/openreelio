@@ -6845,6 +6845,20 @@ pub(crate) struct AssTextOverlayScript {
     /// project simply has no emoji - which is the overwhelming majority of
     /// renders, and the case that must cost nothing.
     pub emoji_occurrences: Vec<EmojiOccurrence>,
+    /// The clip behind each `Dialogue` line, in the order the lines are written.
+    ///
+    /// The script names its events by position (`OpenReelioText<n>`), which is
+    /// enough for libass and useless to anything that wants to say *which
+    /// caption* an event is. A measurement pass reading a rectangle off the Nth
+    /// event needs that answer, and re-walking the sequence to reconstruct it
+    /// means maintaining a second copy of this loop's selection clauses - a copy
+    /// that, the day it drifts, attributes every box after the divergence to the
+    /// wrong caption. So the loop that decides which clips become events says so
+    /// here, and there is nothing left to keep in step.
+    ///
+    /// `event_clip_ids[n]` is the clip of the `n`th `Dialogue` line, and the
+    /// length always equals the number of those lines.
+    pub event_clip_ids: Vec<String>,
 }
 
 /// [`build_ass_text_overlay_script`], with every event's timing rebased.
@@ -6895,6 +6909,7 @@ pub(crate) fn build_ass_text_overlay_script_in_window_with_emoji(
     let mut events = String::new();
     let mut fonts = AssFontEmbedder::default();
     let mut event_count = 0usize;
+    let mut event_clip_ids: Vec<String> = Vec::new();
     let mut uses_host_fonts = false;
 
     let stack_depths = visual_stack_depths(sequence);
@@ -7005,6 +7020,10 @@ pub(crate) fn build_ass_text_overlay_script_in_window_with_emoji(
                 emoji,
                 &mut emoji_occurrences,
             );
+            // Recorded next to the write, not reconstructed later: this is the
+            // only place that knows an event was emitted and which clip it came
+            // from, so the two can never fall out of step.
+            event_clip_ids.push(clip.id.clone());
             event_count += 1;
         }
     }
@@ -7022,6 +7041,7 @@ pub(crate) fn build_ass_text_overlay_script_in_window_with_emoji(
         ),
         uses_host_fonts,
         emoji_occurrences,
+        event_clip_ids,
     }))
 }
 

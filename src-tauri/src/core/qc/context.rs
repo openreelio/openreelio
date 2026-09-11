@@ -4,6 +4,18 @@
 //! QC rules evaluate against. The context is built once per QC run and shared by
 //! reference with every rule, so a single (expensive) measurement pass can serve
 //! the whole rule set.
+//!
+//! # The honesty contract
+//!
+//! Every collection on [`RenderMeasurements`] and every optional field on
+//! [`QCContext`] means "not measured" when it is empty or absent. **An empty
+//! list must never be read as "everything passed."** The two are different
+//! verdicts and the report has to be able to tell them apart: a pass that could
+//! not run at all, and a pass that ran and found nothing, look identical in the
+//! data unless the coverage record alongside says which happened. That is why
+//! every measurement pass here carries a coverage record, and why a rule with no
+//! measurement for a cue falls back to its own predictor rather than declaring
+//! the cue fine.
 
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +67,67 @@ pub struct MeasuredStreams {
     pub video: Option<MeasuredVideoStream>,
     /// Whether the file carries an audio stream
     pub has_audio: bool,
+}
+
+/// Where one caption cue's ink actually landed on the canvas.
+///
+/// The QC-facing shape of `core::render::caption_measure::CaptionExtent`, in the
+/// space QC reasons in: percentages of the canvas, edges rather than a rectangle
+/// object, and nothing that ties `core::qc` to the render module's types. The
+/// pass that produces these renders each cue through the export's own libass
+/// graph and reads the inked alpha bounding box back, so these four numbers are
+/// measurements of the burn-in rather than predictions about it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionExtentSample {
+    /// Caption or text clip whose cue was measured
+    pub clip_id: String,
+    /// Distance from the canvas's left edge to the ink's left edge, in percent
+    pub left_percent: f64,
+    /// Distance from the canvas's left edge to the ink's right edge, in percent
+    pub right_percent: f64,
+    /// Distance from the canvas's top edge to the ink's top edge, in percent
+    pub top_percent: f64,
+    /// Distance from the canvas's top edge to the ink's bottom edge, in percent
+    pub bottom_percent: f64,
+    /// Whether the measured box is flush against a frame edge
+    ///
+    /// libass clips its own drawing at the frame, so a caption wider than the
+    /// picture measures as one exactly the width of the picture: the overshoot
+    /// is not in the image and cannot be recovered from it. A rule reads this as
+    /// "overflow of unknown magnitude" — the edges still say the box reaches the
+    /// frame boundary, and this says the real box goes further by an amount
+    /// nothing here can quantify.
+    pub clipped: bool,
+}
+
+/// What the caption-extent pass could not measure, and why.
+///
+/// Carried so an empty or short [`RenderMeasurements::caption_extents`] cannot
+/// be read as "every caption was measured and every one was fine". A cue named
+/// here has no measurement and is graded by the caller's own estimate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionExtentCoverageRecord {
+    /// Cues the pass measured a rectangle for
+    pub measured: usize,
+    /// Cues sharing a rendered frame with another text or caption event
+    ///
+    /// One bounding box cannot be attributed to one of two events drawn at the
+    /// same instant, so these are left to the estimator.
+    pub shared_frame_cue_ids: Vec<String>,
+    /// Cues shorter than a frame interval, which no rendered frame shows
+    pub sub_frame_cue_ids: Vec<String>,
+    /// Cues that rendered no ink at all on any sampled frame
+    ///
+    /// A missing font, a fully transparent style or a stray override tag. A QC
+    /// signal in its own right, and one no rule grades yet — see the note on
+    /// [`crate::core::qc::structural::CaptionOutOfBoundsRule`].
+    pub no_ink_cue_ids: Vec<String>,
+    /// Whether at least one probe run could not be completed
+    pub probe_failed: bool,
+    /// Human-readable detail for the report
+    pub notes: Vec<String>,
 }
 
 /// Measurements captured from a rendered version of the sequence.
@@ -112,6 +185,22 @@ pub struct RenderMeasurements {
     /// than let an empty sample list read as a clean result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption_band_coverage: Option<CaptionSampleCoverage>,
+    /// Where each caption cue's ink actually landed, measured through the
+    /// export's own libass graph.
+    ///
+    /// Empty when the pass did not run — no FFmpeg on this machine, a
+    /// structural-only run, or a run that selected no caption check — which is
+    /// emphatically not "every caption sits inside the frame". A rule with no
+    /// entry for a cue falls back to its own estimate; see
+    /// [`crate::core::qc::caption_extent`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caption_extents: Vec<CaptionExtentSample>,
+    /// What the caption-extent pass could not reach.
+    ///
+    /// `None` means no extent pass ran at all, which is a different statement
+    /// from a pass that ran and could measure nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_extent_coverage: Option<CaptionExtentCoverageRecord>,
 }
 
 impl RenderMeasurements {
@@ -195,6 +284,13 @@ pub struct QCContext {
     /// Canvas height in pixels
     pub canvas_height: u32,
     /// Measurements from a rendered version of the sequence, when available
+    ///
+    /// `Some` means a rendered file was measured. Every rendered rule reads it
+    /// that way — `None` is what makes them report "skipped" rather than
+    /// "passed" — so nothing may set it just to carry a figure that did not come
+    /// from measuring a file. The caption-extent pass is exactly such a figure
+    /// (it renders synthetic cues and needs no deliverable), which is why it has
+    /// its own slot below.
     pub measurements: Option<RenderMeasurements>,
     /// The timeline stretch the measured file holds, for a partial render
     ///
@@ -202,6 +298,23 @@ pub struct QCContext {
     /// zero, which is what every rendered rule assumed before partial renders
     /// could be verified at all.
     pub measured_window: Option<MeasuredWindow>,
+    /// Measured caption extents, whether or not a rendered file was measured.
+    ///
+    /// The caption-extent pass needs FFmpeg but no deliverable, so it can run on
+    /// a plain structural verify. Keeping its output here rather than only
+    /// inside [`measurements`](Self::measurements) is what lets it do that
+    /// without every *rendered* rule suddenly believing a file was measured and
+    /// reporting "passed" over an empty detection list.
+    ///
+    /// [`with_measurements`](Self::with_measurements) mirrors the same figures
+    /// out of the measurements record, so a context assembled the old way — the
+    /// GUI, a test, a caller that only has a `RenderMeasurements` — still gets
+    /// measured-first grading with no extra call.
+    ///
+    /// Empty is "not measured", never "measured and fine".
+    pub caption_extents: Vec<CaptionExtentSample>,
+    /// What the caption-extent pass could not reach, or `None` if it never ran
+    pub caption_extent_coverage: Option<CaptionExtentCoverageRecord>,
 }
 
 impl QCContext {
@@ -219,13 +332,53 @@ impl QCContext {
             canvas_height: sequence.format.canvas.height,
             measurements: None,
             measured_window: None,
+            caption_extents: Vec::new(),
+            caption_extent_coverage: None,
         }
     }
 
     /// Attaches rendered measurements to this context.
+    ///
+    /// Caption extents travelling inside the record are mirrored into their own
+    /// slot, so there is one place a rule reads them from however the context
+    /// was assembled.
     pub fn with_measurements(mut self, measurements: RenderMeasurements) -> Self {
+        if !measurements.caption_extents.is_empty()
+            || measurements.caption_extent_coverage.is_some()
+        {
+            self.caption_extents = measurements.caption_extents.clone();
+            self.caption_extent_coverage = measurements.caption_extent_coverage.clone();
+        }
         self.measurements = Some(measurements);
         self
+    }
+
+    /// Attaches measured caption extents without claiming a file was rendered.
+    ///
+    /// The pass behind them renders synthetic cues over a transparent canvas, so
+    /// it answers for the captions and for nothing else: this must never make
+    /// [`measurements`](Self::measurements) `Some`, or every rendered rule would
+    /// report a clean picture it never looked at.
+    pub fn with_caption_extents(
+        mut self,
+        samples: Vec<CaptionExtentSample>,
+        coverage: CaptionExtentCoverageRecord,
+    ) -> Self {
+        self.caption_extents = samples;
+        self.caption_extent_coverage = Some(coverage);
+        self
+    }
+
+    /// The measured extent of one cue, or `None` when it was not measured.
+    ///
+    /// `None` covers every way a cue can go unmeasured — the pass did not run,
+    /// the cue shared a frame with another event, it rendered no ink, the probe
+    /// failed — because a caller has exactly one correct response to all of
+    /// them: fall back to its own estimate.
+    pub fn caption_extent(&self, clip_id: &str) -> Option<&CaptionExtentSample> {
+        self.caption_extents
+            .iter()
+            .find(|sample| sample.clip_id == clip_id)
     }
 
     /// Declares which timeline seconds the measured file holds.

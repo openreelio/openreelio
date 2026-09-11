@@ -1956,10 +1956,99 @@ impl QCRule for CaptionEmojiRule {
 // CaptionOutOfBoundsRule
 // =============================================================================
 
+/// Where a cue's four edges came from.
+///
+/// Mostly the report's distinction rather than the rule's — both answers are
+/// graded the same way, and it is the wording of the finding that has to say
+/// whether the numbers were read off a render or predicted by a model. The one
+/// place it changes the verdict is [`CaptionBox::escapes_frame`], where only a
+/// measurement can carry the "clipped" signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptionBoxSource {
+    /// Read off a render of this cue through the export's own libass graph
+    Measured,
+    /// Predicted from the font size, the label and the anchor
+    Estimated,
+}
+
+impl CaptionBoxSource {
+    /// The word the finding uses for this cue's box.
+    fn label(self) -> &'static str {
+        match self {
+            CaptionBoxSource::Measured => "measured",
+            CaptionBoxSource::Estimated => "estimated",
+        }
+    }
+}
+
+/// The rectangle one cue is graded against.
+#[derive(Clone, Copy, Debug)]
+struct CaptionBox {
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+    source: CaptionBoxSource,
+    /// Whether the measured ink is flush against a frame edge
+    ///
+    /// Always false for an estimate, which has no frame to be cut off by.
+    clipped: bool,
+}
+
+impl CaptionBox {
+    /// Whether this box leaves the canvas.
+    ///
+    /// Two ways, and the second only exists because the first cannot see it:
+    ///
+    /// 1. An edge past the canvas by more than `tolerance`. The estimate's only
+    ///    route, and a measurement's route whenever the renderer had room to
+    ///    draw the overshoot.
+    /// 2. `clipped`. libass stops drawing at the frame, so a caption wider than
+    ///    the picture measures as one *exactly* the width of the picture —
+    ///    `0.0` to `100.0`, which clause 1 passes. Reading that as "fits" would
+    ///    make the worst overflow in the project the one case this rule waves
+    ///    through, and would be a regression on the estimate it replaced: the
+    ///    estimator reports such a caption today.
+    ///
+    /// Clause 2 is why this rule cannot simply compare four numbers. It also
+    /// means a style whose ink genuinely reaches the first or last pixel of the
+    /// frame is reported — which is the right call for a caption: a block with
+    /// no margin at all is broken output whether or not a glyph was cut.
+    /// Written as the negation of "inside the frame" rather than as four
+    /// `>` comparisons, so an edge that is somehow not a number is reported
+    /// rather than waved through — exactly as it was before this struct existed.
+    fn escapes_frame(&self, tolerance: f64) -> bool {
+        if self.clipped {
+            return true;
+        }
+
+        let inside = self.left >= -tolerance
+            && self.right <= 100.0 + tolerance
+            && self.top >= -tolerance
+            && self.bottom <= 100.0 + tolerance;
+
+        !inside
+    }
+}
+
 /// Rule that reports captions positioned outside the canvas
 ///
 /// Distinct from the safe-area rule: this one fires only when the caption is
 /// (partly) off-frame, which crops the text and is objectively broken output.
+///
+/// # Measured first, estimated always
+///
+/// The rule stays **structural** and always runs. That is deliberate: it is the
+/// Error-severity check that a render-free `verify --path` on a machine with no
+/// FFmpeg still has to be able to fail, and making it `rendered` would have it
+/// report "skipped" there instead — turning a broken deliverable into a clean
+/// run and changing the exit code with it.
+///
+/// What the caption-extent pre-pass adds is *better numbers for the same test*.
+/// When it ran and could attribute a rectangle to a cue, the rule grades the
+/// rectangle libass actually drew. When it did not, the rule grades the same
+/// estimate it always did. Per cue, never per run: one measured cue on a track
+/// does not make its unmeasured neighbours pass by association.
 #[derive(Debug, Default)]
 pub struct CaptionOutOfBoundsRule;
 
@@ -2004,6 +2093,49 @@ impl CaptionOutOfBoundsRule {
     /// `1..=500`, the anchor axes to `0..=1`, the preset margin to `0..=50`,
     /// and a canvas with a zero side to 16:9 - so the edges below are always
     /// finite and there is no unmeasurable box for this rule to skip.
+    /// The box this rule grades a cue against, and where the numbers came from.
+    ///
+    /// Measured whenever the caption-extent pre-pass reached this cue: it
+    /// renders the cue through the export's own libass graph and reads the inked
+    /// alpha bounding box back, so the edges are the burn-in's rather than a
+    /// second implementation's guess about it. Estimated otherwise — which is
+    /// every run with no FFmpeg, every `--structural-only` run, and, inside a
+    /// measured run, every cue the pass could not attribute a rectangle to (one
+    /// sharing a frame with another event, one shorter than a frame, one that
+    /// drew no ink, one whose probe failed).
+    ///
+    /// The fallback is exact, not approximate-in-the-other-direction: an
+    /// unmeasured cue is graded by precisely the estimate this rule used before
+    /// the pass existed, so no cue is ever checked *less* than it was.
+    fn resolved_box(clip: &Clip, context: &QCContext) -> CaptionBox {
+        if let Some(measured) = context.caption_extent(&clip.id) {
+            return CaptionBox {
+                left: measured.left_percent,
+                right: measured.right_percent,
+                top: measured.top_percent,
+                bottom: measured.bottom_percent,
+                source: CaptionBoxSource::Measured,
+                clipped: measured.clipped,
+            };
+        }
+
+        // TODO(caption-no-ink): a cue the pass measured as drawing nothing at
+        // all is a defect of its own — a missing font, a transparent style, an
+        // override tag that hid the text — and wants a rule that says so. Until
+        // then it arrives here as an unmeasured cue and is estimated like any
+        // other.
+        let (left, right, top, bottom) =
+            Self::box_edges(clip, context.canvas_width, context.canvas_height);
+        CaptionBox {
+            left,
+            right,
+            top,
+            bottom,
+            source: CaptionBoxSource::Estimated,
+            clipped: false,
+        }
+    }
+
     fn box_edges(clip: &Clip, canvas_width: u32, canvas_height: u32) -> (f64, f64, f64, f64) {
         let alignment = CaptionSafeAreaRule::alignment(clip.caption_style.as_ref());
         let anchor = caption_anchor_percent(
@@ -2058,7 +2190,7 @@ impl QCRule for CaptionOutOfBoundsRule {
     }
 
     fn description(&self) -> &str {
-        "Reports captions whose estimated text box falls outside the canvas"
+        "Reports captions whose text box falls outside the canvas"
     }
 
     fn default_severity(&self) -> Severity {
@@ -2078,45 +2210,63 @@ impl QCRule for CaptionOutOfBoundsRule {
 
         for track in sequence.tracks.iter().filter(|track| track.is_caption()) {
             let mut findings: Vec<CaptionFinding> = Vec::new();
+            let mut any_measured = false;
 
             for clip in &track.clips {
-                let (left, right, top, bottom) =
-                    Self::box_edges(clip, context.canvas_width, context.canvas_height);
+                let resolved = Self::resolved_box(clip, context);
+                any_measured |= resolved.source == CaptionBoxSource::Measured;
 
-                if left >= -tolerance
-                    && right <= 100.0 + tolerance
-                    && top >= -tolerance
-                    && bottom <= 100.0 + tolerance
-                {
+                if !resolved.escapes_frame(tolerance) {
                     continue;
                 }
 
-                findings.push(
-                    CaptionFinding::new(
-                        clip.id.clone(),
-                        clip.place.timeline_in_sec,
-                        clip.timeline_end(),
-                    )
-                    .with_metric("leftPercent", left)
-                    .with_metric("rightPercent", right)
-                    .with_metric("topPercent", top)
-                    .with_metric("bottomPercent", bottom),
-                );
+                let mut finding = CaptionFinding::new(
+                    clip.id.clone(),
+                    clip.place.timeline_in_sec,
+                    clip.timeline_end(),
+                )
+                .with_metric("leftPercent", resolved.left)
+                .with_metric("rightPercent", resolved.right)
+                .with_metric("topPercent", resolved.top)
+                .with_metric("bottomPercent", resolved.bottom)
+                .with_metric("boxSource", resolved.source.label());
+
+                // The renderer stopped drawing at the frame, so the reported
+                // edge is where the picture ends and not where the caption
+                // does. Said out loud, because the overshoot is not in the
+                // image and cannot be recovered from it — re-rendering larger
+                // would re-wrap the text and measure a different caption.
+                if resolved.clipped {
+                    finding = finding.with_metric("clipped", true);
+                }
+
+                findings.push(finding);
             }
 
             // One violation per track, not one per cue: a caption track pushed
             // off the frame is one wrong setting, and a fix that repairs one
             // cue at a time makes an agent run the loop once per caption.
+            let details = if any_measured {
+                "Text outside the frame is cropped away. Each listed cue carries its own box \
+                 under `cues`, with `boxSource` saying whether it was measured by rendering the \
+                 cue through the export's own caption graph or estimated from the font size and \
+                 label; a cue marked `clipped` runs further off the frame than its edges can \
+                 show, because the renderer stopped drawing at the boundary. No fix is offered: \
+                 where a caption pushed off the canvas belongs is a composition decision, and \
+                 `caption.safe_area` proposes the move for the cues it can measure."
+            } else {
+                "Text outside the frame is cropped away. Each listed cue carries its own \
+                 estimated box under `cues`. No fix is offered: where a caption pushed off the \
+                 canvas belongs is a composition decision, and `caption.safe_area` proposes the \
+                 move for the cues it can measure."
+            };
+
             violations.extend(group_caption_findings(
                 CaptionGroup {
                     rule_name: self.name(),
                     severity,
                     track_id: &track.id,
-                    details: "Text outside the frame is cropped away. Each listed cue carries its \
-                              own estimated box under `cues`. No fix is offered: where a caption \
-                              pushed off the canvas belongs is a composition decision, and \
-                              `caption.safe_area` proposes the move for the cues it can measure."
-                        .to_string(),
+                    details: details.to_string(),
                     fix_description: String::new(),
                     confidence: 0.0,
                 },
@@ -2641,7 +2791,9 @@ pub fn crossref_black_ranges_with_gaps(
 mod tests {
     use super::*;
     use crate::core::assets::{Asset, AudioInfo, VideoInfo};
-    use crate::core::qc::context::RenderMeasurements;
+    use crate::core::qc::context::{
+        CaptionExtentCoverageRecord, CaptionExtentSample, RenderMeasurements,
+    };
     use crate::core::qc::test_support::text_overlay_clip;
     use crate::core::timeline::SequenceFormat;
 
@@ -4447,6 +4599,256 @@ mod tests {
     /// still report is a run with no wide-script break inside it, which is why
     /// the controls below are a bare letter run and a URL slug that a single
     /// trailing ideograph does not rescue.
+    /// A measured extent for `clip_id`, in canvas percent.
+    fn extent(clip_id: &str, left: f64, right: f64, top: f64, bottom: f64) -> CaptionExtentSample {
+        CaptionExtentSample {
+            clip_id: clip_id.to_string(),
+            left_percent: left,
+            right_percent: right,
+            top_percent: top,
+            bottom_percent: bottom,
+            clipped: false,
+        }
+    }
+
+    /// A context carrying `samples` and nothing else the rules can measure.
+    fn context_with_extents(sequence: &Sequence, samples: Vec<CaptionExtentSample>) -> QCContext {
+        let measured = samples.len();
+        QCContext::from_sequence(sequence).with_caption_extents(
+            samples,
+            CaptionExtentCoverageRecord {
+                measured,
+                ..CaptionExtentCoverageRecord::default()
+            },
+        )
+    }
+
+    /// One caption track holding one clip with a known id.
+    fn sequence_with_one_caption(id: &str, label: &str) -> Sequence {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_caption("C1");
+        let mut clip = caption_clip(label, 0.0, 2.0);
+        clip.id = id.to_string();
+        track.add_clip(clip);
+        sequence.add_track(track);
+        sequence
+    }
+
+    async fn out_of_bounds_violations(
+        sequence: &Sequence,
+        context: &QCContext,
+    ) -> Vec<QCViolation> {
+        CaptionOutOfBoundsRule::new()
+            .check(
+                sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                context,
+            )
+            .await
+            .expect("rule runs")
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should fail a cue the render pushed off the frame even though
+    /// the estimate says it fits
+    ///
+    /// The direction that matters: the estimator is a model of a renderer, and
+    /// when it is wrong it is usually wrong small — a block measured narrower
+    /// and shorter than it is drawn, which on an Error-severity rule is a missed
+    /// Error. A short label in the default position estimates comfortably inside
+    /// the frame; the measurement says libass drew it running off the right
+    /// edge, and the measurement wins.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_prefer_a_measured_box_that_fails() {
+        let sequence = sequence_with_one_caption("clip-a", "Short");
+
+        let estimated = out_of_bounds_violations(&sequence, &context_for(&sequence)).await;
+        assert!(
+            estimated.is_empty(),
+            "the fixture has to be one the estimator passes, or this proves nothing"
+        );
+
+        let context =
+            context_with_extents(&sequence, vec![extent("clip-a", 20.0, 130.0, 80.0, 92.0)]);
+        let measured = out_of_bounds_violations(&sequence, &context).await;
+
+        assert_eq!(measured.len(), 1, "the rendered box runs off the frame");
+        let cue = first_cue(&measured[0]);
+        assert_eq!(
+            cue["rightPercent"], 130.0,
+            "the measured edge, not the estimate: {cue}"
+        );
+        assert_eq!(cue["boxSource"], "measured");
+        assert!(
+            measured[0]
+                .details
+                .as_deref()
+                .expect("details")
+                .contains("measured"),
+            "a measured finding must not be reported as an approximation"
+        );
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should clear a cue the render kept inside the frame even though
+    /// the estimate says it overflows
+    ///
+    /// The other direction, and the one that proves the rule really switched
+    /// source rather than merely gaining a second opinion: the same anchor that
+    /// makes `test_out_of_bounds_rule_should_report_a_caption_off_canvas` fail,
+    /// with a measurement saying the ink landed inside the frame.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_prefer_a_measured_box_that_passes() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_caption("C1");
+        let mut clip = caption_clip("Way off", 0.0, 2.0);
+        clip.id = "clip-a".to_string();
+        clip.caption_position = Some(serde_json::json!({
+            "type": "custom",
+            "xPercent": 120.0,
+            "yPercent": 50.0
+        }));
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        assert_eq!(
+            out_of_bounds_violations(&sequence, &context_for(&sequence))
+                .await
+                .len(),
+            1,
+            "the estimator reports this anchor as off the canvas"
+        );
+
+        let context =
+            context_with_extents(&sequence, vec![extent("clip-a", 30.0, 70.0, 80.0, 92.0)]);
+
+        assert!(
+            out_of_bounds_violations(&sequence, &context)
+                .await
+                .is_empty(),
+            "a measurement of where the ink landed overrules the anchor arithmetic"
+        );
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should estimate every cue the pass did not reach
+    ///
+    /// Per cue, not per run. A pass that measured one cue on a track says
+    /// nothing about its neighbours, and a neighbour treated as fine because
+    /// *something* was measured is exactly the "empty list reads as passed"
+    /// failure the coverage record exists to prevent.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_estimate_the_cues_the_pass_missed() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_caption("C1");
+        for (id, x_percent) in [("clip-measured", 50.0), ("clip-unmeasured", 120.0)] {
+            let mut clip = caption_clip("Way off", 0.0, 2.0);
+            clip.id = id.to_string();
+            clip.caption_position = Some(serde_json::json!({
+                "type": "custom",
+                "xPercent": x_percent,
+                "yPercent": 50.0
+            }));
+            track.add_clip(clip);
+        }
+        sequence.add_track(track);
+
+        let context = context_with_extents(
+            &sequence,
+            vec![extent("clip-measured", 30.0, 70.0, 40.0, 60.0)],
+        );
+        let violations = out_of_bounds_violations(&sequence, &context).await;
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].metrics["cueCount"], 1,
+            "only the unmeasured cue is graded by the estimate"
+        );
+        let cue = first_cue(&violations[0]);
+        assert_eq!(cue["clipId"], "clip-unmeasured");
+        assert_eq!(cue["boxSource"], "estimated");
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should report a caption the renderer cropped, and say the
+    /// overshoot is unquantifiable
+    ///
+    /// The trap in measuring instead of estimating. libass stops drawing at the
+    /// frame, so a caption *wider than the picture* measures as one exactly the
+    /// width of the picture — `0.0` to `100.0`, which the four-edge comparison
+    /// happily passes inside its tolerance. Left at that, switching to
+    /// measurement would have made the very worst overflow in a project the one
+    /// case this Error waved through, while the estimate it replaced reported
+    /// it. So the clipped flag is itself out-of-bounds, and the finding carries
+    /// it so a reader does not take `100` for the caption's true edge.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_report_a_box_the_renderer_cropped() {
+        let sequence = sequence_with_one_caption("clip-a", "Short");
+
+        let flush = extent("clip-a", 0.0, 100.0, 80.0, 92.0);
+        assert!(
+            out_of_bounds_violations(&sequence, &context_with_extents(&sequence, vec![flush]))
+                .await
+                .is_empty(),
+            "a box that merely reaches the edges, unclipped, is inside the frame"
+        );
+
+        let context = context_with_extents(
+            &sequence,
+            vec![CaptionExtentSample {
+                clipped: true,
+                ..extent("clip-a", 0.0, 100.0, 80.0, 92.0)
+            }],
+        );
+        let violations = out_of_bounds_violations(&sequence, &context).await;
+
+        assert_eq!(
+            violations.len(),
+            1,
+            "the same edges, cut off by the renderer, are an overflow"
+        );
+        let cue = first_cue(&violations[0]);
+        assert_eq!(cue["clipped"], true);
+        assert_eq!(cue["boxSource"], "measured");
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should keep reporting the estimate when nothing was measured
+    ///
+    /// The render-free contract. A machine with no FFmpeg, or a
+    /// `--structural-only` run, grades exactly as it did before the pass
+    /// existed — including the word it uses for the box.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_estimate_when_no_pass_ran() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_caption("C1");
+        let mut clip = caption_clip("Way off", 0.0, 2.0);
+        clip.caption_position = Some(serde_json::json!({
+            "type": "custom",
+            "xPercent": 120.0,
+            "yPercent": 50.0
+        }));
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let context = context_for(&sequence);
+        assert!(
+            context.caption_extents.is_empty(),
+            "a plain context carries no measurements"
+        );
+
+        let violations = out_of_bounds_violations(&sequence, &context).await;
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(first_cue(&violations[0])["boxSource"], "estimated");
+        assert!(violations[0]
+            .details
+            .as_deref()
+            .expect("details")
+            .contains("estimated box"));
+    }
+
     #[tokio::test]
     async fn test_out_of_bounds_rule_should_treat_an_unspaced_cjk_cue_as_wrapping() {
         async fn violations_for(label: &str) -> Vec<QCViolation> {

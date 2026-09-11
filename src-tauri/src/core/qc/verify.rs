@@ -45,9 +45,9 @@
 
 use super::{
     crossref_black_ranges_with_gaps, measure_rendered_file_detailed, sample_caption_bands,
-    CaptionSampleOptions, ContrastThresholds, MeasureOptions, MeasuredWindow, MeasurementReport,
-    QCContext, QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleStatus, Severity,
-    ViolationFix, CAPTION_CONTRAST_CHECK_ID,
+    sample_caption_extents, CaptionExtentOptions, CaptionSampleOptions, ContrastThresholds,
+    MeasureOptions, MeasuredWindow, MeasurementReport, QCContext, QCEngine, QCEngineConfig,
+    QCReport, QCSeverityFilter, RuleStatus, Severity, ViolationFix, CAPTION_CONTRAST_CHECK_ID,
 };
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::project::ProjectState;
@@ -85,6 +85,12 @@ const PEAK_CHECK_ID: &str = "audio.peak";
 
 /// Check ID of the render-length rule, wired to `duration_tolerance_sec`.
 const DURATION_CHECK_ID: &str = "render.duration_mismatch";
+
+/// Check ID of the rule that reads measured caption extents.
+///
+/// The extent pass costs an FFmpeg run per eighty cues and answers exactly this
+/// check, so a run that did not select it must not pay for it.
+const CAPTION_OUT_OF_BOUNDS_CHECK_ID: &str = "caption.out_of_bounds";
 
 /// Why a verification could not be run as asked.
 ///
@@ -379,8 +385,76 @@ impl VerifyPlan {
     ///
     /// False for a structural run, which must work on a machine that has no
     /// FFmpeg at all.
+    ///
+    /// "Requires" is the strong word on purpose: a caller that gets `true` here
+    /// must resolve FFmpeg or fail. See [`can_use_ffmpeg`](Self::can_use_ffmpeg)
+    /// for the weaker question.
     pub fn requires_ffmpeg(&self) -> bool {
         self.request.file.is_some()
+    }
+
+    /// Whether this plan has something to do with an FFmpeg it is *offered*.
+    ///
+    /// The caption-extent pass needs a binary but no deliverable — it renders
+    /// synthetic cues over a transparent canvas — so it can run on a plain
+    /// `--path` verify. A caller that sees `true` here should *try* to resolve
+    /// FFmpeg and pass the runner in, and must **not** turn a failure to resolve
+    /// into an error: a structural verify on a machine with no FFmpeg has always
+    /// worked and must keep working. The pass is then simply skipped and
+    /// `caption.out_of_bounds` grades with its own estimate.
+    ///
+    /// False whenever [`requires_ffmpeg`](Self::requires_ffmpeg) already forces
+    /// the issue, so the two questions never both need answering: a caller asks
+    /// this one only when the first said no.
+    ///
+    /// `--structural-only` is "render-free, and no FFmpeg at all", so it answers
+    /// false however the checks were selected.
+    pub fn can_use_ffmpeg(&self) -> bool {
+        !self.requires_ffmpeg() && self.caption_extents_wanted()
+    }
+
+    /// Whether the check that reads measured caption extents is selected.
+    ///
+    /// `--structural-only` is a caller telling the tool not to touch FFmpeg, and
+    /// that overrides any selection: the pass is skipped even when the check is
+    /// on, and the rule falls back to its estimate exactly as it did before this
+    /// pass existed.
+    fn caption_extents_wanted(&self) -> bool {
+        !self.request.structural_only
+            && self
+                .selected_ids
+                .iter()
+                .any(|id| id == CAPTION_OUT_OF_BOUNDS_CHECK_ID)
+    }
+
+    /// How this run would bound the caption-extent pass, or `None` to skip it.
+    ///
+    /// `remaining` is what is left of the run's single measurement budget, the
+    /// same one the probe pass and the caption-band pass draw on — a pass handed
+    /// the caller's whole `--timeout-sec` again is how one run took three times
+    /// what it was told it could.
+    fn caption_extent_options(
+        &self,
+        sequence: &Sequence,
+        remaining: Duration,
+    ) -> Option<CaptionExtentOptions> {
+        if !self.caption_extents_wanted() {
+            return None;
+        }
+
+        Some(CaptionExtentOptions {
+            canvas_width: sequence.format.canvas.width,
+            canvas_height: sequence.format.canvas.height,
+            // The sequence's own rate. An unusable one is the engine's problem
+            // rather than a reason not to measure: it falls back to the
+            // project-wide default exactly as `QCContext` does.
+            fps: sequence.format.fps.as_f64(),
+            // The probe renders the sequence's own script; a declared window
+            // rebases it the way a ranged export does, so the cues measured are
+            // the ones the file under review carries.
+            window_start_sec: self.window.map_or(0.0, |window| window.start_sec),
+            run_timeout: remaining,
+        })
     }
 
     /// The rendered file this plan will measure, if any.
@@ -462,21 +536,24 @@ impl VerifyPlan {
         let mut errors: Vec<String> = Vec::new();
         let mut measurement: Option<MeasurementReport> = None;
 
+        // One deadline for everything FFmpeg is asked to do in this run. The
+        // probe pass and the caption-band pass used to be handed the caller's
+        // whole timeout each, so a run could take twice what it was told it
+        // could; the caption-extent pass draws on the same clock rather than
+        // adding a third.
+        let budget = Duration::from_secs(self.request.timeout_sec);
+        let deadline = Instant::now().checked_add(budget);
+        let remaining = || match deadline {
+            Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+            None => budget,
+        };
+
         if let Some(file) = self.request.file.as_ref() {
             // FFmpeg is only required once a rendered file is in play; the
             // caller was told as much by `requires_ffmpeg`, so arriving here
             // without a runner is a wiring bug rather than a missing install.
             let runner = runner
                 .ok_or_else(|| VerifyError::new("FFmpeg is required to measure a rendered file"))?;
-            // One deadline for everything FFmpeg is asked to do. The probe pass
-            // and the caption-band pass used to be handed the caller's whole
-            // timeout each, so a run could take twice what it was told it could.
-            let budget = Duration::from_secs(self.request.timeout_sec);
-            let deadline = Instant::now().checked_add(budget);
-            let remaining = || match deadline {
-                Some(deadline) => deadline.saturating_duration_since(Instant::now()),
-                None => budget,
-            };
             let options = MeasureOptions {
                 timeout: remaining(),
                 ..Default::default()
@@ -517,6 +594,25 @@ impl VerifyPlan {
             }
         }
 
+        // The caption-extent pass: FFmpeg, but no rendered file. It renders the
+        // sequence's own caption cues over a transparent canvas and reads back
+        // where the ink landed, so it runs on a plain `--path` verify whenever
+        // a runner could be resolved — and simply does not run when one could
+        // not, leaving `caption.out_of_bounds` on the estimate it has always
+        // used. `caption_extent_options` returns `None` for a structural-only
+        // run and for a run that did not select the check, so neither pays for
+        // it. Sequenced after the rendered-file pass so the file measurement,
+        // which answers far more checks, gets first call on the shared budget.
+        let mut caption_extents = None;
+        if let Some(runner) = runner {
+            if let Some(options) = self.caption_extent_options(sequence, remaining()) {
+                let sampling =
+                    sample_caption_extents(runner, sequence, &state.effects, &options).await;
+                warnings.extend(sampling.notes.iter().cloned());
+                caption_extents = Some(sampling);
+            }
+        }
+
         let measurement_failed = self.request.file.is_some() && measurement.is_none();
 
         // The tolerance is the same one the rules use, so it comes from the
@@ -543,8 +639,24 @@ impl VerifyPlan {
             }
         }
 
+        // Recorded on the measurement record too when there is one, so the
+        // rendered-file measurements are one complete document rather than a
+        // record with a caption figure missing from it.
+        if let (Some(report), Some(sampling)) = (measurement.as_mut(), caption_extents.as_ref()) {
+            report.measurements.caption_extents = sampling.samples.clone();
+            report.measurements.caption_extent_coverage = Some(sampling.coverage.clone());
+        }
+
         let context = match measurement.as_ref() {
             Some(measured) => context.with_measurements(measured.measurements.clone()),
+            None => context,
+        };
+        // Attached whether or not a file was measured — that is the whole point
+        // of this pass — and deliberately *not* through `with_measurements`,
+        // which would tell every rendered rule a file had been measured and turn
+        // their honest "skipped" into a "passed" over data nobody collected.
+        let context = match caption_extents {
+            Some(sampling) => context.with_caption_extents(sampling.samples, sampling.coverage),
             None => context,
         };
 
@@ -1398,6 +1510,27 @@ mod tests {
         clip.place.timeline_in_sec = 0.0;
         clip.place.duration_sec = 2.0;
         clip.label = Some("Readable words".to_string());
+        captions.add_clip(clip);
+        sequence.add_track(captions);
+        sequence
+    }
+
+    /// The gap fixture with one caption anchored right off the frame.
+    ///
+    /// Off the frame by the *estimate*, which is the point: a probe that cannot
+    /// spawn leaves the cue unmeasured, and the run has to keep catching it.
+    fn sequence_with_captions_off_canvas() -> Sequence {
+        let mut sequence = sequence_with_gap();
+        let mut captions = Track::new_caption("Captions");
+        let mut clip = Clip::with_range("caption", 0.0, 2.0);
+        clip.place.timeline_in_sec = 0.0;
+        clip.place.duration_sec = 2.0;
+        clip.label = Some("Way off the canvas".to_string());
+        clip.caption_position = Some(serde_json::json!({
+            "type": "custom",
+            "xPercent": 120.0,
+            "yPercent": 50.0
+        }));
         captions.add_clip(clip);
         sequence.add_track(captions);
         sequence
@@ -2369,6 +2502,228 @@ mod tests {
             Some(12.5),
             "the pass must know how much file there is to seek into"
         );
+    }
+
+    // ========================================================================
+    // The caption-extent pass: FFmpeg without a rendered file
+    // ========================================================================
+
+    /// Feature: Measured caption bounds
+    /// Scenario: should offer to use FFmpeg on a plain `--path` run
+    ///
+    /// The new run state. `requires_ffmpeg` stays false — a `--path` run must
+    /// still work on a machine that has none — while `can_use_ffmpeg` says there
+    /// is something worth doing with one if it can be found. A caller that
+    /// confused the two would either refuse to verify without FFmpeg or never
+    /// measure a caption.
+    #[test]
+    fn test_a_structural_run_should_offer_to_use_ffmpeg_without_requiring_it() {
+        let plan = VerifyPlan::resolve(VerifyRequest::default()).expect("plan resolves");
+
+        assert!(!plan.requires_ffmpeg(), "no file, no requirement");
+        assert!(
+            plan.can_use_ffmpeg(),
+            "the extent pass measures captions without a deliverable"
+        );
+    }
+
+    /// Feature: Measured caption bounds
+    /// Scenario: should never reach for FFmpeg on a structural-only run
+    ///
+    /// `--structural-only` means render-free *and* toolchain-free. An
+    /// opportunistic pass that resolved a binary anyway would break the one
+    /// promise the flag makes.
+    #[test]
+    fn test_structural_only_should_never_reach_for_ffmpeg() {
+        let plan = VerifyPlan::resolve(structural_request()).expect("plan resolves");
+
+        assert!(!plan.requires_ffmpeg());
+        assert!(
+            !plan.can_use_ffmpeg(),
+            "--structural-only is a promise not to spawn FFmpeg at all"
+        );
+        assert!(
+            plan.caption_extent_options(&sequence_with_gap(), Duration::from_secs(600))
+                .is_none(),
+            "and the pass refuses even if a runner were handed to it"
+        );
+    }
+
+    /// Feature: Measured caption bounds
+    /// Scenario: should measure caption extents only for a run that grades them
+    ///
+    /// The pass costs an FFmpeg run per eighty cues and answers exactly one
+    /// check, so a caller running `--checks timeline.gap` must not pay for it —
+    /// the same gate `caption.contrast` already has on its band sampling.
+    #[test]
+    fn test_caption_extents_should_be_measured_only_when_the_check_is_selected() {
+        let sequence = sequence_with_gap();
+        let plan_for =
+            |request: VerifyRequest| VerifyPlan::resolve(request).expect("the request is valid");
+
+        assert!(
+            plan_for(VerifyRequest::default())
+                .caption_extent_options(&sequence, Duration::from_secs(600))
+                .is_some(),
+            "a default run grades caption.out_of_bounds"
+        );
+        assert!(
+            plan_for(VerifyRequest {
+                skip: Some(vec![CAPTION_OUT_OF_BOUNDS_CHECK_ID.to_string()]),
+                ..Default::default()
+            })
+            .caption_extent_options(&sequence, Duration::from_secs(600))
+            .is_none(),
+            "a skipped check must not be paid for"
+        );
+        assert!(
+            plan_for(VerifyRequest {
+                checks: Some(vec!["timeline.gap".to_string()]),
+                ..Default::default()
+            })
+            .caption_extent_options(&sequence, Duration::from_secs(600))
+            .is_none(),
+            "a selection that leaves the check out must not be paid for either"
+        );
+        assert!(
+            !plan_for(VerifyRequest {
+                checks: Some(vec!["timeline.gap".to_string()]),
+                ..Default::default()
+            })
+            .can_use_ffmpeg(),
+            "and such a run has no reason to resolve FFmpeg at all"
+        );
+    }
+
+    /// Feature: Measured caption bounds
+    /// Scenario: should draw on what is left of the run's single budget
+    #[test]
+    fn test_caption_extents_should_take_their_budget_from_what_is_left() {
+        let plan = VerifyPlan::resolve(VerifyRequest {
+            timeout_sec: 7,
+            ..Default::default()
+        })
+        .expect("the request is valid");
+
+        let options = plan
+            .caption_extent_options(&sequence_with_gap(), Duration::from_secs(2))
+            .expect("the default run grades caption bounds");
+
+        assert_eq!(options.run_timeout, Duration::from_secs(2));
+    }
+
+    /// Feature: Measured caption bounds
+    /// Scenario: should rebase the probe onto a declared window
+    ///
+    /// The probe renders the sequence's own script, and a `--file-range` run is
+    /// grading a render whose clock starts at the window. Measuring against
+    /// timeline zero would sample cues the file under review does not carry.
+    #[test]
+    fn test_caption_extents_should_follow_a_declared_window() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let file = temp.path().join("render.mp4");
+        std::fs::write(&file, b"render").expect("write render");
+
+        let plan = VerifyPlan::resolve(VerifyRequest {
+            file: Some(file),
+            file_range: Some(vec![10.0, 40.0]),
+            ..Default::default()
+        })
+        .expect("the request is valid");
+
+        let options = plan
+            .caption_extent_options(&sequence_with_gap(), Duration::from_secs(600))
+            .expect("a measured run still grades caption bounds");
+
+        assert_eq!(options.window_start_sec, 10.0);
+    }
+
+    /// Feature: Measured caption bounds
+    /// Scenario: should verify exactly as before when FFmpeg cannot be resolved
+    ///
+    /// The whole point of the pass being opportunistic. `None` here is the
+    /// caller saying it could not find a binary; the run has to produce the same
+    /// document it always did, with the caption check graded by its estimate
+    /// rather than reported as skipped or failed.
+    #[tokio::test]
+    async fn test_a_path_run_without_ffmpeg_still_produces_the_structural_report() {
+        let plan = VerifyPlan::resolve(VerifyRequest::default()).expect("plan resolves");
+
+        let mut state = ProjectState::new("No toolchain");
+        let sequence = sequence_with_gap();
+        state.active_sequence_id = Some(sequence.id.clone());
+        state.sequences.insert(sequence.id.clone(), sequence);
+
+        let report = plan
+            .run(&state, None)
+            .await
+            .expect("a missing FFmpeg is not an error on a structural run");
+        let payload = report.payload();
+
+        assert_eq!(payload["measurements"]["measured"], false);
+        let bounds = payload["checks"]
+            .as_array()
+            .expect("checks array")
+            .iter()
+            .find(|check| check["id"] == CAPTION_OUT_OF_BOUNDS_CHECK_ID)
+            .expect("the caption bounds check is in the document");
+        assert_eq!(
+            bounds["skipped"], false,
+            "the check stays structural and keeps running without a measurement"
+        );
+    }
+
+    /// Feature: Measured caption bounds
+    /// Scenario: should survive a runner whose binary cannot be spawned
+    ///
+    /// A QC pass that failed the verification it was helping would be a tool
+    /// that broke the thing it was checking. A probe that cannot run leaves the
+    /// cues unmeasured, says so in the warnings, and the rules grade on.
+    #[tokio::test]
+    async fn test_a_probe_that_cannot_spawn_does_not_fail_the_run() {
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegSource};
+
+        let plan = VerifyPlan::resolve(VerifyRequest::default()).expect("plan resolves");
+
+        let mut state = ProjectState::new("Broken toolchain");
+        let sequence = sequence_with_captions_off_canvas();
+        state.active_sequence_id = Some(sequence.id.clone());
+        state.sequences.insert(sequence.id.clone(), sequence);
+
+        let runner = FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("ffmpeg-that-cannot-possibly-exist"),
+            ffprobe_path: PathBuf::from("ffprobe-that-cannot-possibly-exist"),
+            version: "test".to_string(),
+            is_bundled: false,
+            source: FFmpegSource::System,
+        });
+
+        let report = plan
+            .run(&state, Some(&runner))
+            .await
+            .expect("a failed probe is not a failed run");
+        let payload = report.payload();
+
+        assert_eq!(
+            payload["measurements"]["measured"], false,
+            "a caption probe is not a rendered-file measurement"
+        );
+
+        let bounds = payload["checks"]
+            .as_array()
+            .expect("checks array")
+            .iter()
+            .find(|check| check["id"] == CAPTION_OUT_OF_BOUNDS_CHECK_ID)
+            .expect("the caption bounds check is in the document");
+        assert_eq!(bounds["status"], "failed", "the estimate still catches it");
+
+        // And every rendered check stays *skipped*: offering FFmpeg to the
+        // caption pass must never be mistaken for having measured a render.
+        assert!(payload["checks"]
+            .as_array()
+            .expect("checks array")
+            .iter()
+            .any(|check| check["category"] == "rendered" && check["skipped"] == true));
     }
 
     /// Feature: Verifying a partial render
