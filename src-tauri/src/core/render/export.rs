@@ -91,7 +91,7 @@ pub fn track_included_in_export(track: &Track) -> bool {
 /// Delegates to [`Track::contributes_to_output`] so this filter and
 /// [`Sequence::output_duration`] — the length the builders pad the output to —
 /// always describe the same set of clips.
-fn track_included_in_media_collection(track: &Track) -> bool {
+pub(super) fn track_included_in_media_collection(track: &Track) -> bool {
     track.contributes_to_output()
 }
 
@@ -5304,7 +5304,7 @@ fn caption_font_weight(value: &Value) -> Option<i64> {
     parse_json_number(value).map(clamp)
 }
 
-fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
+pub(super) fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
     let text = clip.label.as_deref()?.trim();
     if text.is_empty() {
         return None;
@@ -7101,13 +7101,45 @@ pub(super) fn append_ass_text_overlay(
     // value is parsed as filtergraph syntax (`;`/`[`/`]` + `movie=` would give
     // arbitrary file read/write).
     let escaped_path = escape_ffmpeg_filter_value(path_text.as_ref());
-    // The filter takes a single directory, and libass reads it in addition to
-    // the host's own font provider. Taking whichever path happened to sort
-    // first meant a per-user font folder could shadow the system one; naming
-    // the platform's primary folder makes the choice deterministic *on one
-    // machine*, which is not the same as deterministic across machines - hence
-    // the gate above.
-    let fonts_dir_option = crate::core::text::fonts::primary_system_font_directory()
+    let fonts_dir_option = ass_fonts_dir_option(host_fonts_needed);
+    // `original_size` is deliberately absent. The filter turns it into a libass
+    // pixel aspect of frame-AR over original-AR, i.e. it exists to un-stretch a
+    // script authored for one aspect and then anamorphically squeezed into
+    // another. This pipeline never squeezes: normalization letterboxes every
+    // source into the output dimensions, so the pixel aspect is always 1 and
+    // the script's own `PlayRes` aspect is the only thing libass needs. Naming
+    // the canvas here distorted glyphs by frame-AR/canvas-AR whenever an export
+    // preset overrode the output to a different aspect than the sequence canvas
+    // (a vertical canvas exported through a 16:9 preset stretched 3.16x).
+    let wrap_unicode_option = if wrap_unicode_supported {
+        SUBTITLES_WRAP_UNICODE_OPTION
+    } else {
+        ""
+    };
+    filter_complex.push(';');
+    filter_complex.push_str(&format!(
+        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}{wrap_unicode_option}{output_label}"
+    ));
+    output_label.to_string()
+}
+
+/// The `subtitles` filter's `fontsdir` option, or an empty string.
+///
+/// The filter takes a single directory, and libass reads it in addition to the
+/// host's own font provider. Taking whichever path happened to sort first meant
+/// a per-user font folder could shadow the system one; naming the platform's
+/// primary folder makes the choice deterministic *on one machine*, which is not
+/// the same as deterministic across machines - hence the `host_fonts_needed`
+/// gate, documented on [`append_ass_text_overlay`].
+///
+/// Shared with [`super::caption_measure`] for the same reason
+/// [`SUBTITLES_WRAP_UNICODE_OPTION`] is: a probe that resolves fonts differently
+/// from the burn-in measures a layout the burn-in never draws, and for a
+/// text-extent measurement the font *is* the answer.
+pub(super) fn ass_fonts_dir_option(host_fonts_needed: bool) -> String {
+    use crate::core::effects::escape_ffmpeg_filter_value;
+
+    crate::core::text::fonts::primary_system_font_directory()
         .filter(|_| host_fonts_needed)
         .filter(|directory| {
             // Same apostrophe limit as the `.ass` path: FFmpeg cannot carry a literal
@@ -7130,26 +7162,7 @@ pub(super) fn append_ass_text_overlay(
                 escape_ffmpeg_filter_value(directory_text.as_ref())
             )
         })
-        .unwrap_or_default();
-    // `original_size` is deliberately absent. The filter turns it into a libass
-    // pixel aspect of frame-AR over original-AR, i.e. it exists to un-stretch a
-    // script authored for one aspect and then anamorphically squeezed into
-    // another. This pipeline never squeezes: normalization letterboxes every
-    // source into the output dimensions, so the pixel aspect is always 1 and
-    // the script's own `PlayRes` aspect is the only thing libass needs. Naming
-    // the canvas here distorted glyphs by frame-AR/canvas-AR whenever an export
-    // preset overrode the output to a different aspect than the sequence canvas
-    // (a vertical canvas exported through a 16:9 preset stretched 3.16x).
-    let wrap_unicode_option = if wrap_unicode_supported {
-        SUBTITLES_WRAP_UNICODE_OPTION
-    } else {
-        ""
-    };
-    filter_complex.push(';');
-    filter_complex.push_str(&format!(
-        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}{wrap_unicode_option}{output_label}"
-    ));
-    output_label.to_string()
+        .unwrap_or_default()
 }
 
 /// The `subtitles` option that turns the Unicode line-breaking algorithm on.
