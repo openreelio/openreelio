@@ -1989,7 +1989,13 @@ struct CaptionBox {
     top: f64,
     bottom: f64,
     source: CaptionBoxSource,
-    /// Whether the measured ink is flush against a frame edge
+    /// Whether the measured ink ran off the frame by an unrecoverable amount
+    ///
+    /// Set only when the ink fills a whole axis edge to edge — the signature of
+    /// a line longer than the picture, and one a caption that merely sits
+    /// against an edge cannot produce. A `marginPercent: 0` block, or a `\blur`
+    /// that reaches the last row, comes back with this clear and is graded by
+    /// the four-edge comparison below exactly as an estimate would be.
     ///
     /// Always false for an estimate, which has no frame to be cut off by.
     clipped: bool,
@@ -2010,10 +2016,17 @@ impl CaptionBox {
     ///    through, and would be a regression on the estimate it replaced: the
     ///    estimator reports such a caption today.
     ///
-    /// Clause 2 is why this rule cannot simply compare four numbers. It also
-    /// means a style whose ink genuinely reaches the first or last pixel of the
-    /// frame is reported — which is the right call for a caption: a block with
-    /// no margin at all is broken output whether or not a glyph was cut.
+    /// Clause 2 is why this rule cannot simply compare four numbers. What it is
+    /// deliberately *not* is "the ink reaches an edge": a caption with
+    /// `marginPercent: 0` measures against the last row of the picture, and so
+    /// does a `\blur` or a `\shad` that extends past the glyphs, and neither
+    /// lost a pixel. Escalating those made the measured path stricter than the
+    /// estimate it replaced, on cues the estimate passed — so only the
+    /// unrecoverable case reaches here, and everything else is graded by clause
+    /// 1 on the same terms as an estimate. See
+    /// `render::caption_measure::FlushEdges::overflows_frame` for where that
+    /// line is drawn and what it costs.
+    ///
     /// Written as the negation of "inside the frame" rather than as four
     /// `>` comparisons, so an edge that is somehow not a number is reported
     /// rather than waved through — exactly as it was before this struct existed.
@@ -4811,6 +4824,70 @@ mod tests {
         let cue = first_cue(&violations[0]);
         assert_eq!(cue["clipped"], true);
         assert_eq!(cue["boxSource"], "measured");
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should pass a caption that sits against the frame edge without
+    /// being cropped
+    ///
+    /// The other side of the clipped trap, and the one that broke first. A
+    /// `marginPercent: 0` bottom caption is a preset the schema allows: rendered
+    /// on a 1920x1080 canvas it inks `718..1201 x 1027..1079`, and `1079` is the
+    /// last row of the picture. A `\blur8\bord6` on the same caption inks
+    /// `778..1142 x 1003..1079`. Neither lost a pixel, and the estimator passes
+    /// both — so a measured run that reported them would be *stricter* than the
+    /// model it replaced, on output nobody would call broken. A cue only escapes
+    /// via the flag when the render filled a whole axis edge to edge.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_pass_a_caption_flush_against_one_edge() {
+        let sequence = sequence_with_one_caption("clip-a", "Short");
+
+        // 1027/1080 and 1080/1080, the measured margin-0 box in canvas percent.
+        let against_the_bottom = extent("clip-a", 37.395, 62.604, 95.092, 100.0);
+
+        assert!(
+            out_of_bounds_violations(
+                &sequence,
+                &context_with_extents(&sequence, vec![against_the_bottom])
+            )
+            .await
+            .is_empty(),
+            "a caption drawn against the bottom of the frame is not off the frame"
+        );
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should still report a box whose edge really is past the canvas
+    ///
+    /// The clipped flag is a second route, never a replacement: an edge beyond
+    /// `0..100` by more than the tolerance is reported on its own, with no flag
+    /// set and whatever the source.
+    #[tokio::test]
+    async fn test_out_of_bounds_rule_should_report_an_edge_past_the_canvas_without_a_flag() {
+        let sequence = sequence_with_one_caption("clip-a", "Short");
+
+        for (name, sample) in [
+            (
+                "pushed off the left",
+                extent("clip-a", -12.0, 40.0, 80.0, 92.0),
+            ),
+            (
+                "pushed off the bottom",
+                extent("clip-a", 30.0, 70.0, 96.0, 108.0),
+            ),
+        ] {
+            let violations =
+                out_of_bounds_violations(&sequence, &context_with_extents(&sequence, vec![sample]))
+                    .await;
+
+            assert_eq!(violations.len(), 1, "{name} leaves the canvas");
+            let cue = first_cue(&violations[0]);
+            assert_eq!(cue["boxSource"], "measured");
+            assert!(
+                cue.get("clipped").is_none(),
+                "{name} is quantified, so nothing is flagged as unrecoverable: {cue}"
+            );
+        }
     }
 
     /// Feature: measured caption bounds

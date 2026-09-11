@@ -90,7 +90,7 @@ pub struct CaptionExtentSample {
     pub top_percent: f64,
     /// Distance from the canvas's top edge to the ink's bottom edge, in percent
     pub bottom_percent: f64,
-    /// Whether the measured box is flush against a frame edge
+    /// Whether the ink ran off the frame by an amount nothing can quantify
     ///
     /// libass clips its own drawing at the frame, so a caption wider than the
     /// picture measures as one exactly the width of the picture: the overshoot
@@ -98,6 +98,12 @@ pub struct CaptionExtentSample {
     /// "overflow of unknown magnitude" — the edges still say the box reaches the
     /// frame boundary, and this says the real box goes further by an amount
     /// nothing here can quantify.
+    ///
+    /// Set only when the ink fills a whole axis edge to edge, which is what a
+    /// line longer than the picture produces. A caption that merely *reaches*
+    /// an edge — a `marginPercent: 0` block, a `\blur` that extends past the
+    /// glyphs — lost nothing and leaves this clear, so a rule grades it by its
+    /// four edges exactly as it would an estimate.
     pub clipped: bool,
 }
 
@@ -111,6 +117,14 @@ pub struct CaptionExtentSample {
 pub struct CaptionExtentCoverageRecord {
     /// Cues the pass measured a rectangle for
     pub measured: usize,
+    /// The cues behind that count, by clip id
+    ///
+    /// Carried so a *clean* report is still readable: `boxSource` reaches the
+    /// output only on a finding, so without this a caption that passed says
+    /// nothing about whether its verdict came from a render or from a model, and
+    /// an estimated run looks exactly like a measured one.
+    #[serde(default)]
+    pub measured_cue_ids: Vec<String>,
     /// Cues sharing a rendered frame with another text or caption event
     ///
     /// One bounding box cannot be attributed to one of two events drawn at the
@@ -118,6 +132,18 @@ pub struct CaptionExtentCoverageRecord {
     pub shared_frame_cue_ids: Vec<String>,
     /// Cues shorter than a frame interval, which no rendered frame shows
     pub sub_frame_cue_ids: Vec<String>,
+    /// Cues carrying a colour emoji, whose picture is composited outside the
+    /// subtitle layer and so is absent from the measured alpha
+    #[serde(default)]
+    pub emoji_cue_ids: Vec<String>,
+    /// Whether the layout depended on fonts installed on this machine
+    ///
+    /// The measured boxes are then only as reproducible as the host's font set,
+    /// so two machines can legitimately disagree about them. Said out loud
+    /// because the alternative is reading a CI-versus-laptop difference as a
+    /// regression in the project.
+    #[serde(default)]
+    pub uses_host_fonts: bool,
     /// Cues that rendered no ink at all on any sampled frame
     ///
     /// A missing font, a fully transparent style or a stray override tag. A QC

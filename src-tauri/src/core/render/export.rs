@@ -5884,7 +5884,14 @@ fn ass_timecode(seconds: f64) -> String {
 /// time puts the picture on screen up to five milliseconds before or after the
 /// text it belongs to, which at 60fps is a frame of the emoji alone or of the
 /// caption without it. Both sides are rounded the same way instead.
-fn ass_centisecond(seconds: f64) -> f64 {
+///
+/// Visible to the rest of `core::render` because the caption-extent probe has
+/// the same problem in a different shape: it decides which cues share a
+/// rendered frame, and which frames to sample them on, from cue times libass
+/// never sees. Reasoning on the unrounded times classifies a cue as solo whose
+/// *drawn* span really does overlap its neighbour's, and then measures the two
+/// of them together as though the rectangle belonged to one.
+pub(super) fn ass_centisecond(seconds: f64) -> f64 {
     (seconds.max(0.0) * 100.0).round() / 100.0
 }
 

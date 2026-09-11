@@ -57,6 +57,13 @@ pub struct CaptionExtentSampling {
     pub notes: Vec<String>,
 }
 
+/// Below this, the pass is skipped rather than started.
+///
+/// One FFmpeg spawn costs more than this on every machine this ships to, so a
+/// budget under it can only end in a timeout — and a timeout that reports "ran
+/// out of the 0s left in the run's budget" is a diagnostic nobody can act on.
+const MINIMUM_USEFUL_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Everything the pass needs beyond the FFmpeg binary.
 pub struct CaptionExtentOptions {
     /// Canvas width the probe renders at
@@ -91,6 +98,18 @@ pub async fn sample_caption_extents(
     effects: &HashMap<String, Effect>,
     options: &CaptionExtentOptions,
 ) -> CaptionExtentSampling {
+    // Nothing left to spend. Reported as a pass that did not run rather than as
+    // one that timed out: "ran out of the 0s left in the run's budget" names a
+    // failure nobody had, and an agent reading it would go looking for a slow
+    // probe that never started.
+    if options.run_timeout < MINIMUM_USEFUL_BUDGET {
+        return skipped(
+            "Caption extents were not measured: the run's measurement budget was already spent \
+             before this pass, so the reported boxes are estimates"
+                .to_string(),
+        );
+    }
+
     let engine = ExportEngine::new(runner.clone());
     let request = CaptionExtentRequest {
         sequence,
@@ -130,6 +149,8 @@ pub async fn sample_caption_extents(
     let mut coverage = CaptionExtentCoverageRecord {
         shared_frame_cue_ids: measured.coverage.shared_frame_cue_ids.clone(),
         sub_frame_cue_ids: measured.coverage.sub_frame_cue_ids.clone(),
+        emoji_cue_ids: measured.coverage.emoji_cue_ids.clone(),
+        uses_host_fonts: measured.coverage.uses_host_fonts,
         probe_failed: measured.coverage.probe_failed,
         notes: measured.coverage.notes.clone(),
         ..CaptionExtentCoverageRecord::default()
@@ -156,6 +177,10 @@ pub async fn sample_caption_extents(
     }
 
     coverage.measured = samples.len();
+    coverage.measured_cue_ids = samples
+        .iter()
+        .map(|sample| sample.clip_id.clone())
+        .collect();
     if !coverage.no_ink_cue_ids.is_empty() {
         // TODO(caption-no-ink): a cue that renders nothing is a defect in its
         // own right — a missing font, a transparent style, an override tag that
@@ -181,6 +206,22 @@ fn refused(note: String) -> CaptionExtentSampling {
         samples: Vec::new(),
         coverage: CaptionExtentCoverageRecord {
             probe_failed: true,
+            notes: vec![note.clone()],
+            ..CaptionExtentCoverageRecord::default()
+        },
+        notes: vec![note],
+    }
+}
+
+/// A pass that never started, saying so in one note.
+///
+/// Distinct from [`refused`] in exactly one field: `probe_failed` stays false,
+/// because nothing was attempted and nothing broke. Both leave every cue to the
+/// estimator, and both say so in the report.
+fn skipped(note: String) -> CaptionExtentSampling {
+    CaptionExtentSampling {
+        samples: Vec::new(),
+        coverage: CaptionExtentCoverageRecord {
             notes: vec![note.clone()],
             ..CaptionExtentCoverageRecord::default()
         },
@@ -221,14 +262,23 @@ mod tests {
     }
 
     fn sequence_with_one_caption() -> Sequence {
+        sequence_with_captions(&[("clip-a", "A caption", 0.0, 2.0)])
+    }
+
+    /// A caption track carrying `cues` of `(clip id, label, in, out)`.
+    fn sequence_with_captions(cues: &[(&str, &str, f64, f64)]) -> Sequence {
         let mut sequence = Sequence::new("Extent", SequenceFormat::youtube_1080());
         let mut track = Track::new_caption("Captions");
-        let mut clip = Clip::new("caption-asset")
-            .with_source_range(0.0, 2.0)
-            .place_at(0.0);
-        clip.id = "clip-a".to_string();
-        clip.label = Some("A caption".to_string());
-        track.add_clip(clip);
+
+        for (id, label, start, end) in cues {
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, end - start)
+                .place_at(*start);
+            clip.id = (*id).to_string();
+            clip.label = Some((*label).to_string());
+            track.add_clip(clip);
+        }
+
         sequence.add_track(track);
         sequence
     }
@@ -278,9 +328,119 @@ mod tests {
         assert!(sampling.notes.is_empty());
     }
 
+    /// Feature: measured caption bounds
+    /// Scenario: should skip the pass, not time it out, when the budget is gone
+    ///
+    /// A run whose earlier stages spent the whole `--timeout-sec` used to reach
+    /// this pass, start it with nothing, and report "ran out of the 0s left in
+    /// the run's budget" — a timeout nobody experienced, describing a probe that
+    /// never spawned. The cues are estimated either way; what changes is whether
+    /// the report sends a reader looking for a slow probe.
+    #[tokio::test]
+    async fn should_skip_the_pass_rather_than_time_it_out_on_an_empty_budget() {
+        let sequence = sequence_with_one_caption();
+        let options = CaptionExtentOptions {
+            run_timeout: Duration::ZERO,
+            ..options_for(&sequence)
+        };
+
+        let sampling = sample_caption_extents(
+            &runner_that_cannot_run(),
+            &sequence,
+            &HashMap::new(),
+            &options,
+        )
+        .await;
+
+        assert!(sampling.samples.is_empty());
+        assert!(
+            !sampling.coverage.probe_failed,
+            "nothing was attempted, so nothing failed"
+        );
+        let note = sampling.notes.join(" ");
+        assert!(
+            note.contains("budget") && !note.contains("0s"),
+            "the note has to say the budget was spent, not name a zero-second timeout: {note}"
+        );
+    }
+
     // ========================================================================
     // Against a real libass
     // ========================================================================
+
+    /// An engine pointed at the FFmpeg this machine has, or `None` to skip.
+    fn real_runner() -> Option<FFmpegRunner> {
+        let ffmpeg = crate::core::test_ffmpeg::require_or_skip_ffmpeg()?;
+        Some(FFmpegRunner::new(FFmpegInfo {
+            ffprobe_path: ffmpeg.with_file_name(if cfg!(windows) {
+                "ffprobe.exe"
+            } else {
+                "ffprobe"
+            }),
+            ffmpeg_path: ffmpeg,
+            version: "test".to_string(),
+            is_bundled: false,
+            source: FFmpegSource::System,
+        }))
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should refuse an emoji cue and still measure its plain
+    /// neighbour
+    ///
+    /// The two halves of the emoji answer, in one sequence. The probe builds the
+    /// burn-in's script including its emoji pack — without which every cue in
+    /// the script would wrap differently from the render — and that puts an
+    /// ink-free spacer where the emoji is, with the colour picture composited
+    /// outside the alpha this pass reads. So the emoji cue comes back named in
+    /// the coverage record and *not* in the samples, while the plain caption
+    /// beside it, laid out by the same script, is measured exactly as before.
+    #[tokio::test]
+    #[ignore = "requires FFmpeg with libass"]
+    async fn should_refuse_an_emoji_cue_and_measure_the_plain_one_beside_it() {
+        let Some(runner) = real_runner() else {
+            return;
+        };
+        if crate::core::text::emoji_assets::discover().is_none() {
+            eprintln!("Skipping test: no colour emoji pack is installed");
+            return;
+        }
+
+        let sequence = sequence_with_captions(&[
+            ("clip-plain", "A plain caption", 0.0, 2.0),
+            ("clip-emoji", "Fire \u{1F525}", 2.0, 4.0),
+        ]);
+
+        let sampling =
+            sample_caption_extents(&runner, &sequence, &HashMap::new(), &options_for(&sequence))
+                .await;
+
+        assert!(
+            !sampling.coverage.probe_failed,
+            "a real binary must complete the probe: {:?}",
+            sampling.coverage.notes
+        );
+        assert_eq!(
+            sampling.coverage.emoji_cue_ids,
+            vec!["clip-emoji".to_string()],
+            "the emoji cue is named as uncovered: {:?}",
+            sampling.coverage
+        );
+        assert_eq!(
+            sampling
+                .samples
+                .iter()
+                .map(|sample| sample.clip_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clip-plain"],
+            "only the plain caption carries a measured box"
+        );
+        assert_eq!(
+            sampling.coverage.measured_cue_ids,
+            vec!["clip-plain".to_string()],
+            "and a clean report can say which cue that was"
+        );
+    }
 
     /// Feature: measured caption bounds
     /// Scenario: should carry a real measurement all the way to the rule

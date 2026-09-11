@@ -46,6 +46,28 @@
 //! and left to the caller's predictor. The common project - one caption track,
 //! cues back to back - is entirely solo and costs one FFmpeg run.
 //!
+//! # On libass's own clock, not the timeline's
+//!
+//! That partition is only sound if "live at this instant" means what libass
+//! thinks it means. ASS carries times to a hundredth of a second and
+//! [`ass_centisecond`](super::export::ass_centisecond) rounds them there, so the
+//! span a cue is *drawn* over is not the span the timeline stores. Measured
+//! against this binary: a cue whose exact bounds are `[2.004, 2.03)` is written
+//! `0:00:02.00,0:00:02.03` and draws on frame 60 of a 30fps render - `t=2.000`,
+//! which its exact start is four milliseconds *past*. Classifying on the exact
+//! times called that cue absent from the frame, so a neighbour probed there was
+//! declared solo and handed the union of both. Every timing question below is
+//! therefore asked of the rounded span, which is the one the script writes.
+//!
+//! # Colour emoji are outside the alpha
+//!
+//! The burn-in replaces every emoji cluster it has a picture for with an
+//! ink-free advance-only spacer and composites the colour PNG *over* the
+//! rendered subtitle layer. The probe builds the same script - it has to, or the
+//! advances and the line breaks are a different caption - which means the alpha
+//! it measures carries the hole and not the picture. So a cue containing a
+//! colour-emoji cell is reported as uncovered rather than measured short.
+//!
 //! # Three samples per cue
 //!
 //! At 25%, 50% and 75% of the cue, unioned. Not the first frame: a `{\fad}` cue
@@ -55,9 +77,10 @@
 use std::{collections::HashMap, path::Path};
 
 use super::export::{
-    build_ass_text_overlay_script_in_window_with_emoji, ExportEngine, ExportError,
+    ass_centisecond, build_ass_text_overlay_script_in_window_with_emoji, EmojiSpacerContext,
+    ExportEngine, ExportError,
 };
-use crate::core::{effects::Effect, timeline::Sequence};
+use crate::core::{effects::Effect, text::emoji_assets::EmojiRasterSource, timeline::Sequence};
 
 /// How far inside a cue's end a frame time has to be to count as on the cue.
 ///
@@ -79,16 +102,24 @@ const FRAME_BOUNDARY_EPSILON: f64 = 1e-9;
 /// wants is the union over the cue's life.
 const PROBE_FRACTIONS: [f64; 3] = [0.25, 0.5, 0.75];
 
-/// Alpha level at or above which a pixel counts as inked.
+/// Alpha level a pixel has to exceed to count as inked.
 ///
-/// One, not zero. The filter includes every pixel whose value is `>= min_val`,
-/// so `min_val=0` matches the fully transparent canvas as well and reports a
-/// full-frame box for every cue - "no ink" and "overflows the frame" become the
-/// same measurement. One still catches the faintest anti-aliased edge the
-/// renderer can produce (alpha 1/255), and on a correct canvas it measures
-/// identically to 0: the fixture in this module's tests reports the same
-/// rectangle at 0, 1 and 32.
-const BBOX_MIN_ALPHA: u32 = 1;
+/// Zero, and the comparison is the reason it can be: `bbox` keeps a pixel when
+/// its value is **strictly greater** than `min_val`, so `min_val=0` means "every
+/// pixel carrying any alpha at all" and still excludes the transparent canvas,
+/// which is alpha `0`. Anything higher silently discards the faintest
+/// anti-aliased fringe - at `min_val=1` the alpha-1 rim of the outline is not in
+/// the box - and the extent QC reasons about is the outer edge of what was
+/// drawn.
+///
+/// This constant was `1` on the strength of a claim that `0` returns a
+/// full-frame box. It does not, and the measurement says so: over
+/// `color=c=black@0.0,format=rgba` this binary reports `703..1217 x 968..1011`
+/// for the same caption at `min_val` `0`, `1` and `32`, and reports *no box at
+/// all* for a whitespace-only cue at `min_val=0`. The full-frame box that
+/// claim came from was the separate `format=rgba`-in-`-vf` bug below, which
+/// filled alpha with 255 before the filter ever saw it.
+const BBOX_MIN_ALPHA: u32 = 0;
 
 /// Ceiling on `select` terms in one probe, so a long project cannot build a
 /// filtergraph argument the platform refuses to pass to a child process.
@@ -142,13 +173,19 @@ pub struct CaptionExtent {
     /// without it is a cue the probe could not run for; the coverage record
     /// says which.
     pub box_percent: Option<BoxPercent>,
-    /// Whether the measured box touches a frame edge.
+    /// Whether the ink ran off the frame by an amount nothing can recover.
     ///
     /// libass clips at the frame, so an overflowing caption measures as a box
     /// flush against the edge and the overshoot is simply not in the picture.
     /// This flag says "overflow of unknown magnitude"; there is deliberately no
     /// estimate of how far, because re-rendering on a larger canvas would change
     /// the wrapping and measure a different caption.
+    ///
+    /// It is **not** set by a box that merely reaches an edge. A caption with
+    /// `marginPercent: 0` measures `y2 == height - 1`, and a `\blur` or a
+    /// `\shad` reaches an edge the glyphs do not; all of those are ordinary
+    /// output that the caller's own edge comparison passes. See
+    /// [`FlushEdges::overflows_frame`] for the signature that separates them.
     pub clipped: bool,
     /// Whether every sampled frame came back with no ink at all.
     ///
@@ -171,8 +208,24 @@ pub struct CaptionExtentCoverage {
     pub shared_frame_cue_ids: Vec<String>,
     /// Cues shorter than a frame interval, which no frame of this render shows.
     pub sub_frame_cue_ids: Vec<String>,
+    /// Cues carrying at least one colour-emoji cell.
+    ///
+    /// The burn-in draws the emoji's picture *outside* the subtitle layer and
+    /// leaves an ink-free spacer in the text, so the alpha box for such a cue is
+    /// the caption minus its emoji - narrower than what the viewer sees, and
+    /// narrower in the direction that turns a real overflow into a pass. Left to
+    /// the caller's predictor until the overlay cells can be unioned in.
+    pub emoji_cue_ids: Vec<String>,
     /// Whether at least one probe run could not be completed.
     pub probe_failed: bool,
+    /// Whether the layout depended on fonts installed on this machine.
+    ///
+    /// True when at least one run fell through to the host font provider rather
+    /// than a face the script embeds. The boxes are then only as reproducible as
+    /// the machine's font set: the same project measured on CI and on a
+    /// developer's laptop can legitimately disagree, and a reader comparing two
+    /// reports needs to know that before calling it a regression.
+    pub uses_host_fonts: bool,
     /// Human-readable detail, for the report the caller prints.
     pub notes: Vec<String>,
 }
@@ -180,7 +233,12 @@ pub struct CaptionExtentCoverage {
 /// Every cue's extent, plus what the pass could not reach.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CaptionExtentMeasurement {
-    /// One entry per solo cue, in timeline order.
+    /// One entry per solo cue, in the order the script wrote its events.
+    ///
+    /// Event order, which is track order and then clip order within a track -
+    /// *not* timeline order, which two caption tracks would interleave. Nothing
+    /// reads these positionally (the caller looks a cue up by `clip_id`), so the
+    /// order is a description rather than a contract.
     pub extents: Vec<CaptionExtent>,
     /// What was left out.
     pub coverage: CaptionExtentCoverage,
@@ -205,6 +263,14 @@ pub struct CaptionExtentRequest<'a> {
     pub fps: f64,
     /// Where the render's own clock begins on the timeline. `0.0` for a
     /// whole-project QC pass.
+    ///
+    // TODO(caption-extent-window-end): a declared range bounds the start of the
+    // measured set and not its end, so a cue after the window is still probed
+    // and reported. Harmless to the boxes - each is measured on its own frames -
+    // and wrong for a caller grading only the range under review. Closing it
+    // means carrying the end through the script builder too, so an event past
+    // the window stops being written at all rather than being filtered out of
+    // the cue list after the fact.
     pub window_start_sec: f64,
 }
 
@@ -216,22 +282,28 @@ struct CaptionCue {
     /// Cue bounds on the timeline.
     timeline_in_sec: f64,
     timeline_end_sec: f64,
-    /// Cue start on the render's clock, floored at zero exactly as
-    /// `ass_timecode` floors the `Dialogue` line's own start.
-    render_start_sec: f64,
-    /// Cue end on the render's clock.
-    render_end_sec: f64,
+    /// Cue start as the `Dialogue` line writes it: on the render's clock,
+    /// floored at zero exactly as `ass_timecode` floors it, and rounded to the
+    /// centisecond grid that is the only precision ASS has.
+    drawn_start_sec: f64,
+    /// Cue end on the same clock and the same grid.
+    drawn_end_sec: f64,
 }
 
 impl CaptionCue {
     /// Whether this cue is drawn at `instant`, on the render's clock.
     ///
-    /// Half-open, so two cues that merely touch (`a.end == b.start`) are never
-    /// both live: nothing is drawn at the instant a cue ends, and treating a
-    /// touch as an overlap would make every back-to-back caption track
-    /// unmeasurable.
+    /// Half-open, and measured to be so: a cue written `0:00:02.00,0:00:03.00`
+    /// draws on the 30fps frames at `t=2.000` and `t=2.9667` and not on the one
+    /// at `t=3.000`. Two cues that merely touch are therefore never both live,
+    /// which is what keeps a back-to-back caption track measurable.
+    ///
+    /// Asked of the *rounded* span, because that is the span libass is handed.
+    /// A cue starting at an exact `2.004` is written `0:00:02.00` and really is
+    /// on the frame at `t=2.000`; answering `false` there declares a neighbour
+    /// solo that is about to be measured together with this one.
     fn is_live_at(&self, instant: f64) -> bool {
-        self.render_start_sec <= instant && instant < self.render_end_sec
+        self.drawn_start_sec <= instant && instant < self.drawn_end_sec
     }
 
     /// The frames this cue can be probed on, or an empty vector when no frame
@@ -247,14 +319,20 @@ impl CaptionCue {
     ///
     /// Empty is the sub-frame cue: one shorter than a frame interval can fall
     /// entirely between two presentation times, so no frame ever shows it and
-    /// there is nothing to measure.
+    /// there is nothing to measure. A cue whose whole span rounds onto a single
+    /// centisecond lands here too, and correctly: the `Dialogue` line it
+    /// produces has `Start == End` and draws on nothing.
+    ///
+    /// The span is the rounded one for the same reason [`Self::is_live_at`]
+    /// uses it - a frame is probed because libass draws the cue on it, and what
+    /// libass draws is decided by the timecodes in the script.
     fn probe_frames(&self, fps: f64) -> Vec<u64> {
         if !fps.is_finite() || fps <= 0.0 {
             return Vec::new();
         }
 
-        let start = self.render_start_sec;
-        let end = self.render_end_sec;
+        let start = self.drawn_start_sec;
+        let end = self.drawn_end_sec;
         if !start.is_finite() || !end.is_finite() || end <= start {
             return Vec::new();
         }
@@ -323,20 +401,66 @@ fn box_to_percent(measured: MeasuredBox, width: u32, height: u32) -> Option<BoxP
     })
 }
 
-/// Whether a measured box is flush against any frame edge.
-///
-/// libass clips its own rendering at the frame, so a caption wider than the
-/// picture measures as one exactly the width of the picture. The overshoot is
-/// not in the image and cannot be recovered from it, so this is reported as a
-/// flag rather than turned into a number.
-fn touches_frame_edge(measured: MeasuredBox, width: u32, height: u32) -> bool {
+/// Which of the four frame edges a measured box is flush against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FlushEdges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+impl FlushEdges {
+    /// Whether the ink ran off the frame by an amount the picture cannot show.
+    ///
+    /// libass clips its own rendering at the frame, so a caption wider than the
+    /// picture measures as one *exactly* the width of the picture and the
+    /// overshoot is simply not in the image. That is worth reporting, and it is
+    /// the only thing here that is: "flush against an edge" on its own is
+    /// ordinary output, and treating it as an overflow makes this measurement
+    /// stricter than the estimate it replaced, on cues nobody cropped.
+    ///
+    /// Measured against this binary, over a 1920x1080 canvas:
+    ///
+    /// - a bottom caption with `marginPercent: 0` - a value the preset schema
+    ///   allows - inks `718..1201 x 1027..1079`: flush on the bottom, and not a
+    ///   pixel of it lost,
+    /// - the same caption with `\blur8\bord6` inks `778..1142 x 1003..1079`:
+    ///   flush on the bottom because the blur reaches there, still nothing cut,
+    /// - a 200-character unspaced run inks `0..1919 x 968..1010`: flush on the
+    ///   left *and* the right at once.
+    ///
+    /// The third is the signature, and it is the one a legitimate caption cannot
+    /// produce: filling an axis edge to edge means the line was longer than the
+    /// axis. A single flush edge is left to the caller's ordinary edge
+    /// comparison, which passes a box at `0..100` exactly as it does for an
+    /// estimate.
+    ///
+    /// The cost is stated rather than hidden: a caption pushed *partly* off one
+    /// side measures flush on that side alone and is now graded as reaching the
+    /// edge rather than leaving the frame. Separating that from a margin-0
+    /// caption needs a second measurement - the ink density in the boundary
+    /// column, or a probe on an over-sized canvas - and a probe on a larger
+    /// canvas re-wraps the text and measures a different caption.
+    // TODO(caption-extent-one-sided-crop): measure the boundary column's ink run
+    // so a caption cropped on one side can be told from one merely flush
+    // against that side.
+    fn overflows_frame(self) -> bool {
+        (self.left && self.right) || (self.top && self.bottom)
+    }
+}
+
+/// Which frame edges the measured ink reaches.
+fn flush_edges(measured: MeasuredBox, width: u32, height: u32) -> FlushEdges {
     let right_edge = i64::from(width) - 1;
     let bottom_edge = i64::from(height) - 1;
 
-    measured.x1 <= 0
-        || measured.y1 <= 0
-        || i64::from(measured.x2) >= right_edge
-        || i64::from(measured.y2) >= bottom_edge
+    FlushEdges {
+        left: measured.x1 <= 0,
+        right: i64::from(measured.x2) >= right_edge,
+        top: measured.y1 <= 0,
+        bottom: i64::from(measured.y2) >= bottom_edge,
+    }
 }
 
 /// Turns the script builder's own event list into the cues the probe measures.
@@ -398,11 +522,14 @@ fn cues_for_events(
                 clip_id: clip_id.clone(),
                 timeline_in_sec: start,
                 timeline_end_sec: end,
-                // `ass_timecode` floors a negative start at zero, so a cue
-                // already on screen when the window opens is drawn from the
-                // window's first frame.
-                render_start_sec: (start - window_start_sec).max(0.0),
-                render_end_sec: render_end,
+                // Exactly what the `Dialogue` line will say. `ass_timecode`
+                // floors a negative start at zero, so a cue already on screen
+                // when the window opens is drawn from the window's first frame;
+                // `ass_centisecond` is that same function's rounding, which is
+                // the grid libass is given and therefore the grid every timing
+                // question here has to be asked on.
+                drawn_start_sec: ass_centisecond((start - window_start_sec).max(0.0)),
+                drawn_end_sec: ass_centisecond(render_end),
             })
         })
         .collect()
@@ -508,11 +635,24 @@ pub async fn measure_caption_extents(
     // alongside it. Every probe run then reads the same script the burn-in
     // would, so the fonts, the `PlayRes`, the margins and the wrapping are the
     // export's and not a reconstruction of them.
+    //
+    // Including the emoji pack, which is the part that is easy to get wrong:
+    // with a pack installed the burn-in turns every emoji cluster into a
+    // 1.2 em advance-only spacer, and a probe built without one lays the raw
+    // glyph out instead - different advances, a different line break, and a
+    // rectangle for a caption the export never draws. The price is that the
+    // spacer is ink-free, so an emoji cue's own box is incomplete; those cues
+    // are refused below rather than reported short.
+    let emoji_pack = crate::core::text::emoji_assets::discover();
     let Some(script) = build_ass_text_overlay_script_in_window_with_emoji(
         request.sequence,
         request.effects,
         request.window_start_sec,
-        None,
+        Some(EmojiSpacerContext {
+            pack: emoji_pack.map(|pack| pack as &dyn EmojiRasterSource),
+            markers: None,
+            refused: None,
+        }),
     )?
     else {
         return Ok(CaptionExtentMeasurement::default());
@@ -543,11 +683,27 @@ pub async fn measure_caption_extents(
     }
 
     let planned = plan_cues(cues, fps);
-    let mut coverage = CaptionExtentCoverage::default();
+    // `event_index` is a position in the script's own event list, which is the
+    // same list `event_clip_ids` - and therefore `planned` - is indexed by.
+    let emoji_events: std::collections::HashSet<usize> = script
+        .emoji_occurrences
+        .iter()
+        .map(|occurrence| occurrence.event_index)
+        .collect();
+
+    let mut coverage = CaptionExtentCoverage {
+        uses_host_fonts: script.uses_host_fonts,
+        ..CaptionExtentCoverage::default()
+    };
     let mut solo: Vec<usize> = Vec::new();
 
     for (index, entry) in planned.iter().enumerate() {
-        if entry.frames.is_empty() {
+        // Asked first, and before `no_ink` can ever be reached: a cue that is
+        // nothing but an emoji renders an ink-free spacer and would otherwise be
+        // reported as a caption that drew nothing at all.
+        if emoji_events.contains(&index) {
+            coverage.emoji_cue_ids.push(entry.cue.clip_id.clone());
+        } else if entry.frames.is_empty() {
             coverage.sub_frame_cue_ids.push(entry.cue.clip_id.clone());
         } else if entry.shares_a_frame {
             coverage
@@ -558,6 +714,28 @@ pub async fn measure_caption_extents(
         }
     }
 
+    // TODO(caption-extent-emoji-union): measure the full extent of an emoji cue
+    // by unioning the overlay cells `EmojiColourPass` places - their positions
+    // and sizes are already computed for the burn-in - with the alpha box of the
+    // text around them, and drop this bucket.
+    if !coverage.emoji_cue_ids.is_empty() {
+        coverage.notes.push(format!(
+            "{} caption cue(s) contain a colour emoji, whose picture is composited outside the \
+             subtitle layer and so is not in the measured alpha; their boxes are estimated",
+            coverage.emoji_cue_ids.len()
+        ));
+    }
+    // Only worth saying when there is a measurement for it to qualify. The flag
+    // itself stays on the record either way, because that is what a reader
+    // comparing two machines' reports looks at.
+    if coverage.uses_host_fonts && !solo.is_empty() {
+        coverage.notes.push(
+            "At least one caption run was laid out with fonts installed on this machine rather \
+             than a face the script embeds, so the measured boxes are machine-specific and two \
+             machines can legitimately disagree about them"
+                .to_string(),
+        );
+    }
     if !coverage.shared_frame_cue_ids.is_empty() {
         coverage.notes.push(format!(
             "{} cue(s) share a frame with another text or caption event; one bbox rectangle cannot \
@@ -645,7 +823,8 @@ pub async fn measure_caption_extents(
                     box_to_percent(measured, request.canvas_width, request.canvas_height)
                 }),
                 clipped: measured.is_some_and(|measured| {
-                    touches_frame_edge(measured, request.canvas_width, request.canvas_height)
+                    flush_edges(measured, request.canvas_width, request.canvas_height)
+                        .overflows_frame()
                 }),
                 // Every sampled frame came back with no ink. Not a probe
                 // failure - the run completed and libass drew nothing.
@@ -883,13 +1062,14 @@ mod tests {
     // Fixtures
     // =========================================================================
 
+    /// A cue placed on the render's clock, rounded the way the script writes it.
     fn cue(clip_id: &str, start: f64, end: f64) -> CaptionCue {
         CaptionCue {
             clip_id: clip_id.to_string(),
             timeline_in_sec: start,
             timeline_end_sec: end,
-            render_start_sec: start,
-            render_end_sec: end,
+            drawn_start_sec: ass_centisecond(start),
+            drawn_end_sec: ass_centisecond(end),
         }
     }
 
@@ -988,50 +1168,95 @@ mod tests {
     }
 
     /// Feature: caption extent measurement
-    /// Scenario: a box against any frame edge is an overflow of unknown size
+    /// Scenario: a box filling an entire axis is an overflow of unknown size
     ///
     /// libass clips at the frame, so a caption wider than the picture measures
-    /// as one exactly the width of the picture. Reporting that as a clean
-    /// "fits inside the frame" is the failure this flag exists to prevent.
+    /// as one exactly the width of the picture. Reporting that as a clean "fits
+    /// inside the frame" is the failure this flag exists to prevent - and the
+    /// signature is both *opposing* edges at once, because that is what a line
+    /// longer than the axis produces and what a legitimate caption cannot.
     #[test]
-    fn a_box_touching_any_frame_edge_is_flagged_as_clipped() {
+    fn a_box_filling_a_whole_axis_is_flagged_as_clipped() {
         let inside = MeasuredBox {
             x1: 1,
             y1: 1,
             x2: 1918,
             y2: 1078,
         };
-        assert!(!touches_frame_edge(inside, 1920, 1080));
+        assert!(!flush_edges(inside, 1920, 1080).overflows_frame());
 
-        for edge in [
-            MeasuredBox {
-                x1: 0,
-                y1: 1,
-                x2: 1918,
-                y2: 1078,
-            },
-            MeasuredBox {
-                x1: 1,
-                y1: 0,
-                x2: 1918,
-                y2: 1078,
-            },
-            MeasuredBox {
-                x1: 1,
-                y1: 1,
-                x2: 1919,
-                y2: 1078,
-            },
-            MeasuredBox {
-                x1: 1,
-                y1: 1,
-                x2: 1918,
-                y2: 1079,
-            },
+        // The measured 200-character unspaced run: left and right at once.
+        let horizontal = MeasuredBox {
+            x1: 0,
+            y1: 968,
+            x2: 1919,
+            y2: 1010,
+        };
+        assert!(flush_edges(horizontal, 1920, 1080).overflows_frame());
+
+        let vertical = MeasuredBox {
+            x1: 700,
+            y1: 0,
+            x2: 1200,
+            y2: 1079,
+        };
+        assert!(flush_edges(vertical, 1920, 1080).overflows_frame());
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a caption merely reaching one frame edge is not an overflow
+    ///
+    /// Measured against the real binary at 1920x1080: a bottom caption with
+    /// `marginPercent: 0` - a value the preset schema allows - inks
+    /// `718..1201 x 1027..1079`, and the same caption with `\blur8\bord6` inks
+    /// `778..1142 x 1003..1079`. Neither lost a pixel. Escalating those to an
+    /// Error made this measurement stricter than the estimate it replaced, on
+    /// captions nobody cropped; the ordinary edge comparison, which passes a box
+    /// at `0..100`, governs them instead.
+    #[test]
+    fn a_caption_flush_against_one_edge_is_not_an_overflow() {
+        for (name, flush) in [
+            (
+                "a margin-0 bottom caption",
+                MeasuredBox {
+                    x1: 718,
+                    y1: 1027,
+                    x2: 1201,
+                    y2: 1079,
+                },
+            ),
+            (
+                "the same caption with a blur",
+                MeasuredBox {
+                    x1: 778,
+                    y1: 1003,
+                    x2: 1142,
+                    y2: 1079,
+                },
+            ),
+            (
+                "a caption flush against the left",
+                MeasuredBox {
+                    x1: 0,
+                    y1: 500,
+                    x2: 900,
+                    y2: 560,
+                },
+            ),
+            (
+                "a caption flush against the top",
+                MeasuredBox {
+                    x1: 700,
+                    y1: 0,
+                    x2: 1200,
+                    y2: 60,
+                },
+            ),
         ] {
+            let edges = flush_edges(flush, 1920, 1080);
             assert!(
-                touches_frame_edge(edge, 1920, 1080),
-                "{edge:?} sits on a frame edge"
+                !edges.overflows_frame(),
+                "{name} reaches an edge without being cut: {flush:?} -> {edges:?}"
             );
         }
     }
@@ -1092,13 +1317,15 @@ mod tests {
     /// that comes *next*, which is worse than measuring nothing.
     #[test]
     fn a_short_cues_samples_are_clamped_into_the_frames_it_is_on() {
-        // Two frames at 30fps: 1.0 and 1.0333. All three fractions must land on
-        // one of those two and nowhere else.
+        // `1.0` to `1.0666…` is written `0:00:01.00,0:00:01.07`, and measured
+        // against the real binary that script draws on frames 30, 31 and 32 -
+        // not on 29, not on 33. All three fractions must land inside that span
+        // and nowhere else.
         let frames = cue("a", 1.0, 1.0 + 2.0 / 30.0).probe_frames(30.0);
 
         assert!(!frames.is_empty());
         for frame in &frames {
-            assert!((30..=31).contains(frame), "frame {frame} is not on the cue");
+            assert!((30..=32).contains(frame), "frame {frame} is not on the cue");
         }
     }
 
@@ -1211,6 +1438,46 @@ mod tests {
 
         assert!(planned[0].frames.is_empty());
         assert!(!planned[0].shares_a_frame);
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a cue the script rounds onto a neighbour's probe frame is
+    /// shared, not solo
+    ///
+    /// The whole partition rests on "no other event is drawn here", and the
+    /// script decides that on a hundredth-of-a-second grid the timeline knows
+    /// nothing about. A cue whose exact bounds are `[2.004, 2.03)` is written
+    /// `0:00:02.00,0:00:02.03`, and measured against the real binary that line
+    /// draws on exactly one frame of a 30fps render: frame 60, at `t=2.000` -
+    /// four milliseconds *before* the cue's own exact start.
+    ///
+    /// Asked on the exact times, both halves of that were wrong at once. The
+    /// spanning cue probed frame 60 with nobody apparently live there, so it was
+    /// declared solo and handed a rectangle containing both captions; and the
+    /// short cue's own frame span came out empty, so it was filed as a cue no
+    /// frame shows while libass was drawing it.
+    #[test]
+    fn a_cue_the_script_rounds_onto_a_neighbours_probe_frame_is_shared() {
+        let short = cue("short", 2.004, 2.03);
+
+        assert!(
+            short.timeline_in_sec > 60.0 / 30.0,
+            "the fixture only proves anything if the exact start is past the probe instant"
+        );
+        assert_eq!(
+            short.probe_frames(30.0),
+            vec![60],
+            "the frame the binary was measured drawing this line on"
+        );
+
+        // Probes 1.5s, 2.0s and 2.5s: frames 45, 60 and 90.
+        let planned = plan_cues(vec![cue("spanning", 1.0, 3.0), short], 30.0);
+
+        assert!(
+            planned[0].shares_a_frame,
+            "frame 60 carries the short cue's ink too, so this box belongs to neither: {planned:#?}"
+        );
+        assert!(planned[1].shares_a_frame, "{planned:#?}");
     }
 
     // =========================================================================
@@ -1505,8 +1772,8 @@ mod tests {
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].timeline_in_sec, 8.0);
         assert_eq!(cues[0].timeline_end_sec, 14.0);
-        assert_eq!(cues[0].render_start_sec, 0.0, "floored at the window");
-        assert_eq!(cues[0].render_end_sec, 4.0);
+        assert_eq!(cues[0].drawn_start_sec, 0.0, "floored at the window");
+        assert_eq!(cues[0].drawn_end_sec, 4.0);
     }
 
     /// Feature: caption extent measurement
@@ -1536,9 +1803,9 @@ mod tests {
     ///   alpha with 255, and every cue measures as a full-frame box.
     /// - `alpha=1` on `subtitles`. Without it libass leaves the alpha channel
     ///   untouched, and the probe reads the empty canvas it started with.
-    /// - `min_val=1`, not 0. The filter includes pixels `>= min_val`, so 0
-    ///   matches the transparent canvas too and makes "no ink" and "fills the
-    ///   frame" the same measurement.
+    /// - `min_val=0`. The filter keeps pixels *strictly greater* than
+    ///   `min_val`, so 0 is "any alpha at all" and still excludes the
+    ///   transparent canvas; anything higher drops the anti-aliased fringe.
     /// - `select` before `subtitles`, so libass lays out three frames per cue
     ///   rather than every frame of the project.
     #[test]
@@ -1574,7 +1841,7 @@ mod tests {
         assert_eq!(
             args[filter + 1],
             "select='eq(n\\,30)+eq(n\\,60)+eq(n\\,90)',subtitles=filename='script.ass':alpha=1,\
-             alphaextract,bbox=min_val=1,metadata=mode=print:file=-"
+             alphaextract,bbox=min_val=0,metadata=mode=print:file=-"
         );
         assert!(args
             .windows(2)
@@ -1617,7 +1884,7 @@ mod tests {
         assert_eq!(
             args[filter + 1],
             "select='eq(n\\,30)',subtitles=filename='script.ass':alpha=1:\
-             fontsdir='/usr/share/fonts':wrap_unicode=1,alphaextract,bbox=min_val=1,\
+             fontsdir='/usr/share/fonts':wrap_unicode=1,alphaextract,bbox=min_val=0,\
              metadata=mode=print:file=-"
         );
     }
@@ -1728,6 +1995,104 @@ mod tests {
     }
 
     /// Feature: caption extent measurement
+    /// Scenario: a cue containing a colour emoji is refused, not measured short
+    ///
+    /// The probe has to build the script the burn-in builds, emoji pack and all,
+    /// or the advances and the line breaks belong to a caption the export never
+    /// draws. Doing that puts an ink-free spacer where the emoji is and leaves
+    /// the colour picture outside the alpha, so the cue's own box comes back
+    /// narrower than what a viewer sees - narrower in the direction that turns a
+    /// real overflow into a pass. So it is refused.
+    ///
+    /// That the emoji cue is named here at all is itself the proof the probe
+    /// built the script with the pack: an occurrence only exists when a cluster
+    /// was given a cell.
+    #[tokio::test]
+    async fn a_cue_carrying_a_colour_emoji_is_recorded_as_uncovered() {
+        if crate::core::text::emoji_assets::discover().is_none() {
+            eprintln!("Skipping test: no colour emoji pack is installed");
+            return;
+        }
+
+        let mut sequence =
+            sequence_with_captions(&[("Plain cue", 0.0, 2.0), ("Fire \u{1F525}", 2.0, 4.0)]);
+        sequence.tracks[0].clips[0].id = "clip-plain".to_string();
+        sequence.tracks[0].clips[1].id = "clip-emoji".to_string();
+
+        let request = CaptionExtentRequest {
+            sequence: &sequence,
+            effects: &HashMap::new(),
+            canvas_width: 1920,
+            canvas_height: 1080,
+            fps: 30.0,
+            window_start_sec: 0.0,
+        };
+
+        let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
+            .await
+            .expect("an emoji is not an error");
+
+        assert_eq!(
+            measurement.coverage.emoji_cue_ids,
+            vec!["clip-emoji".to_string()],
+            "the emoji cue is named as uncovered: {:?}",
+            measurement.coverage
+        );
+        assert!(
+            measurement
+                .coverage
+                .notes
+                .iter()
+                .any(|note| note.contains("colour emoji")),
+            "the report has to say why: {:?}",
+            measurement.coverage.notes
+        );
+        // The plain cue was the only one the probe was asked to run for, which
+        // is what makes the emoji cue's exclusion a refusal rather than a
+        // failure shared by both.
+        assert!(
+            !measurement
+                .coverage
+                .shared_frame_cue_ids
+                .contains(&"clip-emoji".to_string()),
+            "an emoji cue is refused for its own reason, not filed under overlap"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a layout that fell through to the host's fonts says so
+    ///
+    /// A measured box is a statement about glyph metrics, so a run that libass
+    /// drew with a face off this machine rather than one the script embeds is
+    /// only as reproducible as the machine. Without the flag, a CI report and a
+    /// developer's report disagreeing about a caption's width reads as a
+    /// regression in the project rather than as two different font sets.
+    #[tokio::test]
+    async fn a_layout_drawn_with_host_fonts_is_marked_machine_specific() {
+        // Hangul: no bundled face covers it, so libass consults the host's font
+        // provider and `fontsdir` goes onto the graph.
+        let sequence = sequence_with_captions(&[("한글 자막", 0.0, 2.0)]);
+        let request = CaptionExtentRequest {
+            sequence: &sequence,
+            effects: &HashMap::new(),
+            canvas_width: 1920,
+            canvas_height: 1080,
+            fps: 30.0,
+            window_start_sec: 0.0,
+        };
+
+        let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
+            .await
+            .expect("host fonts are not an error");
+
+        assert!(
+            measurement.coverage.uses_host_fonts,
+            "a Hangul caption is drawn by a face off this machine: {:?}",
+            measurement.coverage
+        );
+    }
+
+    /// Feature: caption extent measurement
     /// Scenario: overlapping cues are named in the coverage, not measured
     #[tokio::test]
     async fn overlapping_cues_are_recorded_as_unattributable() {
@@ -1813,6 +2178,14 @@ mod tests {
 
     /// A hand-written script in the shape the export writes.
     fn fixture_script(tags: &str, text: &str) -> String {
+        fixture_script_with_margin(tags, text, 60)
+    }
+
+    /// The same, with the vertical margin under the caller's control.
+    ///
+    /// `0` is the margin a `marginPercent: 0` preset resolves to, and the case
+    /// this module used to report as an overflow.
+    fn fixture_script_with_margin(tags: &str, text: &str, margin_v: u32) -> String {
         format!(
             "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\
              PlayResX: 1920\nPlayResY: 1080\n\n\
@@ -1821,10 +2194,10 @@ mod tests {
              Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, \
              Encoding\n\
              Style: T,Arial,60.00,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100.00,\
-             100.00,0,0,1,2.00,0.00,2,60,60,60,1\n\n\
+             100.00,0,0,1,2.00,0.00,2,60,60,{margin_v},1\n\n\
              [Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, \
              Text\n\
-             Dialogue: 0,0:00:00.00,0:00:04.00,T,,60,60,60,,{{{tags}}}{text}\n"
+             Dialogue: 0,0:00:00.00,0:00:04.00,T,,60,60,{margin_v},,{{{tags}}}{text}\n"
         )
     }
 
@@ -1845,7 +2218,10 @@ mod tests {
         )
         .expect("an ordinary caption draws ink");
 
-        assert!(!touches_frame_edge(measured, 1920, 1080), "{measured:?}");
+        assert!(
+            !flush_edges(measured, 1920, 1080).overflows_frame(),
+            "{measured:?}"
+        );
 
         let percent = box_to_percent(measured, 1920, 1080).expect("a sized canvas");
         assert!(
@@ -1949,7 +2325,10 @@ mod tests {
         // The quarter mark, which is where this module actually samples.
         let measured = probe_script(&ffmpeg, &script, 30, 30.0)
             .expect("a faded cue is fully drawn a quarter of the way in");
-        assert!(!touches_frame_edge(measured, 1920, 1080), "{measured:?}");
+        assert!(
+            !flush_edges(measured, 1920, 1080).overflows_frame(),
+            "{measured:?}"
+        );
     }
 
     /// Feature: caption extent measurement
@@ -1972,9 +2351,96 @@ mod tests {
             .expect("an overflowing run still draws");
 
         assert!(
-            touches_frame_edge(measured, 1920, 1080),
+            flush_edges(measured, 1920, 1080).overflows_frame(),
             "a 200-character unspaced run cannot fit in 1920px: {measured:?}"
         );
+        let edges = flush_edges(measured, 1920, 1080);
+        assert!(
+            edges.left && edges.right,
+            "the signature is an axis filled edge to edge, not a single edge: {edges:?}"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a caption flush against the bottom of the frame is not cropped
+    ///
+    /// `marginPercent: 0` is a value the preset schema accepts, and a `\blur`
+    /// or a `\shad` reaches an edge the glyphs do not. Both measure with the box
+    /// touching the last row of the picture and neither loses a pixel. Flagging
+    /// them made the measured path stricter than the estimate it replaced, on
+    /// output nobody would call broken - so they have to come back with the
+    /// overflow flag clear and be left to the ordinary edge comparison.
+    #[test]
+    #[ignore = "requires FFmpeg with libass"]
+    fn a_margin_zero_caption_reaches_the_edge_without_being_cropped() {
+        let Some(ffmpeg) = crate::core::test_ffmpeg::require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        for (name, script) in [
+            (
+                "a margin-0 bottom caption",
+                fixture_script_with_margin(r"\an2", "Bottom flush caption", 0),
+            ),
+            (
+                "the same caption with a blur and a wide border",
+                fixture_script_with_margin(r"\an2\blur8\bord6", "Blurry bottom", 0),
+            ),
+        ] {
+            let measured = probe_script(&ffmpeg, &script, 30, 30.0).expect("the caption draws ink");
+            let edges = flush_edges(measured, 1920, 1080);
+
+            assert!(
+                edges.bottom,
+                "{name} has to actually reach the frame edge, or this proves nothing: {measured:?}"
+            );
+            assert!(
+                !edges.overflows_frame(),
+                "{name} reaches the edge without being cropped: {measured:?} -> {edges:?}"
+            );
+
+            let percent = box_to_percent(measured, 1920, 1080).expect("a sized canvas");
+            assert!(
+                percent.left > 0.0 && percent.right < 100.0 && percent.bottom <= 100.0,
+                "and its edges are the ones an edge comparison passes: {percent:?}"
+            );
+        }
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: the drawn span of a cue is the one the script rounds it onto
+    ///
+    /// The measurement the centisecond reasoning rests on. A cue whose exact
+    /// bounds are `[2.004, 2.03)` is written `0:00:02.00,0:00:02.03` and is
+    /// drawn on exactly one frame of a 30fps render - frame 60, at `t=2.000`,
+    /// which its exact start is four milliseconds past. If this ever stops being
+    /// true, [`CaptionCue::is_live_at`] is classifying on the wrong clock again
+    /// and solo cues are being measured with a neighbour's ink in the box.
+    #[test]
+    #[ignore = "requires FFmpeg with libass"]
+    fn a_cue_is_drawn_on_the_frames_its_rounded_timecodes_cover() {
+        let Some(ffmpeg) = crate::core::test_ffmpeg::require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        let script = fixture_script(r"\an2", "Rounded")
+            .replace("0:00:00.00,0:00:04.00", "0:00:02.00,0:00:02.03");
+
+        assert!(
+            probe_script(&ffmpeg, &script, 59, 30.0).is_none(),
+            "t=1.9667 is before the rounded start"
+        );
+        assert!(
+            probe_script(&ffmpeg, &script, 60, 30.0).is_some(),
+            "t=2.000 is the rounded start, and libass draws there"
+        );
+        assert!(
+            probe_script(&ffmpeg, &script, 61, 30.0).is_none(),
+            "t=2.0333 is past the rounded end"
+        );
+
+        // And the module agrees with the binary about which frame that is.
+        assert_eq!(cue("a", 2.004, 2.03).probe_frames(30.0), vec![60]);
     }
 
     /// Feature: caption extent measurement

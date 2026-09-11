@@ -45,9 +45,10 @@
 
 use super::{
     crossref_black_ranges_with_gaps, measure_rendered_file_detailed, sample_caption_bands,
-    sample_caption_extents, CaptionExtentOptions, CaptionSampleOptions, ContrastThresholds,
-    MeasureOptions, MeasuredWindow, MeasurementReport, QCContext, QCEngine, QCEngineConfig,
-    QCReport, QCSeverityFilter, RuleStatus, Severity, ViolationFix, CAPTION_CONTRAST_CHECK_ID,
+    sample_caption_extents, CaptionExtentCoverageRecord, CaptionExtentOptions,
+    CaptionSampleOptions, ContrastThresholds, MeasureOptions, MeasuredWindow, MeasurementReport,
+    QCContext, QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleStatus, Severity,
+    ViolationFix, CAPTION_CONTRAST_CHECK_ID,
 };
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::project::ProjectState;
@@ -685,6 +686,7 @@ impl VerifyPlan {
                 engine: &self.engine,
                 selected_ids: &self.selected_ids,
                 measurement: measurement.as_ref(),
+                caption_extent_coverage: context.caption_extent_coverage.as_ref(),
                 rendered_file: self.request.file.as_deref(),
                 measured_window: self.window,
                 structural_only: self.request.structural_only,
@@ -1171,6 +1173,15 @@ struct OutputInputs<'a> {
     engine: &'a QCEngine,
     selected_ids: &'a [String],
     measurement: Option<&'a MeasurementReport>,
+    /// What the caption-extent pass reached, when it ran at all.
+    ///
+    /// Carried separately from `measurement` on purpose: the pass needs an
+    /// FFmpeg binary but no rendered file, so it runs on a plain `--path`
+    /// verify where `measurement` is `None`. Hung off the measurement record
+    /// alone, its whole coverage record — the only thing in the report that
+    /// says whether a caption verdict was measured or predicted — never reached
+    /// the JSON on exactly the runs it was built for.
+    caption_extent_coverage: Option<&'a CaptionExtentCoverageRecord>,
     rendered_file: Option<&'a Path>,
     measured_window: Option<MeasuredWindow>,
     structural_only: bool,
@@ -1234,6 +1245,11 @@ fn build_output(inputs: OutputInputs<'_>, mut warnings: Vec<String>, errors: Vec
             inputs.rendered_file,
             inputs.measured_window,
         ),
+        // Whether each caption verdict came off a render or off a model, on
+        // every run the pass took — including the render-free ones, where
+        // `measurements` says only `measured: false`. `null` means the pass did
+        // not run, which is not the same as a pass that ran and reached nothing.
+        "captionExtentCoverage": inputs.caption_extent_coverage,
         "warnings": warnings,
         "errors": errors,
     })
@@ -2709,6 +2725,19 @@ mod tests {
             "a caption probe is not a rendered-file measurement"
         );
 
+        // And the coverage reaches the document anyway. Hung off the
+        // measurement record it would be invisible on exactly the runs this
+        // pass was built for — a `--path` verify with no file — and a reader
+        // could not tell a run whose probe died from one that measured every
+        // caption and found them fine.
+        let coverage = &payload["captionExtentCoverage"];
+        assert!(
+            coverage.is_object(),
+            "the extent pass ran, so its coverage belongs in the document: {payload}"
+        );
+        assert_eq!(coverage["probeFailed"], true);
+        assert_eq!(coverage["measured"], 0);
+
         let bounds = payload["checks"]
             .as_array()
             .expect("checks array")
@@ -2724,6 +2753,31 @@ mod tests {
             .expect("checks array")
             .iter()
             .any(|check| check["category"] == "rendered" && check["skipped"] == true));
+    }
+
+    /// Feature: Measured caption bounds
+    /// Scenario: should say nothing about extent coverage when no pass ran
+    ///
+    /// `null` is the third state, and it is not the same as a pass that ran and
+    /// reached nothing: a `--structural-only` run never offers FFmpeg to the
+    /// probe at all, and a record of zero measured cues would read as a probe
+    /// that tried.
+    #[tokio::test]
+    async fn test_a_structural_run_reports_no_extent_coverage_at_all() {
+        let plan = VerifyPlan::resolve(structural_request()).expect("plan resolves");
+
+        let mut state = ProjectState::new("Structural");
+        let sequence = sequence_with_a_bare_caption();
+        state.active_sequence_id = Some(sequence.id.clone());
+        state.sequences.insert(sequence.id.clone(), sequence);
+
+        let report = plan.run(&state, None).await.expect("verification runs");
+
+        assert!(
+            report.payload()["captionExtentCoverage"].is_null(),
+            "a run with no extent pass must not report an empty one: {}",
+            report.payload()
+        );
     }
 
     /// Feature: Verifying a partial render
