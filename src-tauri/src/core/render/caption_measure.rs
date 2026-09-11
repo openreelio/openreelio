@@ -34,17 +34,50 @@
 //! the frame. Attaching the conversion to the source is what makes the `@0.0`
 //! survive.
 //!
-//! # One rectangle per frame
+//! # One rectangle per frame, and one cue per rectangle
 //!
 //! `bbox` reports the bounding box of every inked pixel on the frame, so a
 //! frame showing two text events at once returns their union - a rectangle that
-//! belongs to neither. Rather than build a per-cue isolation script (which
-//! would change the layout it is trying to measure), the cues are partitioned
-//! by time: a cue whose every probe instant has no other text or caption event
-//! live is *solo*, and the full-script box at those instants is that cue's box.
-//! A cue that shares an instant with another event is recorded as unmeasurable
-//! and left to the caller's predictor. The common project - one caption track,
-//! cues back to back - is entirely solo and costs one FFmpeg run.
+//! belongs to neither. The first cut of this module answered that by refusing:
+//! a cue whose probe instants were all to itself was *solo* and measured, and a
+//! cue sharing an instant with anything else was handed back to the caller's
+//! predictor. That is fine for one caption track and useless for the ordinary
+//! shape of a finished video - a lower third or a channel bug on screen the
+//! whole time - where *every* caption shares a frame with the title and nothing
+//! at all gets measured.
+//!
+//! So the cues are **isolated** instead. They are partitioned into layers by
+//! greedy colouring of the conflict graph (see [`plan_layers`]), and each layer
+//! is rendered from a script in which only that layer's events draw ink -
+//! [`ASS_HIDE_INK_TAGS`](super::export::ASS_HIDE_INK_TAGS) on every other event.
+//! Within a layer nothing overlaps, so the one rectangle `bbox` reports for a
+//! probe frame is the one live cue's rectangle. A single caption track is one
+//! layer and still costs one FFmpeg run; a title over captions is two.
+//!
+//! ## Hidden, not dropped - and the collisions that turns on
+//!
+//! The hidden events stay in the script, at their own timings, in their own
+//! styles, with their own text. That is not tidiness: libass shifts overlapping
+//! events apart so they do not draw on top of each other, and it computes that
+//! from the *bitmaps it rendered*. A fully transparent event still renders its
+//! bitmaps, so hiding preserves the shift; an event deleted from the script
+//! cannot be avoided, so dropping would not.
+//!
+//! Measured against the bundled binary at 1920x1080, two `\an2` captions live
+//! at the same instant:
+//!
+//! | script | inked box |
+//! |--------|-----------|
+//! | both drawn | `726..1194 x 903..1021` (their union) |
+//! | second alone in the script | `726..1194 x 967..1021` |
+//! | second drawn, first **hidden** | `726..1194 x 903..957` |
+//!
+//! The third row is the second caption's real position - the top half of the
+//! union the first row reports. Dropping the neighbour's `Dialogue` line would
+//! have measured the second row and reported that caption 5.9% of the canvas
+//! below where it burns in. So the vertical a layer measures is the vertical
+//! that renders, collisions and all, and there is no band of cues this pass has
+//! to hand back for being stacked.
 //!
 //! # On libass's own clock, not the timeline's
 //!
@@ -91,8 +124,14 @@
 //!
 //! The second box costs a second FFmpeg run because the decoration is switched
 //! off script-wide, not per event - but it is one run for every glyph-only frame
-//! in the chunk, on exactly the same 25/50/75 grid and the same solo partition,
-//! so it never doubles the number of *spawns per cue*.
+//! in the chunk, on exactly the same 25/50/75 grid and the same layers, so it
+//! never doubles the number of *spawns per cue*.
+//!
+//! The decoration is taken off the layer's *visible* events only. A hidden event
+//! keeps its outline, shadow and background box, because those are what libass
+//! measured when it decided how far to shift the visible cue away from it: a
+//! hidden neighbour rendered two pixels shorter is a visible cue two pixels
+//! lower than the one that burns in.
 //!
 //! How the decoration is switched off is measured rather than assumed.
 //! `force_style='Outline=0,Shadow=0'` alone does **nothing** here: the burn-in
@@ -120,8 +159,8 @@ use std::{
 };
 
 use super::export::{
-    ass_centisecond, build_ass_text_overlay_script_in_window_with_emoji, EmojiSpacerContext,
-    ExportEngine, ExportError,
+    ass_centisecond, build_ass_text_overlay_script_in_window_with_emoji,
+    build_ass_text_overlay_script_isolated, EmojiSpacerContext, ExportEngine, ExportError,
 };
 use crate::core::{effects::Effect, text::emoji_assets::EmojiRasterSource, timeline::Sequence};
 
@@ -216,6 +255,24 @@ const MAX_FONT_SUBSTITUTION_NOTES: usize = 6;
 /// still measuring eighty cues in a single FFmpeg run.
 const MAX_PROBE_FRAMES_PER_RUN: usize = 240;
 
+/// Ceiling on how many overlap-free layers one measurement pass will render.
+///
+/// Every layer is at least one FFmpeg spawn, and two when the glyph box is
+/// wanted, so the number of layers is the number of processes this pass can
+/// start. The colouring in [`plan_layers`] needs one layer per event that is
+/// simultaneously on screen, which is one for an ordinary caption track, two
+/// for the title-over-captions project this exists for, and - for a motion
+/// graphic built from thirty text clips that all animate together - thirty.
+/// That project must not spawn sixty FFmpeg runs inside a QC pass.
+///
+/// Eight is well past anything a human edit produces (a lower third, a bug, a
+/// caption and a chapter card at once is four) and small enough that the worst
+/// case is sixteen spawns rather than an unbounded number. Cues in a layer past
+/// the cap are named in
+/// [`CaptionExtentCoverage::shared_frame_cue_ids`] and graded by the caller's
+/// predictor, exactly as every uncovered cue is.
+const MAX_MEASURED_LAYERS: usize = 8;
+
 /// The canvas rectangle a cue's ink occupies, as percentages of the canvas.
 ///
 /// Percentages rather than pixels because that is the space safe-area rules are
@@ -301,10 +358,15 @@ pub struct CaptionExtent {
 /// fine" would turn a probe failure into a clean bill of health.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CaptionExtentCoverage {
-    /// Cues sharing a frame with another text or caption event.
+    /// Cues sharing their frames with more events than the pass would isolate.
     ///
-    /// Not measured: one `bbox` rectangle cannot be attributed to one of two
-    /// events drawn on the same frame. The caller falls back to its predictor.
+    /// Sharing a frame is no longer a refusal on its own: the cues are split
+    /// into overlap-free layers and each layer is rendered with every other
+    /// event hidden, so a caption under a persistent title is measured like any
+    /// other. What is left here is the overflow past [`MAX_MEASURED_LAYERS`] -
+    /// a project with more text events simultaneously on screen than this pass
+    /// will spawn processes for. The caller falls back to its predictor for
+    /// them.
     pub shared_frame_cue_ids: Vec<String>,
     /// Cues shorter than a frame interval, which no frame of this render shows.
     pub sub_frame_cue_ids: Vec<String>,
@@ -350,7 +412,7 @@ pub struct CaptionExtentCoverage {
 /// Every cue's extent, plus what the pass could not reach.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CaptionExtentMeasurement {
-    /// One entry per solo cue, in the order the script wrote its events.
+    /// One entry per measured cue, in the order the script wrote its events.
     ///
     /// Event order, which is track order and then clip order within a track -
     /// *not* timeline order, which two caption tracks would interleave. Nothing
@@ -396,14 +458,18 @@ pub struct CaptionExtentRequest<'a> {
     /// title-safe tier reads. A caller that does not grade that tier says so
     /// here and pays for one pass instead of two.
     pub needs_glyph_box: bool,
-    /// How long the two probe passes may take between them.
+    /// How long every probe run may take between them.
     ///
-    /// Spent in order and not split: the full-ink pass has first call on it,
-    /// because its boxes are what every consumer of this pass needs, and the
-    /// glyph pass runs only if enough is left to be worth starting. A glyph pass
-    /// that then runs out returns the full-ink boxes rather than nothing - which
-    /// is why the budget is enforced here, per pass, instead of by one timeout
-    /// around the whole call.
+    /// Spent in order and never split: the full-ink pass over every layer has
+    /// first call on it, because its boxes are what every consumer of this pass
+    /// needs, and the glyph pass runs only over the layers it completed and only
+    /// if enough is left to be worth starting.
+    ///
+    /// Enforced per *layer*, which is what makes running out survivable. A
+    /// deadline around the whole call would cancel the future holding every
+    /// rectangle measured so far; a per-layer slice leaves the layers that
+    /// finished standing and sends only the ones that were never reached back to
+    /// the caller's predictor.
     pub probe_budget: Duration,
 }
 
@@ -668,7 +734,7 @@ fn cues_for_events(
         .collect()
 }
 
-/// The same script with every event's decoration taken away.
+/// The same script with the *visible* events' decoration taken away.
 ///
 /// Only the `Dialogue` lines are touched, and only their text field: the styles
 /// keep their `Outline`, `Shadow` and `BorderStyle` columns exactly as the
@@ -678,8 +744,25 @@ fn cues_for_events(
 /// Line endings, the `[Script Info]` header, the `[Fonts]` section and the
 /// timecodes all survive byte for byte, which is what keeps this the *same*
 /// layout: libass wraps on glyph advances, and no tag added here has one.
-fn glyph_only_script(script: &str) -> String {
+///
+/// `hidden_events` names the events this layer's script drew no ink for, by
+/// their position among the `Dialogue` lines - which is the event index
+/// everything else in this module counts by, because the builder writes exactly
+/// one line per event in order. Those lines are copied through untouched. They
+/// are the obstacles libass shifted the visible cue away from, and it measured
+/// them with their outline and their background box on: taking the decoration
+/// off a hidden neighbour shrinks what the visible cue has to clear and measures
+/// its glyphs below where they render.
+///
+/// Measured on this binary at 1920x1080, a `\bord6` cue stacked above a hidden
+/// neighbour: the full ink is `891..953`, the glyph box with the neighbour left
+/// alone is `903..953`, and the glyph box with the neighbour zeroed as well is
+/// `909..959` - six pixels *outside* the rectangle it is supposed to be a subset
+/// of, which is a title-safe verdict read off a box that is not inside the
+/// action-safe one.
+fn glyph_only_script(script: &str, hidden_events: &std::collections::HashSet<usize>) -> String {
     let mut out = String::with_capacity(script.len() + script.len() / 8);
+    let mut event_index = 0usize;
 
     for line in script.split_inclusive('\n') {
         let (body, ending) = match line.find(['\r', '\n']) {
@@ -687,9 +770,14 @@ fn glyph_only_script(script: &str) -> String {
             None => (line, ""),
         };
 
-        match body
-            .starts_with("Dialogue:")
-            .then(|| dialogue_text_offset(body))
+        let is_event = body.starts_with("Dialogue:");
+        let hidden = is_event && hidden_events.contains(&event_index);
+        if is_event {
+            event_index += 1;
+        }
+
+        match (!hidden)
+            .then(|| is_event.then(|| dialogue_text_offset(body)).flatten())
             .flatten()
         {
             Some(offset) => {
@@ -764,48 +852,87 @@ fn zero_decoration_tags(text: &str) -> String {
     out
 }
 
-/// A cue with its probe frames, and whether it can be attributed a box.
+/// A cue with the frames the probe will read it back on.
 #[derive(Clone, Debug, PartialEq)]
 struct PlannedCue {
     cue: CaptionCue,
     /// Frames to probe. Empty for a sub-frame cue.
     frames: Vec<u64>,
-    /// Whether another event is drawn on at least one of those frames.
-    shares_a_frame: bool,
 }
 
-/// Splits the cues into the ones a single full-script probe can attribute and
-/// the ones it cannot.
+impl PlannedCue {
+    /// Whether these two cues can be measured on the same probe run.
+    ///
+    /// They cannot when either one is drawn on a frame the other is probed on,
+    /// because `bbox` reports one rectangle for the frame and it would then be
+    /// the union of the two. Asked in both directions, which is not the same
+    /// question asked twice: a long cue can be live across a short one's every
+    /// sample while the short one is live at none of the long one's.
+    ///
+    /// Asked of *frames* rather than of the spans, because a frame is what
+    /// libass is actually handed to draw. Two cues whose drawn spans overlap for
+    /// less than a frame interval may share no rendered frame at all, and
+    /// putting them in separate layers on the strength of the span alone would
+    /// spawn a second FFmpeg run to measure something one already could.
+    fn conflicts_with(&self, other: &Self, fps: f64) -> bool {
+        self.frames
+            .iter()
+            .any(|frame| other.cue.is_live_at(*frame as f64 / fps))
+            || other
+                .frames
+                .iter()
+                .any(|frame| self.cue.is_live_at(*frame as f64 / fps))
+    }
+}
+
+/// Pairs every cue with the frames it will be probed on.
 ///
-/// Purely a question of timing, answered before anything is rendered: a cue is
-/// solo when no *other* cue is live at any of its probe instants. That is the
-/// exact condition under which the one rectangle `bbox` reports for the frame is
-/// this cue's rectangle and nothing else's.
-///
-/// The instants are frame times rather than the raw fractions, because a frame
-/// time is what libass is actually asked to draw - two cues whose spans overlap
-/// by less than half a frame may still never share a rendered frame.
+/// Purely a question of timing, answered before anything is rendered.
 fn plan_cues(cues: Vec<CaptionCue>, fps: f64) -> Vec<PlannedCue> {
-    let framed: Vec<Vec<u64>> = cues.iter().map(|cue| cue.probe_frames(fps)).collect();
-
-    cues.iter()
-        .enumerate()
-        .map(|(index, cue)| {
-            let frames = framed[index].clone();
-            let shares_a_frame = frames.iter().any(|frame| {
-                let instant = *frame as f64 / fps;
-                cues.iter()
-                    .enumerate()
-                    .any(|(other, candidate)| other != index && candidate.is_live_at(instant))
-            });
-
-            PlannedCue {
-                cue: cue.clone(),
-                frames,
-                shares_a_frame,
-            }
+    cues.into_iter()
+        .map(|cue| {
+            let frames = cue.probe_frames(fps);
+            PlannedCue { cue, frames }
         })
         .collect()
+}
+
+/// Splits the measurable cues into groups no two members of which share a frame.
+///
+/// Greedy colouring of the conflict graph, mirroring the colour-emoji pass's
+/// [`plan_measurement_batches`](super::emoji_measure::plan_measurement_batches):
+/// each cue takes the first layer none of whose members it conflicts with, and a
+/// cue that fits nowhere opens a new one. The order is the script's own event
+/// order, so the partition is deterministic; the result is a proper colouring by
+/// construction, which is the only property the measurement needs (an optimal
+/// one would only ever save a process).
+///
+/// The guarantee a layer carries is exactly the one the probe rests on: on any
+/// frame a member is probed at, no other member of that layer is drawn. Cues
+/// *outside* the layer draw nothing at all, because the script that renders it
+/// hides them - so the rectangle `bbox` reports for that frame is one cue's.
+///
+/// `measurable` is the cues worth colouring: a sub-frame cue has no frame to
+/// probe, and a colour-emoji cue is refused for its own reason. Including them
+/// would spend layers - and therefore FFmpeg runs - on cues that are going back
+/// to the caller's predictor either way.
+fn plan_layers(planned: &[PlannedCue], measurable: &[usize], fps: f64) -> Vec<Vec<usize>> {
+    let mut layers: Vec<Vec<usize>> = Vec::new();
+
+    for index in measurable {
+        let slot = layers.iter().position(|layer| {
+            layer
+                .iter()
+                .all(|member| !planned[*member].conflicts_with(&planned[*index], fps))
+        });
+
+        match slot {
+            Some(slot) => layers[slot].push(*index),
+            None => layers.push(vec![*index]),
+        }
+    }
+
+    layers
 }
 
 /// Groups solo cues into runs small enough for one FFmpeg invocation.
@@ -924,7 +1051,7 @@ pub async fn measure_caption_extents(
         uses_host_fonts: script.uses_host_fonts,
         ..CaptionExtentCoverage::default()
     };
-    let mut solo: Vec<usize> = Vec::new();
+    let mut measurable: Vec<usize> = Vec::new();
 
     for (index, entry) in planned.iter().enumerate() {
         // Asked first, and before `no_ink` can ever be reached: a cue that is
@@ -934,12 +1061,27 @@ pub async fn measure_caption_extents(
             coverage.emoji_cue_ids.push(entry.cue.clip_id.clone());
         } else if entry.frames.is_empty() {
             coverage.sub_frame_cue_ids.push(entry.cue.clip_id.clone());
-        } else if entry.shares_a_frame {
+        } else {
+            measurable.push(index);
+        }
+    }
+
+    // One layer per set of cues that never share a probe frame. A caption track
+    // collapses to one; a persistent title over that track makes two.
+    let mut layers = plan_layers(&planned, &measurable, fps);
+    let kept_layers = MAX_MEASURED_LAYERS.min(layers.len());
+    let capped: std::collections::HashSet<usize> = layers.drain(kept_layers..).flatten().collect();
+    // Walked in event order rather than in layer order, so both the measured set
+    // and the report name the cues in the order the script wrote them however
+    // the colouring happened to fall out.
+    let mut layered: Vec<usize> = Vec::with_capacity(measurable.len());
+    for index in &measurable {
+        if capped.contains(index) {
             coverage
                 .shared_frame_cue_ids
-                .push(entry.cue.clip_id.clone());
+                .push(planned[*index].cue.clip_id.clone());
         } else {
-            solo.push(index);
+            layered.push(*index);
         }
     }
 
@@ -957,7 +1099,7 @@ pub async fn measure_caption_extents(
     // Only worth saying when there is a measurement for it to qualify. The flag
     // itself stays on the record either way, because that is what a reader
     // comparing two machines' reports looks at.
-    if coverage.uses_host_fonts && !solo.is_empty() {
+    if coverage.uses_host_fonts && !layered.is_empty() {
         coverage.notes.push(
             "At least one caption run was laid out with fonts installed on this machine rather \
              than a face the script embeds, so the measured boxes are machine-specific and two \
@@ -967,8 +1109,8 @@ pub async fn measure_caption_extents(
     }
     if !coverage.shared_frame_cue_ids.is_empty() {
         coverage.notes.push(format!(
-            "{} cue(s) share a frame with another text or caption event; one bbox rectangle cannot \
-             be attributed to one of them",
+            "{} cue(s) are on screen alongside more text or caption events than this pass will \
+             isolate ({MAX_MEASURED_LAYERS} at once), so their boxes are estimated",
             coverage.shared_frame_cue_ids.len()
         ));
     }
@@ -983,68 +1125,90 @@ pub async fn measure_caption_extents(
         .prefix("openreelio-caption-extent-")
         .tempdir()
         .map_err(ExportError::IoError)?;
-    let script_path = temp_dir.path().join("caption-extent.ass");
-    crate::core::fs::validate_filter_safe_path(&script_path, "Caption extent script path")
-        .map_err(ExportError::InvalidSettings)?;
-    tokio::fs::write(&script_path, &script.script)
-        .await
-        .map_err(ExportError::IoError)?;
 
     let frames_per_cue: Vec<usize> = planned.iter().map(|entry| entry.frames.len()).collect();
-    let chunks = chunk_by_frame_budget(&solo, &frames_per_cue);
+    let event_count = script.event_clip_ids.len();
+    let mut plans: Vec<LayerPlan> = Vec::with_capacity(layers.len());
+    let mut unbuildable: Vec<usize> = Vec::new();
 
-    // The budget starts here, at the first thing that spawns FFmpeg. What came
-    // before it is script building and two file writes.
-    let probe_started = Instant::now();
-    let full_ink = match tokio::time::timeout(
-        request.probe_budget,
-        run_probe_pass(
-            engine,
-            request,
-            &script,
-            ProbePass {
-                script_path: &script_path,
-                force_style_option: "",
-                collect_font_notes: script.uses_host_fonts,
-            },
-            &chunks,
-            &planned,
-            fps,
-        ),
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        // Nothing to salvage: this is the pass every consumer needs, so every
-        // solo cue goes back unmeasured and the glyph pass is not started.
-        Err(_) => {
-            coverage.notes.push(format!(
-                "Caption extent measurement ran out of the {:.1}s left in the run's budget, so the \
-                 reported boxes are estimates",
-                request.probe_budget.as_secs_f64()
-            ));
-            ProbeOutcome {
-                failed: solo.clone(),
-                ..ProbeOutcome::default()
-            }
-        }
-    };
+    for (layer_index, layer) in layers.iter().enumerate() {
+        let visible: std::collections::HashSet<usize> = layer.iter().copied().collect();
+        // The overwhelming majority of projects: one caption track, every event
+        // in the one layer, nothing to hide. The render's own script is reused
+        // rather than rebuilt, which makes the common path byte-identical to
+        // what this module wrote before isolation existed - a property the
+        // builder guarantees anyway, and one it costs nothing to also not test.
+        let text = if visible.len() == event_count {
+            script.script.clone()
+        } else {
+            let Some(isolated) = build_ass_text_overlay_script_isolated(
+                request.sequence,
+                request.effects,
+                request.window_start_sec,
+                Some(EmojiSpacerContext {
+                    pack: emoji_pack.map(|pack| pack as &dyn EmojiRasterSource),
+                    markers: None,
+                    refused: None,
+                }),
+                Some(&visible),
+            )?
+            else {
+                // Unreachable: the isolated build runs exactly the selection the
+                // build above it ran, and that one produced events. Recorded
+                // rather than skipped, because a layer quietly dropped here
+                // would leave its cues in the measured set with no box - and a
+                // cue with no box is reported as one that drew no ink, which is
+                // a defect invented out of a build that never happened.
+                debug_assert!(
+                    false,
+                    "an isolated build of a script that has events produced none"
+                );
+                unbuildable.extend(layer.iter().copied());
+                continue;
+            };
+            isolated.script
+        };
 
-    // The second run, over the same cues and the same frames, with the
-    // decoration switched off. Skipped outright when nobody asked for the glyph
-    // box, and when the first run reached no cue at all: a binary that cannot
-    // spawn will not spawn twice either, and every cue is already going to be
-    // reported unmeasured.
-    let glyph = if !request.needs_glyph_box || full_ink.failed.len() == solo.len() {
-        ProbeOutcome::default()
-    } else if let Some(remaining) = glyph_pass_budget(request.probe_budget, probe_started.elapsed())
-    {
-        let glyph_path = temp_dir.path().join("caption-extent-glyph.ass");
-        crate::core::fs::validate_filter_safe_path(&glyph_path, "Caption extent script path")
+        let script_path = temp_dir
+            .path()
+            .join(format!("caption-extent-layer-{layer_index}.ass"));
+        crate::core::fs::validate_filter_safe_path(&script_path, "Caption extent script path")
             .map_err(ExportError::InvalidSettings)?;
-        tokio::fs::write(&glyph_path, glyph_only_script(&script.script))
+        tokio::fs::write(&script_path, &text)
             .await
             .map_err(ExportError::IoError)?;
+
+        plans.push(LayerPlan {
+            cues: layer.clone(),
+            chunks: chunk_by_frame_budget(layer, &frames_per_cue),
+            script_path,
+            hidden_events: (0..event_count)
+                .filter(|index| !visible.contains(index))
+                .collect::<std::collections::HashSet<usize>>(),
+        });
+    }
+
+    if !unbuildable.is_empty() {
+        coverage.probe_failed = true;
+        coverage.notes.push(format!(
+            "{} cue(s) had no isolated script built for them, so their boxes are estimated",
+            unbuildable.len()
+        ));
+    }
+
+    // The budget starts here, at the first thing that spawns FFmpeg. What came
+    // before it is script building and one file write per layer.
+    let probe_started = Instant::now();
+    let mut full_ink = ProbeOutcome::default();
+    let mut completed: Vec<usize> = Vec::new();
+    let mut unreached: Vec<usize> = Vec::new();
+
+    for (plan_index, plan) in plans.iter().enumerate() {
+        let Some(remaining) = remaining_pass_budget(request.probe_budget, probe_started.elapsed())
+        else {
+            unreached.extend(cues_of(&plans[plan_index..]));
+            break;
+        };
 
         match tokio::time::timeout(
             remaining,
@@ -1053,41 +1217,119 @@ pub async fn measure_caption_extents(
                 request,
                 &script,
                 ProbePass {
-                    script_path: &glyph_path,
-                    force_style_option: GLYPH_ONLY_FORCE_STYLE_OPTION,
-                    // Already collected from the full-ink run over the same
-                    // script, and libass resolves the same faces for both:
-                    // saying it twice would only pad the report.
-                    collect_font_notes: false,
+                    script_path: &plan.script_path,
+                    force_style_option: "",
+                    collect_font_notes: script.uses_host_fonts,
                 },
-                &chunks,
+                &plan.chunks,
                 &planned,
                 fps,
             ),
         )
         .await
         {
-            Ok(outcome) => outcome,
-            // The full-ink boxes survive this. They are already measured, every
-            // other consumer grades them, and the cues left without a glyph box
-            // are named below exactly as a failed second render names them.
+            Ok(outcome) => {
+                full_ink.absorb(outcome);
+                completed.push(plan_index);
+            }
+            // The layers already measured keep their rectangles. Only this one
+            // and the ones behind it go back to the caller's predictor, which is
+            // the whole reason the deadline is taken per layer rather than once
+            // around the loop.
             Err(_) => {
-                coverage.notes.push(
-                    "The glyph-only measurement ran out of the run's budget; the full-ink boxes \
-                     stand and the tighter title-safe bound was not graded"
-                        .to_string(),
-                );
-                ProbeOutcome::default()
+                unreached.extend(cues_of(&plans[plan_index..]));
+                break;
             }
         }
-    } else {
-        coverage.notes.push(
-            "There was not enough of the run's budget left to measure the glyphs alone, so the \
-             tighter title-safe bound was not graded"
-                .to_string(),
-        );
-        ProbeOutcome::default()
-    };
+    }
+
+    if !unreached.is_empty() {
+        coverage.notes.push(format!(
+            "Caption extent measurement ran out of the {:.1}s left in the run's budget after {} of \
+             {} layer(s), so {} cue(s) keep their estimated boxes",
+            request.probe_budget.as_secs_f64(),
+            completed.len(),
+            plans.len(),
+            unreached.len()
+        ));
+        full_ink.failed.extend(unreached);
+    }
+
+    // The second run, over the same cues and the same frames, with the
+    // decoration switched off. Skipped outright when nobody asked for the glyph
+    // box, and when the first run reached no cue at all: a binary that cannot
+    // spawn will not spawn twice either, and every cue is already going to be
+    // reported unmeasured.
+    let layered_total: usize = plans.iter().map(|plan| plan.cues.len()).sum();
+    let mut glyph = ProbeOutcome::default();
+    if request.needs_glyph_box && !completed.is_empty() && full_ink.failed.len() < layered_total {
+        let mut ran_short = false;
+
+        for plan_index in &completed {
+            let plan = &plans[*plan_index];
+            let Some(remaining) =
+                remaining_pass_budget(request.probe_budget, probe_started.elapsed())
+            else {
+                ran_short = true;
+                break;
+            };
+
+            let glyph_path = temp_dir
+                .path()
+                .join(format!("caption-extent-glyph-{plan_index}.ass"));
+            crate::core::fs::validate_filter_safe_path(&glyph_path, "Caption extent script path")
+                .map_err(ExportError::InvalidSettings)?;
+            let layer_script = tokio::fs::read_to_string(&plan.script_path)
+                .await
+                .map_err(ExportError::IoError)?;
+            tokio::fs::write(
+                &glyph_path,
+                glyph_only_script(&layer_script, &plan.hidden_events),
+            )
+            .await
+            .map_err(ExportError::IoError)?;
+
+            match tokio::time::timeout(
+                remaining,
+                run_probe_pass(
+                    engine,
+                    request,
+                    &script,
+                    ProbePass {
+                        script_path: &glyph_path,
+                        force_style_option: GLYPH_ONLY_FORCE_STYLE_OPTION,
+                        // Already collected from the full-ink run over the same
+                        // script, and libass resolves the same faces for both:
+                        // saying it twice would only pad the report.
+                        collect_font_notes: false,
+                    },
+                    &plan.chunks,
+                    &planned,
+                    fps,
+                ),
+            )
+            .await
+            {
+                Ok(outcome) => glyph.absorb(outcome),
+                // The full-ink boxes survive this. They are already measured,
+                // every other consumer grades them, and the cues left without a
+                // glyph box are named below exactly as a failed second render
+                // names them.
+                Err(_) => {
+                    ran_short = true;
+                    break;
+                }
+            }
+        }
+
+        if ran_short {
+            coverage.notes.push(
+                "The glyph-only measurement ran out of the run's budget; the full-ink boxes stand \
+                 and the tighter title-safe bound was not graded for every cue"
+                    .to_string(),
+            );
+        }
+    }
 
     if !full_ink.failed.is_empty() {
         coverage.probe_failed = true;
@@ -1105,9 +1347,14 @@ pub async fn measure_caption_extents(
         ));
     }
 
-    let extents: Vec<CaptionExtent> = solo
+    // Only cues a probe was actually run for. `layered` is the set the pass
+    // *intended* to measure, and `no_ink` below is asked of a missing box - so a
+    // cue that never reached a run at all would come back reported as a caption
+    // that drew nothing, which is a defect this pass would have invented.
+    let probed: std::collections::HashSet<usize> = cues_of(&plans).collect();
+    let extents: Vec<CaptionExtent> = layered
         .iter()
-        .filter(|index| !full_ink.failed.contains(index))
+        .filter(|index| probed.contains(index) && !full_ink.failed.contains(index))
         .map(|index| {
             let cue = &planned[*index].cue;
             let measured = full_ink.boxes.get(index).copied().flatten();
@@ -1161,24 +1408,45 @@ pub async fn measure_caption_extents(
     Ok(CaptionExtentMeasurement { extents, coverage })
 }
 
-/// Least of the budget worth starting the glyph pass with.
+/// Least of the budget worth starting another probe pass with.
 ///
 /// One FFmpeg spawn costs more than this on every machine this ships to, so a
-/// second pass started with less can only end in a timeout - having written a
-/// script and spawned a process for nothing. The cue list is identical either
-/// way; what changes is whether the run wastes its last quarter-second finding
-/// that out.
-const MINIMUM_GLYPH_PASS_BUDGET: Duration = Duration::from_millis(250);
+/// pass started with less can only end in a timeout - having written a script
+/// and spawned a process for nothing. The cue list is identical either way; what
+/// changes is whether the run wastes its last quarter-second finding that out.
+const MINIMUM_PASS_BUDGET: Duration = Duration::from_millis(250);
 
-/// What is left for the glyph pass, or `None` when it is not worth starting.
+/// What is left of the budget, or `None` when it is not worth another pass.
 ///
-/// The full-ink pass has first call on the budget - its boxes are what every
-/// consumer of this module reads, and the glyph box refines exactly one verdict
-/// - so this is whatever it did not spend.
-fn glyph_pass_budget(probe_budget: Duration, spent: Duration) -> Option<Duration> {
+/// The passes run in order and each takes whatever the ones before it did not
+/// spend: the full-ink layers first, because their boxes are what every consumer
+/// of this module reads, and then the glyph layers, which refine exactly one
+/// verdict.
+fn remaining_pass_budget(probe_budget: Duration, spent: Duration) -> Option<Duration> {
     let remaining = probe_budget.saturating_sub(spent);
 
-    (remaining >= MINIMUM_GLYPH_PASS_BUDGET).then_some(remaining)
+    (remaining >= MINIMUM_PASS_BUDGET).then_some(remaining)
+}
+
+/// One overlap-free layer, ready to render.
+struct LayerPlan {
+    /// The cues it holds, as indices into the planned-cue list.
+    cues: Vec<usize>,
+    /// Those cues grouped into runs small enough for one FFmpeg invocation.
+    chunks: Vec<Vec<usize>>,
+    /// The script in which only this layer's events draw ink.
+    script_path: std::path::PathBuf,
+    /// The events that script hid, by their position in the event list.
+    ///
+    /// Carried for the glyph pass, which must leave them exactly as they are:
+    /// they are the obstacles libass shifted this layer's cues away from, and it
+    /// measured them with their decoration on.
+    hidden_events: std::collections::HashSet<usize>,
+}
+
+/// Every cue these layers hold, in layer order.
+fn cues_of(plans: &[LayerPlan]) -> impl Iterator<Item = usize> + '_ {
+    plans.iter().flat_map(|plan| plan.cues.iter().copied())
 }
 
 /// What one probe pass produced.
@@ -1190,6 +1458,29 @@ struct ProbeOutcome {
     failed: Vec<usize>,
     /// Font substitutions libass reported, deduplicated and capped.
     font_notes: Vec<String>,
+}
+
+impl ProbeOutcome {
+    /// Folds another layer's outcome into this one.
+    ///
+    /// The three fields merge three different ways, and each is the only one
+    /// that is right. Boxes are disjoint - a cue belongs to exactly one layer -
+    /// so they are moved across rather than unioned. Failures accumulate.
+    /// Substitution notes are deduplicated and capped again, because two layers
+    /// of the same project draw the same families and would otherwise report the
+    /// same fallback once per layer.
+    fn absorb(&mut self, other: Self) {
+        self.boxes.extend(other.boxes);
+        self.failed.extend(other.failed);
+        for note in other.font_notes {
+            if self.font_notes.len() >= MAX_FONT_SUBSTITUTION_NOTES {
+                break;
+            }
+            if !self.font_notes.contains(&note) {
+                self.font_notes.push(note);
+            }
+        }
+    }
 }
 
 /// How one pass differs from the other. Everything else about them is identical,
@@ -1916,75 +2207,102 @@ mod tests {
     }
 
     // =========================================================================
-    // Solo versus shared
+    // Layering
     // =========================================================================
 
+    /// Every cue of `planned`, coloured.
+    fn layers_of(planned: &[PlannedCue], fps: f64) -> Vec<Vec<usize>> {
+        let measurable: Vec<usize> = (0..planned.len()).collect();
+        plan_layers(planned, &measurable, fps)
+    }
+
     /// Feature: caption extent measurement
-    /// Scenario: a single caption track is entirely measurable
+    /// Scenario: a single caption track is one layer, and therefore one run
     ///
     /// Back-to-back cues touch at their boundary, and a touch is not an overlap:
-    /// nothing is drawn at the instant a cue ends. Treating it as one would make
-    /// the ordinary project - one caption track, cues end to end - completely
-    /// unmeasurable.
+    /// nothing is drawn at the instant a cue ends. Treating it as one would put
+    /// the ordinary project - one caption track, cues end to end - into a layer
+    /// per cue and spawn an FFmpeg run for each of them.
     #[test]
-    fn back_to_back_cues_on_one_track_are_all_solo() {
+    fn back_to_back_cues_on_one_track_are_one_layer() {
         let planned = plan_cues(
             vec![cue("a", 0.0, 2.0), cue("b", 2.0, 4.0), cue("c", 4.0, 6.0)],
             30.0,
         );
 
-        assert!(
-            planned.iter().all(|entry| !entry.shares_a_frame),
-            "{planned:#?}"
-        );
+        let layers = layers_of(&planned, 30.0);
+
+        assert_eq!(layers, vec![vec![0, 1, 2]], "{planned:#?}");
+        // And that one layer is one FFmpeg invocation, which is the cost claim
+        // the common path rests on.
+        let frames: Vec<usize> = planned.iter().map(|entry| entry.frames.len()).collect();
+        assert_eq!(chunk_by_frame_budget(&layers[0], &frames).len(), 1);
     }
 
     /// Feature: caption extent measurement
-    /// Scenario: two events live at once cannot be told apart
+    /// Scenario: a title over a caption track is two layers, not two refusals
+    ///
+    /// The project this change exists for: one text clip on screen for the whole
+    /// timeline, captions running underneath it. Every caption shares a frame
+    /// with the title, so the solo/shared partition measured *nothing* here. Two
+    /// layers measure all of it - the title alone in one, every caption in the
+    /// other, because the captions do not overlap each other.
+    #[test]
+    fn a_persistent_title_over_captions_is_two_layers() {
+        let planned = plan_cues(
+            vec![
+                cue("title", 0.0, 6.0),
+                cue("a", 0.0, 2.0),
+                cue("b", 2.0, 4.0),
+                cue("c", 4.0, 6.0),
+            ],
+            30.0,
+        );
+
+        assert_eq!(layers_of(&planned, 30.0), vec![vec![0], vec![1, 2, 3]]);
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: two events live at once go into different layers
     ///
     /// `bbox` reports one rectangle per frame: the union of every inked pixel on
     /// it. A caption drawn at the same instant as a text overlay gives a box
-    /// that belongs to neither, and attributing it to one of them would be a
-    /// fabricated measurement.
+    /// that belongs to neither, so the two are never rendered together.
     #[test]
-    fn cues_that_share_a_frame_are_both_refused() {
+    fn cues_that_share_a_frame_are_split_across_layers() {
         let planned = plan_cues(vec![cue("a", 0.0, 4.0), cue("b", 1.0, 3.0)], 30.0);
 
-        assert!(
-            planned.iter().all(|entry| entry.shares_a_frame),
-            "{planned:#?}"
-        );
+        assert_eq!(layers_of(&planned, 30.0), vec![vec![0], vec![1]]);
     }
 
     /// Feature: caption extent measurement
-    /// Scenario: an overlap that misses every sample instant is still solo
+    /// Scenario: an overlap that misses every sample instant stays in one layer
     ///
-    /// The partition is about the frames actually probed, not about whether the
+    /// The conflict is about the frames actually probed, not about whether the
     /// spans intersect at all: a cue overlapping another only near its very end
-    /// can still have all three of its own samples to itself.
+    /// can still have all three of its own samples to itself, and a second
+    /// FFmpeg run to establish that would buy nothing.
     #[test]
-    fn an_overlap_that_misses_every_sample_leaves_both_cues_solo() {
+    fn an_overlap_that_misses_every_sample_leaves_both_cues_in_one_layer() {
         // `a` samples at 1s, 2s and 3s; `b` samples at 4.25s, 4.5s and 4.75s.
         // They overlap on [3.9, 4.0) and share no sample instant.
         let planned = plan_cues(vec![cue("a", 0.0, 4.0), cue("b", 3.9, 5.0)], 30.0);
 
-        assert!(!planned[0].shares_a_frame, "{planned:#?}");
-        assert!(!planned[1].shares_a_frame, "{planned:#?}");
+        assert_eq!(layers_of(&planned, 30.0), vec![vec![0, 1]]);
     }
 
     /// Feature: caption extent measurement
-    /// Scenario: a sub-frame cue is uncovered, not shared
+    /// Scenario: a sub-frame cue has nothing to probe
     #[test]
     fn a_sub_frame_cue_is_planned_with_no_frames_at_all() {
         let planned = plan_cues(vec![cue("a", 0.98, 1.0)], 30.0);
 
         assert!(planned[0].frames.is_empty());
-        assert!(!planned[0].shares_a_frame);
     }
 
     /// Feature: caption extent measurement
-    /// Scenario: a cue the script rounds onto a neighbour's probe frame is
-    /// shared, not solo
+    /// Scenario: a cue the script rounds onto a neighbour's probe frame
+    /// conflicts with it
     ///
     /// The whole partition rests on "no other event is drawn here", and the
     /// script decides that on a hundredth-of-a-second grid the timeline knows
@@ -1994,12 +2312,18 @@ mod tests {
     /// four milliseconds *before* the cue's own exact start.
     ///
     /// Asked on the exact times, both halves of that were wrong at once. The
-    /// spanning cue probed frame 60 with nobody apparently live there, so it was
-    /// declared solo and handed a rectangle containing both captions; and the
-    /// short cue's own frame span came out empty, so it was filed as a cue no
-    /// frame shows while libass was drawing it.
+    /// spanning cue probed frame 60 with nobody apparently live there, so it
+    /// would share a layer with the short one and be handed a rectangle
+    /// containing both captions; and the short cue's own frame span came out
+    /// empty, so it was filed as a cue no frame shows while libass was drawing
+    /// it.
+    ///
+    /// Note which direction carries the answer: the short cue is live on the
+    /// spanning cue's frame 60, but the spanning cue is live on the short one's
+    /// frame 60 as well - and a fixture where only one direction fires is what
+    /// [`PlannedCue::conflicts_with`] asks both for.
     #[test]
-    fn a_cue_the_script_rounds_onto_a_neighbours_probe_frame_is_shared() {
+    fn a_cue_the_script_rounds_onto_a_neighbours_probe_frame_conflicts_with_it() {
         let short = cue("short", 2.004, 2.03);
 
         assert!(
@@ -2015,11 +2339,53 @@ mod tests {
         // Probes 1.5s, 2.0s and 2.5s: frames 45, 60 and 90.
         let planned = plan_cues(vec![cue("spanning", 1.0, 3.0), short], 30.0);
 
+        assert_eq!(layers_of(&planned, 30.0), vec![vec![0], vec![1]]);
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a conflict is a conflict in either direction
+    ///
+    /// A long cue can be drawn across a short one's every probe frame while the
+    /// short one is live on none of the long one's - so asking the question once
+    /// answers it for half the pairs and silently measures the union for the
+    /// other half. Here the short cue sits between the spanning cue's 25% and
+    /// 50% samples, so nothing of it is on frames 45, 60 or 90.
+    #[test]
+    fn a_conflict_only_one_cue_can_see_still_splits_the_layer() {
+        let spanning = cue("spanning", 1.0, 3.0);
+        let short = cue("short", 1.6, 1.7);
+        assert_eq!(spanning.probe_frames(30.0), vec![45, 60, 75]);
+        assert_eq!(short.probe_frames(30.0), vec![49, 50]);
         assert!(
-            planned[0].shares_a_frame,
-            "frame 60 carries the short cue's ink too, so this box belongs to neither: {planned:#?}"
+            spanning
+                .probe_frames(30.0)
+                .iter()
+                .all(|frame| !short.is_live_at(*frame as f64 / 30.0)),
+            "the spanning cue's own samples never see the short one"
         );
-        assert!(planned[1].shares_a_frame, "{planned:#?}");
+
+        let planned = plan_cues(vec![spanning, short], 30.0);
+
+        assert_eq!(
+            layers_of(&planned, 30.0),
+            vec![vec![0], vec![1]],
+            "the short cue's samples all carry the spanning cue's ink"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: three simultaneous cues need three layers
+    ///
+    /// Greedy colouring, in the shape the cap is about: every cue conflicts with
+    /// every other, so no two can share a run.
+    #[test]
+    fn simultaneous_cues_each_take_their_own_layer() {
+        let planned = plan_cues(
+            vec![cue("a", 0.0, 4.0), cue("b", 0.0, 4.0), cue("c", 0.0, 4.0)],
+            30.0,
+        );
+
+        assert_eq!(layers_of(&planned, 30.0), vec![vec![0], vec![1], vec![2]]);
     }
 
     // =========================================================================
@@ -2477,34 +2843,34 @@ mod tests {
     // =========================================================================
 
     /// Feature: caption extent measurement
-    /// Scenario: the full-ink pass has first call on the budget
+    /// Scenario: each pass takes only what the passes before it left
     ///
-    /// Two passes under one budget, spent in order rather than split: the
-    /// full-ink boxes are what every consumer of this module reads, and the
-    /// glyph box refines exactly one verdict. What is left after the first pass
-    /// is the second one's, and when that is less than an FFmpeg spawn costs the
-    /// second pass is not started at all — writing a script and spawning a
-    /// process only to time out would spend the run's last moments proving it
-    /// had none left.
+    /// Every layer's full-ink run, then every layer's glyph run, under one
+    /// budget spent in order rather than split: the full-ink boxes are what
+    /// every consumer of this module reads, and the glyph box refines exactly
+    /// one verdict. When what is left is less than an FFmpeg spawn costs, the
+    /// next pass is not started at all — writing a script and spawning a process
+    /// only to time out would spend the run's last moments proving it had none
+    /// left.
     #[test]
-    fn the_glyph_pass_takes_only_what_the_full_ink_pass_left() {
+    fn each_pass_takes_only_what_the_passes_before_it_left() {
         assert_eq!(
-            glyph_pass_budget(Duration::from_secs(30), Duration::from_secs(2)),
+            remaining_pass_budget(Duration::from_secs(30), Duration::from_secs(2)),
             Some(Duration::from_secs(28)),
-            "whatever the first pass did not spend"
+            "whatever the earlier passes did not spend"
         );
         assert_eq!(
-            glyph_pass_budget(Duration::from_secs(30), Duration::from_millis(29_900)),
+            remaining_pass_budget(Duration::from_secs(30), Duration::from_millis(29_900)),
             None,
             "100ms cannot spawn FFmpeg, so the pass is skipped rather than started"
         );
         assert_eq!(
-            glyph_pass_budget(Duration::from_secs(30), Duration::from_secs(45)),
+            remaining_pass_budget(Duration::from_secs(30), Duration::from_secs(45)),
             None,
-            "a first pass that overran leaves nothing, and must not underflow"
+            "a pass that overran leaves nothing, and must not underflow"
         );
         assert_eq!(
-            glyph_pass_budget(Duration::from_secs(30), Duration::from_secs(30))
+            remaining_pass_budget(Duration::from_secs(30), Duration::from_secs(30))
                 .or(Some(Duration::ZERO)),
             Some(Duration::ZERO),
             "an exactly spent budget is a skip, not a zero-second timeout"
@@ -2528,7 +2894,7 @@ mod tests {
                       Dialogue: 0,0:00:01.00,0:00:03.00,S,,60,60,60,,\
                       {\\an2\\bord6.00\\xshad3\\yshad3\\blur2}Hello\n";
 
-        let glyph = glyph_only_script(script);
+        let glyph = glyph_only_script(script, &std::collections::HashSet::new());
         let event = glyph
             .lines()
             .find(|line| line.starts_with("Dialogue:"))
@@ -2560,7 +2926,7 @@ mod tests {
                       Dialogue: 0,0:00:00.00,0:00:02.00,S,,0,0,0,,\
                       {\\an2\\bord6.00}Hello {\\fnNoto Sans}world\n";
 
-        let glyph = glyph_only_script(script);
+        let glyph = glyph_only_script(script, &std::collections::HashSet::new());
 
         assert_eq!(
             glyph.matches(GLYPH_ONLY_OVERRIDE_TAGS).count(),
@@ -2580,9 +2946,11 @@ mod tests {
     fn an_event_with_no_override_block_is_given_one() {
         let script = "[Events]\nDialogue: 0,0:00:00.00,0:00:02.00,S,,0,0,0,,Plain text\n";
 
-        assert!(glyph_only_script(script).contains(&format!(
-            "0,0:00:00.00,0:00:02.00,S,,0,0,0,,{{{GLYPH_ONLY_OVERRIDE_TAGS}}}Plain text"
-        )));
+        assert!(
+            glyph_only_script(script, &std::collections::HashSet::new()).contains(&format!(
+                "0,0:00:00.00,0:00:02.00,S,,0,0,0,,{{{GLYPH_ONLY_OVERRIDE_TAGS}}}Plain text"
+            ))
+        );
     }
 
     /// Feature: caption extent measurement
@@ -2601,7 +2969,7 @@ mod tests {
                       MarginV, Effect, Text\n\
                       Dialogue: 0,0:00:00.00,0:00:02.00,S,,0,0,0,,{\\an2}Hi\n";
 
-        let glyph = glyph_only_script(script);
+        let glyph = glyph_only_script(script, &std::collections::HashSet::new());
 
         for line in script.lines().filter(|line| !line.starts_with("Dialogue:")) {
             assert!(
@@ -2626,7 +2994,10 @@ mod tests {
     fn a_dialogue_line_with_no_text_field_is_copied_through() {
         let script = "[Events]\nDialogue: 0,0:00:00.00,0:00:02.00,S\n";
 
-        assert_eq!(glyph_only_script(script), script);
+        assert_eq!(
+            glyph_only_script(script, &std::collections::HashSet::new()),
+            script
+        );
     }
 
     /// Feature: caption extent measurement
@@ -2900,9 +3271,16 @@ mod tests {
     }
 
     /// Feature: caption extent measurement
-    /// Scenario: overlapping cues are named in the coverage, not measured
+    /// Scenario: overlapping cues are probed rather than refused
+    ///
+    /// The behaviour change this module was rewritten for. Two cues live at the
+    /// same instant used to be named in `shared_frame_cue_ids` and handed to the
+    /// caller's predictor without a single FFmpeg run being attempted; now each
+    /// takes a layer of its own and both are probed. The engine here cannot
+    /// spawn, so what comes back is a *failure* - which is exactly the point:
+    /// the pass tried.
     #[tokio::test]
-    async fn overlapping_cues_are_recorded_as_unattributable() {
+    async fn overlapping_cues_are_probed_in_separate_layers() {
         let sequence = sequence_with_captions(&[("Under", 0.0, 4.0), ("Over", 1.0, 3.0)]);
         let request = CaptionExtentRequest {
             sequence: &sequence,
@@ -2919,10 +3297,72 @@ mod tests {
             .await
             .expect("overlap is not an error");
 
-        assert_eq!(measurement.coverage.shared_frame_cue_ids.len(), 2);
+        assert!(
+            measurement.coverage.shared_frame_cue_ids.is_empty(),
+            "two events on one frame is a second layer now, not a refusal: {:?}",
+            measurement.coverage
+        );
+        assert!(
+            measurement.coverage.probe_failed,
+            "both cues were handed to a binary that cannot run: {:?}",
+            measurement.coverage
+        );
         assert!(measurement.extents.is_empty());
-        // Nothing to probe, so nothing failed.
-        assert!(!measurement.coverage.probe_failed);
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a project with more simultaneous events than the cap is
+    /// partly refused rather than given unbounded processes
+    ///
+    /// Every layer is at least one FFmpeg spawn. A motion graphic built from a
+    /// dozen text clips that all animate together needs one layer each, and a QC
+    /// pass must not answer that by starting a dozen processes. The layers up to
+    /// the cap are measured; the rest are named in the coverage and graded by
+    /// the caller's predictor, exactly as any other uncovered cue is.
+    #[tokio::test]
+    async fn simultaneous_events_past_the_layer_cap_are_recorded_as_uncovered() {
+        let overlapping: Vec<(&str, f64, f64)> = (0..MAX_MEASURED_LAYERS + 3)
+            .map(|_| ("All at once", 0.0, 4.0))
+            .collect();
+        let mut sequence = sequence_with_captions(&overlapping);
+        for (index, clip) in sequence.tracks[0].clips.iter_mut().enumerate() {
+            clip.id = format!("clip-{index}");
+        }
+
+        let request = CaptionExtentRequest {
+            sequence: &sequence,
+            effects: &HashMap::new(),
+            canvas_width: 1920,
+            canvas_height: 1080,
+            fps: 30.0,
+            window_start_sec: 0.0,
+            needs_glyph_box: false,
+            probe_budget: Duration::from_secs(30),
+        };
+
+        let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
+            .await
+            .expect("a crowded frame is not an error");
+
+        assert_eq!(
+            measurement.coverage.shared_frame_cue_ids,
+            vec![
+                "clip-8".to_string(),
+                "clip-9".to_string(),
+                "clip-10".to_string()
+            ],
+            "the overflow past the cap is named, in event order: {:?}",
+            measurement.coverage
+        );
+        assert!(
+            measurement
+                .coverage
+                .notes
+                .iter()
+                .any(|note| note.contains("isolate")),
+            "and the report says why: {:?}",
+            measurement.coverage.notes
+        );
     }
 
     // =========================================================================
@@ -3007,6 +3447,21 @@ mod tests {
     /// `0` is the margin a `marginPercent: 0` preset resolves to, and the case
     /// this module used to report as an overflow.
     fn fixture_script_with_margin(tags: &str, text: &str, margin_v: u32) -> String {
+        fixture_script_with_events(&[(tags, text)], margin_v)
+    }
+
+    /// The same shape, with one `Dialogue` line per `(tags, text)` pair.
+    ///
+    /// Every event runs over the same span, which is what a fixture about two
+    /// captions on one frame needs.
+    fn fixture_script_with_events(events: &[(&str, &str)], margin_v: u32) -> String {
+        let lines: String = events
+            .iter()
+            .map(|(tags, text)| {
+                format!("Dialogue: 0,0:00:00.00,0:00:04.00,T,,60,60,{margin_v},,{{{tags}}}{text}\n")
+            })
+            .collect();
+
         format!(
             "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\
              PlayResX: 1920\nPlayResY: 1080\n\n\
@@ -3018,8 +3473,142 @@ mod tests {
              100.00,0,0,1,2.00,0.00,2,60,60,{margin_v},1\n\n\
              [Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, \
              Text\n\
-             Dialogue: 0,0:00:00.00,0:00:04.00,T,,60,60,{margin_v},,{{{tags}}}{text}\n"
+             {lines}"
         )
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: an isolated cue is measured where collision avoidance put it
+    ///
+    /// The claim the whole isolation design rests on, asked of the renderer.
+    /// libass moves overlapping events apart so they do not draw on top of each
+    /// other, and it decides that from the bitmaps it rendered - so an event
+    /// hidden by [`ASS_HIDE_INK_TAGS`](super::export::ASS_HIDE_INK_TAGS), which
+    /// still renders its bitmaps, is still avoided. Measured on this binary at
+    /// 1920x1080: the pair inks `903..1021`, the second cue alone in its own
+    /// script inks `967..1021`, and the second cue with the first *hidden* inks
+    /// `903..957` - the shifted position, which is the one that burns in.
+    ///
+    /// The alternative implementation - dropping the other `Dialogue` lines -
+    /// would measure the `967..1021` row and report that caption 5.9% of the
+    /// canvas below where the viewer sees it. If a future libass stops
+    /// accounting for transparent events, this fails rather than quietly
+    /// shifting every stacked caption's verdict.
+    #[test]
+    #[ignore = "requires FFmpeg with libass"]
+    fn an_isolated_cue_is_measured_where_collision_avoidance_put_it() {
+        let Some(ffmpeg) = crate::core::test_ffmpeg::require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        let hide = crate::core::render::export::ASS_HIDE_INK_TAGS;
+        let first = ("\\an2", "First caption line");
+        let second = ("\\an2", "Second caption line");
+
+        let both = probe_script(
+            &ffmpeg,
+            &fixture_script_with_events(&[first, second], 60),
+            30,
+            30.0,
+        )
+        .expect("two captions draw ink");
+        let isolated = probe_script(
+            &ffmpeg,
+            &fixture_script_with_events(&[(&format!("\\an2{hide}"), first.1), second], 60),
+            30,
+            30.0,
+        )
+        .expect("the visible caption draws ink");
+        let alone = probe_script(
+            &ffmpeg,
+            &fixture_script_with_events(&[second], 60),
+            30,
+            30.0,
+        )
+        .expect("one caption draws ink");
+
+        assert!(
+            both.y1 < alone.y1,
+            "the fixture only means anything if libass really stacked the two: {both:?} against \
+             {alone:?}"
+        );
+        assert!(
+            isolated.y1 == both.y1 && isolated.y2 < alone.y1,
+            "isolating by alpha has to leave the cue where the full render draws it - the top half \
+             of the pair's union - not where it would sit with nobody to avoid: {isolated:?}, pair \
+             {both:?}, alone {alone:?}"
+        );
+        assert!(
+            isolated.x1 == alone.x1 && isolated.x2 == alone.x2,
+            "and the horizontal extent is the cue's own either way: {isolated:?} against {alone:?}"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: the glyph pass leaves a hidden neighbour's decoration alone
+    ///
+    /// The glyph-only render takes the outline, shadow and background box off
+    /// every event it measures - and a hidden event is not one of those. It is
+    /// the *obstacle* libass shifted the measured cue away from, and libass
+    /// measured it with its decoration on: shrink it and the visible cue slides
+    /// down by however much the outline was worth.
+    ///
+    /// Measured on this binary at 1920x1080, a `\bord6` cue stacked above a
+    /// hidden neighbour: the full ink is `891..953`, the glyph box with the
+    /// neighbour left alone is `903..953` - inside the ink on every side - and
+    /// the glyph box with the neighbour zeroed too is `909..959`, which escapes
+    /// the full-ink box by six pixels at the bottom. A title-safe verdict is
+    /// then being read off a rectangle that is not inside the rectangle it is
+    /// supposed to refine.
+    #[test]
+    #[ignore = "requires FFmpeg with libass"]
+    fn the_glyph_pass_leaves_a_hidden_neighbours_decoration_alone() {
+        let Some(ffmpeg) = crate::core::test_ffmpeg::require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        let hide = crate::core::render::export::ASS_HIDE_INK_TAGS;
+        let isolated = fixture_script_with_events(
+            &[
+                (&format!("\\an2\\bord6{hide}"), "First caption line"),
+                ("\\an2\\bord6", "Second caption line"),
+            ],
+            60,
+        );
+        let hidden: std::collections::HashSet<usize> = [0usize].into_iter().collect();
+
+        let full_ink =
+            probe_script(&ffmpeg, &isolated, 30, 30.0).expect("the visible caption draws ink");
+        let glyph = probe_script_styled(
+            &ffmpeg,
+            &glyph_only_script(&isolated, &hidden),
+            30,
+            30.0,
+            GLYPH_ONLY_FORCE_STYLE_OPTION,
+        )
+        .expect("the glyphs draw ink");
+        let glyph_if_both_zeroed = probe_script_styled(
+            &ffmpeg,
+            &glyph_only_script(&isolated, &std::collections::HashSet::new()),
+            30,
+            30.0,
+            GLYPH_ONLY_FORCE_STYLE_OPTION,
+        )
+        .expect("the glyphs draw ink");
+
+        assert!(
+            glyph.x1 >= full_ink.x1
+                && glyph.x2 <= full_ink.x2
+                && glyph.y1 >= full_ink.y1
+                && glyph.y2 <= full_ink.y2,
+            "the letterforms have to sit inside the ink drawn around them: {glyph:?} against \
+             {full_ink:?}"
+        );
+        assert!(
+            glyph_if_both_zeroed.y2 > full_ink.y2,
+            "the fixture only means anything if zeroing the hidden neighbour really does move the \
+             measured cue out of its own ink: {glyph_if_both_zeroed:?} against {full_ink:?}"
+        );
     }
 
     /// Feature: caption extent measurement
@@ -3308,7 +3897,7 @@ mod tests {
 
         // The decoration the burn-in writes inline, in the shape it writes it.
         let full = fixture_script(r"\an2\bord6.00\xshad3\yshad3\blur2", "Hello measured world");
-        let glyph = glyph_only_script(&full);
+        let glyph = glyph_only_script(&full, &std::collections::HashSet::new());
 
         let full_box = probe_script(&ffmpeg, &full, 30, 30.0).expect("the caption draws ink");
         let forced_only =
@@ -3361,7 +3950,7 @@ mod tests {
         let boxed_ink = probe_script(&ffmpeg, &boxed, 30, 30.0).expect("a boxed caption draws ink");
         let boxed_glyphs = probe_script_styled(
             &ffmpeg,
-            &glyph_only_script(&boxed),
+            &glyph_only_script(&boxed, &std::collections::HashSet::new()),
             30,
             30.0,
             GLYPH_ONLY_FORCE_STYLE_OPTION,
@@ -3369,7 +3958,7 @@ mod tests {
         .expect("its glyphs draw ink");
         let outlined_glyphs = probe_script_styled(
             &ffmpeg,
-            &glyph_only_script(&outlined),
+            &glyph_only_script(&outlined, &std::collections::HashSet::new()),
             30,
             30.0,
             GLYPH_ONLY_FORCE_STYLE_OPTION,
@@ -3420,5 +4009,235 @@ mod tests {
             percent.left > 0.0 && percent.right < 100.0,
             "a wrapped CJK cue stays inside the frame: {percent:?}"
         );
+    }
+
+    // =========================================================================
+    // Whole passes, against a real libass
+    // =========================================================================
+
+    /// An engine pointed at the FFmpeg this machine has, or `None` to skip.
+    fn real_engine() -> Option<ExportEngine> {
+        let ffmpeg = crate::core::test_ffmpeg::require_or_skip_ffmpeg()?;
+        Some(ExportEngine::new(crate::core::ffmpeg::FFmpegRunner::new(
+            crate::core::ffmpeg::FFmpegInfo {
+                ffprobe_path: ffmpeg.with_file_name(if cfg!(windows) {
+                    "ffprobe.exe"
+                } else {
+                    "ffprobe"
+                }),
+                ffmpeg_path: ffmpeg,
+                version: "test".to_string(),
+                is_bundled: false,
+                source: crate::core::ffmpeg::FFmpegSource::System,
+            },
+        )))
+    }
+
+    /// A top-anchored title running the whole timeline, over a caption track.
+    ///
+    /// The shape of nearly every finished video, and the one the solo/shared
+    /// partition measured nothing at all for.
+    fn sequence_with_a_title_over_captions() -> Sequence {
+        let mut sequence = Sequence::new("Title", SequenceFormat::youtube_1080());
+
+        let mut titles = Track::new_caption("Title");
+        let mut title = Clip::new("caption-asset")
+            .with_source_range(0.0, 6.0)
+            .place_at(0.0);
+        title.id = "clip-title".to_string();
+        title.label = Some("A persistent title".to_string());
+        title.caption_style = Some(caption_style(64.0));
+        title.caption_position = Some(serde_json::json!({
+            "type": "preset",
+            "vertical": "top",
+        }));
+        titles.add_clip(title);
+        sequence.add_track(titles);
+
+        let mut captions = Track::new_caption("Captions");
+        for (index, (text, start, end)) in [
+            ("The first caption", 0.0, 2.0),
+            ("The second caption", 2.0, 4.0),
+            ("The third caption", 4.0, 6.0),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, end - start)
+                .place_at(*start);
+            clip.id = format!("clip-{index}");
+            clip.label = Some((*text).to_string());
+            clip.caption_style = Some(caption_style(64.0));
+            captions.add_clip(clip);
+        }
+        sequence.add_track(captions);
+
+        sequence
+    }
+
+    fn request_for<'a>(
+        sequence: &'a Sequence,
+        effects: &'a HashMap<String, Effect>,
+        probe_budget: Duration,
+    ) -> CaptionExtentRequest<'a> {
+        CaptionExtentRequest {
+            sequence,
+            effects,
+            canvas_width: 1920,
+            canvas_height: 1080,
+            fps: 30.0,
+            window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget,
+        }
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a caption under a persistent title is measured, and so is the
+    /// title
+    ///
+    /// The end-to-end claim this change exists for. Every caption here shares
+    /// every one of its frames with the title, so the previous partition
+    /// declared all four cues unmeasurable and handed the lot to the caller's
+    /// predictor. Two layers measure all four, each with a rectangle that is its
+    /// own rather than the union - which is what the vertical assertion checks:
+    /// the title's box is in the top of the frame and every caption's is in the
+    /// bottom, so neither swallowed the other.
+    #[tokio::test]
+    #[ignore = "requires FFmpeg with libass"]
+    async fn a_caption_under_a_persistent_title_is_measured_and_so_is_the_title() {
+        let Some(engine) = real_engine() else {
+            return;
+        };
+
+        let sequence = sequence_with_a_title_over_captions();
+        let effects = HashMap::new();
+        let measurement = measure_caption_extents(
+            &engine,
+            &request_for(&sequence, &effects, Duration::from_secs(60)),
+        )
+        .await
+        .expect("a title over captions is not an error");
+
+        assert!(
+            !measurement.coverage.probe_failed,
+            "a real binary completes both layers: {:?}",
+            measurement.coverage
+        );
+        assert!(
+            measurement.coverage.shared_frame_cue_ids.is_empty(),
+            "nothing is refused for sharing a frame any more: {:?}",
+            measurement.coverage
+        );
+
+        let mut measured: Vec<&str> = measurement
+            .extents
+            .iter()
+            .map(|extent| extent.clip_id.as_str())
+            .collect();
+        measured.sort_unstable();
+        assert_eq!(
+            measured,
+            vec!["clip-0", "clip-1", "clip-2", "clip-title"],
+            "every cue in the project has a rectangle: {:?}",
+            measurement.coverage
+        );
+
+        for extent in &measurement.extents {
+            let inked = extent
+                .full_ink
+                .unwrap_or_else(|| panic!("{} drew ink", extent.clip_id));
+            assert!(
+                inked.left > 0.0
+                    && inked.right < 100.0
+                    && inked.top >= 0.0
+                    && inked.bottom <= 100.0,
+                "{} lands inside the frame: {inked:?}",
+                extent.clip_id
+            );
+            assert!(
+                inked.height() < 25.0,
+                "{} is one line tall, not the union of a title and a caption: {inked:?}",
+                extent.clip_id
+            );
+            assert!(
+                !extent.clipped,
+                "{} is not cropped: {inked:?}",
+                extent.clip_id
+            );
+
+            if extent.clip_id == "clip-title" {
+                assert!(inked.bottom < 40.0, "the title sits high: {inked:?}");
+            } else {
+                assert!(inked.top > 60.0, "a caption sits low: {inked:?}");
+            }
+        }
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a budget that runs out mid-layering leaves the measured layers
+    /// standing
+    ///
+    /// The deadline is taken per layer for exactly this: one timeout around the
+    /// whole loop would cancel the future holding every rectangle already
+    /// measured and send a two-layer project back to the estimator entirely. The
+    /// budget here is measured from a generous run and then halved, which is
+    /// enough for the first layer and rarely enough for all four passes.
+    ///
+    /// Both outcomes are asserted, because which one a machine lands on is a
+    /// property of that machine: what must never happen is coming back with
+    /// nothing, and a run that measured fewer cues than it could has to say so.
+    #[tokio::test]
+    #[ignore = "requires FFmpeg with libass"]
+    async fn a_budget_that_runs_out_between_layers_keeps_the_layers_it_measured() {
+        let Some(engine) = real_engine() else {
+            return;
+        };
+
+        let sequence = sequence_with_a_title_over_captions();
+        let effects = HashMap::new();
+        let started = std::time::Instant::now();
+        let generous = measure_caption_extents(
+            &engine,
+            &request_for(&sequence, &effects, Duration::from_secs(60)),
+        )
+        .await
+        .expect("the generous run succeeds");
+        let everything = started.elapsed();
+        assert_eq!(generous.extents.len(), 4, "the fixture measures at all");
+
+        let tight = measure_caption_extents(
+            &engine,
+            &request_for(&sequence, &effects, everything / 2 + MINIMUM_PASS_BUDGET),
+        )
+        .await
+        .expect("a tight budget is not an error");
+
+        assert!(
+            !tight.extents.is_empty(),
+            "a layer that finished keeps its rectangles: {:?}",
+            tight.coverage.notes
+        );
+        for extent in &tight.extents {
+            let inked = extent
+                .full_ink
+                .unwrap_or_else(|| panic!("{} drew ink", extent.clip_id));
+            assert!(
+                inked.right > inked.left && inked.bottom > inked.top,
+                "and they are the rectangles the pass measured: {inked:?}"
+            );
+        }
+        if tight.extents.len() < generous.extents.len() {
+            assert!(
+                tight
+                    .coverage
+                    .notes
+                    .iter()
+                    .any(|note| note.contains("budget")),
+                "a run that measured fewer cues has to say why: {:?}",
+                tight.coverage.notes
+            );
+        }
     }
 }

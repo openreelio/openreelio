@@ -5966,14 +5966,33 @@ const EMOJI_MARKER_DEPTH_RATIO: f64 = 2.0 / 3.0;
 /// and the QC report says how many did.
 pub(crate) const MAX_EMOJI_OVERLAYS_PER_RENDER: usize = 200;
 
-/// Override tags that leave a marker script drawing nothing but its boxes.
+/// Override tags that leave an event drawing no ink at all.
 ///
 /// Primary, outline and shadow alphas, all fully transparent. `bbox` reports
 /// one rectangle for the whole frame, so anything else the frame draws is
-/// measured *together with* the marker and the answer is the caption's box
-/// rather than the cell's. Alpha cannot move a glyph, so hiding the text leaves
-/// the layout the real render will use exactly where it was.
-pub(crate) const ASS_EMOJI_MARKER_HIDE_TAGS: &str = r"\1a&HFF&\3a&HFF&\4a&HFF&";
+/// measured *together with* what the probe is after - and the answer is then a
+/// rectangle that belongs to neither event.
+///
+/// Two measurement passes rely on it, for the same reason and with the same
+/// guarantee: the colour-emoji pre-pass hides every event so only its marker
+/// cells paint, and [`caption_measure`](super::caption_measure) hides every
+/// event outside the layer it is measuring so the frame carries one cue's ink.
+///
+/// # What it does not change
+///
+/// Alpha cannot move a glyph, so the layout the real render will use stays
+/// exactly where it was - and that is true of libass's *collision avoidance*
+/// too, which is the part worth stating out loud because it is the part that
+/// could have been otherwise. libass shifts overlapping events apart on the
+/// bitmaps it rendered, and a fully transparent event still renders its
+/// bitmaps: measured against the bundled binary at 1920x1080, two `\an2`
+/// captions live at the same instant ink `903..1021` together, the second one
+/// alone in its own script inks `967..1021`, and the second one with its
+/// neighbour *hidden by these tags* inks `903..957` - the shifted position, the
+/// one the full render draws. Dropping the neighbour's `Dialogue` line instead
+/// would have measured `967..1021` and reported a caption 5.9% of the canvas
+/// away from where it burns in.
+pub(crate) const ASS_HIDE_INK_TAGS: &str = r"\1a&HFF&\3a&HFF&\4a&HFF&";
 
 /// The cell edge, in `PlayRes` units, for an event at `font_size`.
 pub(crate) fn ass_emoji_cell_size(font_size: f64) -> u32 {
@@ -6480,6 +6499,13 @@ struct AssEventContext<'a> {
     /// Position of this `Dialogue` line in the script, which is how a measured
     /// colour emoji finds its way back to the cue it belongs to.
     event_index: usize,
+    /// Whether this event is emitted drawing no ink.
+    ///
+    /// Set for every event outside the visible set of an *isolated* build. The
+    /// line is still written, at its own timing, in its own style, with its own
+    /// text: only [`ASS_HIDE_INK_TAGS`] is appended, so the event still occupies
+    /// the space libass shifts its neighbours around and simply paints nothing.
+    hidden: bool,
 }
 
 fn append_ass_text_style_and_event(
@@ -6499,6 +6525,7 @@ fn append_ass_text_style_and_event(
         anchor,
         window_start_sec,
         event_index,
+        hidden,
     } = *context;
     let opacity = effect_float_param(effect, "opacity", 1.0).clamp(0.0, 1.0);
     let font_family = ass_sanitize_style_field(font_family, DEFAULT_TEXT_FONT_FAMILY);
@@ -6640,11 +6667,17 @@ fn append_ass_text_style_and_event(
         &font_family,
         spacers.as_mut(),
     );
-    // A measurement script hides every event, not only the ones carrying a
-    // cell: `bbox` measures the frame, so one unhidden caption elsewhere on the
-    // timeline would be the rectangle that comes back.
-    let hide = if emoji.is_some_and(|context| context.markers.is_some()) {
-        ASS_EMOJI_MARKER_HIDE_TAGS
+    // A measurement script hides events, and two passes ask for it for the same
+    // reason: `bbox` measures the whole frame, so one unwanted caption anywhere
+    // on it is the rectangle that comes back. The colour-emoji pre-pass hides
+    // *every* event, not only the ones carrying a cell; an isolated build hides
+    // everything outside the layer being measured.
+    //
+    // Appended after `tags`, and that ordering is the mechanism: within one
+    // override block the last spelling of a tag wins, so an alpha the event's
+    // own block set earlier cannot put the ink back.
+    let hide = if hidden || emoji.is_some_and(|context| context.markers.is_some()) {
+        ASS_HIDE_INK_TAGS
     } else {
         ""
     };
@@ -6910,6 +6943,44 @@ pub(crate) fn build_ass_text_overlay_script_in_window_with_emoji(
     window_start_sec: f64,
     emoji: Option<EmojiSpacerContext<'_>>,
 ) -> Result<Option<AssTextOverlayScript>, ExportError> {
+    build_ass_text_overlay_script_isolated(sequence, effects, window_start_sec, emoji, None)
+}
+
+/// [`build_ass_text_overlay_script_in_window_with_emoji`], with only some events
+/// drawing ink.
+///
+/// `visible_events` names the `Dialogue` lines - by the event index that
+/// [`AssTextOverlayScript::event_clip_ids`] is also indexed by - that paint.
+/// Every other event is still written, at its own timing, in its own style, with
+/// its own text and the same font runs: it simply carries [`ASS_HIDE_INK_TAGS`]
+/// at the end of its override block and draws nothing.
+///
+/// `None` is the render's own script, and it is byte-identical to what
+/// [`build_ass_text_overlay_script_in_window_with_emoji`] produced before this
+/// parameter existed - not by convention but by construction, because the two
+/// call the same emitter and `None` can never set an event's `hidden` flag.
+///
+/// # Why hide rather than drop
+///
+/// The point of an isolated script is to measure *the layout the export burns
+/// in*, one event at a time. Dropping the other `Dialogue` lines would measure a
+/// different one: libass shifts overlapping events apart, and an event that is
+/// not in the script cannot be avoided. A fully transparent event still renders
+/// the bitmaps that collision avoidance is computed on, so hiding leaves every
+/// neighbour exactly where the full render puts it. See [`ASS_HIDE_INK_TAGS`]
+/// for the measurement that establishes this.
+///
+/// Hiding also keeps the event *indices* - and therefore `event_clip_ids`, the
+/// `OpenReelioText<n>` style names and the colour-emoji occurrence order -
+/// identical between the isolated script and the render's, which is what lets a
+/// measured rectangle be attributed to a clip at all.
+pub(crate) fn build_ass_text_overlay_script_isolated(
+    sequence: &Sequence,
+    effects: &HashMap<String, Effect>,
+    window_start_sec: f64,
+    emoji: Option<EmojiSpacerContext<'_>>,
+    visible_events: Option<&HashSet<usize>>,
+) -> Result<Option<AssTextOverlayScript>, ExportError> {
     let (play_res_x, play_res_y) = ass_play_resolution(&sequence.format.canvas);
     let mut emoji_occurrences: Vec<EmojiOccurrence> = Vec::new();
     let mut styles = String::new();
@@ -7021,6 +7092,7 @@ pub(crate) fn build_ass_text_overlay_script_in_window_with_emoji(
                     anchor: ass_text_anchor(clip, &track.kind, &effect, play_res_x, play_res_y),
                     window_start_sec,
                     event_index: event_count,
+                    hidden: visible_events.is_some_and(|visible| !visible.contains(&event_count)),
                 },
                 clip,
                 &effect,
@@ -10786,6 +10858,183 @@ mod tests {
         .expect("script exists")
     }
 
+    // =========================================================================
+    // Event isolation
+    // =========================================================================
+
+    /// A caption track carrying `cues` of `(label, in, out)`, one clip each.
+    fn isolation_sequence(cues: &[(&str, f64, f64)]) -> Sequence {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Isolation", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        for (label, start, end) in cues {
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, end - start)
+                .place_at(*start);
+            clip.label = Some((*label).to_string());
+            clip.caption_style = Some(default_caption_style());
+            track.add_clip(clip);
+        }
+        sequence.add_track(track);
+        sequence
+    }
+
+    /// The `Dialogue` lines of a script, in order.
+    fn dialogue_lines(script: &str) -> Vec<&str> {
+        script
+            .lines()
+            .filter(|line| line.starts_with("Dialogue:"))
+            .collect()
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: an isolated build hides exactly the events outside the
+    /// visible set, and leaves the visible ones byte for byte
+    ///
+    /// The whole mechanism in one assertion. A hidden event is the *same line*
+    /// with [`ASS_HIDE_INK_TAGS`] appended to its override block - same timing,
+    /// same style, same margins, same text - because it still has to occupy the
+    /// space libass shifts its neighbours around. A visible event is untouched,
+    /// because anything added to it would be a layout this pass measures and the
+    /// export never draws.
+    #[test]
+    fn an_isolated_build_hides_exactly_the_events_outside_the_visible_set() {
+        let sequence = isolation_sequence(&[
+            ("Title over everything", 0.0, 6.0),
+            ("First caption", 0.0, 2.0),
+            ("Second caption", 2.0, 4.0),
+        ]);
+
+        let rendered = build_ass_text_overlay_script_in_window_with_emoji(
+            &sequence,
+            &HashMap::new(),
+            0.0,
+            None,
+        )
+        .expect("script result")
+        .expect("script exists");
+
+        let visible: HashSet<usize> = [1usize, 2].into_iter().collect();
+        let isolated = build_ass_text_overlay_script_isolated(
+            &sequence,
+            &HashMap::new(),
+            0.0,
+            None,
+            Some(&visible),
+        )
+        .expect("script result")
+        .expect("script exists");
+
+        let before = dialogue_lines(&rendered.script);
+        let after = dialogue_lines(&isolated.script);
+        assert_eq!(before.len(), 3);
+        assert_eq!(after.len(), before.len(), "no event was added or dropped");
+
+        for index in 1..=2 {
+            assert_eq!(
+                after[index], before[index],
+                "a visible event must be the burn-in's own line, byte for byte"
+            );
+            assert!(
+                !after[index].contains(ASS_HIDE_INK_TAGS),
+                "and must not be hidden: {}",
+                after[index]
+            );
+        }
+
+        let close = before[0].find('}').expect("the leading override block");
+        assert_eq!(
+            after[0],
+            format!(
+                "{}{ASS_HIDE_INK_TAGS}{}",
+                &before[0][..close],
+                &before[0][close..]
+            ),
+            "a hidden event is the same line with the alpha overrides appended to the end of its \
+             block, where the last spelling of a tag wins"
+        );
+
+        assert_eq!(
+            isolated.event_clip_ids, rendered.event_clip_ids,
+            "hiding must not disturb the identity a measured rectangle is attributed by"
+        );
+        assert_eq!(isolated.uses_host_fonts, rendered.uses_host_fonts);
+
+        // Everything that is not an event survives: the header carries
+        // `PlayRes` and `WrapStyle`, the styles carry the alignment and the
+        // margins, and the `[Fonts]` section carries the faces.
+        for line in rendered
+            .script
+            .lines()
+            .filter(|line| !line.starts_with("Dialogue:"))
+        {
+            assert!(
+                isolated.script.contains(line),
+                "a non-event line was rewritten: {line}"
+            );
+        }
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a build with every event visible is the render's own script
+    ///
+    /// The common path, and the one that must cost nothing: one caption track
+    /// collapses to a single layer holding every event, and the script that
+    /// measures it has to be the script that burns in. Byte for byte, not
+    /// "equivalent" - the two are handed to the same libass and any difference
+    /// at all is a rectangle for a caption nobody renders.
+    #[test]
+    fn a_build_with_every_event_visible_is_the_renders_own_script() {
+        let sequence = isolation_sequence(&[("One", 0.0, 2.0), ("Two", 2.0, 4.0)]);
+
+        let rendered = build_ass_text_overlay_script_in_window_with_emoji(
+            &sequence,
+            &HashMap::new(),
+            0.0,
+            None,
+        )
+        .expect("script result")
+        .expect("script exists");
+
+        let all: HashSet<usize> = (0..rendered.event_clip_ids.len()).collect();
+        let isolated = build_ass_text_overlay_script_isolated(
+            &sequence,
+            &HashMap::new(),
+            0.0,
+            None,
+            Some(&all),
+        )
+        .expect("script result")
+        .expect("script exists");
+
+        assert_eq!(isolated.script, rendered.script);
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: hiding every event leaves a script that draws nothing
+    ///
+    /// The degenerate end of the same mechanism, and the one that says the
+    /// visible set is read as a *set* rather than as "the first N events".
+    #[test]
+    fn an_isolated_build_with_an_empty_visible_set_hides_every_event() {
+        let sequence = isolation_sequence(&[("One", 0.0, 2.0), ("Two", 2.0, 4.0)]);
+
+        let isolated = build_ass_text_overlay_script_isolated(
+            &sequence,
+            &HashMap::new(),
+            0.0,
+            None,
+            Some(&HashSet::new()),
+        )
+        .expect("script result")
+        .expect("script exists");
+
+        let lines = dialogue_lines(&isolated.script);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.contains(ASS_HIDE_INK_TAGS)));
+    }
+
     /// The cell width a script actually emitted, read back out of it.
     fn emitted_cell_size(script: &str) -> u32 {
         let opening = "{\\p1}m 0 0 l ";
@@ -10906,7 +11155,7 @@ mod tests {
                 let close = line.find('}').expect("the leading override block");
                 let mut rebuilt = String::new();
                 rebuilt.push_str(&line[..close]);
-                rebuilt.push_str(ASS_EMOJI_MARKER_HIDE_TAGS);
+                rebuilt.push_str(ASS_HIDE_INK_TAGS);
                 rebuilt.push_str(&line[close..]);
                 // Only the *second* cell paints, so only the second is replaced.
                 let cell = ass_emoji_spacer_run(size);
@@ -12471,6 +12720,7 @@ mod tests {
                 font_stack: &FontStack::default(),
                 window_start_sec: 0.0,
                 event_index: 0,
+                hidden: false,
                 anchor: ass_text_anchor(
                     &sequence.tracks[0].clips[0],
                     &TrackKind::Caption,

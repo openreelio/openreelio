@@ -161,10 +161,14 @@ pub struct CaptionExtentCoverageRecord {
     /// an estimated run looks exactly like a measured one.
     #[serde(default)]
     pub measured_cue_ids: Vec<String>,
-    /// Cues sharing a rendered frame with another text or caption event
+    /// Cues on screen alongside more events than the pass will isolate
     ///
-    /// One bounding box cannot be attributed to one of two events drawn at the
-    /// same instant, so these are left to the estimator.
+    /// Sharing a frame is not on its own a refusal: the pass splits the cues
+    /// into overlap-free layers and renders each with every other event hidden,
+    /// so a caption under a persistent title is measured like any other. What is
+    /// named here is the overflow — a project with more text events
+    /// simultaneously on screen than the pass will spawn FFmpeg runs for. These
+    /// are left to the estimator.
     pub shared_frame_cue_ids: Vec<String>,
     /// Cues shorter than a frame interval, which no rendered frame shows
     pub sub_frame_cue_ids: Vec<String>,

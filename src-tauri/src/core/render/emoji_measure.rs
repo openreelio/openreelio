@@ -1290,10 +1290,7 @@ mod tests {
     /// the one rectangle `bbox` reports is the painted cell and nothing else.
     fn probe_marker_script(text: &str) -> String {
         probe_script_with(
-            &format!(
-                r"\an2{}",
-                crate::core::render::export::ASS_EMOJI_MARKER_HIDE_TAGS
-            ),
+            &format!(r"\an2{}", crate::core::render::export::ASS_HIDE_INK_TAGS),
             text,
         )
     }
@@ -1643,10 +1640,7 @@ mod tests {
             // The text is hidden exactly the way the real emitter hides it,
             // so only the selected cell is on the frame.
             Ok(probe_script_with(
-                &format!(
-                    r"\an2{}",
-                    crate::core::render::export::ASS_EMOJI_MARKER_HIDE_TAGS
-                ),
+                &format!(r"\an2{}", crate::core::render::export::ASS_HIDE_INK_TAGS),
                 &format!("AAA{} BBB {}", cell(0), cell(1)),
             ))
         };
