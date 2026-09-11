@@ -34,7 +34,7 @@
 
 use std::collections::HashMap;
 
-use super::context::{CaptionExtentCoverageRecord, CaptionExtentSample};
+use super::context::{CaptionExtentCoverageRecord, CaptionExtentSample, CaptionGlyphBox};
 use crate::core::effects::Effect;
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::render::caption_measure::{measure_caption_extents, CaptionExtentRequest};
@@ -151,6 +151,8 @@ pub async fn sample_caption_extents(
         sub_frame_cue_ids: measured.coverage.sub_frame_cue_ids.clone(),
         emoji_cue_ids: measured.coverage.emoji_cue_ids.clone(),
         uses_host_fonts: measured.coverage.uses_host_fonts,
+        glyph_unmeasured_cue_ids: measured.coverage.glyph_unmeasured_cue_ids.clone(),
+        font_substitutions: measured.coverage.font_substitutions.clone(),
         probe_failed: measured.coverage.probe_failed,
         notes: measured.coverage.notes.clone(),
         ..CaptionExtentCoverageRecord::default()
@@ -161,7 +163,12 @@ pub async fn sample_caption_extents(
         // A cue that drew nothing has no rectangle to grade. Reported as
         // unmeasured rather than as a zero-sized box at the origin, which would
         // read as a caption tucked neatly into the top-left corner.
-        let Some(box_percent) = extent.box_percent else {
+        //
+        // The full ink decides that, not the glyph box: a cue whose decoration
+        // is all there is — a background box around a space, say — drew
+        // something, and a cue whose second render failed drew everything and
+        // was simply not measured twice.
+        let Some(box_percent) = extent.full_ink else {
             coverage.no_ink_cue_ids.push(extent.clip_id);
             continue;
         };
@@ -172,6 +179,12 @@ pub async fn sample_caption_extents(
             right_percent: box_percent.right,
             top_percent: box_percent.top,
             bottom_percent: box_percent.bottom,
+            glyph: extent.glyph.map(|glyph| CaptionGlyphBox {
+                left_percent: glyph.left,
+                right_percent: glyph.right,
+                top_percent: glyph.top,
+                bottom_percent: glyph.bottom,
+            }),
             clipped: extent.clipped,
         });
     }
@@ -443,6 +456,111 @@ mod tests {
     }
 
     /// Feature: measured caption bounds
+    /// Scenario: should measure an outlined caption's glyphs inside its ink
+    ///
+    /// The end-to-end claim behind the two-tier safe-area test, through the
+    /// whole pass rather than against a hand-written fixture: a caption the
+    /// project asks for a 12px black outline on is rendered twice by the real
+    /// binary, and the second box is strictly inside the first on every side.
+    /// If the glyph pass ever silently measures the full ink again — a
+    /// `force_style` that an inline tag overrides, a script rewrite that stops
+    /// matching the burn-in's event shape — the two boxes come back equal and
+    /// this fails.
+    #[tokio::test]
+    #[ignore = "requires FFmpeg with libass"]
+    async fn should_measure_an_outlined_cues_glyphs_inside_its_ink() {
+        let Some(runner) = real_runner() else {
+            return;
+        };
+
+        let mut sequence = sequence_with_captions(&[("clip-a", "Outlined caption", 0.0, 2.0)]);
+        sequence.tracks[0].clips[0].caption_style = Some(serde_json::json!({
+            "fontFamily": "Inter",
+            "fontSize": 64,
+            "color": "#FFFFFF",
+            "outlineColor": "#000000",
+            "outlineWidth": 12,
+        }));
+
+        let sampling =
+            sample_caption_extents(&runner, &sequence, &HashMap::new(), &options_for(&sequence))
+                .await;
+
+        assert!(
+            !sampling.coverage.probe_failed,
+            "a real binary must complete both runs: {:?}",
+            sampling.coverage.notes
+        );
+        assert_eq!(sampling.samples.len(), 1);
+
+        let sample = &sampling.samples[0];
+        let glyph = sample.glyph.expect("the glyph pass measured this cue");
+        assert!(
+            glyph.left_percent > sample.left_percent
+                && glyph.right_percent < sample.right_percent
+                && glyph.top_percent > sample.top_percent
+                && glyph.bottom_percent < sample.bottom_percent,
+            "a 12px outline is ink the letterforms are not: {glyph:?} against {sample:?}"
+        );
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should name the fonts libass fell back to for a host-font cue
+    ///
+    /// `uses_host_fonts` says the boxes are machine-specific; this says *which*
+    /// machine-specific decision was made. A Hangul caption is drawn by no face
+    /// this binary embeds, so libass consults the host's provider — and a CI
+    /// report and a laptop report disagreeing about that caption's width are
+    /// then explainable by two lines rather than by a shrug.
+    ///
+    /// Asserted loosely on purpose: which family answers is a property of the
+    /// machine, and pinning a face name would make this a test about the
+    /// developer's font set. What is pinned is that the pass heard the decision
+    /// at all and recorded it under the cue's coverage.
+    #[tokio::test]
+    #[ignore = "requires FFmpeg with libass"]
+    async fn should_name_the_font_libass_fell_back_to() {
+        let Some(runner) = real_runner() else {
+            return;
+        };
+
+        let sequence = sequence_with_captions(&[("clip-a", "한글 자막 measured", 0.0, 2.0)]);
+
+        let sampling =
+            sample_caption_extents(&runner, &sequence, &HashMap::new(), &options_for(&sequence))
+                .await;
+
+        assert!(
+            sampling.coverage.uses_host_fonts,
+            "a Hangul caption is drawn by a face off this machine: {:?}",
+            sampling.coverage
+        );
+        assert!(
+            !sampling.coverage.font_substitutions.is_empty(),
+            "the verbose run has to name the faces libass chose: {:?}",
+            sampling.coverage
+        );
+        assert!(
+            sampling
+                .coverage
+                .font_substitutions
+                .iter()
+                .all(|note| !note.contains("Parsed_subtitles")),
+            "the heap address in the log prefix would make two identical runs report differently: \
+             {:?}",
+            sampling.coverage.font_substitutions
+        );
+        assert!(
+            sampling
+                .notes
+                .iter()
+                .any(|note| note.contains("substituted a font")),
+            "and the report says so in prose: {:?}",
+            sampling.notes
+        );
+    }
+
+    /// Feature: measured caption bounds
     /// Scenario: should carry a real measurement all the way to the rule
     ///
     /// The end-to-end claim the unit tests above cannot make: a real FFmpeg
@@ -456,7 +574,7 @@ mod tests {
     #[ignore = "requires FFmpeg with libass"]
     async fn should_hand_the_rule_a_box_it_measured_for_real() {
         use crate::core::project::ProjectState;
-        use crate::core::qc::rules::{QCRule, RuleConfig};
+        use crate::core::qc::rules::{CaptionSafeAreaRule, QCRule, RuleConfig};
         use crate::core::qc::structural::CaptionOutOfBoundsRule;
         use crate::core::qc::QCContext;
 
@@ -497,6 +615,44 @@ mod tests {
             "an ordinary caption lands inside the frame: {sample:?}"
         );
         assert!(!sample.clipped);
+
+        // And the second render reached it: the glyph box is a real rectangle
+        // inside the full ink, which is what the two-tier safe-area test needs
+        // and what no unit test can establish.
+        let glyph = sample.glyph.expect("the glyph pass measured this cue");
+        assert!(
+            glyph.left_percent >= sample.left_percent
+                && glyph.right_percent <= sample.right_percent
+                && glyph.top_percent >= sample.top_percent
+                && glyph.bottom_percent <= sample.bottom_percent,
+            "the glyphs sit inside the ink drawn around them: {glyph:?} against {sample:?}"
+        );
+        assert!(
+            glyph.right_percent > glyph.left_percent && glyph.bottom_percent > glyph.top_percent,
+            "and it is a box rather than a point: {glyph:?}"
+        );
+        assert!(
+            sampling.coverage.glyph_unmeasured_cue_ids.is_empty(),
+            "nothing was left to the one-render path: {:?}",
+            sampling.coverage
+        );
+
+        // A caption the renderer drew inside the frame clears both SMPTE tiers,
+        // so neither the safe-area rule nor the bounds rule has anything to say.
+        let violations = CaptionSafeAreaRule::new()
+            .check(
+                &sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &QCContext::from_sequence(&sequence)
+                    .with_caption_extents(sampling.samples.clone(), sampling.coverage.clone()),
+            )
+            .await
+            .expect("the rule runs");
+        assert!(
+            violations.is_empty(),
+            "a default caption clears action-safe and title-safe alike: {violations:?}"
+        );
 
         // And the rule reads it: same sequence, same box, no finding.
         let context = QCContext::from_sequence(&sequence)

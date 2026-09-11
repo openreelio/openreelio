@@ -572,21 +572,6 @@ impl VerifyPlan {
                         shift_measured_spans(&mut report, window.start_sec);
                     }
 
-                    if let Some(options) =
-                        self.caption_sample_options(report.duration_sec, remaining())
-                    {
-                        let sampling_window = self
-                            .window
-                            .map(|window| (window.start_sec, window.end_sec))
-                            .unwrap_or((0.0, sequence.duration()));
-                        let sampling =
-                            sample_caption_bands(runner, file, sequence, sampling_window, &options)
-                                .await;
-                        warnings.extend(sampling.notes.iter().cloned());
-                        report.measurements.caption_band_samples = sampling.samples;
-                        report.measurements.caption_band_coverage = Some(sampling.coverage);
-                    }
-
                     measurement = Some(report);
                 }
                 Err(error) => {
@@ -603,7 +588,9 @@ impl VerifyPlan {
         // used. `caption_extent_options` returns `None` for a structural-only
         // run and for a run that did not select the check, so neither pays for
         // it. Sequenced after the rendered-file pass so the file measurement,
-        // which answers far more checks, gets first call on the shared budget.
+        // which answers far more checks, gets first call on the shared budget —
+        // and *before* the caption-band pass below, which crops to the boxes
+        // this one measures.
         let mut caption_extents = None;
         if let Some(runner) = runner {
             if let Some(options) = self.caption_extent_options(sequence, remaining()) {
@@ -611,6 +598,39 @@ impl VerifyPlan {
                     sample_caption_extents(runner, sequence, &state.effects, &options).await;
                 warnings.extend(sampling.notes.iter().cloned());
                 caption_extents = Some(sampling);
+            }
+        }
+
+        // The caption-band pass, which needs both a rendered file and — when
+        // there is one — the measured extent of each cue, because the column and
+        // band it decodes are a crop around the caption and a crop around a
+        // *measured* caption is the words rather than the words plus half again.
+        // Cues the extent pass could not reach are cropped from the estimate
+        // exactly as before.
+        if let (Some(runner), Some(file), Some(report)) =
+            (runner, self.request.file.as_ref(), measurement.as_mut())
+        {
+            if let Some(options) = self.caption_sample_options(report.duration_sec, remaining()) {
+                let sampling_window = self
+                    .window
+                    .map(|window| (window.start_sec, window.end_sec))
+                    .unwrap_or((0.0, sequence.duration()));
+                let extents = caption_extents
+                    .as_ref()
+                    .map(|sampling| sampling.samples.as_slice())
+                    .unwrap_or_default();
+                let sampling = sample_caption_bands(
+                    runner,
+                    file,
+                    sequence,
+                    sampling_window,
+                    &options,
+                    extents,
+                )
+                .await;
+                warnings.extend(sampling.notes.iter().cloned());
+                report.measurements.caption_band_samples = sampling.samples;
+                report.measurements.caption_band_coverage = Some(sampling.coverage);
             }
         }
 

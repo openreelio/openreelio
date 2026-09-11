@@ -83,6 +83,11 @@ pub struct CaptionExtentSample {
     /// Caption or text clip whose cue was measured
     pub clip_id: String,
     /// Distance from the canvas's left edge to the ink's left edge, in percent
+    ///
+    /// The *full* ink: glyphs plus outline, shadow, blur and background box.
+    /// Everything the viewer sees, which is what a frame boundary and an
+    /// action-safe margin are about. The letterforms alone are in
+    /// [`Self::glyph`].
     pub left_percent: f64,
     /// Distance from the canvas's left edge to the ink's right edge, in percent
     pub right_percent: f64,
@@ -90,6 +95,19 @@ pub struct CaptionExtentSample {
     pub top_percent: f64,
     /// Distance from the canvas's top edge to the ink's bottom edge, in percent
     pub bottom_percent: f64,
+    /// Where the letterforms alone landed, with the decoration switched off
+    ///
+    /// Measured by a second render of the same script with every border, shadow
+    /// and blur zeroed, so it is the same layout carrying less ink — always
+    /// inside the four edges above. The tighter title-safe bound is asked of
+    /// this box, because legibility is a question about the words and not about
+    /// the outline drawn around them.
+    ///
+    /// `None` when the second render could not be completed. Never read that as
+    /// "the glyphs are fine": the cue simply has no legibility box, and
+    /// [`CaptionExtentCoverageRecord::glyph_unmeasured_cue_ids`] names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glyph: Option<CaptionGlyphBox>,
     /// Whether the ink ran off the frame by an amount nothing can quantify
     ///
     /// libass clips its own drawing at the frame, so a caption wider than the
@@ -105,6 +123,24 @@ pub struct CaptionExtentSample {
     /// glyphs — lost nothing and leaves this clear, so a rule grades it by its
     /// four edges exactly as it would an estimate.
     pub clipped: bool,
+}
+
+/// Where one cue's letterforms landed, with its decoration switched off.
+///
+/// The companion of [`CaptionExtentSample`]'s four edges rather than a
+/// replacement for them: the same cue, the same layout, measured without the
+/// outline, shadow, blur and background box that the full-ink figures include.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionGlyphBox {
+    /// Distance from the canvas's left edge to the glyphs' left edge, in percent
+    pub left_percent: f64,
+    /// Distance from the canvas's left edge to the glyphs' right edge, in percent
+    pub right_percent: f64,
+    /// Distance from the canvas's top edge to the glyphs' top edge, in percent
+    pub top_percent: f64,
+    /// Distance from the canvas's top edge to the glyphs' bottom edge, in percent
+    pub bottom_percent: f64,
 }
 
 /// What the caption-extent pass could not measure, and why.
@@ -150,6 +186,23 @@ pub struct CaptionExtentCoverageRecord {
     /// signal in its own right, and one no rule grades yet — see the note on
     /// [`crate::core::qc::structural::CaptionOutOfBoundsRule`].
     pub no_ink_cue_ids: Vec<String>,
+    /// Cues measured for their full ink but not for their glyphs alone
+    ///
+    /// The glyph box comes from a second render, and a render that failed leaves
+    /// the cue with a full-ink rectangle and no legibility box. The frame and
+    /// action-safe verdicts are still measurements; only the tighter title-safe
+    /// bound goes ungraded for these cues.
+    #[serde(default)]
+    pub glyph_unmeasured_cue_ids: Vec<String>,
+    /// Font substitutions libass named while laying these captions out
+    ///
+    /// Collected only when [`Self::uses_host_fonts`] is set, and capped: it is
+    /// the explanation a reader needs when two machines' reports disagree about
+    /// a caption's width. Each entry names the family that was asked for, the
+    /// face that answered it, and — for a fallback — the codepoint that forced
+    /// one.
+    #[serde(default)]
+    pub font_substitutions: Vec<String>,
     /// Whether at least one probe run could not be completed
     pub probe_failed: bool,
     /// Human-readable detail for the report

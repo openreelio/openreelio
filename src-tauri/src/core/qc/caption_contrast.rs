@@ -120,6 +120,7 @@
 //! [`CaptionSampleCoverage`] and reported as an informational finding, because
 //! "we measured none of them" must never reach an agent as `passed`.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -128,7 +129,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
-use super::context::QCContext;
+use super::context::{CaptionExtentSample, QCContext};
 use super::rules::{CheckCategory, QCRule, RuleConfig};
 use super::violation::{QCViolation, Severity, ViolationFix};
 use crate::core::ffmpeg::FFmpegRunner;
@@ -999,14 +1000,25 @@ fn sampling_candidates(
     canvas_width: u32,
     canvas_height: u32,
     thresholds: ContrastThresholds,
+    extents: &[CaptionExtentSample],
 ) -> CandidateCues {
     let (window_start, window_end) = window;
     let mut candidates = CandidateCues::default();
     let cues = &mut candidates.cues;
+    let measured: HashMap<&str, &CaptionExtentSample> = extents
+        .iter()
+        .map(|sample| (sample.clip_id.as_str(), sample))
+        .collect();
 
     for track in sequence.tracks.iter().filter(|track| track.is_caption()) {
         for clip in &track.clips {
-            let Some(cue) = caption_cue(track, clip, canvas_width, canvas_height) else {
+            let Some(cue) = caption_cue(
+                track,
+                clip,
+                canvas_width,
+                canvas_height,
+                measured.get(clip.id.as_str()).copied(),
+            ) else {
                 continue;
             };
             // A cue the renderer already protects is answered without a decode.
@@ -1046,11 +1058,20 @@ fn sampling_candidates(
 }
 
 /// Builds a cue from a caption clip, or `None` when there is nothing to read.
+///
+/// `measured` is the rectangle the caption-extent pass read off a render of this
+/// cue, when it reached it. The crop is built from that rectangle rather than
+/// from the block estimate whenever there is one: the estimate has to be widened
+/// by half again to cover its own imprecision, and a column half again as wide
+/// as the words takes in picture the caption never covered — which is how a
+/// bright patch beside a line came to decide that the line sat over a mixed
+/// background.
 fn caption_cue(
     track: &Track,
     clip: &Clip,
     canvas_width: u32,
     canvas_height: u32,
+    measured: Option<&CaptionExtentSample>,
 ) -> Option<CaptionCue> {
     let text = clip.label.as_ref().map(|label| label.trim())?;
     if text.is_empty() {
@@ -1069,8 +1090,18 @@ fn caption_cue(
         start_sec,
         end_sec,
         midpoint_sec: (start_sec + end_sec) / 2.0,
-        band_percent: super::rules::caption_band_percent(clip, canvas_width, canvas_height),
-        span_percent: super::rules::caption_span_percent(clip, canvas_width, canvas_height),
+        band_percent: super::rules::caption_band_percent(
+            clip,
+            canvas_width,
+            canvas_height,
+            measured,
+        ),
+        span_percent: super::rules::caption_span_percent(
+            clip,
+            canvas_width,
+            canvas_height,
+            measured,
+        ),
         paint: caption_paint(clip.caption_style.as_ref(), clip.opacity),
     })
 }
@@ -1136,6 +1167,7 @@ pub async fn sample_caption_bands(
     sequence: &Sequence,
     window: (f64, f64),
     options: &CaptionSampleOptions,
+    extents: &[CaptionExtentSample],
 ) -> CaptionBandSampling {
     let canvas_width = sequence.format.canvas.width;
     let canvas_height = sequence.format.canvas.height;
@@ -1146,6 +1178,7 @@ pub async fn sample_caption_bands(
         canvas_width,
         canvas_height,
         options.thresholds,
+        extents,
     );
     let mut sampling = CaptionBandSampling {
         coverage: CaptionSampleCoverage {
@@ -2923,13 +2956,20 @@ mod tests {
             Some(style),
         )]);
         assert!(
-            sampling_candidates(&sequence, (0.0, 10.0), 1920, 1080, thresholds_default())
-                .cues
-                .is_empty(),
+            sampling_candidates(
+                &sequence,
+                (0.0, 10.0),
+                1920,
+                1080,
+                thresholds_default(),
+                &[]
+            )
+            .cues
+            .is_empty(),
             "the default run skips it"
         );
         assert_eq!(
-            sampling_candidates(&sequence, (0.0, 10.0), 1920, 1080, strict)
+            sampling_candidates(&sequence, (0.0, 10.0), 1920, 1080, strict, &[])
                 .cues
                 .len(),
             1,
@@ -2952,8 +2992,14 @@ mod tests {
             caption_clip("Visible", 4.0, 6.0, Some(bare_white_style())),
         ]);
 
-        let candidates =
-            sampling_candidates(&sequence, (0.0, 10.0), 1920, 1080, thresholds_default());
+        let candidates = sampling_candidates(
+            &sequence,
+            (0.0, 10.0),
+            1920,
+            1080,
+            thresholds_default(),
+            &[],
+        );
 
         assert_eq!(candidates.cues.len(), 1, "only the visible cue is decoded");
         assert_eq!(candidates.faded_out, 1, "the faded one is still counted");
@@ -3445,8 +3491,14 @@ mod tests {
             caption_clip("After the window", 40.0, 42.0, Some(bare_white_style())),
         ]);
 
-        let candidates =
-            sampling_candidates(&sequence, (10.0, 20.0), 1920, 1080, thresholds_default());
+        let candidates = sampling_candidates(
+            &sequence,
+            (10.0, 20.0),
+            1920,
+            1080,
+            thresholds_default(),
+            &[],
+        );
 
         let labels: Vec<f64> = candidates.cues.iter().map(|cue| cue.midpoint_sec).collect();
         assert_eq!(labels, vec![13.0], "only the bare cue inside the window");
@@ -3463,8 +3515,15 @@ mod tests {
             Some(bare_white_style()),
         )]);
 
-        let cues =
-            sampling_candidates(&sequence, (10.0, 20.0), 1920, 1080, thresholds_default()).cues;
+        let cues = sampling_candidates(
+            &sequence,
+            (10.0, 20.0),
+            1920,
+            1080,
+            thresholds_default(),
+            &[],
+        )
+        .cues;
 
         assert_eq!(cues.len(), 1);
         assert!(
@@ -3573,6 +3632,7 @@ mod tests {
             &sequence,
             (0.0, 10.0),
             &CaptionSampleOptions::default(),
+            &[],
         )
         .await;
 
@@ -3613,6 +3673,7 @@ mod tests {
                 run_timeout: Duration::ZERO,
                 ..CaptionSampleOptions::default()
             },
+            &[],
         )
         .await;
 
@@ -3652,6 +3713,7 @@ mod tests {
                 file_duration_sec: Some(2.0),
                 ..CaptionSampleOptions::default()
             },
+            &[],
         )
         .await;
 
@@ -3707,14 +3769,14 @@ mod tests {
     #[test]
     fn should_build_a_crop_for_the_caption_band() {
         let clip = caption_clip("Words", 0.0, 2.0, Some(bare_white_style()));
-        let (top, bottom) = super::super::rules::caption_band_percent(&clip, 1920, 1080);
+        let (top, bottom) = super::super::rules::caption_band_percent(&clip, 1920, 1080, None);
 
         assert!(
             top > 75.0 && bottom <= 100.0,
             "a default caption sits low in the frame, got {top}-{bottom}"
         );
 
-        let (left, right) = super::super::rules::caption_span_percent(&clip, 1920, 1080);
+        let (left, right) = super::super::rules::caption_span_percent(&clip, 1920, 1080, None);
         let filter = band_filter((top, bottom), (left, right), 320);
         assert!(filter.contains("scale=w='min(320,iw)'"));
         assert!(filter.contains("crop="));
@@ -3760,6 +3822,7 @@ mod tests {
                 file_duration_sec: Some(2.0),
                 ..CaptionSampleOptions::default()
             },
+            &[],
         )
         .await;
 
@@ -3819,6 +3882,7 @@ mod tests {
                 file_duration_sec: Some(2.0),
                 ..CaptionSampleOptions::default()
             },
+            &[],
         )
         .await;
         let sample = sampling
@@ -3856,6 +3920,7 @@ mod tests {
                 file_duration_sec: Some(2.0),
                 ..CaptionSampleOptions::default()
             },
+            &[],
         )
         .await;
         let sample = sampling
@@ -3894,6 +3959,7 @@ mod tests {
                 file_duration_sec: Some(2.0),
                 ..CaptionSampleOptions::default()
             },
+            &[],
         )
         .await;
 
@@ -4014,7 +4080,7 @@ mod tests {
         let band_for = |position: serde_json::Value, style: serde_json::Value| {
             let mut clip = caption_clip_with_style("Words", 0.0, 2.0, Some(style));
             clip.caption_position = Some(position);
-            super::super::rules::caption_band_percent(&clip, 1920, 1080)
+            super::super::rules::caption_band_percent(&clip, 1920, 1080, None)
         };
         let white = serde_json::json!({ "color": "#FFFFFF" });
 
@@ -4049,6 +4115,70 @@ mod tests {
     }
 
     /// Feature: Band geometry
+    /// Scenario: should crop a measured cue to the box that was rendered
+    ///
+    /// The wiring, end to end through the candidate pass: when the
+    /// caption-extent pre-pass reached a cue, the crop this pass decodes is
+    /// built from the rectangle libass drew rather than from the block estimate
+    /// widened by half again. It is a deliberate change of verdict for measured
+    /// cues — a tighter column reads the pixels the words sit on and not the
+    /// picture beside them — and it is the only thing that changes: a cue with
+    /// no measurement is cropped exactly as before.
+    #[test]
+    fn should_crop_a_measured_cue_to_the_rendered_box() {
+        let sequence = sequence_with_captions(vec![caption_clip(
+            "A measured cue of several words",
+            0.0,
+            2.0,
+            Some(bare_white_style()),
+        )]);
+        let clip_id = sequence.tracks[0].clips[0].id.clone();
+
+        let estimated = sampling_candidates(
+            &sequence,
+            (0.0, 10.0),
+            1920,
+            1080,
+            thresholds_default(),
+            &[],
+        );
+        let estimated_span = estimated.cues[0].span_percent;
+
+        let measured = sampling_candidates(
+            &sequence,
+            (0.0, 10.0),
+            1920,
+            1080,
+            thresholds_default(),
+            &[CaptionExtentSample {
+                clip_id,
+                left_percent: 40.0,
+                right_percent: 60.0,
+                top_percent: 84.0,
+                bottom_percent: 89.0,
+                glyph: None,
+                clipped: false,
+            }],
+        );
+        let (left, right) = measured.cues[0].span_percent;
+        let (top, bottom) = measured.cues[0].band_percent;
+
+        assert!(
+            (left - 39.0).abs() < 1e-9 && (right - 61.0).abs() < 1e-9,
+            "the measured column is the rendered one plus the pixel-grid pad: {left}-{right}"
+        );
+        assert!(
+            (top - 83.0).abs() < 1e-9 && (bottom - 90.0).abs() < 1e-9,
+            "and so is the band: {top}-{bottom}"
+        );
+        assert!(
+            right - left < estimated_span.1 - estimated_span.0,
+            "measuring the cue has to tighten the crop, not merely move it: {left}-{right} against \
+             {estimated_span:?}"
+        );
+    }
+
+    /// Feature: Band geometry
     /// Scenario: should crop around the point a custom caption is pinned to
     ///
     /// `xPercent: 0.5` is the middle of the frame to the renderer, which reads
@@ -4065,7 +4195,7 @@ mod tests {
         clip.caption_position =
             Some(serde_json::json!({ "type": "custom", "xPercent": 0.5, "yPercent": 0.5 }));
 
-        let (left, right) = super::super::rules::caption_span_percent(&clip, 1920, 1080);
+        let (left, right) = super::super::rules::caption_span_percent(&clip, 1920, 1080, None);
         let centre = (left + right) / 2.0;
 
         assert!(
@@ -4086,7 +4216,7 @@ mod tests {
         let wrap_box = crate::core::captions::CAPTION_WRAP_BOX_WIDTH_PERCENT;
 
         let short = caption_clip("Hi", 0.0, 2.0, Some(bare_white_style()));
-        let (left, right) = super::super::rules::caption_span_percent(&short, 1920, 1080);
+        let (left, right) = super::super::rules::caption_span_percent(&short, 1920, 1080, None);
         assert!(
             right - left < wrap_box,
             "a two-character cue must not be measured across the whole wrap box, got \
@@ -4109,7 +4239,7 @@ mod tests {
             2.0,
             Some(bare_white_style()),
         );
-        let (left, right) = super::super::rules::caption_span_percent(&long, 1920, 1080);
+        let (left, right) = super::super::rules::caption_span_percent(&long, 1920, 1080, None);
         assert!(
             (right - left - wrap_box).abs() < 1e-9,
             "a full-width preset caption is measured across its wrap box, got {left}-{right}"
@@ -4147,7 +4277,7 @@ mod tests {
 
         /// Asserts the measured column contains the centred line it is for.
         fn assert_column_covers(clip: &Clip, line_percent: f64, what: &str) {
-            let (left, right) = super::super::rules::caption_span_percent(clip, 1920, 1080);
+            let (left, right) = super::super::rules::caption_span_percent(clip, 1920, 1080, None);
             assert!(
                 left <= 50.0 - line_percent / 2.0 + 1e-9
                     && right >= 50.0 + line_percent / 2.0 - 1e-9,
@@ -4203,7 +4333,7 @@ mod tests {
             .expect("position serialises"),
         );
 
-        let (top, bottom) = super::super::rules::caption_band_percent(&clip, 1920, 1080);
+        let (top, bottom) = super::super::rules::caption_band_percent(&clip, 1920, 1080, None);
 
         assert!(
             top >= 9.0 && bottom < 25.0,
