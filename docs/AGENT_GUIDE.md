@@ -1152,7 +1152,14 @@ a vertical frame. Run `verify` after
 styling and read what it says rather than assuming the pack covers it.
 
 `caption.safe_area` is a broadcast title/action-safe band — a fixed symmetric
-5%/10% of the frame, with no orientation and no platform in it. It does not
+percentage of the frame, with no orientation and no platform in it. When the cue
+was measured it is the SMPTE ST 2046-1 pair: the rendered ink (outline, shadow
+and background box included) against 3.5%, and the letterforms alone against 5%.
+When it could not be measured the predicted block — which has no outline in it —
+is graded against 5%, and the repair a finding offers moves the caption to a 10%
+margin. A caption authored with a background box near a 5% margin is reported
+where the prediction said nothing, because the box edge really is in overscan.
+It does not
 model the UI a vertical platform draws over the picture (the username,
 description, sound and CTA rail along the bottom; the action column down the
 right), so a caption it passes on 1080x1920 can still sit under them. Clearing

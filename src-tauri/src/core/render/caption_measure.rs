@@ -73,8 +73,51 @@
 //! At 25%, 50% and 75% of the cue, unioned. Not the first frame: a `{\fad}` cue
 //! draws literally nothing on it, and a first-frame probe would report every
 //! faded caption in the project as drawing no ink at all.
+//!
+//! # Two boxes per cue, because two questions are being asked
+//!
+//! "Does anything the viewer can see get cropped?" and "are the *words*
+//! legible?" are different questions with different answers, and a safe-area
+//! standard grades them against different margins. So every solo cue is measured
+//! twice:
+//!
+//! - **Full ink** - the caption exactly as it burns in, outline, shadow, blur
+//!   and background box included. This is the rectangle that must not leave the
+//!   frame and must clear the action-safe margin.
+//! - **Glyph only** - the same script with every border, shadow and blur zeroed,
+//!   so the box is the letterforms themselves. This is what the tighter
+//!   title-safe margin is about: a reader's eye needs the glyphs inside it, not
+//!   the decoration around them.
+//!
+//! The second box costs a second FFmpeg run because the decoration is switched
+//! off script-wide, not per event - but it is one run for every glyph-only frame
+//! in the chunk, on exactly the same 25/50/75 grid and the same solo partition,
+//! so it never doubles the number of *spawns per cue*.
+//!
+//! How the decoration is switched off is measured rather than assumed.
+//! `force_style='Outline=0,Shadow=0'` alone does **nothing** here: the burn-in
+//! writes `\bord`, `\xshad`, `\yshad` and `\blur` into every event's own
+//! override block (see `export::append_ass_text_overlay`), and an inline tag
+//! beats a forced style field. Measured against this binary on a 60px outlined
+//! caption at 1920x1080: full ink `693..1229 x 959..1022`, `force_style` alone
+//! `693..1229 x 959..1022` - identical - and the same script with
+//! [`GLYPH_ONLY_OVERRIDE_TAGS`] appended to its override block
+//! `704..1215 x 970..1009`. So the override block is what carries the answer,
+//! and the forced style rides along only to cover an event that carries no
+//! override block at all. A `BorderStyle: 3` caption - the opaque background box
+//! - collapses the same way, from `685..1237 x 945..1037` to the identical
+//! `704..1215 x 970..1009`, because libass draws no box at a border size of
+//! zero.
+//!
+//! None of those tags move a glyph: libass breaks lines on advances, and an
+//! outline has none. The glyph-only render is therefore the same layout with
+//! less ink on it, which is what makes the two boxes comparable at all.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use super::export::{
     ass_centisecond, build_ass_text_overlay_script_in_window_with_emoji, EmojiSpacerContext,
@@ -120,6 +163,50 @@ const PROBE_FRACTIONS: [f64; 3] = [0.25, 0.5, 0.75];
 /// claim came from was the separate `format=rgba`-in-`-vf` bug below, which
 /// filled alpha with 255 before the filter ever saw it.
 const BBOX_MIN_ALPHA: u32 = 0;
+
+/// Override tags that take a caption's decoration away without moving a glyph.
+///
+/// Appended to the *end* of every override block of every event in the
+/// glyph-only script, because within one block the last spelling of a tag wins:
+/// the burn-in's own `\bord6.00\xshad3\yshad3\blur2` sits earlier in that same
+/// block, and anything written before it would simply be overwritten.
+///
+/// `\shad` as well as `\xshad`/`\yshad` because the burn-in writes the axis
+/// spellings and a script from elsewhere may write the combined one; `\be`
+/// because blur-edges is ink the glyph outline does not have. `\bord0` is what
+/// also removes a `BorderStyle: 3` background box - libass paints no box at a
+/// border size of zero - which is why no separate tag is needed for it.
+const GLYPH_ONLY_OVERRIDE_TAGS: &str = r"\bord0\shad0\xshad0\yshad0\blur0\be0";
+
+/// The `subtitles` option that zeroes decoration at the *style* level.
+///
+/// Belt and braces, and measured to be exactly that: on the scripts this module
+/// builds it changes nothing, because every event overrides those fields inline
+/// and an inline tag wins. It is here for an event that carries no override
+/// block - which the burn-in never writes today and a future one might - and for
+/// the `BorderStyle` column, which no inline tag can reach.
+///
+/// Quoted, because the value's own commas would otherwise end the `subtitles`
+/// filter and start a new one.
+const GLYPH_ONLY_FORCE_STYLE_OPTION: &str = ":force_style='BorderStyle=1,Outline=0,Shadow=0'";
+
+/// Commas preceding the `Text` field of a `Dialogue` line.
+///
+/// `Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect` - nine
+/// fields, and therefore nine commas, before the text begins. Counted rather
+/// than split on so a text field containing commas (which is ordinary) stays in
+/// one piece, and so the override blocks of *only* the text are touched: a
+/// `Name` or `Effect` column is not a place a brace means anything.
+const ASS_DIALOGUE_COMMAS_BEFORE_TEXT: usize = 9;
+
+/// How many distinct libass font-substitution lines reach the coverage record.
+///
+/// A project in a script no bundled face covers logs one pair of lines per
+/// missing codepoint, which on a feature-length transcript is thousands of
+/// lines saying the same two things. The first few name the families and the
+/// codepoints, which is the whole diagnostic value; the rest are noise in a
+/// report a human reads.
+const MAX_FONT_SUBSTITUTION_NOTES: usize = 6;
 
 /// Ceiling on `select` terms in one probe, so a long project cannot build a
 /// filtergraph argument the platform refuses to pass to a child process.
@@ -167,12 +254,25 @@ pub struct CaptionExtent {
     pub timeline_in_sec: f64,
     /// Cue end on the same clock.
     pub timeline_end_sec: f64,
-    /// The measured rectangle, or `None` when nothing was measured.
+    /// Everything the cue drew: glyphs, outline, shadow, blur, background box.
+    ///
+    /// The rectangle a frame boundary and an action-safe margin are about,
+    /// because all of it is ink a viewer sees and a crop would take away.
     ///
     /// `None` with `no_ink` set is a cue that rendered nothing at all. `None`
     /// without it is a cue the probe could not run for; the coverage record
     /// says which.
-    pub box_percent: Option<BoxPercent>,
+    pub full_ink: Option<BoxPercent>,
+    /// The letterforms alone, measured with the decoration switched off.
+    ///
+    /// The rectangle a *legibility* bound is about: the title-safe margin asks
+    /// where a reader's eye has to find the words, and an outline drawn around
+    /// them is not one of the words.
+    ///
+    /// Always contained in [`Self::full_ink`] when both were measured, and
+    /// independently optional: the two come from two FFmpeg runs, and a run that
+    /// failed leaves its own box `None` without taking the other one with it.
+    pub glyph: Option<BoxPercent>,
     /// Whether the ink ran off the frame by an amount nothing can recover.
     ///
     /// libass clips at the frame, so an overflowing caption measures as a box
@@ -218,6 +318,23 @@ pub struct CaptionExtentCoverage {
     pub emoji_cue_ids: Vec<String>,
     /// Whether at least one probe run could not be completed.
     pub probe_failed: bool,
+    /// Cues measured for their full ink but not for their glyphs alone.
+    ///
+    /// The glyph-only box comes from a second FFmpeg run, and a run that failed
+    /// leaves these cues with a full-ink rectangle and no legibility box. The
+    /// caller grades what it has - a frame or action-safe verdict is still a
+    /// measurement - and must not read a missing glyph box as "the glyphs are
+    /// fine".
+    pub glyph_unmeasured_cue_ids: Vec<String>,
+    /// Font substitutions libass reported while laying these cues out.
+    ///
+    /// Only collected when [`Self::uses_host_fonts`] is set, which is the only
+    /// case where they can differ between machines - and the case where a CI
+    /// report and a laptop report disagreeing about a caption's width needs an
+    /// explanation more specific than "host fonts were involved". Each line
+    /// names the family that was asked for, the family that answered, and, for a
+    /// fallback, the codepoint that forced it.
+    pub font_substitutions: Vec<String>,
     /// Whether the layout depended on fonts installed on this machine.
     ///
     /// True when at least one run fell through to the host font provider rather
@@ -272,6 +389,22 @@ pub struct CaptionExtentRequest<'a> {
     // the window stops being written at all rather than being filtered out of
     // the cue list after the fact.
     pub window_start_sec: f64,
+    /// Whether the second, glyph-only render is wanted at all.
+    ///
+    /// It doubles the FFmpeg runs this pass makes and produces exactly one
+    /// thing: [`CaptionExtent::glyph`], which only the safe-area rule's
+    /// title-safe tier reads. A caller that does not grade that tier says so
+    /// here and pays for one pass instead of two.
+    pub needs_glyph_box: bool,
+    /// How long the two probe passes may take between them.
+    ///
+    /// Spent in order and not split: the full-ink pass has first call on it,
+    /// because its boxes are what every consumer of this pass needs, and the
+    /// glyph pass runs only if enough is left to be worth starting. A glyph pass
+    /// that then runs out returns the full-ink boxes rather than nothing - which
+    /// is why the budget is enforced here, per pass, instead of by one timeout
+    /// around the whole call.
+    pub probe_budget: Duration,
 }
 
 /// One cue, as both the script builder and the probe see it.
@@ -535,6 +668,102 @@ fn cues_for_events(
         .collect()
 }
 
+/// The same script with every event's decoration taken away.
+///
+/// Only the `Dialogue` lines are touched, and only their text field: the styles
+/// keep their `Outline`, `Shadow` and `BorderStyle` columns exactly as the
+/// burn-in wrote them, because [`GLYPH_ONLY_FORCE_STYLE_OPTION`] is what answers
+/// for those and doing it twice would only be two chances to get it wrong.
+///
+/// Line endings, the `[Script Info]` header, the `[Fonts]` section and the
+/// timecodes all survive byte for byte, which is what keeps this the *same*
+/// layout: libass wraps on glyph advances, and no tag added here has one.
+fn glyph_only_script(script: &str) -> String {
+    let mut out = String::with_capacity(script.len() + script.len() / 8);
+
+    for line in script.split_inclusive('\n') {
+        let (body, ending) = match line.find(['\r', '\n']) {
+            Some(index) => line.split_at(index),
+            None => (line, ""),
+        };
+
+        match body
+            .starts_with("Dialogue:")
+            .then(|| dialogue_text_offset(body))
+            .flatten()
+        {
+            Some(offset) => {
+                out.push_str(&body[..offset]);
+                out.push_str(&zero_decoration_tags(&body[offset..]));
+            }
+            None => out.push_str(body),
+        }
+        out.push_str(ending);
+    }
+
+    out
+}
+
+/// Byte offset of a `Dialogue` line's text field, or `None` when the line is
+/// too short to have one.
+///
+/// A line missing its ninth comma is malformed and is copied through untouched
+/// rather than guessed at: appending override tags at a guessed offset would
+/// corrupt an event the burn-in still has to be able to draw.
+fn dialogue_text_offset(line: &str) -> Option<usize> {
+    let mut commas = 0usize;
+
+    for (index, byte) in line.bytes().enumerate() {
+        if byte == b',' {
+            commas += 1;
+            if commas == ASS_DIALOGUE_COMMAS_BEFORE_TEXT {
+                return Some(index + 1);
+            }
+        }
+    }
+
+    None
+}
+
+/// Appends the decoration-zeroing tags to the end of every override block.
+///
+/// Every block, not only the first: the burn-in opens a second block per font
+/// run and per emoji spacer, and a block later in the line could otherwise put
+/// a border back. Appending rather than prepending is the whole trick - inside
+/// one block the last spelling of a tag wins, so these have to come after the
+/// `\bord` the burn-in wrote.
+///
+/// Text carrying no block at all gets one in front, so an event written by hand
+/// (or by a future builder that drops the inherited tags) is still measured
+/// without its style's decoration.
+fn zero_decoration_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + GLYPH_ONLY_OVERRIDE_TAGS.len() + 2);
+    let mut rest = text;
+    let mut blocks = 0usize;
+
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}').map(|offset| open + offset) else {
+            // An unterminated brace is not an override block; libass draws it as
+            // text and so does this.
+            break;
+        };
+
+        out.push_str(&rest[..close]);
+        out.push_str(GLYPH_ONLY_OVERRIDE_TAGS);
+        out.push('}');
+        rest = &rest[close + 1..];
+        blocks += 1;
+    }
+
+    out.push_str(rest);
+
+    if blocks == 0 {
+        return format!("{{{GLYPH_ONLY_OVERRIDE_TAGS}}}{out}");
+    }
+
+    out
+}
+
 /// A cue with its probe frames, and whether it can be attributed a box.
 #[derive(Clone, Debug, PartialEq)]
 struct PlannedCue {
@@ -762,10 +991,232 @@ pub async fn measure_caption_extents(
         .map_err(ExportError::IoError)?;
 
     let frames_per_cue: Vec<usize> = planned.iter().map(|entry| entry.frames.len()).collect();
-    let mut boxes: HashMap<usize, Option<MeasuredBox>> = HashMap::new();
-    let mut failed: Vec<usize> = Vec::new();
+    let chunks = chunk_by_frame_budget(&solo, &frames_per_cue);
 
-    for chunk in chunk_by_frame_budget(&solo, &frames_per_cue) {
+    // The budget starts here, at the first thing that spawns FFmpeg. What came
+    // before it is script building and two file writes.
+    let probe_started = Instant::now();
+    let full_ink = match tokio::time::timeout(
+        request.probe_budget,
+        run_probe_pass(
+            engine,
+            request,
+            &script,
+            ProbePass {
+                script_path: &script_path,
+                force_style_option: "",
+                collect_font_notes: script.uses_host_fonts,
+            },
+            &chunks,
+            &planned,
+            fps,
+        ),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        // Nothing to salvage: this is the pass every consumer needs, so every
+        // solo cue goes back unmeasured and the glyph pass is not started.
+        Err(_) => {
+            coverage.notes.push(format!(
+                "Caption extent measurement ran out of the {:.1}s left in the run's budget, so the \
+                 reported boxes are estimates",
+                request.probe_budget.as_secs_f64()
+            ));
+            ProbeOutcome {
+                failed: solo.clone(),
+                ..ProbeOutcome::default()
+            }
+        }
+    };
+
+    // The second run, over the same cues and the same frames, with the
+    // decoration switched off. Skipped outright when nobody asked for the glyph
+    // box, and when the first run reached no cue at all: a binary that cannot
+    // spawn will not spawn twice either, and every cue is already going to be
+    // reported unmeasured.
+    let glyph = if !request.needs_glyph_box || full_ink.failed.len() == solo.len() {
+        ProbeOutcome::default()
+    } else if let Some(remaining) = glyph_pass_budget(request.probe_budget, probe_started.elapsed())
+    {
+        let glyph_path = temp_dir.path().join("caption-extent-glyph.ass");
+        crate::core::fs::validate_filter_safe_path(&glyph_path, "Caption extent script path")
+            .map_err(ExportError::InvalidSettings)?;
+        tokio::fs::write(&glyph_path, glyph_only_script(&script.script))
+            .await
+            .map_err(ExportError::IoError)?;
+
+        match tokio::time::timeout(
+            remaining,
+            run_probe_pass(
+                engine,
+                request,
+                &script,
+                ProbePass {
+                    script_path: &glyph_path,
+                    force_style_option: GLYPH_ONLY_FORCE_STYLE_OPTION,
+                    // Already collected from the full-ink run over the same
+                    // script, and libass resolves the same faces for both:
+                    // saying it twice would only pad the report.
+                    collect_font_notes: false,
+                },
+                &chunks,
+                &planned,
+                fps,
+            ),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            // The full-ink boxes survive this. They are already measured, every
+            // other consumer grades them, and the cues left without a glyph box
+            // are named below exactly as a failed second render names them.
+            Err(_) => {
+                coverage.notes.push(
+                    "The glyph-only measurement ran out of the run's budget; the full-ink boxes \
+                     stand and the tighter title-safe bound was not graded"
+                        .to_string(),
+                );
+                ProbeOutcome::default()
+            }
+        }
+    } else {
+        coverage.notes.push(
+            "There was not enough of the run's budget left to measure the glyphs alone, so the \
+             tighter title-safe bound was not graded"
+                .to_string(),
+        );
+        ProbeOutcome::default()
+    };
+
+    if !full_ink.failed.is_empty() {
+        coverage.probe_failed = true;
+        coverage.notes.push(format!(
+            "{} cue(s) could not be probed; FFmpeg did not complete the measurement run",
+            full_ink.failed.len()
+        ));
+    }
+    coverage.font_substitutions = full_ink.font_notes;
+    if !coverage.font_substitutions.is_empty() {
+        coverage.notes.push(format!(
+            "libass substituted a font while laying these captions out, so the boxes are only as \
+             reproducible as this machine's font set: {}",
+            coverage.font_substitutions.join("; ")
+        ));
+    }
+
+    let extents: Vec<CaptionExtent> = solo
+        .iter()
+        .filter(|index| !full_ink.failed.contains(index))
+        .map(|index| {
+            let cue = &planned[*index].cue;
+            let measured = full_ink.boxes.get(index).copied().flatten();
+            let glyph_measured = glyph.boxes.get(index).copied().flatten();
+
+            CaptionExtent {
+                clip_id: cue.clip_id.clone(),
+                timeline_in_sec: cue.timeline_in_sec,
+                timeline_end_sec: cue.timeline_end_sec,
+                full_ink: measured.and_then(|measured| {
+                    box_to_percent(measured, request.canvas_width, request.canvas_height)
+                }),
+                glyph: glyph_measured.and_then(|measured| {
+                    box_to_percent(measured, request.canvas_width, request.canvas_height)
+                }),
+                clipped: measured.is_some_and(|measured| {
+                    flush_edges(measured, request.canvas_width, request.canvas_height)
+                        .overflows_frame()
+                }),
+                // Every sampled frame came back with no ink. Not a probe
+                // failure - the run completed and libass drew nothing. Asked of
+                // the full-ink render alone: a cue with ink but no glyph box is
+                // a cue whose *second* run failed, not one that drew nothing.
+                no_ink: measured.is_none(),
+            }
+        })
+        .collect();
+
+    // A cue with ink the glyph pass could not put a rectangle on. Named rather
+    // than counted, because the caller grades cues one at a time and needs to
+    // know which of them has no legibility box rather than that some do not.
+    //
+    // Only when the glyph box was asked for: a caller that did not want one is
+    // not missing anything, and naming every cue as "unmeasured" would report a
+    // gap in a measurement nobody ordered.
+    if request.needs_glyph_box {
+        coverage.glyph_unmeasured_cue_ids = extents
+            .iter()
+            .filter(|extent| extent.full_ink.is_some() && extent.glyph.is_none())
+            .map(|extent| extent.clip_id.clone())
+            .collect();
+        if !coverage.glyph_unmeasured_cue_ids.is_empty() {
+            coverage.notes.push(format!(
+                "{} cue(s) were measured for their full ink but not for their glyphs alone; the \
+                 tighter title-safe bound was not graded for them",
+                coverage.glyph_unmeasured_cue_ids.len()
+            ));
+        }
+    }
+
+    Ok(CaptionExtentMeasurement { extents, coverage })
+}
+
+/// Least of the budget worth starting the glyph pass with.
+///
+/// One FFmpeg spawn costs more than this on every machine this ships to, so a
+/// second pass started with less can only end in a timeout - having written a
+/// script and spawned a process for nothing. The cue list is identical either
+/// way; what changes is whether the run wastes its last quarter-second finding
+/// that out.
+const MINIMUM_GLYPH_PASS_BUDGET: Duration = Duration::from_millis(250);
+
+/// What is left for the glyph pass, or `None` when it is not worth starting.
+///
+/// The full-ink pass has first call on the budget - its boxes are what every
+/// consumer of this module reads, and the glyph box refines exactly one verdict
+/// - so this is whatever it did not spend.
+fn glyph_pass_budget(probe_budget: Duration, spent: Duration) -> Option<Duration> {
+    let remaining = probe_budget.saturating_sub(spent);
+
+    (remaining >= MINIMUM_GLYPH_PASS_BUDGET).then_some(remaining)
+}
+
+/// What one probe pass produced.
+#[derive(Debug, Default)]
+struct ProbeOutcome {
+    /// Per planned-cue index, the union of the boxes its frames measured.
+    boxes: HashMap<usize, Option<MeasuredBox>>,
+    /// Cue indices whose chunk did not complete.
+    failed: Vec<usize>,
+    /// Font substitutions libass reported, deduplicated and capped.
+    font_notes: Vec<String>,
+}
+
+/// How one pass differs from the other. Everything else about them is identical,
+/// which is the point: two boxes of the same caption, not two measurements of
+/// two different layouts.
+struct ProbePass<'a> {
+    /// Script to render - the burn-in's own, or its decoration-free twin.
+    script_path: &'a Path,
+    /// `subtitles` options spliced in after the shared ones.
+    force_style_option: &'a str,
+    /// Whether to run verbosely enough to hear libass pick a fallback face.
+    collect_font_notes: bool,
+}
+
+/// Runs one pass of the probe over every chunk and unions each cue's frames.
+async fn run_probe_pass(
+    engine: &ExportEngine,
+    request: &CaptionExtentRequest<'_>,
+    script: &super::export::AssTextOverlayScript,
+    pass: ProbePass<'_>,
+    chunks: &[Vec<usize>],
+    planned: &[PlannedCue],
+    fps: f64,
+) -> ProbeOutcome {
+    let mut outcome = ProbeOutcome::default();
+
+    for chunk in chunks {
         let instants: Vec<(usize, u64, f64)> = chunk
             .iter()
             .flat_map(|index| {
@@ -776,17 +1227,25 @@ pub async fn measure_caption_extents(
             })
             .collect();
 
-        match run_probe(engine, request, &script, &script_path, &instants, fps).await {
+        match run_probe(engine, request, script, &pass, &instants, fps).await {
             Ok(report) => {
-                let printed = parse_bbox_frames(&report);
+                let printed = parse_bbox_frames(&report.printed);
                 for (index, _, instant) in &instants {
                     let measured = match_box_to_instant(&printed, *instant, fps);
-                    let slot = boxes.entry(*index).or_default();
+                    let slot = outcome.boxes.entry(*index).or_default();
                     *slot = match (*slot, measured) {
                         (Some(existing), Some(found)) => Some(existing.union(found)),
                         (Some(existing), None) => Some(existing),
                         (None, found) => found,
                     };
+                }
+                for note in report.font_notes {
+                    if outcome.font_notes.len() >= MAX_FONT_SUBSTITUTION_NOTES {
+                        break;
+                    }
+                    if !outcome.font_notes.contains(&note) {
+                        outcome.font_notes.push(note);
+                    }
                 }
             }
             Err(error) => {
@@ -795,45 +1254,12 @@ pub async fn measure_caption_extents(
                      extent: {error}",
                     chunk.len()
                 );
-                failed.extend(chunk.iter().copied());
+                outcome.failed.extend(chunk.iter().copied());
             }
         }
     }
 
-    if !failed.is_empty() {
-        coverage.probe_failed = true;
-        coverage.notes.push(format!(
-            "{} cue(s) could not be probed; FFmpeg did not complete the measurement run",
-            failed.len()
-        ));
-    }
-
-    let extents = solo
-        .iter()
-        .filter(|index| !failed.contains(index))
-        .map(|index| {
-            let cue = &planned[*index].cue;
-            let measured = boxes.get(index).copied().flatten();
-
-            CaptionExtent {
-                clip_id: cue.clip_id.clone(),
-                timeline_in_sec: cue.timeline_in_sec,
-                timeline_end_sec: cue.timeline_end_sec,
-                box_percent: measured.and_then(|measured| {
-                    box_to_percent(measured, request.canvas_width, request.canvas_height)
-                }),
-                clipped: measured.is_some_and(|measured| {
-                    flush_edges(measured, request.canvas_width, request.canvas_height)
-                        .overflows_frame()
-                }),
-                // Every sampled frame came back with no ink. Not a probe
-                // failure - the run completed and libass drew nothing.
-                no_ink: measured.is_none(),
-            }
-        })
-        .collect();
-
-    Ok(CaptionExtentMeasurement { extents, coverage })
+    outcome
 }
 
 // TODO(caption-extent-cache): adopt the process-global cache `emoji_measure`
@@ -847,6 +1273,24 @@ pub async fn measure_caption_extents(
 // deliberately: the engine is correct without it and a wrong key would hand a
 // caller boxes measured against a different layout.
 
+/// Everything about a probe's filtergraph that is not the cue list.
+///
+/// Grouped rather than passed one by one because four of the five are strings
+/// spliced into the same `subtitles` option list, and a call site that mixed two
+/// of them up would build a graph that runs and measures the wrong thing.
+struct ProbeGraph<'a> {
+    /// The script libass is handed.
+    script_path: &'a Path,
+    /// `:fontsdir='...'`, or empty when the script embeds every face it needs.
+    fonts_dir_option: &'a str,
+    /// `:wrap_unicode=1`, or empty for a binary whose filter has no such option.
+    wrap_unicode_option: &'a str,
+    /// `:force_style='...'`, or empty for the full-ink pass.
+    force_style_option: &'a str,
+    /// `-loglevel` value.
+    log_level: &'a str,
+}
+
 /// Builds the probe command for one run.
 ///
 /// Split out from the spawn so a test can assert on the exact graph without
@@ -855,13 +1299,19 @@ pub async fn measure_caption_extents(
 /// burn-in does.
 fn build_probe_args(
     request: &CaptionExtentRequest<'_>,
-    script_path: &Path,
     instants: &[(usize, u64, f64)],
     fps: f64,
-    fonts_dir_option: &str,
-    wrap_unicode_option: &str,
+    graph: &ProbeGraph<'_>,
 ) -> Vec<String> {
     use crate::core::effects::escape_ffmpeg_filter_value;
+
+    let ProbeGraph {
+        script_path,
+        fonts_dir_option,
+        wrap_unicode_option,
+        force_style_option,
+        log_level,
+    } = graph;
 
     let last_instant = instants
         .iter()
@@ -893,7 +1343,7 @@ fn build_probe_args(
     // produces no bytes.
     let filter = format!(
         "select='{select}',subtitles=filename='{escaped_script}':alpha=1{fonts_dir_option}\
-         {wrap_unicode_option},alphaextract,bbox=min_val={BBOX_MIN_ALPHA},\
+         {wrap_unicode_option}{force_style_option},alphaextract,bbox=min_val={BBOX_MIN_ALPHA},\
          metadata=mode=print:file=-"
     );
 
@@ -901,7 +1351,7 @@ fn build_probe_args(
         "-hide_banner".to_string(),
         "-nostdin".to_string(),
         "-loglevel".to_string(),
-        "error".to_string(),
+        log_level.to_string(),
         "-f".to_string(),
         "lavfi".to_string(),
         // `format=rgba` belongs to the *source*, not to `-vf`. A bare
@@ -933,15 +1383,41 @@ fn build_probe_args(
     ]
 }
 
+/// The default log level for a probe run.
+///
+/// Quiet enough that the `metadata` filter's own info-level chatter stays out of
+/// the way; everything this module reads is on stdout.
+const PROBE_LOG_LEVEL: &str = "error";
+
+/// The log level libass names its font substitutions at.
+///
+/// Measured against this binary: `Glyph 0x12000 not found, selecting one more
+/// font for (Family, 400, 0)` and the `fontselect:` line that answers it are
+/// `MSGL_INFO`, which `vf_subtitles` maps to `AV_LOG_VERBOSE` - so `warning`
+/// hears nothing at all, not even for a family that is installed nowhere. The
+/// price of `verbose` is that libass also echoes the whole script to stderr,
+/// which is why it is asked for only when the layout depended on host fonts and
+/// the answer is therefore worth something.
+const PROBE_FONT_LOG_LEVEL: &str = "verbose";
+
+/// What one probe run returned.
+struct ProbeReport {
+    /// The `metadata` filter's report, off stdout.
+    printed: String,
+    /// Font substitutions libass named on stderr, when it was asked loudly
+    /// enough to name them.
+    font_notes: Vec<String>,
+}
+
 /// Runs one probe and returns the metadata text it printed.
 async fn run_probe(
     engine: &ExportEngine,
     request: &CaptionExtentRequest<'_>,
     script: &super::export::AssTextOverlayScript,
-    script_path: &Path,
+    pass: &ProbePass<'_>,
     instants: &[(usize, u64, f64)],
     fps: f64,
-) -> Result<String, ExportError> {
+) -> Result<ProbeReport, ExportError> {
     // Both spliced from the same answers the burn-in graph uses. A probe that
     // resolves fonts or breaks lines differently from the render measures a
     // layout the render never draws - and for a text-extent measurement that is
@@ -953,17 +1429,66 @@ async fn run_probe(
         ""
     };
 
+    let log_level = if pass.collect_font_notes {
+        PROBE_FONT_LOG_LEVEL
+    } else {
+        PROBE_LOG_LEVEL
+    };
     let args = build_probe_args(
         request,
-        script_path,
         instants,
         fps,
-        &fonts_dir_option,
-        wrap_unicode_option,
+        &ProbeGraph {
+            script_path: pass.script_path,
+            fonts_dir_option: &fonts_dir_option,
+            wrap_unicode_option,
+            force_style_option: pass.force_style_option,
+            log_level,
+        },
     );
     let output = super::executor::execute_ffmpeg_output(engine.ffmpeg_path(), &args).await?;
 
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(ProbeReport {
+        printed: String::from_utf8_lossy(&output.stdout).into_owned(),
+        font_notes: if pass.collect_font_notes {
+            parse_font_substitutions(&String::from_utf8_lossy(&output.stderr))
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+/// Pulls libass's font-selection lines out of a verbose run's stderr.
+///
+/// Two shapes, both worth keeping and for different reasons:
+///
+/// - `fontselect: (Family, 400, 0) -> ArialMT, 0, ArialMT` - the family that was
+///   asked for and the face that answered. A report saying those differ is the
+///   difference between "this machine has the font" and "this machine picked
+///   something else", which is exactly what makes two machines' boxes disagree.
+/// - `Glyph 0x12000 not found, selecting one more font for (Family, 400, 0)` -
+///   the codepoint that forced a fallback, which names the character a reader
+///   should look at.
+///
+/// Everything else on a verbose run's stderr - and at that level libass echoes
+/// the whole script - is dropped. The `[Parsed_subtitles_1 @ 0x...]` prefix goes
+/// with it: it carries a heap address, so keeping it would make two runs of the
+/// same project produce different report text.
+fn parse_font_substitutions(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let line = match line.rfind("] ") {
+                Some(index) if line.starts_with('[') => &line[index + 2..],
+                _ => line,
+            };
+
+            (line.starts_with("fontselect:")
+                || (line.starts_with("Glyph 0x") && line.contains("not found")))
+            .then(|| line.to_string())
+        })
+        .collect()
 }
 
 /// Formats a frame rate for an `lavfi` source without exponent notation.
@@ -1115,6 +1640,23 @@ mod tests {
                 source: crate::core::ffmpeg::FFmpegSource::System,
             },
         ))
+    }
+
+    /// A probe graph with the ordinary log level, for a test that cares only
+    /// about the filter options.
+    fn probe_graph<'a>(
+        script_path: &'a Path,
+        fonts_dir_option: &'a str,
+        wrap_unicode_option: &'a str,
+        force_style_option: &'a str,
+    ) -> ProbeGraph<'a> {
+        ProbeGraph {
+            script_path,
+            fonts_dir_option,
+            wrap_unicode_option,
+            force_style_option,
+            log_level: PROBE_LOG_LEVEL,
+        }
     }
 
     // =========================================================================
@@ -1818,15 +2360,15 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let args = build_probe_args(
             &request,
-            Path::new("script.ass"),
             &[(0, 30, 1.0), (0, 60, 2.0), (0, 90, 3.0)],
             30.0,
-            "",
-            "",
+            &probe_graph(Path::new("script.ass"), "", "", ""),
         );
         let input = args.iter().position(|arg| arg == "-i").expect("an input");
         let filter = args
@@ -1866,15 +2408,20 @@ mod tests {
             canvas_height: 1920,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let args = build_probe_args(
             &request,
-            Path::new("script.ass"),
             &[(0, 30, 1.0)],
             30.0,
-            ":fontsdir='/usr/share/fonts'",
-            super::super::export::SUBTITLES_WRAP_UNICODE_OPTION,
+            &probe_graph(
+                Path::new("script.ass"),
+                ":fontsdir='/usr/share/fonts'",
+                super::super::export::SUBTITLES_WRAP_UNICODE_OPTION,
+                "",
+            ),
         );
         let filter = args
             .iter()
@@ -1905,9 +2452,16 @@ mod tests {
             canvas_height: 1920,
             fps: 25.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
-        let args = build_probe_args(&request, Path::new("s.ass"), &[(0, 25, 1.0)], 25.0, "", "");
+        let args = build_probe_args(
+            &request,
+            &[(0, 25, 1.0)],
+            25.0,
+            &probe_graph(Path::new("s.ass"), "", "", ""),
+        );
         let input = args.iter().position(|arg| arg == "-i").expect("an input");
 
         assert!(
@@ -1916,6 +2470,249 @@ mod tests {
             args[input + 1]
         );
         assert!(args[input + 1].contains(":r=25:"), "{}", args[input + 1]);
+    }
+
+    // =========================================================================
+    // The budget the two passes share
+    // =========================================================================
+
+    /// Feature: caption extent measurement
+    /// Scenario: the full-ink pass has first call on the budget
+    ///
+    /// Two passes under one budget, spent in order rather than split: the
+    /// full-ink boxes are what every consumer of this module reads, and the
+    /// glyph box refines exactly one verdict. What is left after the first pass
+    /// is the second one's, and when that is less than an FFmpeg spawn costs the
+    /// second pass is not started at all — writing a script and spawning a
+    /// process only to time out would spend the run's last moments proving it
+    /// had none left.
+    #[test]
+    fn the_glyph_pass_takes_only_what_the_full_ink_pass_left() {
+        assert_eq!(
+            glyph_pass_budget(Duration::from_secs(30), Duration::from_secs(2)),
+            Some(Duration::from_secs(28)),
+            "whatever the first pass did not spend"
+        );
+        assert_eq!(
+            glyph_pass_budget(Duration::from_secs(30), Duration::from_millis(29_900)),
+            None,
+            "100ms cannot spawn FFmpeg, so the pass is skipped rather than started"
+        );
+        assert_eq!(
+            glyph_pass_budget(Duration::from_secs(30), Duration::from_secs(45)),
+            None,
+            "a first pass that overran leaves nothing, and must not underflow"
+        );
+        assert_eq!(
+            glyph_pass_budget(Duration::from_secs(30), Duration::from_secs(30))
+                .or(Some(Duration::ZERO)),
+            Some(Duration::ZERO),
+            "an exactly spent budget is a skip, not a zero-second timeout"
+        );
+    }
+
+    // =========================================================================
+    // The glyph-only script
+    // =========================================================================
+
+    /// Feature: caption extent measurement
+    /// Scenario: the glyph-only script zeroes the decoration the burn-in wrote
+    ///
+    /// Appended to the *end* of the block, which is the whole mechanism: within
+    /// one override block the last spelling of a tag wins, so tags written
+    /// before the burn-in's own `\bord6.00` would simply be overwritten and the
+    /// "glyph-only" render would be the full-ink one measured twice.
+    #[test]
+    fn the_glyph_only_script_zeroes_the_decoration_the_burn_in_wrote() {
+        let script = "[Events]\n\
+                      Dialogue: 0,0:00:01.00,0:00:03.00,S,,60,60,60,,\
+                      {\\an2\\bord6.00\\xshad3\\yshad3\\blur2}Hello\n";
+
+        let glyph = glyph_only_script(script);
+        let event = glyph
+            .lines()
+            .find(|line| line.starts_with("Dialogue:"))
+            .expect("the event survives");
+
+        assert!(
+            event.ends_with(&format!("{GLYPH_ONLY_OVERRIDE_TAGS}}}Hello")),
+            "the zeroing tags have to be the last thing in the block: {event}"
+        );
+        assert!(
+            event.contains("\\bord6.00"),
+            "the burn-in's own tags stay, so only the winner changed: {event}"
+        );
+        assert!(
+            event.contains("0:00:01.00,0:00:03.00"),
+            "the timing is untouched, or the two passes measure different frames: {event}"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: every override block of an event is zeroed, not only the first
+    ///
+    /// The burn-in opens a fresh block per font run and per emoji spacer. A
+    /// later one carrying a border would put the decoration back for the rest of
+    /// the line, and the box would be neither the full ink nor the glyphs.
+    #[test]
+    fn every_override_block_of_an_event_is_zeroed() {
+        let script = "[Events]\n\
+                      Dialogue: 0,0:00:00.00,0:00:02.00,S,,0,0,0,,\
+                      {\\an2\\bord6.00}Hello {\\fnNoto Sans}world\n";
+
+        let glyph = glyph_only_script(script);
+
+        assert_eq!(
+            glyph.matches(GLYPH_ONLY_OVERRIDE_TAGS).count(),
+            2,
+            "both blocks carry the zeroing: {glyph}"
+        );
+        assert!(glyph.contains(&format!("{{\\fnNoto Sans{GLYPH_ONLY_OVERRIDE_TAGS}}}world")));
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: an event with no override block still loses its decoration
+    ///
+    /// Its style's `Outline` and `Shadow` are answered by the forced style, but
+    /// only if a block exists to lose to nothing; giving the event one costs
+    /// nothing and makes the two mechanisms agree.
+    #[test]
+    fn an_event_with_no_override_block_is_given_one() {
+        let script = "[Events]\nDialogue: 0,0:00:00.00,0:00:02.00,S,,0,0,0,,Plain text\n";
+
+        assert!(glyph_only_script(script).contains(&format!(
+            "0,0:00:00.00,0:00:02.00,S,,0,0,0,,{{{GLYPH_ONLY_OVERRIDE_TAGS}}}Plain text"
+        )));
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: everything that is not an event is copied byte for byte
+    ///
+    /// The `[Script Info]` header carries `PlayResX`, `WrapStyle` and
+    /// `ScaledBorderAndShadow`, and the `[Fonts]` section carries the embedded
+    /// faces. Touching any of them would measure a different layout rather than
+    /// the same one with less ink on it.
+    #[test]
+    fn only_the_events_of_the_script_are_rewritten() {
+        let script = "[Script Info]\nPlayResX: 1920\nPlayResY: 1080\n\n\
+                      [V4+ Styles]\nStyle: S,Arial,60.00,&H00FFFFFF,&H00FFFFFF,&H00000000,\
+                      &H00000000,0,0,0,0,100.00,100.00,0,0,1,2.00,0.00,2,60,60,60,1\n\n\
+                      [Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, \
+                      MarginV, Effect, Text\n\
+                      Dialogue: 0,0:00:00.00,0:00:02.00,S,,0,0,0,,{\\an2}Hi\n";
+
+        let glyph = glyph_only_script(script);
+
+        for line in script.lines().filter(|line| !line.starts_with("Dialogue:")) {
+            assert!(
+                glyph.contains(line),
+                "a non-event line was rewritten: {line}"
+            );
+        }
+        assert_eq!(
+            glyph.lines().count(),
+            script.lines().count(),
+            "no line was added or dropped"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a `Dialogue` line with no text field is left alone
+    ///
+    /// Appending tags at a guessed offset would corrupt an event that still has
+    /// to draw; a malformed line is libass's problem to report, not this
+    /// module's to rewrite.
+    #[test]
+    fn a_dialogue_line_with_no_text_field_is_copied_through() {
+        let script = "[Events]\nDialogue: 0,0:00:00.00,0:00:02.00,S\n";
+
+        assert_eq!(glyph_only_script(script), script);
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: the glyph-only probe also forces the style fields
+    ///
+    /// Belt and braces for the `BorderStyle` column, which no inline tag can
+    /// reach, and quoted so the value's own commas do not end the `subtitles`
+    /// filter and start a new one.
+    #[test]
+    fn the_glyph_probe_graph_forces_the_decoration_off_at_the_style_level() {
+        let sequence = sequence_with_captions(&[("Hello", 0.0, 4.0)]);
+        let request = CaptionExtentRequest {
+            sequence: &sequence,
+            effects: &HashMap::new(),
+            canvas_width: 1920,
+            canvas_height: 1080,
+            fps: 30.0,
+            window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
+        };
+
+        let args = build_probe_args(
+            &request,
+            &[(0, 30, 1.0)],
+            30.0,
+            &probe_graph(
+                Path::new("glyph.ass"),
+                "",
+                "",
+                GLYPH_ONLY_FORCE_STYLE_OPTION,
+            ),
+        );
+        let filter = args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("a filter chain");
+
+        assert_eq!(
+            args[filter + 1],
+            "select='eq(n\\,30)',subtitles=filename='glyph.ass':alpha=1:\
+             force_style='BorderStyle=1,Outline=0,Shadow=0',alphaextract,bbox=min_val=0,\
+             metadata=mode=print:file=-"
+        );
+    }
+
+    // =========================================================================
+    // Font substitution
+    // =========================================================================
+
+    /// Feature: caption extent measurement
+    /// Scenario: libass's fallback choices are read off a verbose run
+    ///
+    /// The lines are real output from this binary for a script naming a family
+    /// that is installed nowhere. The filter has to keep both shapes - the
+    /// family that answered, and the codepoint that forced a fallback - and drop
+    /// the heap address in the prefix, which would otherwise make two runs of
+    /// the same project produce different report text.
+    #[test]
+    fn a_verbose_runs_font_substitutions_are_read_back_without_their_addresses() {
+        let stderr = "[Parsed_subtitles_1 @ 0000020e23590380] Initialized\n\
+                      [Parsed_subtitles_1 @ 0000020e23590380] fontselect: (NoSuchFamily, 400, 0) \
+                      -> ArialMT, 0, ArialMT\n\
+                      [Parsed_subtitles_1 @ 0000020e23590380] Glyph 0x12000 not found, selecting \
+                      one more font for (NoSuchFamily, 400, 0)\n\
+                      [Parsed_subtitles_1 @ 0000020e23590380] Event: [Script Info]\n\
+                      PlayResX: 1920\n";
+
+        let notes = parse_font_substitutions(stderr);
+
+        assert_eq!(
+            notes,
+            vec![
+                "fontselect: (NoSuchFamily, 400, 0) -> ArialMT, 0, ArialMT".to_string(),
+                "Glyph 0x12000 not found, selecting one more font for (NoSuchFamily, 400, 0)"
+                    .to_string(),
+            ],
+            "the echoed script and the address prefix are not diagnostics"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a run laid out entirely by embedded faces says nothing
+    #[test]
+    fn a_quiet_run_reports_no_substitutions() {
+        assert!(parse_font_substitutions("frame:0 pts_time:1\n").is_empty());
     }
 
     // =========================================================================
@@ -1934,6 +2731,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         assert!(measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -1953,6 +2752,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -1979,6 +2780,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2026,6 +2829,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2079,6 +2884,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2104,6 +2911,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2131,6 +2940,18 @@ mod tests {
     ///
     /// Returns the box for that frame, or `None` when the frame carried no ink.
     fn probe_script(ffmpeg: &Path, script: &str, frame: u64, fps: f64) -> Option<MeasuredBox> {
+        probe_script_styled(ffmpeg, script, frame, fps, "")
+    }
+
+    /// The same, with the glyph-only pass's `force_style` under the caller's
+    /// control, so a test can measure both boxes of one fixture.
+    fn probe_script_styled(
+        ffmpeg: &Path,
+        script: &str,
+        frame: u64,
+        fps: f64,
+        force_style: &str,
+    ) -> Option<MeasuredBox> {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("extent.ass");
         std::fs::write(&path, script).expect("write script");
@@ -2152,14 +2973,14 @@ mod tests {
             canvas_height: 1080,
             fps,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
         let args = build_probe_args(
             &request,
-            &path,
             &[(0, frame, frame as f64 / fps)],
             fps,
-            &fonts,
-            wrap,
+            &probe_graph(&path, &fonts, wrap, force_style),
         );
 
         let mut command = std::process::Command::new(ffmpeg);
@@ -2459,6 +3280,110 @@ mod tests {
         assert!(
             probe_script(&ffmpeg, &fixture_script(r"\an2", ""), 30, 30.0).is_none(),
             "an empty cue inks nothing"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: the glyph-only render is strictly smaller than the full ink
+    ///
+    /// The claim the whole two-tier design rests on, and one no unit test can
+    /// make. Measured against this binary at 1920x1080, on a 60px caption with a
+    /// 6px outline and a 3px shadow:
+    ///
+    /// - full ink            `693..1229 x 959..1022`
+    /// - `force_style` alone `693..1229 x 959..1022` — *unchanged*, because the
+    ///   event's own `\bord6.00` beats a forced style field
+    /// - glyph only          `704..1215 x 970..1009`
+    ///
+    /// The middle line is why this module rewrites the script rather than
+    /// passing an option, and it is asserted here so a future simplification
+    /// back to `force_style` alone fails loudly instead of silently measuring
+    /// the same box twice.
+    #[test]
+    #[ignore = "requires FFmpeg with libass"]
+    fn the_glyph_only_render_is_strictly_inside_the_full_ink_render() {
+        let Some(ffmpeg) = crate::core::test_ffmpeg::require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        // The decoration the burn-in writes inline, in the shape it writes it.
+        let full = fixture_script(r"\an2\bord6.00\xshad3\yshad3\blur2", "Hello measured world");
+        let glyph = glyph_only_script(&full);
+
+        let full_box = probe_script(&ffmpeg, &full, 30, 30.0).expect("the caption draws ink");
+        let forced_only =
+            probe_script_styled(&ffmpeg, &full, 30, 30.0, GLYPH_ONLY_FORCE_STYLE_OPTION)
+                .expect("the caption still draws ink");
+        let glyph_box =
+            probe_script_styled(&ffmpeg, &glyph, 30, 30.0, GLYPH_ONLY_FORCE_STYLE_OPTION)
+                .expect("the glyphs draw ink");
+
+        assert_eq!(
+            forced_only, full_box,
+            "an inline `\\bord` beats a forced style field, so `force_style` alone measures the \
+             full ink: {forced_only:?} against {full_box:?}"
+        );
+        assert!(
+            glyph_box.x1 > full_box.x1
+                && glyph_box.y1 > full_box.y1
+                && glyph_box.x2 < full_box.x2
+                && glyph_box.y2 < full_box.y2,
+            "the glyph box has to sit strictly inside the full ink on every side: {glyph_box:?} \
+             against {full_box:?}"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a background-box caption collapses to its glyphs too
+    ///
+    /// `BorderStyle: 3` paints an opaque rectangle in the `OutlineColour`
+    /// column, which is ink the glyphs do not have and which no `\shad` or
+    /// `\blur` tag touches. Measured against this binary, a boxed caption inks
+    /// `685..1237 x 945..1037` and its glyph-only twin inks
+    /// `704..1215 x 970..1009` - the *identical* box the outlined caption's
+    /// glyphs measure, because libass paints no background box at a border size
+    /// of zero.
+    #[test]
+    #[ignore = "requires FFmpeg with libass"]
+    fn a_background_box_caption_collapses_to_the_same_glyphs() {
+        let Some(ffmpeg) = crate::core::test_ffmpeg::require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        let outlined = fixture_script(r"\an2\bord6.00\xshad3\yshad3\blur2", "Hello measured world");
+        // `BorderStyle: 3` with a 10px box, in the columns the export writes.
+        let boxed = fixture_script(
+            r"\an2\bord10.00\xshad3\yshad3\blur2",
+            "Hello measured world",
+        )
+        .replace(",0,0,1,2.00,0.00,2,", ",0,0,3,10.00,3.00,2,");
+
+        let boxed_ink = probe_script(&ffmpeg, &boxed, 30, 30.0).expect("a boxed caption draws ink");
+        let boxed_glyphs = probe_script_styled(
+            &ffmpeg,
+            &glyph_only_script(&boxed),
+            30,
+            30.0,
+            GLYPH_ONLY_FORCE_STYLE_OPTION,
+        )
+        .expect("its glyphs draw ink");
+        let outlined_glyphs = probe_script_styled(
+            &ffmpeg,
+            &glyph_only_script(&outlined),
+            30,
+            30.0,
+            GLYPH_ONLY_FORCE_STYLE_OPTION,
+        )
+        .expect("the outlined caption's glyphs draw ink");
+
+        assert!(
+            boxed_glyphs.x1 > boxed_ink.x1 && boxed_glyphs.y1 > boxed_ink.y1,
+            "the box is ink the glyphs are not: {boxed_glyphs:?} against {boxed_ink:?}"
+        );
+        assert_eq!(
+            boxed_glyphs, outlined_glyphs,
+            "the same words in the same face measure the same glyph box whichever decoration was \
+             taken off them"
         );
     }
 

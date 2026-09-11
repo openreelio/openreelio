@@ -30,8 +30,8 @@ pub use caption_contrast::{
 };
 pub use caption_extent::{sample_caption_extents, CaptionExtentOptions, CaptionExtentSampling};
 pub use context::{
-    CaptionExtentCoverageRecord, CaptionExtentSample, MeasuredStreams, MeasuredVideoStream,
-    MeasuredWindow, QCContext, RenderMeasurements,
+    CaptionExtentCoverageRecord, CaptionExtentSample, CaptionGlyphBox, MeasuredStreams,
+    MeasuredVideoStream, MeasuredWindow, QCContext, RenderMeasurements,
 };
 pub use engine::{
     QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleFailure, RuleOutcome, RuleStatus,

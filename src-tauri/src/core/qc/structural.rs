@@ -4620,6 +4620,11 @@ mod tests {
             right_percent: right,
             top_percent: top,
             bottom_percent: bottom,
+            // `caption.out_of_bounds` grades the full ink and nothing else: a
+            // caption is cropped when its *visible* pixels leave the frame, and
+            // the glyph box exists for the tighter legibility bound one rule
+            // over.
+            glyph: None,
             clipped: false,
         }
     }

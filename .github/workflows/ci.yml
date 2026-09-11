@@ -380,6 +380,8 @@ jobs:
             core::analysis::audio::tests:: \
             core::captions::audio::ffmpeg_backed_tests:: \
             core::effects::filter_builder::tests:: \
+            core::qc::caption_extent::tests:: \
+            core::render::caption_measure::tests:: \
             core::render::export::tests:: ; do
             log="${RUNNER_TEMP}/ffmpeg-tests-$(printf '%s' "$filter" | tr -c 'a-zA-Z0-9' '-').log"
             cargo test --locked --features dev-full --lib -- --ignored "$filter" 2>&1 | tee "$log"
