@@ -87,11 +87,18 @@ const PEAK_CHECK_ID: &str = "audio.peak";
 /// Check ID of the render-length rule, wired to `duration_tolerance_sec`.
 const DURATION_CHECK_ID: &str = "render.duration_mismatch";
 
-/// Check ID of the rule that reads measured caption extents.
+/// Check ID of the rule that reads the measured full-ink box against the frame.
 ///
-/// The extent pass costs an FFmpeg run per eighty cues and answers exactly this
-/// check, so a run that did not select it must not pay for it.
+/// The extent pass costs an FFmpeg run per eighty cues, so a run that selected
+/// neither this check nor [`CAPTION_SAFE_AREA_CHECK_ID`] must not pay for it.
 const CAPTION_OUT_OF_BOUNDS_CHECK_ID: &str = "caption.out_of_bounds";
+
+/// Check ID of the rule that grades the measured boxes against the safe bands.
+///
+/// The second consumer of the extent pass, and the only consumer of its
+/// glyph-only box: the tighter title-safe tier is the one asked of the
+/// letterforms alone.
+const CAPTION_SAFE_AREA_CHECK_ID: &str = "caption.safe_area";
 
 /// Why a verification could not be run as asked.
 ///
@@ -402,7 +409,8 @@ impl VerifyPlan {
     /// FFmpeg and pass the runner in, and must **not** turn a failure to resolve
     /// into an error: a structural verify on a machine with no FFmpeg has always
     /// worked and must keep working. The pass is then simply skipped and
-    /// `caption.out_of_bounds` grades with its own estimate.
+    /// `caption.out_of_bounds` and `caption.safe_area` grade with their own
+    /// estimates.
     ///
     /// False whenever [`requires_ffmpeg`](Self::requires_ffmpeg) already forces
     /// the issue, so the two questions never both need answering: a caller asks
@@ -414,18 +422,36 @@ impl VerifyPlan {
         !self.requires_ffmpeg() && self.caption_extents_wanted()
     }
 
-    /// Whether the check that reads measured caption extents is selected.
+    /// Whether any check that reads measured caption extents is selected.
+    ///
+    /// Both consumers, not one: `caption.out_of_bounds` grades the full-ink box
+    /// against the frame and `caption.safe_area` grades it against the
+    /// action-safe band, so a run that selected either has a reason to measure.
+    /// Gating on the bounds check alone left `--check caption.safe_area` on the
+    /// estimator while paying nothing and reporting nothing about it.
     ///
     /// `--structural-only` is a caller telling the tool not to touch FFmpeg, and
-    /// that overrides any selection: the pass is skipped even when the check is
-    /// on, and the rule falls back to its estimate exactly as it did before this
-    /// pass existed.
+    /// that overrides any selection: the pass is skipped even when a check is
+    /// on, and the rules fall back to their estimate exactly as they did before
+    /// this pass existed.
     fn caption_extents_wanted(&self) -> bool {
         !self.request.structural_only
             && self
                 .selected_ids
                 .iter()
-                .any(|id| id == CAPTION_OUT_OF_BOUNDS_CHECK_ID)
+                .any(|id| id == CAPTION_OUT_OF_BOUNDS_CHECK_ID || id == CAPTION_SAFE_AREA_CHECK_ID)
+    }
+
+    /// Whether the glyph-only box is worth the second render pass.
+    ///
+    /// `caption.safe_area` is its only consumer - it is the box the tighter
+    /// title-safe tier is graded against - so a run that selected only
+    /// `caption.out_of_bounds`, which grades the full ink and nothing else,
+    /// would pay for a second FFmpeg pass per chunk and discard the result.
+    fn caption_glyph_box_wanted(&self) -> bool {
+        self.selected_ids
+            .iter()
+            .any(|id| id == CAPTION_SAFE_AREA_CHECK_ID)
     }
 
     /// How this run would bound the caption-extent pass, or `None` to skip it.
@@ -455,6 +481,7 @@ impl VerifyPlan {
             // the ones the file under review carries.
             window_start_sec: self.window.map_or(0.0, |window| window.start_sec),
             run_timeout: remaining,
+            needs_glyph_box: self.caption_glyph_box_wanted(),
         })
     }
 
@@ -572,6 +599,21 @@ impl VerifyPlan {
                         shift_measured_spans(&mut report, window.start_sec);
                     }
 
+                    if let Some(options) =
+                        self.caption_sample_options(report.duration_sec, remaining())
+                    {
+                        let sampling_window = self
+                            .window
+                            .map(|window| (window.start_sec, window.end_sec))
+                            .unwrap_or((0.0, sequence.duration()));
+                        let sampling =
+                            sample_caption_bands(runner, file, sequence, sampling_window, &options)
+                                .await;
+                        warnings.extend(sampling.notes.iter().cloned());
+                        report.measurements.caption_band_samples = sampling.samples;
+                        report.measurements.caption_band_coverage = Some(sampling.coverage);
+                    }
+
                     measurement = Some(report);
                 }
                 Err(error) => {
@@ -586,11 +628,10 @@ impl VerifyPlan {
         // a runner could be resolved — and simply does not run when one could
         // not, leaving `caption.out_of_bounds` on the estimate it has always
         // used. `caption_extent_options` returns `None` for a structural-only
-        // run and for a run that did not select the check, so neither pays for
-        // it. Sequenced after the rendered-file pass so the file measurement,
-        // which answers far more checks, gets first call on the shared budget —
-        // and *before* the caption-band pass below, which crops to the boxes
-        // this one measures.
+        // run and for a run that selected neither check that reads the boxes, so
+        // neither pays for it. Sequenced after the rendered-file pass so the
+        // file measurement, which answers far more checks, gets first call on
+        // the shared budget.
         let mut caption_extents = None;
         if let Some(runner) = runner {
             if let Some(options) = self.caption_extent_options(sequence, remaining()) {
@@ -598,39 +639,6 @@ impl VerifyPlan {
                     sample_caption_extents(runner, sequence, &state.effects, &options).await;
                 warnings.extend(sampling.notes.iter().cloned());
                 caption_extents = Some(sampling);
-            }
-        }
-
-        // The caption-band pass, which needs both a rendered file and — when
-        // there is one — the measured extent of each cue, because the column and
-        // band it decodes are a crop around the caption and a crop around a
-        // *measured* caption is the words rather than the words plus half again.
-        // Cues the extent pass could not reach are cropped from the estimate
-        // exactly as before.
-        if let (Some(runner), Some(file), Some(report)) =
-            (runner, self.request.file.as_ref(), measurement.as_mut())
-        {
-            if let Some(options) = self.caption_sample_options(report.duration_sec, remaining()) {
-                let sampling_window = self
-                    .window
-                    .map(|window| (window.start_sec, window.end_sec))
-                    .unwrap_or((0.0, sequence.duration()));
-                let extents = caption_extents
-                    .as_ref()
-                    .map(|sampling| sampling.samples.as_slice())
-                    .unwrap_or_default();
-                let sampling = sample_caption_bands(
-                    runner,
-                    file,
-                    sequence,
-                    sampling_window,
-                    &options,
-                    extents,
-                )
-                .await;
-                warnings.extend(sampling.notes.iter().cloned());
-                report.measurements.caption_band_samples = sampling.samples;
-                report.measurements.caption_band_coverage = Some(sampling.coverage);
             }
         }
 
@@ -2588,11 +2596,14 @@ mod tests {
     /// Feature: Measured caption bounds
     /// Scenario: should measure caption extents only for a run that grades them
     ///
-    /// The pass costs an FFmpeg run per eighty cues and answers exactly one
-    /// check, so a caller running `--checks timeline.gap` must not pay for it —
-    /// the same gate `caption.contrast` already has on its band sampling.
+    /// The pass costs an FFmpeg run per eighty cues and answers two checks, so a
+    /// caller running `--checks timeline.gap` must not pay for it — the same
+    /// gate `caption.contrast` already has on its band sampling. Both consumers
+    /// count: gating on `caption.out_of_bounds` alone left a
+    /// `--check caption.safe_area` run grading its estimate while an FFmpeg it
+    /// could have used sat there.
     #[test]
-    fn test_caption_extents_should_be_measured_only_when_the_check_is_selected() {
+    fn test_caption_extents_should_be_measured_only_when_a_check_is_selected() {
         let sequence = sequence_with_gap();
         let plan_for =
             |request: VerifyRequest| VerifyPlan::resolve(request).expect("the request is valid");
@@ -2601,7 +2612,7 @@ mod tests {
             plan_for(VerifyRequest::default())
                 .caption_extent_options(&sequence, Duration::from_secs(600))
                 .is_some(),
-            "a default run grades caption.out_of_bounds"
+            "a default run grades both checks that read the boxes"
         );
         assert!(
             plan_for(VerifyRequest {
@@ -2609,8 +2620,20 @@ mod tests {
                 ..Default::default()
             })
             .caption_extent_options(&sequence, Duration::from_secs(600))
+            .is_some(),
+            "caption.safe_area reads the same boxes, so skipping the other one changes nothing"
+        );
+        assert!(
+            plan_for(VerifyRequest {
+                skip: Some(vec![
+                    CAPTION_OUT_OF_BOUNDS_CHECK_ID.to_string(),
+                    CAPTION_SAFE_AREA_CHECK_ID.to_string(),
+                ]),
+                ..Default::default()
+            })
+            .caption_extent_options(&sequence, Duration::from_secs(600))
             .is_none(),
-            "a skipped check must not be paid for"
+            "with both consumers skipped there is nothing to measure for"
         );
         assert!(
             plan_for(VerifyRequest {
@@ -2619,7 +2642,7 @@ mod tests {
             })
             .caption_extent_options(&sequence, Duration::from_secs(600))
             .is_none(),
-            "a selection that leaves the check out must not be paid for either"
+            "a selection that leaves both checks out must not be paid for either"
         );
         assert!(
             !plan_for(VerifyRequest {
@@ -2628,6 +2651,43 @@ mod tests {
             })
             .can_use_ffmpeg(),
             "and such a run has no reason to resolve FFmpeg at all"
+        );
+    }
+
+    /// Feature: Measured caption bounds
+    /// Scenario: should render the glyph-only pass only for the check that reads
+    /// it
+    ///
+    /// The glyph box is a second FFmpeg pass over every chunk, and exactly one
+    /// check grades it: `caption.safe_area`, whose title-safe tier is about the
+    /// letterforms rather than the outline around them. A
+    /// `--check caption.out_of_bounds` run reads the full ink and nothing else,
+    /// so it must measure the extents *without* paying for a box it discards.
+    #[test]
+    fn test_the_glyph_pass_should_run_only_for_the_check_that_reads_it() {
+        let sequence = sequence_with_gap();
+        let plan_for =
+            |request: VerifyRequest| VerifyPlan::resolve(request).expect("the request is valid");
+        let options_for = |checks: &[&str]| {
+            plan_for(VerifyRequest {
+                checks: Some(checks.iter().map(|id| (*id).to_string()).collect()),
+                ..Default::default()
+            })
+            .caption_extent_options(&sequence, Duration::from_secs(600))
+        };
+
+        let safe_area = options_for(&[CAPTION_SAFE_AREA_CHECK_ID])
+            .expect("the safe-area check reads the measured boxes");
+        assert!(
+            safe_area.needs_glyph_box,
+            "the title-safe tier is graded on the glyph box, so it has to be measured"
+        );
+
+        let bounds = options_for(&[CAPTION_OUT_OF_BOUNDS_CHECK_ID])
+            .expect("the bounds check reads the measured boxes too");
+        assert!(
+            !bounds.needs_glyph_box,
+            "a run that grades only the full ink must not pay for a second render pass"
         );
     }
 

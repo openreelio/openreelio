@@ -1607,6 +1607,12 @@ impl CaptionSafeAreaRule {
     /// which is why breaching it is reported at the rule severity while
     /// breaching only the title-safe margin stays informational.
     ///
+    /// The *measured* tier and nothing else. It is the bound for a rectangle
+    /// that has the decoration in it, and only a render produces one of those;
+    /// the estimator has no outline to grade and uses
+    /// [`Self::TITLE_SAFE_MARGIN_PERCENT`], which is the band it has always
+    /// used.
+    ///
     /// ST 2046-1 (2017) is the current statement of these numbers. It replaced
     /// SMPTE RP 218, whose 5%/10% figures were withdrawn with it and are the
     /// ones this rule used to carry; the 10% still appears here as the
@@ -1638,9 +1644,17 @@ impl CaptionSafeAreaRule {
     /// glyph-only box against this one and the full ink - outline and shadow
     /// included - against the looser action-safe margin.
     ///
-    /// Only reachable with a measurement. The estimator has no ink/glyph
-    /// distinction to draw, so on the estimated path this constant is not used
-    /// and the band comparison stays exactly the single one it always was.
+    /// Also the *estimator's* single band, and for the same reason read the
+    /// other way round: an estimated box is built from glyph advances and an
+    /// anchor, with no outline, shadow or background box anywhere in it, so the
+    /// rectangle it produces is a glyph box and the bound a glyph box is graded
+    /// against is this one. Comparing that outline-free rectangle to the looser
+    /// action-safe margin would hand every unmeasured cue 1.5% of slack it has
+    /// no ink to spend, which is how a 4% authored margin - a caption whose real
+    /// ink reaches 96.6% once its outline is drawn, and which the measured path
+    /// calls a Warning - came to be graded as a note. 5.0 is also exactly the
+    /// band the estimator applied before the measured path existed, so an
+    /// unmeasured cue is graded today as it always was.
     const TITLE_SAFE_MARGIN_PERCENT: f64 = 5.0;
 
     /// Average glyph advance as a fraction of the font size
@@ -2015,8 +2029,15 @@ impl CaptionSafeAreaRule {
     /// derived from a font size, a per-character advance and an anchor, and
     /// there is nothing in it that distinguishes a glyph from the outline drawn
     /// around it — so splitting it across two margins would be inventing a
-    /// distinction the numbers do not carry, and the tighter of the two bands
-    /// would be applied to a width that was never measured.
+    /// distinction the numbers do not carry.
+    ///
+    /// That one band is the 5% title-safe margin, not the 3.5% action-safe one.
+    /// A box with no decoration in it *is* a glyph box, and 5% is the bound a
+    /// glyph box answers to; it is also the band this rule applied before the
+    /// measured path existed, so a cue the extent pass could not reach is graded
+    /// exactly as it always was. The finding is still reported at the graded
+    /// tier, because an estimate cannot tell "may be cropped" from "is hard to
+    /// read" and the serious reading is the safe one.
     ///
     /// `None` when the cue is inside the band, or when the canvas has no height
     /// for a block to be measured against.
@@ -2025,9 +2046,15 @@ impl CaptionSafeAreaRule {
         context: &QCContext,
         anchor: &ResolvedCaptionAnchor,
         alignment: &TextAlignment,
-        action_safe_margin: f64,
         title_safe_margin: f64,
     ) -> Option<SafeAreaOutcome> {
+        // The estimator's one band. Named `action_safe_margin` because that is
+        // the tier the finding is graded at - an estimate cannot separate "may
+        // be cropped" from "is hard to read", so its single verdict is reported
+        // at the serious one - but the *number* is the title-safe 5%, because
+        // the rectangle being compared is an outline-free glyph box. See
+        // [`Self::TITLE_SAFE_MARGIN_PERCENT`].
+        let action_safe_margin = Self::TITLE_SAFE_MARGIN_PERCENT;
         let anchor_x_percent = anchor.x * 100.0;
 
         let (band, reason, message, details, suggested_position) = match (
@@ -2153,17 +2180,6 @@ impl CaptionSafeAreaRule {
                     return None;
                 }
 
-                // The fix has to be expressed in the same anchoring the
-                // renderer reads, so the clamped center is converted
-                // back into a left/right/center anchor.
-                let clamped_center_x =
-                    Self::clamp_center((left + right) / 2.0, box_width, action_safe_margin);
-                let fixed_x = match alignment {
-                    TextAlignment::Left => clamped_center_x - box_width / 2.0,
-                    TextAlignment::Right => clamped_center_x + box_width / 2.0,
-                    TextAlignment::Center => clamped_center_x,
-                };
-
                 (
                         SafeAreaBand::ActionSafe,
                         "custom_anchor",
@@ -2172,14 +2188,15 @@ impl CaptionSafeAreaRule {
                             "Estimated text box spans x {:.1}%-{:.1}%, y {:.1}%-{:.1}%, outside the {:.1}%-{:.1}% safe band (box size is an approximation)",
                             left, right, top, bottom, action_safe_margin, upper_bound
                         ),
-                        CaptionPosition::Custom(CustomPosition {
-                            x_percent: fixed_x,
-                            y_percent: Self::clamp_center(
-                                anchor_y_percent,
-                                box_height,
-                                action_safe_margin,
-                            ),
-                        }),
+                        // Nothing the measurement would add: this cue has none.
+                        Self::custom_anchor_repair(
+                            clip,
+                            context,
+                            anchor,
+                            alignment,
+                            action_safe_margin,
+                            (0.0, 0.0),
+                        ),
                     )
             }
         };
@@ -2189,7 +2206,7 @@ impl CaptionSafeAreaRule {
             reason,
             message,
             details,
-            suggested_position,
+            suggested_position: Some(suggested_position),
             box_source: CAPTION_BOX_SOURCE_ESTIMATED,
         })
     }
@@ -2202,7 +2219,10 @@ impl CaptionSafeAreaRule {
     /// 1. **Full ink against action-safe.** Everything the viewer sees -
     ///    letterforms, outline, shadow, blur, background box - is expected
     ///    inside `[3.5, 96.5]`. Ink outside it is at risk of being cropped, and
-    ///    that is the graded finding.
+    ///    that is the graded finding. A `BorderStyle: 3` caption - the opaque
+    ///    background box - authored near a 5% margin is reported here where the
+    ///    estimate said nothing, and correctly so: the box edge is ink, and it
+    ///    really is in the overscan. The shipped packs anchor at 10%.
     /// 2. **Glyphs alone against title-safe.** The words themselves are expected
     ///    inside the tighter `[5, 95]`. A caption whose outline pokes out of the
     ///    title-safe band but whose glyphs do not is perfectly legible, and
@@ -2220,6 +2240,8 @@ impl CaptionSafeAreaRule {
     /// which would report the outline as illegible text; the cue simply has no
     /// legibility verdict, and `caption_extent_coverage` names it.
     fn measured_outcome(
+        clip: &Clip,
+        context: &QCContext,
         measured: &CaptionExtentSample,
         anchor: &ResolvedCaptionAnchor,
         alignment: &TextAlignment,
@@ -2293,72 +2315,196 @@ impl CaptionSafeAreaRule {
             ),
         };
 
+        // The edges the graded tier names. A preset caption is repaired by
+        // raising its margin, which moves it vertically and nothing else, so a
+        // horizontal breach has no repair to offer here at all.
+        let graded = if action.any() {
+            action
+        } else {
+            title.unwrap_or_default()
+        };
+
         Some(SafeAreaOutcome {
             band,
             reason,
             message,
             details,
             suggested_position: Self::measured_repair(
-                &ink,
+                clip,
+                context,
+                measured,
                 anchor,
                 alignment,
                 repair_margin_percent,
+                graded,
             ),
             box_source: CAPTION_BOX_SOURCE_MEASURED,
         })
     }
 
-    /// The repair offered for a cue whose rectangle was measured.
+    /// The repair offered for a cue whose rectangle was measured, or `None` when
+    /// this rule has none to offer.
     ///
     /// A preset caption is repaired the way the estimator repairs one - by
     /// raising the margin - because a preset margin *is* the position and
     /// nothing about the measurement changes what the right margin would be.
-    /// That repair is vertical only, exactly as it is on the estimated path: a
-    /// preset caption whose *width* leaves the band is a caption that needs a
-    /// smaller font or a shorter line, and offering a margin for it would be
-    /// offering a fix that does not fix it. The finding still names the edge.
+    /// That repair is vertical only: a preset caption whose *width* leaves the
+    /// band is a caption that needs a smaller font or a shorter line, and a
+    /// margin cannot move it sideways. So a preset cue whose graded breach is on
+    /// the left or the right gets no command at all rather than a vertical one
+    /// that leaves the same violation standing - the grouped finding is then
+    /// honestly not auto-fixable, and the detail line still names the edge. The
+    /// measured full-ink box is what made that case reachable: an outline pushes
+    /// ink past a side margin the estimator's advance-only box cleared.
     ///
-    /// A custom caption is repaired by moving its anchor, and that is where the
-    /// measurement earns its place: the clamp needs the block's width, and the
-    /// width the renderer drew is `right - left` rather than the estimator's
-    /// per-character guess at it. The arithmetic is the estimator's own, with
-    /// the measured size substituted - the box is re-centred inside the
-    /// action-safe band and then converted back into the left/right/centre
-    /// anchor the renderer reads, so a left-aligned caption still gets the
-    /// coordinate of its left edge.
+    /// A custom caption is repaired by moving its anchor, and the geometry for
+    /// that comes from the *estimator's* predicted box rather than from the
+    /// measurement, for two reasons the measurement itself cannot fix:
+    ///
+    /// 1. **A clipped cue's measured width is not its width.** libass stops
+    ///    drawing at the frame, so a caption running off the edge measures as
+    ///    wide as the frame and no wider; centring that truncated width leaves
+    ///    the real caption off the edge, and the agent that applied the fix
+    ///    re-verifies into the same violation.
+    /// 2. **The anchor is the layout's, not the ink's.** An asymmetric shadow
+    ///    moves the ink relative to the point the renderer positions, so
+    ///    re-centring the *ink* box lands an edge about half the shadow outside
+    ///    the band again.
+    ///
+    /// What the measurement does contribute is the decoration slack: how much
+    /// wider the ink is than the letterforms, which is what
+    /// [`Self::custom_anchor_repair`] charges to each side so the repaired box
+    /// is provably inside the band rather than sitting exactly on its line. The
+    /// verdict is still the measurement's; only the geometry of the move is the
+    /// estimator's.
     fn measured_repair(
-        ink: &SafeAreaBox,
+        clip: &Clip,
+        context: &QCContext,
+        measured: &CaptionExtentSample,
         anchor: &ResolvedCaptionAnchor,
         alignment: &TextAlignment,
         repair_margin_percent: f64,
-    ) -> CaptionPosition {
+        graded: SafeBandBreach,
+    ) -> Option<CaptionPosition> {
         if let Some(vertical) = anchor.vertical.clone() {
-            return CaptionPosition::Preset {
+            if graded.is_horizontal() {
+                return None;
+            }
+
+            return Some(CaptionPosition::Preset {
                 vertical,
                 margin_percent: repair_margin_percent.min(45.0),
-            };
+            });
         }
 
-        let width = (ink.right - ink.left).max(0.0);
-        let height = (ink.bottom - ink.top).max(0.0);
-        let clamped_center_x = Self::clamp_center(
-            (ink.left + ink.right) / 2.0,
-            width,
+        Some(Self::custom_anchor_repair(
+            clip,
+            context,
+            anchor,
+            alignment,
             Self::ACTION_SAFE_MARGIN_PERCENT,
+            Self::decoration_slack_percent(clip, context, measured),
+        ))
+    }
+
+    /// Moves a custom caption's anchor so its box lands inside `band_margin`.
+    ///
+    /// One helper for both paths, because the repair is the same move whichever
+    /// of them found the problem: the box is re-centred inside the band and the
+    /// centre converted back into the left/right/centre anchor the renderer
+    /// reads, so a left-aligned caption still gets the coordinate of its left
+    /// edge.
+    ///
+    /// Two widths, deliberately. The box is *clamped* as though it were
+    /// `slack` wider on every side - decoration the layout box does not carry,
+    /// plus [`CAPTION_REPAIR_PAD_PERCENT`] for the arithmetic - so the ink ends
+    /// up strictly inside the band instead of flush against its line; but it is
+    /// *converted back* to an anchor using the layout width alone, because that
+    /// is the width the renderer will lay out. Clamping and converting with the
+    /// same padded number would shift the caption by the padding.
+    ///
+    /// A box too big for the band at all still degrades to the centre of the
+    /// frame, which is [`Self::clamp_center`]'s answer and the best one
+    /// available: no anchor makes an oversized block fit.
+    fn custom_anchor_repair(
+        clip: &Clip,
+        context: &QCContext,
+        anchor: &ResolvedCaptionAnchor,
+        alignment: &TextAlignment,
+        band_margin_percent: f64,
+        slack: (f64, f64),
+    ) -> CaptionPosition {
+        // A custom caption is placed with `\pos`, which disables the event
+        // margins, so it wraps only where it meets the frame edge.
+        let (box_width, box_height) = Self::estimate_text_box_percent(
+            clip,
+            context.canvas_width,
+            context.canvas_height,
+            100.0,
+        );
+        let (horizontal_slack, vertical_slack) = slack;
+        let horizontal_pad = horizontal_slack.max(0.0) + CAPTION_REPAIR_PAD_PERCENT;
+        let vertical_pad = vertical_slack.max(0.0) + CAPTION_REPAIR_PAD_PERCENT;
+
+        let (left, right) = Self::horizontal_span(anchor.x * 100.0, box_width, alignment);
+        let clamped_center_x = Self::clamp_center(
+            (left + right) / 2.0,
+            box_width + 2.0 * horizontal_pad,
+            band_margin_percent,
         );
 
         CaptionPosition::Custom(CustomPosition {
             x_percent: match alignment {
-                TextAlignment::Left => clamped_center_x - width / 2.0,
-                TextAlignment::Right => clamped_center_x + width / 2.0,
+                TextAlignment::Left => clamped_center_x - box_width / 2.0,
+                TextAlignment::Right => clamped_center_x + box_width / 2.0,
                 TextAlignment::Center => clamped_center_x,
             },
             y_percent: Self::clamp_center(
-                (ink.top + ink.bottom) / 2.0,
-                height,
-                Self::ACTION_SAFE_MARGIN_PERCENT,
+                anchor.y * 100.0,
+                box_height + 2.0 * vertical_pad,
+                band_margin_percent,
             ),
         })
+    }
+
+    /// How much ink a measured cue carries beyond its letterforms, per axis.
+    ///
+    /// The outline, shadow, blur and background box: everything the estimator's
+    /// advance-only box has no term for. Read as `ink - glyphs` when both
+    /// rectangles were measured, and as `ink - prediction` when the glyph render
+    /// did not complete, which is the same quantity with a rougher subtrahend.
+    ///
+    /// The *total* across both sides is charged to each side by the caller. That
+    /// is deliberately generous: decoration is not always symmetric - a shadow
+    /// is drawn at an offset, on one side only - and a repair that lands the
+    /// caption a fraction of a percent further inside the band than it had to
+    /// costs nothing, while one that lands it a fraction outside sends an agent
+    /// round the verify → fix → verify loop again.
+    fn decoration_slack_percent(
+        clip: &Clip,
+        context: &QCContext,
+        measured: &CaptionExtentSample,
+    ) -> (f64, f64) {
+        let ink_width = (measured.right_percent - measured.left_percent).max(0.0);
+        let ink_height = (measured.bottom_percent - measured.top_percent).max(0.0);
+
+        let (inner_width, inner_height) = match measured.glyph {
+            Some(glyph) => (
+                (glyph.right_percent - glyph.left_percent).max(0.0),
+                (glyph.bottom_percent - glyph.top_percent).max(0.0),
+            ),
+            None => Self::estimate_text_box_percent(
+                clip,
+                context.canvas_width,
+                context.canvas_height,
+                100.0,
+            ),
+        };
+
+        (
+            (ink_width - inner_width).max(0.0),
+            (ink_height - inner_height).max(0.0),
+        )
     }
 
     /// Centers a box of `size_percent` inside the safe band, without panicking
@@ -2380,6 +2526,20 @@ const CAPTION_BOX_SOURCE_MEASURED: &str = "measured";
 
 /// The word a finding uses for a box predicted from the style and the label.
 const CAPTION_BOX_SOURCE_ESTIMATED: &str = "estimated";
+
+/// Margin a suggested reposition leaves between the caption and the band line.
+///
+/// A repair that lands the caption *exactly* on the safe-area line is one
+/// rounding away from not repairing it: the anchor is written as a percentage,
+/// the renderer quantises it to the pixel grid, and the measurement that grades
+/// the result is quantised again. A tenth of a percent is two pixels on a
+/// 1920-wide frame and moves nothing a viewer can see, so the repaired box is
+/// put inside the band rather than on it.
+///
+/// This is the arithmetic's margin only. Decoration - an outline or a shadow the
+/// layout box has no term for - is measured per cue and added on top; see
+/// [`CaptionSafeAreaRule::decoration_slack_percent`].
+const CAPTION_REPAIR_PAD_PERCENT: f64 = 0.25;
 
 /// A caption rectangle in canvas percent, whatever produced it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2454,6 +2614,15 @@ impl SafeBandBreach {
             .any(|overshoot| *overshoot > Self::TOLERANCE_PERCENT)
     }
 
+    /// Whether a side edge is one of the breaching ones.
+    ///
+    /// The question a vertical repair has to ask before offering itself: raising
+    /// a preset caption's margin moves it up or down and never sideways, so a
+    /// breach on the left or the right is one that repair cannot resolve.
+    fn is_horizontal(self) -> bool {
+        self.left > Self::TOLERANCE_PERCENT || self.right > Self::TOLERANCE_PERCENT
+    }
+
     /// The breaching edges, worst first, as a human-readable list.
     fn describe(self) -> String {
         let mut edges: Vec<(&str, f64)> = [
@@ -2494,8 +2663,9 @@ struct SafeAreaOutcome {
     message: String,
     /// The numbers behind the verdict
     details: String,
-    /// Where the caption should go instead
-    suggested_position: CaptionPosition,
+    /// Where the caption should go instead, or `None` when this rule has no
+    /// repair that resolves the breach it found
+    suggested_position: Option<CaptionPosition>,
     /// Whether the box was read off a render or predicted
     box_source: &'static str,
 }
@@ -2556,22 +2726,6 @@ pub(super) const MIN_CAPTION_SPAN_WIDTH_PERCENT: f64 = 10.0;
 /// sampling less than the line is grading the wrong pixels.
 const CAPTION_SPAN_SAFETY_FACTOR: f64 = 1.5;
 
-/// Pad added around a *measured* caption box before it becomes a crop.
-///
-/// Not the same job as [`CAPTION_SPAN_SAFETY_FACTOR`], and deliberately not the
-/// same size. That factor compensates for a predictor with no shaping in it, and
-/// half again is the order of the error such a predictor makes. A measured box
-/// has no such error to absorb: it is the rendered extent, anti-aliased fringe
-/// included, read straight off the alpha channel. What is left to guard against
-/// is the canvas pixel grid the box was quantised on and the rounding the crop
-/// itself does, which is a pixel or two - so the pad is a flat percent on each
-/// side rather than a multiplier that would grow with the caption.
-///
-/// Widening a measured box by half again would undo the whole point of measuring
-/// it: on a 60% wide caption the crop would reach past the frame on both sides
-/// and the contrast pass would be back to grading the picture beside the words.
-const MEASURED_CAPTION_CROP_PAD_PERCENT: f64 = 1.0;
-
 /// The alignment spelling the render path's anchor helpers take.
 pub(super) fn alignment_key(alignment: &TextAlignment) -> &'static str {
     match alignment {
@@ -2602,28 +2756,26 @@ pub(super) fn alignment_key(alignment: &TextAlignment) -> &'static str {
 /// [`MIN_CAPTION_SPAN_WIDTH_PERCENT`] and clamped to the frame, so it is always
 /// a crop FFmpeg can take.
 ///
-/// `measured` is the rectangle the caption-extent pass read off a render of this
-/// cue, when it reached one. That box *is* the column the words were drawn in,
-/// so it needs none of the widening the estimate does: the `×1.5` exists solely
-/// to absorb the predictor's missing shaper, and applying it to a rectangle read
-/// off the render would throw the measurement away - a 60%-wide caption would
-/// crop to 90% of the frame, which is the whole-frame sampling this column
-/// replaced. Only [`MEASURED_CAPTION_CROP_PAD_PERCENT`] is added, for the pixel
-/// grid. The floors stay either way: a one-word cue still has to yield a crop
-/// wide enough for its statistics to mean anything.
+/// The estimate, deliberately, even for a cue the caption-extent pass measured.
+/// Cropping to the measured box sounds like the obvious improvement and is not:
+/// the frames this crop is taken from are the *rendered* ones, with the caption
+/// already burned into them, so a crop tight around the ink is mostly the
+/// caption's own white letterforms and their spread reads as a mixed
+/// background. Measured, a caption over a flat `#101010` backdrop failed
+/// `caption.contrast` that way while the widened estimate - which takes in the
+/// picture around the words as well - passed it.
+//
+// TODO(caption-contrast-measured-annulus): the measurement is still the right
+// answer, through a different crop. Sample the background *between* the glyph
+// box and the full-ink box - or the rows just outside the ink - so the pixels
+// graded are the ones behind and around the words rather than the words
+// themselves, and recalibrate `max_band_stddev` against that annulus, which has
+// a different distribution from the whole-band crop the threshold was tuned on.
 pub(crate) fn caption_span_percent(
     clip: &Clip,
     canvas_width: u32,
     canvas_height: u32,
-    measured: Option<&CaptionExtentSample>,
 ) -> (f64, f64) {
-    if let Some(measured) = measured {
-        return clamp_caption_span(
-            measured.left_percent - MEASURED_CAPTION_CROP_PAD_PERCENT,
-            measured.right_percent + MEASURED_CAPTION_CROP_PAD_PERCENT,
-        );
-    }
-
     let alignment = CaptionSafeAreaRule::alignment(clip.caption_style.as_ref());
     let anchor = caption_anchor_percent(
         clip.caption_position.as_ref(),
@@ -2655,14 +2807,6 @@ pub(crate) fn caption_span_percent(
 
     let (left, right) = CaptionSafeAreaRule::horizontal_span(anchor.x * 100.0, width, &alignment);
 
-    clamp_caption_span(left, right)
-}
-
-/// Turns a proposed column into one FFmpeg can always take.
-///
-/// Shared by the measured and the estimated path so the floors, the fallback and
-/// the frame clamp cannot drift apart between them.
-fn clamp_caption_span(left: f64, right: f64) -> (f64, f64) {
     let (left, right) = if left.is_finite() && right.is_finite() && right > left {
         (left, right)
     } else {
@@ -2697,23 +2841,14 @@ fn clamp_caption_span(left: f64, right: f64) -> (f64, f64) {
 /// `"Preset"` in the wrong case, all of which the burn-in accepts, and so
 /// measured the default bottom band for captions drawn along the top.
 ///
-/// `measured` is the vertical twin of [`caption_span_percent`]'s, and this is
-/// the axis where it matters most: the estimate derives the band's height from a
-/// line count it *predicted*, so a caption that wrapped onto one more line than
-/// the model expected was graded on a strip that missed a line of its own text.
+/// Estimated rather than measured, for the reason spelled out on
+/// [`caption_span_percent`]: this crop is taken from frames the caption is
+/// already burned into.
 pub(crate) fn caption_band_percent(
     clip: &Clip,
     canvas_width: u32,
     canvas_height: u32,
-    measured: Option<&CaptionExtentSample>,
 ) -> (f64, f64) {
-    if let Some(measured) = measured {
-        return clamp_caption_band(
-            measured.top_percent - MEASURED_CAPTION_CROP_PAD_PERCENT,
-            measured.bottom_percent + MEASURED_CAPTION_CROP_PAD_PERCENT,
-        );
-    }
-
     let alignment = CaptionSafeAreaRule::alignment(clip.caption_style.as_ref());
     let anchor = caption_anchor_percent(
         clip.caption_position.as_ref(),
@@ -2749,14 +2884,6 @@ pub(crate) fn caption_band_percent(
         }
     };
 
-    clamp_caption_band(top, bottom)
-}
-
-/// Turns a proposed band into one FFmpeg can always take.
-///
-/// Shared by the measured and the estimated path, for the same reason
-/// [`clamp_caption_span`] is.
-fn clamp_caption_band(top: f64, bottom: f64) -> (f64, f64) {
     let (top, bottom) = if top.is_finite() && bottom.is_finite() && bottom > top {
         (top, bottom)
     } else {
@@ -2808,7 +2935,6 @@ impl QCRule for CaptionSafeAreaRule {
         let title_safe_margin = config
             .get_param::<f64>("margin_percent")
             .unwrap_or(Self::DEFAULT_MARGIN_PERCENT);
-        let action_safe_margin = Self::ACTION_SAFE_MARGIN_PERCENT;
 
         let severity = config.severity_override.unwrap_or(self.default_severity());
 
@@ -2845,15 +2971,19 @@ impl QCRule for CaptionSafeAreaRule {
                 // A cue the pass could not reach is graded by exactly the
                 // estimate this rule used before the pass existed.
                 let outcome = match context.caption_extent(&clip.id) {
-                    Some(measured) => {
-                        Self::measured_outcome(measured, &anchor, &alignment, title_safe_margin)
-                    }
+                    Some(measured) => Self::measured_outcome(
+                        clip,
+                        context,
+                        measured,
+                        &anchor,
+                        &alignment,
+                        title_safe_margin,
+                    ),
                     None => Self::estimated_outcome(
                         clip,
                         context,
                         &anchor,
                         &alignment,
-                        action_safe_margin,
                         title_safe_margin,
                     ),
                 };
@@ -2874,7 +3004,17 @@ impl QCRule for CaptionSafeAreaRule {
                 // it than when a per-character model predicted it.
                 .with_metric("boxSource", outcome.box_source);
 
-                if let Ok(position_json) = serde_json::to_value(&outcome.suggested_position) {
+                // A cue with no position to offer carries no command, which is
+                // what makes the grouped finding report `autoFixable: false`:
+                // a preset caption pushed off the *side* of the band cannot be
+                // repaired by the margin this rule knows how to write, and
+                // saying otherwise sends an agent round the loop with a fix
+                // that leaves the violation standing.
+                if let Some(position_json) = outcome
+                    .suggested_position
+                    .as_ref()
+                    .and_then(|position| serde_json::to_value(position).ok())
+                {
                     finding = finding.with_commands(
                         vec![serde_json::json!({
                             "type": "UpdateCaption",
@@ -4885,18 +5025,24 @@ mod tests {
     }
 
     /// Feature: measured caption safe area
-    /// Scenario: should repair a custom anchor using the width that was rendered
+    /// Scenario: should repair a clipped custom anchor to a box inside the band
     ///
-    /// The estimator's repair inverts its own guess at the block width, so a cue
-    /// whose real width differs lands somewhere else again. On the measured path
-    /// the width is `right - left` of the rendered box, so the offered anchor
-    /// puts the *actual* caption on the action-safe line: a 30%-wide box
-    /// centred on the anchor can sit no further right than
-    /// `100 - 3.5 - 15 = 81.5`.
+    /// The finding is auto-applied, so a repair that leaves the same violation
+    /// standing is a loop: the agent moves the caption, re-verifies, and is told
+    /// the same thing again. Centring the *measured* box is exactly that repair
+    /// for a clipped cue — libass stops drawing at the frame, so the rectangle
+    /// read back is the frame's width and not the caption's, and re-centring it
+    /// leaves the real caption hanging off the edge by everything that was never
+    /// drawn.
+    ///
+    /// So the repair is built from the estimator's predicted width, which is not
+    /// truncated by anything, widened by the decoration the measurement *can*
+    /// see (ink minus glyphs) and a pad. The verdict is still the measurement's;
+    /// only the geometry of the move is predicted.
     #[tokio::test]
-    async fn test_a_measured_custom_anchor_is_repaired_from_the_rendered_width() {
+    async fn test_a_clipped_custom_anchor_is_repaired_to_a_box_inside_the_band() {
         let sequence = sequence_with_caption(
-            "A caption pushed off the right edge",
+            "A caption pushed off the right edge of the frame entirely",
             Some(serde_json::json!({
                 "type": "custom",
                 "xPercent": 95.0,
@@ -4904,14 +5050,27 @@ mod tests {
             })),
             Some(serde_json::json!({ "fontSize": 48 })),
         );
-        let context = context_with_extent(
-            &sequence,
-            measured_extent(
-                &sequence,
-                (80.0, 110.0, 45.0, 55.0),
-                Some((82.0, 108.0, 46.0, 54.0)),
-            ),
+        let (predicted_width, _) = CaptionSafeAreaRule::estimate_text_box_percent(
+            &sequence.tracks[0].clips[0],
+            1920,
+            1080,
+            100.0,
         );
+        assert!(
+            predicted_width < 93.0,
+            "the fixture only means anything if the caption can be made to fit: {predicted_width}"
+        );
+
+        // Ink flush to the right edge: libass drew what fitted and clipped the
+        // rest, so 30% is the width of the *frame* that was left, not of the
+        // caption. The glyphs measure 2% narrower, which is the decoration.
+        let mut sample = measured_extent(
+            &sequence,
+            (70.0, 100.0, 45.0, 55.0),
+            Some((71.0, 99.0, 46.0, 54.0)),
+        );
+        sample.clipped = true;
+        let context = context_with_extent(&sequence, sample);
 
         let violations = safe_area_violations(&sequence, &context).await;
 
@@ -4923,14 +5082,131 @@ mod tests {
             .commands[0]["position"];
         assert_eq!(position["type"], "custom");
 
+        // A centred caption's anchor is the middle of its box, so the box the
+        // renderer will lay out spans the predicted width around it - and with
+        // the decoration charged to each side it has to clear the band.
         let x = position["xPercent"].as_f64().expect("an x coordinate");
+        let slack = 2.0 + CAPTION_REPAIR_PAD_PERCENT;
         assert!(
-            (x - 81.5).abs() < 1e-6,
-            "the 30%-wide measured box is centred on the action-safe line: {x}"
+            x - predicted_width / 2.0 - slack >= 3.5 - 1e-9
+                && x + predicted_width / 2.0 + slack <= 96.5 + 1e-9,
+            "the repaired {predicted_width}%-wide box has to sit inside the action-safe band, \
+             decoration and all: anchored at {x}"
         );
 
-        // And the repaired box really is inside the band it was clamped to.
-        assert!(x - 15.0 >= 3.5 - 1e-9 && x + 15.0 <= 96.5 + 1e-9, "{x}");
+        // And it is not the measured box re-centred, which is where the loop
+        // came from: that box is 30% wide, so its clamp would have stopped at
+        // 81.5 and left most of the caption off the frame.
+        assert!(
+            x < 81.5,
+            "a repair built on the truncated measurement would have landed at 81.5: {x}"
+        );
+    }
+
+    /// Feature: caption safe area bands
+    /// Scenario: should keep the estimator on the 5% band it has always used
+    ///
+    /// Two paths, two bands, and the numbers are not interchangeable. The
+    /// measured path grades a rectangle that *includes* the outline against the
+    /// 3.5% action-safe margin. The estimator has no outline in it at all — its
+    /// box is glyph advances and an anchor — so grading it against 3.5% would
+    /// hand every unmeasured cue 1.5% of slack it has no ink to spend: a
+    /// caption authored at a 4% margin whose outline really does reach 96.6%
+    /// would be reported as a note rather than a warning, and the estimator path
+    /// is the common one (emoji cues, shared frames, a machine with no FFmpeg).
+    #[tokio::test]
+    async fn test_the_estimator_and_the_measured_tier_use_different_bands() {
+        let sequence = sequence_with_caption(
+            "Caption authored just inside the action-safe line",
+            Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": 4.0
+            })),
+            None,
+        );
+
+        let estimated = safe_area_violations(&sequence, &QCContext::from_sequence(&sequence)).await;
+
+        assert_eq!(estimated.len(), 1, "{estimated:?}");
+        assert_eq!(
+            estimated[0].severity,
+            Severity::Warning,
+            "a 4% margin is below the estimator's 5% band, which is a graded finding"
+        );
+        let cue = first_cue(&estimated[0]);
+        assert_eq!(cue["boxSource"], "estimated");
+        assert_eq!(cue["reason"], "action_safe_margin");
+
+        // The same cue, measured: ink inside [3.5, 96.5] and glyphs inside
+        // [5, 95]. Nothing is at risk and nothing is hard to read, so the
+        // measurement overrides the prediction that was worried about it.
+        let context = context_with_extent(
+            &sequence,
+            measured_extent(
+                &sequence,
+                (10.0, 90.0, 80.0, 96.0),
+                Some((12.0, 88.0, 82.0, 94.5)),
+            ),
+        );
+
+        assert!(
+            safe_area_violations(&sequence, &context).await.is_empty(),
+            "the measured tiers are the looser ones, and this cue clears both"
+        );
+    }
+
+    /// Feature: measured caption safe area
+    /// Scenario: should not advertise a vertical fix for a sideways breach
+    ///
+    /// A preset caption is positioned by a margin, and a margin moves it up or
+    /// down. A cue whose ink leaves the band on the *left* or the *right* has no
+    /// repair this rule can write, and attaching the vertical one anyway makes
+    /// the report claim a fix that re-verifies into the same violation. The
+    /// measured full-ink box is what made the case common: an outline reaches
+    /// past a side margin the estimator's advance-only box cleared.
+    #[tokio::test]
+    async fn test_a_preset_cue_breaching_sideways_is_not_auto_fixable() {
+        let sequence = safe_preset_caption("A caption whose ink runs off both sides");
+        let context = context_with_extent(
+            &sequence,
+            measured_extent(
+                &sequence,
+                (2.0, 98.0, 80.0, 90.0),
+                Some((3.0, 97.0, 82.0, 88.0)),
+            ),
+        );
+
+        let violations = safe_area_violations(&sequence, &context).await;
+
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(
+            !violations[0].auto_fixable,
+            "a margin cannot move a caption sideways: {:?}",
+            violations[0].suggested_fix
+        );
+        assert!(
+            violations[0].suggested_fix.is_none(),
+            "and nothing is offered that would re-verify into the same finding: {:?}",
+            violations[0].suggested_fix
+        );
+
+        // The vertical breach on the same preset caption still gets its margin.
+        let vertical = context_with_extent(
+            &sequence,
+            measured_extent(
+                &sequence,
+                (20.0, 80.0, 80.0, 99.0),
+                Some((22.0, 78.0, 82.0, 97.0)),
+            ),
+        );
+        let violations = safe_area_violations(&sequence, &vertical).await;
+
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(
+            violations[0].auto_fixable,
+            "raising the margin is exactly the repair for ink off the bottom"
+        );
     }
 
     /// Feature: measured caption safe area
@@ -4984,109 +5260,6 @@ mod tests {
             "action-safe is the looser band, or 'ink inside action-safe, glyphs outside \
              title-safe' is unreachable"
         );
-    }
-
-    // ========================================================================
-    // The caption contrast crop
-    // ========================================================================
-
-    /// Feature: measured caption contrast crop
-    /// Scenario: should crop a measured cue to the box that was rendered
-    ///
-    /// The `×1.5` widening exists to absorb a predictor with no shaper in it. A
-    /// measured box has no such error, so applying the factor to it would throw
-    /// the measurement away: a 40%-wide caption would be sampled across 60% of
-    /// the frame, and the bright patch beside the words would be back in the
-    /// verdict.
-    #[test]
-    fn test_a_measured_cue_is_cropped_to_the_box_that_was_rendered() {
-        let sequence = safe_preset_caption("Measured cue");
-        let clip = &sequence.tracks[0].clips[0];
-        let sample = measured_extent(&sequence, (30.0, 70.0, 80.0, 90.0), None);
-
-        let (left, right) = caption_span_percent(clip, 1920, 1080, Some(&sample));
-        let (top, bottom) = caption_band_percent(clip, 1920, 1080, Some(&sample));
-
-        assert!((left - 29.0).abs() < 1e-9, "{left}");
-        assert!((right - 71.0).abs() < 1e-9, "{right}");
-        assert!((top - 79.0).abs() < 1e-9, "{top}");
-        assert!((bottom - 91.0).abs() < 1e-9, "{bottom}");
-
-        // Only the pixel-grid pad, not half again: 40% measured stays 42%.
-        assert!(
-            (right - left) < 40.0 * CAPTION_SPAN_SAFETY_FACTOR,
-            "a measured column is not widened like an estimated one"
-        );
-    }
-
-    /// Feature: measured caption contrast crop
-    /// Scenario: should keep widening an estimated cue
-    ///
-    /// The fallback is untouched: a cue the extent pass could not reach is still
-    /// cropped from the block estimate, still widened by half again, because the
-    /// estimator's imprecision has not gone anywhere.
-    #[test]
-    fn test_an_unmeasured_cue_is_still_cropped_from_the_widened_estimate() {
-        let sequence = safe_preset_caption("An unmeasured cue of a good few words");
-        let clip = &sequence.tracks[0].clips[0];
-
-        let (box_width, _) = CaptionSafeAreaRule::estimate_text_box_percent(
-            clip,
-            1920,
-            1080,
-            CAPTION_WRAP_BOX_WIDTH_PERCENT,
-        );
-        let (left, right) = caption_span_percent(clip, 1920, 1080, None);
-
-        assert!(
-            (right - left - box_width * CAPTION_SPAN_SAFETY_FACTOR).abs() < 1e-9,
-            "the estimated column is still the block widened by half again: {left}-{right} for a \
-             {box_width}% block"
-        );
-
-        // And the same cue *measured* to that width crops to the width itself,
-        // which is the whole difference between the two paths.
-        let sample = measured_extent(
-            &sequence,
-            (50.0 - box_width / 2.0, 50.0 + box_width / 2.0, 80.0, 90.0),
-            None,
-        );
-        let (measured_left, measured_right) = caption_span_percent(clip, 1920, 1080, Some(&sample));
-        assert!(
-            (measured_right
-                - measured_left
-                - (box_width + 2.0 * MEASURED_CAPTION_CROP_PAD_PERCENT))
-                .abs()
-                < 1e-9,
-            "{measured_left}-{measured_right}"
-        );
-    }
-
-    /// Feature: measured caption contrast crop
-    /// Scenario: should keep the floors for a thin measured cue
-    ///
-    /// A one-word caption measures to a column a few percent wide, whose
-    /// statistics say more about one letter's background than about the picture
-    /// the line has to read over. The floors are about what makes a *sample*
-    /// meaningful, not about the predictor, so they survive the measurement.
-    #[test]
-    fn test_a_thin_measured_cue_still_yields_a_samplable_crop() {
-        let sequence = safe_preset_caption("Hi");
-        let clip = &sequence.tracks[0].clips[0];
-        let sample = measured_extent(&sequence, (49.0, 51.0, 88.0, 89.0), None);
-
-        let (left, right) = caption_span_percent(clip, 1920, 1080, Some(&sample));
-        let (top, bottom) = caption_band_percent(clip, 1920, 1080, Some(&sample));
-
-        assert!(
-            right - left >= MIN_CAPTION_SPAN_WIDTH_PERCENT - 1e-9,
-            "{left}..{right}"
-        );
-        assert!(
-            bottom - top >= MIN_CAPTION_BAND_HEIGHT_PERCENT - 1e-9,
-            "{top}..{bottom}"
-        );
-        assert!(left >= 0.0 && right <= 100.0 && top >= 0.0 && bottom <= 100.0);
     }
 
     // ========================================================================

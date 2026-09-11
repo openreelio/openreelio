@@ -64,6 +64,16 @@ pub struct CaptionExtentSampling {
 /// out of the 0s left in the run's budget" is a diagnostic nobody can act on.
 const MINIMUM_USEFUL_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Held back from the probe passes' own budget.
+///
+/// The pass bounds its two renders from inside, and the timeout below is the
+/// backstop around the whole thing. Those two deadlines must not be the same
+/// instant: the inner one has to fire first, or a glyph pass that ran out is
+/// cancelled along with the full-ink boxes it was supposed to come back with.
+/// The reserve is what separates them, and it is small because it only has to
+/// cover the difference between where the two clocks start.
+const PROBE_BUDGET_RESERVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Everything the pass needs beyond the FFmpeg binary.
 pub struct CaptionExtentOptions {
     /// Canvas width the probe renders at
@@ -83,6 +93,12 @@ pub struct CaptionExtentOptions {
     /// Shared with the probe pass and the caption-band pass rather than taken
     /// afresh, so `--timeout-sec 600` bounds the run and not each stage of it.
     pub run_timeout: std::time::Duration,
+    /// Whether the glyph-only box is wanted as well as the full ink
+    ///
+    /// It costs a second FFmpeg pass over every chunk, and exactly one check
+    /// reads it (`caption.safe_area`, for its title-safe tier). A run that did
+    /// not select that check gets the full-ink boxes and no second pass.
+    pub needs_glyph_box: bool,
 }
 
 /// Measures every caption cue this project's burn-in can be attributed one box.
@@ -102,7 +118,7 @@ pub async fn sample_caption_extents(
     // one that timed out: "ran out of the 0s left in the run's budget" names a
     // failure nobody had, and an agent reading it would go looking for a slow
     // probe that never started.
-    if options.run_timeout < MINIMUM_USEFUL_BUDGET {
+    if options.run_timeout < MINIMUM_USEFUL_BUDGET + PROBE_BUDGET_RESERVE {
         return skipped(
             "Caption extents were not measured: the run's measurement budget was already spent \
              before this pass, so the reported boxes are estimates"
@@ -118,6 +134,13 @@ pub async fn sample_caption_extents(
         canvas_height: options.canvas_height,
         fps: options.fps,
         window_start_sec: options.window_start_sec,
+        needs_glyph_box: options.needs_glyph_box,
+        // A hair under the outer timeout below, so the glyph pass's own deadline
+        // is the one that fires. That is the whole point of bounding it inside:
+        // a glyph pass that runs out has to come back with the full-ink boxes
+        // the first pass already produced, and it cannot do that if the outer
+        // timeout cancels the future carrying them first.
+        probe_budget: options.run_timeout.saturating_sub(PROBE_BUDGET_RESERVE),
     };
 
     // The engine bounds nothing itself: it spawns one FFmpeg run per chunk of
@@ -271,6 +294,7 @@ mod tests {
             fps: sequence.format.fps.as_f64(),
             window_start_sec: 0.0,
             run_timeout: Duration::from_secs(30),
+            needs_glyph_box: true,
         }
     }
 
@@ -505,6 +529,113 @@ mod tests {
     }
 
     /// Feature: measured caption bounds
+    /// Scenario: should not pay for a glyph box no check reads
+    ///
+    /// The glyph-only render is a second FFmpeg pass over every chunk, and only
+    /// `caption.safe_area` grades what it produces. A run that selected only
+    /// `caption.out_of_bounds` says so, gets the full-ink boxes it came for, and
+    /// spawns half as many processes — and the coverage record must not then
+    /// name every cue as missing a measurement nobody ordered.
+    #[tokio::test]
+    #[ignore = "requires FFmpeg with libass"]
+    async fn should_skip_the_glyph_pass_when_no_check_reads_it() {
+        let Some(runner) = real_runner() else {
+            return;
+        };
+
+        let sequence = sequence_with_one_caption();
+        let options = CaptionExtentOptions {
+            needs_glyph_box: false,
+            ..options_for(&sequence)
+        };
+
+        let sampling = sample_caption_extents(&runner, &sequence, &HashMap::new(), &options).await;
+
+        assert!(
+            !sampling.coverage.probe_failed,
+            "the full-ink pass still runs: {:?}",
+            sampling.coverage.notes
+        );
+        assert_eq!(sampling.samples.len(), 1, "and still measures the cue");
+        assert!(
+            sampling.samples[0].glyph.is_none(),
+            "nothing asked for the letterform box: {:?}",
+            sampling.samples[0]
+        );
+        assert!(
+            sampling.coverage.glyph_unmeasured_cue_ids.is_empty(),
+            "a box nobody wanted is not a gap in the coverage: {:?}",
+            sampling.coverage
+        );
+        assert!(
+            !sampling
+                .notes
+                .iter()
+                .any(|note| note.contains("title-safe")),
+            "and the report does not apologise for it: {:?}",
+            sampling.notes
+        );
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should keep the full-ink boxes when the glyph pass runs out
+    ///
+    /// Both passes used to sit under one timeout, so a budget that expired
+    /// during the second one threw away the first one's completed rectangles and
+    /// sent every cue back to the estimator. The full-ink boxes are the ones
+    /// every consumer reads; the glyph box refines one tier of one rule. So the
+    /// budget is spent in order and a glyph pass that cannot finish degrades to
+    /// "no legibility box for these cues", which the coverage record already
+    /// knows how to say.
+    ///
+    /// The budget here is the measured cost of the first pass plus a second,
+    /// which is comfortably enough to complete it and rarely enough to complete
+    /// a second pass of the same size. Either outcome is asserted: what must
+    /// never happen is coming back with nothing.
+    #[tokio::test]
+    #[ignore = "requires FFmpeg with libass"]
+    async fn should_keep_the_full_ink_boxes_when_the_glyph_pass_runs_out() {
+        let Some(runner) = real_runner() else {
+            return;
+        };
+
+        let sequence = sequence_with_one_caption();
+        let started = std::time::Instant::now();
+        let generous =
+            sample_caption_extents(&runner, &sequence, &HashMap::new(), &options_for(&sequence))
+                .await;
+        let both_passes = started.elapsed();
+        assert_eq!(generous.samples.len(), 1, "the fixture measures at all");
+
+        let options = CaptionExtentOptions {
+            run_timeout: both_passes / 2 + Duration::from_secs(1),
+            ..options_for(&sequence)
+        };
+        let tight = sample_caption_extents(&runner, &sequence, &HashMap::new(), &options).await;
+
+        assert_eq!(
+            tight.samples.len(),
+            1,
+            "the full-ink box survives a budget the second pass cannot fit in: {:?}",
+            tight.coverage.notes
+        );
+        let sample = &tight.samples[0];
+        assert!(
+            sample.right_percent > sample.left_percent
+                && sample.bottom_percent > sample.top_percent,
+            "and it is the rectangle the first pass measured: {sample:?}"
+        );
+        if sample.glyph.is_none() {
+            assert_eq!(
+                tight.coverage.glyph_unmeasured_cue_ids,
+                vec!["clip-a".to_string()],
+                "a cue with no legibility box has to be named: {:?}",
+                tight.coverage
+            );
+        }
+    }
+
+    /// Feature: measured caption bounds
     /// Scenario: should name the fonts libass fell back to for a host-font cue
     ///
     /// `uses_host_fonts` says the boxes are machine-specific; this says *which*
@@ -557,6 +688,86 @@ mod tests {
                 .any(|note| note.contains("substituted a font")),
             "and the report says so in prose: {:?}",
             sampling.notes
+        );
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: should repair an off-edge caption into the safe band for real
+    ///
+    /// The claim the unit tests can only make about arithmetic, made against
+    /// libass: a caption anchored so far right that the renderer clips it is
+    /// measured, graded, repaired with the position the finding offers, and
+    /// measured again — and the second rectangle is inside the action-safe band.
+    /// That is the loop an agent runs, and the reason the repair is built from
+    /// the predicted width rather than the measured one: the measured width of a
+    /// clipped cue is the frame's, so re-centring it moves the caption without
+    /// fixing it and the agent arrives back here with the same violation.
+    #[tokio::test]
+    #[ignore = "requires FFmpeg with libass"]
+    async fn should_repair_an_off_edge_caption_into_the_band() {
+        use crate::core::project::ProjectState;
+        use crate::core::qc::rules::{CaptionSafeAreaRule, QCRule, RuleConfig};
+        use crate::core::qc::QCContext;
+
+        let Some(runner) = real_runner() else {
+            return;
+        };
+
+        let mut sequence =
+            sequence_with_captions(&[("clip-a", "Pushed off the right edge", 0.0, 2.0)]);
+        sequence.tracks[0].clips[0].caption_position = Some(serde_json::json!({
+            "type": "custom",
+            "xPercent": 92.0,
+            "yPercent": 50.0
+        }));
+        sequence.tracks[0].clips[0].caption_style = Some(serde_json::json!({
+            "fontFamily": "Inter",
+            "fontSize": 64,
+            "color": "#FFFFFF",
+            "outlineColor": "#000000",
+            "outlineWidth": 8,
+        }));
+
+        let sampling =
+            sample_caption_extents(&runner, &sequence, &HashMap::new(), &options_for(&sequence))
+                .await;
+        assert_eq!(sampling.samples.len(), 1, "{:?}", sampling.coverage);
+        assert!(
+            sampling.samples[0].right_percent > 96.5,
+            "the fixture only means anything if the caption really is off the band: {:?}",
+            sampling.samples[0]
+        );
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(
+                &sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &QCContext::from_sequence(&sequence)
+                    .with_caption_extents(sampling.samples.clone(), sampling.coverage.clone()),
+            )
+            .await
+            .expect("the rule runs");
+        assert_eq!(violations.len(), 1, "{violations:?}");
+
+        let position = violations[0]
+            .suggested_fix
+            .as_ref()
+            .expect("a custom anchor is repaired by moving it")
+            .commands[0]["position"]
+            .clone();
+        sequence.tracks[0].clips[0].caption_position = Some(position.clone());
+
+        let repaired =
+            sample_caption_extents(&runner, &sequence, &HashMap::new(), &options_for(&sequence))
+                .await;
+        assert_eq!(repaired.samples.len(), 1, "{:?}", repaired.coverage);
+
+        let sample = &repaired.samples[0];
+        assert!(
+            sample.left_percent >= 3.5 && sample.right_percent <= 96.5,
+            "the repair the report offered has to put the ink inside the action-safe band, or the \
+             agent that applies it verifies into the same finding: {sample:?} from {position}"
         );
     }
 

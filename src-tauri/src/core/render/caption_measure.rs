@@ -113,7 +113,11 @@
 //! outline has none. The glyph-only render is therefore the same layout with
 //! less ink on it, which is what makes the two boxes comparable at all.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use super::export::{
     ass_centisecond, build_ass_text_overlay_script_in_window_with_emoji, EmojiSpacerContext,
@@ -385,6 +389,22 @@ pub struct CaptionExtentRequest<'a> {
     // the window stops being written at all rather than being filtered out of
     // the cue list after the fact.
     pub window_start_sec: f64,
+    /// Whether the second, glyph-only render is wanted at all.
+    ///
+    /// It doubles the FFmpeg runs this pass makes and produces exactly one
+    /// thing: [`CaptionExtent::glyph`], which only the safe-area rule's
+    /// title-safe tier reads. A caller that does not grade that tier says so
+    /// here and pays for one pass instead of two.
+    pub needs_glyph_box: bool,
+    /// How long the two probe passes may take between them.
+    ///
+    /// Spent in order and not split: the full-ink pass has first call on it,
+    /// because its boxes are what every consumer of this pass needs, and the
+    /// glyph pass runs only if enough is left to be worth starting. A glyph pass
+    /// that then runs out returns the full-ink boxes rather than nothing - which
+    /// is why the budget is enforced here, per pass, instead of by one timeout
+    /// around the whole call.
+    pub probe_budget: Duration,
 }
 
 /// One cue, as both the script builder and the probe see it.
@@ -973,28 +993,52 @@ pub async fn measure_caption_extents(
     let frames_per_cue: Vec<usize> = planned.iter().map(|entry| entry.frames.len()).collect();
     let chunks = chunk_by_frame_budget(&solo, &frames_per_cue);
 
-    let full_ink = run_probe_pass(
-        engine,
-        request,
-        &script,
-        ProbePass {
-            script_path: &script_path,
-            force_style_option: "",
-            collect_font_notes: script.uses_host_fonts,
-        },
-        &chunks,
-        &planned,
-        fps,
+    // The budget starts here, at the first thing that spawns FFmpeg. What came
+    // before it is script building and two file writes.
+    let probe_started = Instant::now();
+    let full_ink = match tokio::time::timeout(
+        request.probe_budget,
+        run_probe_pass(
+            engine,
+            request,
+            &script,
+            ProbePass {
+                script_path: &script_path,
+                force_style_option: "",
+                collect_font_notes: script.uses_host_fonts,
+            },
+            &chunks,
+            &planned,
+            fps,
+        ),
     )
-    .await;
+    .await
+    {
+        Ok(outcome) => outcome,
+        // Nothing to salvage: this is the pass every consumer needs, so every
+        // solo cue goes back unmeasured and the glyph pass is not started.
+        Err(_) => {
+            coverage.notes.push(format!(
+                "Caption extent measurement ran out of the {:.1}s left in the run's budget, so the \
+                 reported boxes are estimates",
+                request.probe_budget.as_secs_f64()
+            ));
+            ProbeOutcome {
+                failed: solo.clone(),
+                ..ProbeOutcome::default()
+            }
+        }
+    };
 
     // The second run, over the same cues and the same frames, with the
-    // decoration switched off. Skipped outright when the first run reached no
-    // cue at all: a binary that cannot spawn will not spawn twice either, and
-    // every cue is already going to be reported unmeasured.
-    let glyph = if full_ink.failed.len() == solo.len() {
+    // decoration switched off. Skipped outright when nobody asked for the glyph
+    // box, and when the first run reached no cue at all: a binary that cannot
+    // spawn will not spawn twice either, and every cue is already going to be
+    // reported unmeasured.
+    let glyph = if !request.needs_glyph_box || full_ink.failed.len() == solo.len() {
         ProbeOutcome::default()
-    } else {
+    } else if let Some(remaining) = glyph_pass_budget(request.probe_budget, probe_started.elapsed())
+    {
         let glyph_path = temp_dir.path().join("caption-extent-glyph.ass");
         crate::core::fs::validate_filter_safe_path(&glyph_path, "Caption extent script path")
             .map_err(ExportError::InvalidSettings)?;
@@ -1002,23 +1046,47 @@ pub async fn measure_caption_extents(
             .await
             .map_err(ExportError::IoError)?;
 
-        run_probe_pass(
-            engine,
-            request,
-            &script,
-            ProbePass {
-                script_path: &glyph_path,
-                force_style_option: GLYPH_ONLY_FORCE_STYLE_OPTION,
-                // Already collected from the full-ink run over the same script,
-                // and libass resolves the same faces for both: saying it twice
-                // would only pad the report.
-                collect_font_notes: false,
-            },
-            &chunks,
-            &planned,
-            fps,
+        match tokio::time::timeout(
+            remaining,
+            run_probe_pass(
+                engine,
+                request,
+                &script,
+                ProbePass {
+                    script_path: &glyph_path,
+                    force_style_option: GLYPH_ONLY_FORCE_STYLE_OPTION,
+                    // Already collected from the full-ink run over the same
+                    // script, and libass resolves the same faces for both:
+                    // saying it twice would only pad the report.
+                    collect_font_notes: false,
+                },
+                &chunks,
+                &planned,
+                fps,
+            ),
         )
         .await
+        {
+            Ok(outcome) => outcome,
+            // The full-ink boxes survive this. They are already measured, every
+            // other consumer grades them, and the cues left without a glyph box
+            // are named below exactly as a failed second render names them.
+            Err(_) => {
+                coverage.notes.push(
+                    "The glyph-only measurement ran out of the run's budget; the full-ink boxes \
+                     stand and the tighter title-safe bound was not graded"
+                        .to_string(),
+                );
+                ProbeOutcome::default()
+            }
+        }
+    } else {
+        coverage.notes.push(
+            "There was not enough of the run's budget left to measure the glyphs alone, so the \
+             tighter title-safe bound was not graded"
+                .to_string(),
+        );
+        ProbeOutcome::default()
     };
 
     if !full_ink.failed.is_empty() {
@@ -1071,20 +1139,46 @@ pub async fn measure_caption_extents(
     // A cue with ink the glyph pass could not put a rectangle on. Named rather
     // than counted, because the caller grades cues one at a time and needs to
     // know which of them has no legibility box rather than that some do not.
-    coverage.glyph_unmeasured_cue_ids = extents
-        .iter()
-        .filter(|extent| extent.full_ink.is_some() && extent.glyph.is_none())
-        .map(|extent| extent.clip_id.clone())
-        .collect();
-    if !coverage.glyph_unmeasured_cue_ids.is_empty() {
-        coverage.notes.push(format!(
-            "{} cue(s) were measured for their full ink but not for their glyphs alone; the \
-             tighter title-safe bound was not graded for them",
-            coverage.glyph_unmeasured_cue_ids.len()
-        ));
+    //
+    // Only when the glyph box was asked for: a caller that did not want one is
+    // not missing anything, and naming every cue as "unmeasured" would report a
+    // gap in a measurement nobody ordered.
+    if request.needs_glyph_box {
+        coverage.glyph_unmeasured_cue_ids = extents
+            .iter()
+            .filter(|extent| extent.full_ink.is_some() && extent.glyph.is_none())
+            .map(|extent| extent.clip_id.clone())
+            .collect();
+        if !coverage.glyph_unmeasured_cue_ids.is_empty() {
+            coverage.notes.push(format!(
+                "{} cue(s) were measured for their full ink but not for their glyphs alone; the \
+                 tighter title-safe bound was not graded for them",
+                coverage.glyph_unmeasured_cue_ids.len()
+            ));
+        }
     }
 
     Ok(CaptionExtentMeasurement { extents, coverage })
+}
+
+/// Least of the budget worth starting the glyph pass with.
+///
+/// One FFmpeg spawn costs more than this on every machine this ships to, so a
+/// second pass started with less can only end in a timeout - having written a
+/// script and spawned a process for nothing. The cue list is identical either
+/// way; what changes is whether the run wastes its last quarter-second finding
+/// that out.
+const MINIMUM_GLYPH_PASS_BUDGET: Duration = Duration::from_millis(250);
+
+/// What is left for the glyph pass, or `None` when it is not worth starting.
+///
+/// The full-ink pass has first call on the budget - its boxes are what every
+/// consumer of this module reads, and the glyph box refines exactly one verdict
+/// - so this is whatever it did not spend.
+fn glyph_pass_budget(probe_budget: Duration, spent: Duration) -> Option<Duration> {
+    let remaining = probe_budget.saturating_sub(spent);
+
+    (remaining >= MINIMUM_GLYPH_PASS_BUDGET).then_some(remaining)
 }
 
 /// What one probe pass produced.
@@ -2266,6 +2360,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let args = build_probe_args(
@@ -2312,6 +2408,8 @@ mod tests {
             canvas_height: 1920,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let args = build_probe_args(
@@ -2354,6 +2452,8 @@ mod tests {
             canvas_height: 1920,
             fps: 25.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let args = build_probe_args(
@@ -2370,6 +2470,45 @@ mod tests {
             args[input + 1]
         );
         assert!(args[input + 1].contains(":r=25:"), "{}", args[input + 1]);
+    }
+
+    // =========================================================================
+    // The budget the two passes share
+    // =========================================================================
+
+    /// Feature: caption extent measurement
+    /// Scenario: the full-ink pass has first call on the budget
+    ///
+    /// Two passes under one budget, spent in order rather than split: the
+    /// full-ink boxes are what every consumer of this module reads, and the
+    /// glyph box refines exactly one verdict. What is left after the first pass
+    /// is the second one's, and when that is less than an FFmpeg spawn costs the
+    /// second pass is not started at all — writing a script and spawning a
+    /// process only to time out would spend the run's last moments proving it
+    /// had none left.
+    #[test]
+    fn the_glyph_pass_takes_only_what_the_full_ink_pass_left() {
+        assert_eq!(
+            glyph_pass_budget(Duration::from_secs(30), Duration::from_secs(2)),
+            Some(Duration::from_secs(28)),
+            "whatever the first pass did not spend"
+        );
+        assert_eq!(
+            glyph_pass_budget(Duration::from_secs(30), Duration::from_millis(29_900)),
+            None,
+            "100ms cannot spawn FFmpeg, so the pass is skipped rather than started"
+        );
+        assert_eq!(
+            glyph_pass_budget(Duration::from_secs(30), Duration::from_secs(45)),
+            None,
+            "a first pass that overran leaves nothing, and must not underflow"
+        );
+        assert_eq!(
+            glyph_pass_budget(Duration::from_secs(30), Duration::from_secs(30))
+                .or(Some(Duration::ZERO)),
+            Some(Duration::ZERO),
+            "an exactly spent budget is a skip, not a zero-second timeout"
+        );
     }
 
     // =========================================================================
@@ -2506,6 +2645,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let args = build_probe_args(
@@ -2590,6 +2731,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         assert!(measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2609,6 +2752,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2635,6 +2780,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2682,6 +2829,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2735,6 +2884,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2760,6 +2911,8 @@ mod tests {
             canvas_height: 1080,
             fps: 30.0,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
 
         let measurement = measure_caption_extents(&engine_that_cannot_run(), &request)
@@ -2820,6 +2973,8 @@ mod tests {
             canvas_height: 1080,
             fps,
             window_start_sec: 0.0,
+            needs_glyph_box: true,
+            probe_budget: Duration::from_secs(30),
         };
         let args = build_probe_args(
             &request,
