@@ -91,7 +91,7 @@ pub fn track_included_in_export(track: &Track) -> bool {
 /// Delegates to [`Track::contributes_to_output`] so this filter and
 /// [`Sequence::output_duration`] — the length the builders pad the output to —
 /// always describe the same set of clips.
-fn track_included_in_media_collection(track: &Track) -> bool {
+pub(super) fn track_included_in_media_collection(track: &Track) -> bool {
     track.contributes_to_output()
 }
 
@@ -5304,7 +5304,7 @@ fn caption_font_weight(value: &Value) -> Option<i64> {
     parse_json_number(value).map(clamp)
 }
 
-fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
+pub(super) fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
     let text = clip.label.as_deref()?.trim();
     if text.is_empty() {
         return None;
@@ -5884,7 +5884,14 @@ fn ass_timecode(seconds: f64) -> String {
 /// time puts the picture on screen up to five milliseconds before or after the
 /// text it belongs to, which at 60fps is a frame of the emoji alone or of the
 /// caption without it. Both sides are rounded the same way instead.
-fn ass_centisecond(seconds: f64) -> f64 {
+///
+/// Visible to the rest of `core::render` because the caption-extent probe has
+/// the same problem in a different shape: it decides which cues share a
+/// rendered frame, and which frames to sample them on, from cue times libass
+/// never sees. Reasoning on the unrounded times classifies a cue as solo whose
+/// *drawn* span really does overlap its neighbour's, and then measures the two
+/// of them together as though the rectangle belonged to one.
+pub(super) fn ass_centisecond(seconds: f64) -> f64 {
     (seconds.max(0.0) * 100.0).round() / 100.0
 }
 
@@ -6845,6 +6852,20 @@ pub(crate) struct AssTextOverlayScript {
     /// project simply has no emoji - which is the overwhelming majority of
     /// renders, and the case that must cost nothing.
     pub emoji_occurrences: Vec<EmojiOccurrence>,
+    /// The clip behind each `Dialogue` line, in the order the lines are written.
+    ///
+    /// The script names its events by position (`OpenReelioText<n>`), which is
+    /// enough for libass and useless to anything that wants to say *which
+    /// caption* an event is. A measurement pass reading a rectangle off the Nth
+    /// event needs that answer, and re-walking the sequence to reconstruct it
+    /// means maintaining a second copy of this loop's selection clauses - a copy
+    /// that, the day it drifts, attributes every box after the divergence to the
+    /// wrong caption. So the loop that decides which clips become events says so
+    /// here, and there is nothing left to keep in step.
+    ///
+    /// `event_clip_ids[n]` is the clip of the `n`th `Dialogue` line, and the
+    /// length always equals the number of those lines.
+    pub event_clip_ids: Vec<String>,
 }
 
 /// [`build_ass_text_overlay_script`], with every event's timing rebased.
@@ -6895,6 +6916,7 @@ pub(crate) fn build_ass_text_overlay_script_in_window_with_emoji(
     let mut events = String::new();
     let mut fonts = AssFontEmbedder::default();
     let mut event_count = 0usize;
+    let mut event_clip_ids: Vec<String> = Vec::new();
     let mut uses_host_fonts = false;
 
     let stack_depths = visual_stack_depths(sequence);
@@ -7005,6 +7027,10 @@ pub(crate) fn build_ass_text_overlay_script_in_window_with_emoji(
                 emoji,
                 &mut emoji_occurrences,
             );
+            // Recorded next to the write, not reconstructed later: this is the
+            // only place that knows an event was emitted and which clip it came
+            // from, so the two can never fall out of step.
+            event_clip_ids.push(clip.id.clone());
             event_count += 1;
         }
     }
@@ -7022,6 +7048,7 @@ pub(crate) fn build_ass_text_overlay_script_in_window_with_emoji(
         ),
         uses_host_fonts,
         emoji_occurrences,
+        event_clip_ids,
     }))
 }
 
@@ -7101,13 +7128,45 @@ pub(super) fn append_ass_text_overlay(
     // value is parsed as filtergraph syntax (`;`/`[`/`]` + `movie=` would give
     // arbitrary file read/write).
     let escaped_path = escape_ffmpeg_filter_value(path_text.as_ref());
-    // The filter takes a single directory, and libass reads it in addition to
-    // the host's own font provider. Taking whichever path happened to sort
-    // first meant a per-user font folder could shadow the system one; naming
-    // the platform's primary folder makes the choice deterministic *on one
-    // machine*, which is not the same as deterministic across machines - hence
-    // the gate above.
-    let fonts_dir_option = crate::core::text::fonts::primary_system_font_directory()
+    let fonts_dir_option = ass_fonts_dir_option(host_fonts_needed);
+    // `original_size` is deliberately absent. The filter turns it into a libass
+    // pixel aspect of frame-AR over original-AR, i.e. it exists to un-stretch a
+    // script authored for one aspect and then anamorphically squeezed into
+    // another. This pipeline never squeezes: normalization letterboxes every
+    // source into the output dimensions, so the pixel aspect is always 1 and
+    // the script's own `PlayRes` aspect is the only thing libass needs. Naming
+    // the canvas here distorted glyphs by frame-AR/canvas-AR whenever an export
+    // preset overrode the output to a different aspect than the sequence canvas
+    // (a vertical canvas exported through a 16:9 preset stretched 3.16x).
+    let wrap_unicode_option = if wrap_unicode_supported {
+        SUBTITLES_WRAP_UNICODE_OPTION
+    } else {
+        ""
+    };
+    filter_complex.push(';');
+    filter_complex.push_str(&format!(
+        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}{wrap_unicode_option}{output_label}"
+    ));
+    output_label.to_string()
+}
+
+/// The `subtitles` filter's `fontsdir` option, or an empty string.
+///
+/// The filter takes a single directory, and libass reads it in addition to the
+/// host's own font provider. Taking whichever path happened to sort first meant
+/// a per-user font folder could shadow the system one; naming the platform's
+/// primary folder makes the choice deterministic *on one machine*, which is not
+/// the same as deterministic across machines - hence the `host_fonts_needed`
+/// gate, documented on [`append_ass_text_overlay`].
+///
+/// Shared with [`super::caption_measure`] for the same reason
+/// [`SUBTITLES_WRAP_UNICODE_OPTION`] is: a probe that resolves fonts differently
+/// from the burn-in measures a layout the burn-in never draws, and for a
+/// text-extent measurement the font *is* the answer.
+pub(super) fn ass_fonts_dir_option(host_fonts_needed: bool) -> String {
+    use crate::core::effects::escape_ffmpeg_filter_value;
+
+    crate::core::text::fonts::primary_system_font_directory()
         .filter(|_| host_fonts_needed)
         .filter(|directory| {
             // Same apostrophe limit as the `.ass` path: FFmpeg cannot carry a literal
@@ -7130,26 +7189,7 @@ pub(super) fn append_ass_text_overlay(
                 escape_ffmpeg_filter_value(directory_text.as_ref())
             )
         })
-        .unwrap_or_default();
-    // `original_size` is deliberately absent. The filter turns it into a libass
-    // pixel aspect of frame-AR over original-AR, i.e. it exists to un-stretch a
-    // script authored for one aspect and then anamorphically squeezed into
-    // another. This pipeline never squeezes: normalization letterboxes every
-    // source into the output dimensions, so the pixel aspect is always 1 and
-    // the script's own `PlayRes` aspect is the only thing libass needs. Naming
-    // the canvas here distorted glyphs by frame-AR/canvas-AR whenever an export
-    // preset overrode the output to a different aspect than the sequence canvas
-    // (a vertical canvas exported through a 16:9 preset stretched 3.16x).
-    let wrap_unicode_option = if wrap_unicode_supported {
-        SUBTITLES_WRAP_UNICODE_OPTION
-    } else {
-        ""
-    };
-    filter_complex.push(';');
-    filter_complex.push_str(&format!(
-        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}{wrap_unicode_option}{output_label}"
-    ));
-    output_label.to_string()
+        .unwrap_or_default()
 }
 
 /// The `subtitles` option that turns the Unicode line-breaking algorithm on.

@@ -11,7 +11,7 @@
 //! `2` the tool itself failed (bad arguments, unreadable file, FFmpeg failure,
 //! or a rule that errored, leaving the verdict incomplete).
 
-use crate::ffmpeg_env::ensure_ffmpeg;
+use crate::ffmpeg_env::{ensure_ffmpeg, ensure_ffmpeg_optional};
 use crate::output;
 use clap::Args;
 use openreelio_core::ffmpeg::FFmpegRunner;
@@ -153,6 +153,11 @@ fn run(args: VerifyArgs) -> anyhow::Result<i32> {
 /// needs FFmpeg installed and a path that names nothing reads as a missing
 /// file rather than a missing toolchain.
 ///
+/// A `--path` run without `--structural-only` now *offers* FFmpeg to the engine
+/// when one can be found, so the caption-extent pass can measure where the
+/// burn-in really puts each caption instead of estimating it. Offering is all it
+/// is: resolution failure is swallowed and the run proceeds unchanged.
+///
 /// Returning `Err` means the tool failed before it could produce a report; a
 /// report that merely found problems returns `Ok` with a non-zero code.
 pub(crate) fn run_verify(path: &Path, request: VerifyRequest) -> anyhow::Result<(Value, i32)> {
@@ -160,8 +165,19 @@ pub(crate) fn run_verify(path: &Path, request: VerifyRequest) -> anyhow::Result<
 
     let project = super::load_project(&path.to_path_buf())?;
 
+    // Two different questions, and the difference is the whole contract:
+    //
+    // * `requires_ffmpeg` — a rendered file is in play, so a missing toolchain
+    //   is a tool failure and says so.
+    // * `can_use_ffmpeg` — the caption-extent pass would measure where the
+    //   burn-in puts each caption, which needs a binary but no deliverable. It
+    //   is an improvement on an estimate, never a requirement: a machine with no
+    //   FFmpeg verifies exactly as it did before, and `--structural-only` never
+    //   reaches this branch at all.
     let runner = if plan.requires_ffmpeg() {
         Some(FFmpegRunner::new(ensure_ffmpeg()?))
+    } else if plan.can_use_ffmpeg() {
+        ensure_ffmpeg_optional().map(FFmpegRunner::new)
     } else {
         None
     };
@@ -233,6 +249,39 @@ mod tests {
                 "expected the refusal to name '{expected}', got: {error}"
             );
         }
+    }
+
+    /// Feature: FFmpeg resolution
+    /// Scenario: should decide which of the two FFmpeg branches a run takes
+    ///
+    /// This is the branch in [`run_verify`] that actually reaches for a binary,
+    /// so the flags that must never reach it are pinned here rather than only in
+    /// the engine:
+    ///
+    /// * `--structural-only` — neither branch, ever. The flag promises a run
+    ///   that does not touch FFmpeg, and the caption-extent pass must not quietly
+    ///   break that.
+    /// * `--path` alone — the *optional* branch: a binary if one can be found,
+    ///   and an unchanged run if not.
+    /// * `--file` — the required branch, where a missing binary is an error.
+    #[test]
+    fn should_only_reach_for_ffmpeg_when_the_run_has_a_use_for_it() {
+        let structural = parse(&["verify", "--path", "project", "--structural-only"]);
+        let (_, request, _) = structural.into_request();
+        let plan = VerifyPlan::resolve(request).expect("the request is valid");
+        assert!(!plan.requires_ffmpeg());
+        assert!(
+            !plan.can_use_ffmpeg(),
+            "--structural-only must not resolve FFmpeg even optionally"
+        );
+
+        let (_, request, _) = parse(&["verify", "--path", "project"]).into_request();
+        let plan = VerifyPlan::resolve(request).expect("the request is valid");
+        assert!(!plan.requires_ffmpeg(), "no file, no requirement");
+        assert!(
+            plan.can_use_ffmpeg(),
+            "a plain --path run measures caption bounds when it can"
+        );
     }
 
     /// Feature: Argument names in the report

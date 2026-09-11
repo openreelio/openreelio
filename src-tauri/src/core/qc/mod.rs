@@ -4,6 +4,8 @@
 //! Provides rules engine, built-in rules, and auto-fix capabilities.
 
 pub mod caption_contrast;
+/// Measures where the burn-in actually puts each caption, before the rules run.
+pub mod caption_extent;
 /// Groups repeated per-cue caption findings into one actionable violation.
 pub(crate) mod caption_group;
 pub mod context;
@@ -26,8 +28,10 @@ pub use caption_contrast::{
     sample_caption_bands, CaptionBandSample, CaptionBandSampling, CaptionContrastRule,
     CaptionSampleCoverage, CaptionSampleOptions, ContrastThresholds, CAPTION_CONTRAST_CHECK_ID,
 };
+pub use caption_extent::{sample_caption_extents, CaptionExtentOptions, CaptionExtentSampling};
 pub use context::{
-    MeasuredStreams, MeasuredVideoStream, MeasuredWindow, QCContext, RenderMeasurements,
+    CaptionExtentCoverageRecord, CaptionExtentSample, MeasuredStreams, MeasuredVideoStream,
+    MeasuredWindow, QCContext, RenderMeasurements,
 };
 pub use engine::{
     QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleFailure, RuleOutcome, RuleStatus,

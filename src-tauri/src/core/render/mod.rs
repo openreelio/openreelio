@@ -9,6 +9,8 @@
 
 pub mod audio_presence;
 pub mod cache;
+/// Measures the pixel extent each burned-in caption cue actually occupies.
+pub mod caption_measure;
 /// Measures where the burn-in put each colour-emoji cell.
 pub mod emoji_measure;
 pub mod executor;
