@@ -133,24 +133,25 @@
 //! hidden neighbour rendered two pixels shorter is a visible cue two pixels
 //! lower than the one that burns in.
 //!
-//! How the decoration is switched off is measured rather than assumed.
-//! `force_style='Outline=0,Shadow=0'` alone does **nothing** here: the burn-in
-//! writes `\bord`, `\xshad`, `\yshad` and `\blur` into every event's own
-//! override block (see `export::append_ass_text_overlay`), and an inline tag
-//! beats a forced style field. Measured against this binary on a 60px outlined
-//! caption at 1920x1080: full ink `693..1229 x 959..1022`, `force_style` alone
-//! `693..1229 x 959..1022` - identical - and the same script with
-//! [`GLYPH_ONLY_OVERRIDE_TAGS`] appended to its override block
-//! `704..1215 x 970..1009`. So the override block is what carries the answer,
-//! and the forced style rides along only to cover an event that carries no
-//! override block at all. A `BorderStyle: 3` caption - the opaque background box
-//! - collapses the same way, from `685..1237 x 945..1037` to the identical
-//! `704..1215 x 970..1009`, because libass draws no box at a border size of
-//! zero.
+//! How the decoration is switched off is measured rather than assumed, and the
+//! answer is **alpha, never geometry**. The visible cue's own outline and
+//! background box belong to the same bitmap its glyphs do, so shrinking them -
+//! `\bord0\shad0`, or a `force_style='BorderStyle=1,Outline=0'` - moves the cue
+//! libass then packs into the collision stack. [`GLYPH_ONLY_OVERRIDE_TAGS`]
+//! instead paints the outline and shadow colours fully transparent and leaves
+//! every glyph, border and box exactly the size libass drew it, so the pass
+//! measures the letterforms *where they burn in*. The measurements are in that
+//! constant's own documentation.
 //!
-//! None of those tags move a glyph: libass breaks lines on advances, and an
-//! outline has none. The glyph-only render is therefore the same layout with
-//! less ink on it, which is what makes the two boxes comparable at all.
+//! `force_style` is not used at all. It cannot reach an event that overrides the
+//! field inline (an inline tag wins), it reaches the *hidden* neighbours as well
+//! - shrinking the very obstacles the visible cue was positioned against - and
+//! everything it was there for, the `BorderStyle` column included, the alpha
+//! tags cover inline.
+//!
+//! No tag used here moves a glyph: libass breaks lines on advances, and an alpha
+//! has none. The glyph-only render is therefore the same layout with less of it
+//! painted, which is what makes the two boxes comparable at all.
 
 use std::{
     collections::HashMap,
@@ -203,31 +204,55 @@ const PROBE_FRACTIONS: [f64; 3] = [0.25, 0.5, 0.75];
 /// filled alpha with 255 before the filter ever saw it.
 const BBOX_MIN_ALPHA: u32 = 0;
 
-/// Override tags that take a caption's decoration away without moving a glyph.
+/// Override tags that hide a caption's decoration without moving one pixel of
+/// it.
 ///
 /// Appended to the *end* of every override block of every event in the
 /// glyph-only script, because within one block the last spelling of a tag wins:
-/// the burn-in's own `\bord6.00\xshad3\yshad3\blur2` sits earlier in that same
-/// block, and anything written before it would simply be overwritten.
+/// the burn-in's own `\3a&H80&` or `\4a&H80&` sits earlier in that same block,
+/// and anything written before it would simply be overwritten.
 ///
-/// `\shad` as well as `\xshad`/`\yshad` because the burn-in writes the axis
-/// spellings and a script from elsewhere may write the combined one; `\be`
-/// because blur-edges is ink the glyph outline does not have. `\bord0` is what
-/// also removes a `BorderStyle: 3` background box - libass paints no box at a
-/// border size of zero - which is why no separate tag is needed for it.
-const GLYPH_ONLY_OVERRIDE_TAGS: &str = r"\bord0\shad0\xshad0\yshad0\blur0\be0";
-
-/// The `subtitles` option that zeroes decoration at the *style* level.
+/// `\3a` is the outline colour's alpha and `\4a` the shadow-and-back colour's;
+/// `&HFF&` is fully transparent. The glyph fill (`\1a`) is left alone, so what
+/// the pass measures is the letterforms and nothing drawn around them. One tag
+/// covers a `BorderStyle: 3` background box too: libass paints that box in the
+/// outline colour and its drop shadow in the back colour, so hiding both colours
+/// hides the box.
 ///
-/// Belt and braces, and measured to be exactly that: on the scripts this module
-/// builds it changes nothing, because every event overrides those fields inline
-/// and an inline tag wins. It is here for an event that carries no override
-/// block - which the burn-in never writes today and a future one might - and for
-/// the `BorderStyle` column, which no inline tag can reach.
+/// **Alpha, not geometry, and that is the whole point.** The obvious spelling -
+/// `\bord0\shad0\blur0\be0` - takes the decoration away by *shrinking the
+/// bitmap*, and libass packs colliding events by the bitmaps it rendered. A cue
+/// in a collision stack therefore slides down by however much its own outline
+/// was worth, and the glyph pass measures it below where it burns in. Measured
+/// on this binary at 1920x1080, the second of a colliding pair with the first
+/// hidden:
 ///
-/// Quoted, because the value's own commas would otherwise end the `subtitles`
-/// filter and start a new one.
-const GLYPH_ONLY_FORCE_STYLE_OPTION: &str = ":force_style='BorderStyle=1,Outline=0,Shadow=0'";
+/// | style                 | full ink   | `\bord0...` | alpha    |
+/// |-----------------------|------------|-------------|----------|
+/// | `BorderStyle: 3` box  | `869..950` | `899..949`  | `889..939` |
+/// | `BorderStyle: 1` `\bord6` | `891..953` | `903..953` | `897..947` |
+///
+/// Ten pixels and six pixels low respectively, on exactly the population this
+/// pass exists to measure - and in the boxed case one pixel from escaping the
+/// full-ink box it is supposed to refine. Alpha changes no bitmap's extent, so
+/// the collision packing, and therefore the measured position, is the burn-in's.
+///
+/// `\blur`/`\be` are deliberately **not** here, and that is a decision rather
+/// than an oversight. They blur the glyph *fill* whenever there is no
+/// glyph-hugging border bitmap for the blur to land on instead - `\bord0`, and
+/// `BorderStyle: 3`, whose decoration is a box rather than a stroke - so the
+/// glyph box this pass reports then includes the fill's own soft edge. Measured:
+/// a boxed caption's glyphs ink `970..1009` unblurred and `965..1013` at
+/// `\blur2`; a `\bord0\blur6` caption inks `954..1032` and measures the same.
+/// With a border present libass blurs the border bitmap and leaves the fill
+/// crisp, so the glyph box is the sharp letterforms either way.
+///
+/// Zeroing them would shrink the bitmap and bring the geometry shift straight
+/// back, which is the whole defect above. The soft edge of a blurred letterform
+/// is part of that letterform, it is what a viewer actually has to read, and
+/// measuring it errs toward a *larger* box - the safe direction for a safe-area
+/// verdict.
+const GLYPH_ONLY_OVERRIDE_TAGS: &str = r"\3a&HFF&\4a&HFF&";
 
 /// Commas preceding the `Text` field of a `Dialogue` line.
 ///
@@ -258,17 +283,25 @@ const MAX_PROBE_FRAMES_PER_RUN: usize = 240;
 /// Ceiling on how many overlap-free layers one measurement pass will render.
 ///
 /// Every layer is at least one FFmpeg spawn, and two when the glyph box is
-/// wanted, so the number of layers is the number of processes this pass can
-/// start. The colouring in [`plan_layers`] needs one layer per event that is
+/// wanted, so the number of layers multiplies the number of processes this pass
+/// can start. The colouring in [`plan_layers`] needs one layer per event that is
 /// simultaneously on screen, which is one for an ordinary caption track, two
 /// for the title-over-captions project this exists for, and - for a motion
 /// graphic built from thirty text clips that all animate together - thirty.
 /// That project must not spawn sixty FFmpeg runs inside a QC pass.
 ///
 /// Eight is well past anything a human edit produces (a lower third, a bug, a
-/// caption and a chapter card at once is four) and small enough that the worst
-/// case is sixteen spawns rather than an unbounded number. Cues in a layer past
-/// the cap are named in
+/// caption and a chapter card at once is four) and small enough to keep the
+/// spawn count bounded rather than proportional to the timeline's text clips.
+///
+/// Bounded, not fixed: each layer is itself chunked by
+/// [`chunk_by_frame_budget`], so the real ceiling is
+/// `MAX_MEASURED_LAYERS × ceil(probed frames / MAX_PROBE_FRAMES_PER_RUN) ×
+/// (1 + glyph pass)`. A feature-length project's chunk count is what dominates
+/// that product; what this cap removes is the *other* factor growing with it.
+/// The whole pass is still held inside `probe_budget` regardless, which is what
+/// actually stops a QC run from running long. Cues in a layer past the cap are
+/// named in
 /// [`CaptionExtentCoverage::shared_frame_cue_ids`] and graded by the caller's
 /// predictor, exactly as every uncovered cue is.
 const MAX_MEASURED_LAYERS: usize = 8;
@@ -734,12 +767,14 @@ fn cues_for_events(
         .collect()
 }
 
-/// The same script with the *visible* events' decoration taken away.
+/// The same script with the *visible* events' decoration hidden.
 ///
 /// Only the `Dialogue` lines are touched, and only their text field: the styles
 /// keep their `Outline`, `Shadow` and `BorderStyle` columns exactly as the
-/// burn-in wrote them, because [`GLYPH_ONLY_FORCE_STYLE_OPTION`] is what answers
-/// for those and doing it twice would only be two chances to get it wrong.
+/// burn-in wrote them, because those columns are what libass sizes the bitmaps
+/// from and a smaller bitmap is a differently positioned cue. The inline
+/// [`GLYPH_ONLY_OVERRIDE_TAGS`] make the decoration invisible without making it
+/// smaller, which is the only way to have both.
 ///
 /// Line endings, the `[Script Info]` header, the `[Fonts]` section and the
 /// timecodes all survive byte for byte, which is what keeps this the *same*
@@ -748,18 +783,22 @@ fn cues_for_events(
 /// `hidden_events` names the events this layer's script drew no ink for, by
 /// their position among the `Dialogue` lines - which is the event index
 /// everything else in this module counts by, because the builder writes exactly
-/// one line per event in order. Those lines are copied through untouched. They
-/// are the obstacles libass shifted the visible cue away from, and it measured
-/// them with their outline and their background box on: taking the decoration
-/// off a hidden neighbour shrinks what the visible cue has to clear and measures
-/// its glyphs below where they render.
+/// one line per event in order. Those lines are copied through untouched.
 ///
-/// Measured on this binary at 1920x1080, a `\bord6` cue stacked above a hidden
-/// neighbour: the full ink is `891..953`, the glyph box with the neighbour left
-/// alone is `903..953`, and the glyph box with the neighbour zeroed as well is
-/// `909..959` - six pixels *outside* the rectangle it is supposed to be a subset
-/// of, which is a title-safe verdict read off a box that is not inside the
-/// action-safe one.
+/// With [`GLYPH_ONLY_OVERRIDE_TAGS`] as it stands, skipping them changes no
+/// pixel: a hidden event already carries
+/// [`ASS_HIDE_INK_TAGS`](super::export::ASS_HIDE_INK_TAGS), so appending the
+/// same transparency to it a second time is idempotent. The boundary is kept
+/// anyway, and deliberately, because it is the structural guarantee that this
+/// pass never rewrites an event it is not measuring. A hidden neighbour is the
+/// *obstacle* libass shifted the visible cue away from, and libass sized that
+/// obstacle with its outline and its background box on; the day someone widens
+/// this tag set to something that changes a bitmap's extent, the neighbours have
+/// to be out of its reach. Measured on this binary at 1920x1080, a `\bord6` cue
+/// stacked above a hidden neighbour, with the geometry-zeroing tag set this
+/// module used to write: correct box `897..947`, that tag set on the visible cue
+/// alone `903..953`, and on the neighbour as well `909..959` - outside the
+/// full-ink rectangle it is supposed to be a subset of.
 fn glyph_only_script(script: &str, hidden_events: &std::collections::HashSet<usize>) -> String {
     let mut out = String::with_capacity(script.len() + script.len() / 8);
     let mut event_index = 0usize;
@@ -782,7 +821,7 @@ fn glyph_only_script(script: &str, hidden_events: &std::collections::HashSet<usi
         {
             Some(offset) => {
                 out.push_str(&body[..offset]);
-                out.push_str(&zero_decoration_tags(&body[offset..]));
+                out.push_str(&hide_decoration_tags(&body[offset..]));
             }
             None => out.push_str(body),
         }
@@ -813,18 +852,22 @@ fn dialogue_text_offset(line: &str) -> Option<usize> {
     None
 }
 
-/// Appends the decoration-zeroing tags to the end of every override block.
+/// Appends the decoration-hiding tags to the end of every override block.
 ///
 /// Every block, not only the first: the burn-in opens a second block per font
-/// run and per emoji spacer, and a block later in the line could otherwise put
-/// a border back. Appending rather than prepending is the whole trick - inside
-/// one block the last spelling of a tag wins, so these have to come after the
-/// `\bord` the burn-in wrote.
+/// run and per emoji spacer, and a block later in the line could otherwise make
+/// an outline opaque again. Appending rather than prepending is the whole trick:
+/// inside one block the last spelling of a tag wins, so these have to come after
+/// any `\3a` the burn-in wrote.
 ///
 /// Text carrying no block at all gets one in front, so an event written by hand
 /// (or by a future builder that drops the inherited tags) is still measured
-/// without its style's decoration.
-fn zero_decoration_tags(text: &str) -> String {
+/// without its style's decoration painted. That is also what retires the
+/// `force_style` option this pass used to splice into the filter: the one case
+/// it covered - an event with no override block, whose `BorderStyle` column no
+/// inline tag could otherwise reach - is covered here, inline, and without
+/// touching the hidden neighbours a style-level option would also have reached.
+fn hide_decoration_tags(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + GLYPH_ONLY_OVERRIDE_TAGS.len() + 2);
     let mut rest = text;
     let mut blocks = 0usize;
@@ -1133,11 +1176,19 @@ pub async fn measure_caption_extents(
 
     for (layer_index, layer) in layers.iter().enumerate() {
         let visible: std::collections::HashSet<usize> = layer.iter().copied().collect();
-        // The overwhelming majority of projects: one caption track, every event
-        // in the one layer, nothing to hide. The render's own script is reused
-        // rather than rebuilt, which makes the common path byte-identical to
-        // what this module wrote before isolation existed - a property the
-        // builder guarantees anyway, and one it costs nothing to also not test.
+        // One layer holding *every* event in the script: there is nothing to
+        // hide, so the render's own script is reused rather than rebuilt.
+        //
+        // Narrower than "an ordinary one-track project", and worth being exact
+        // about: the layers only ever hold the `measurable` cues, so a single
+        // emoji cue, a single sub-frame cue, or any cue past
+        // `MAX_MEASURED_LAYERS` is enough to take a one-caption-track project
+        // down the rebuild path. That is correctness-neutral - the isolated
+        // build with every measured event visible produces the same script the
+        // builder wrote, and `build_ass_text_overlay_script_isolated` is tested
+        // for exactly that - so this stays a shortcut, not a guarantee. It is
+        // load-bearing only in that the common shape does not pay for a second
+        // build.
         let text = if visible.len() == event_count {
             script.script.clone()
         } else {
@@ -1218,7 +1269,6 @@ pub async fn measure_caption_extents(
                 &script,
                 ProbePass {
                     script_path: &plan.script_path,
-                    force_style_option: "",
                     collect_font_notes: script.uses_host_fonts,
                 },
                 &plan.chunks,
@@ -1297,7 +1347,6 @@ pub async fn measure_caption_extents(
                     &script,
                     ProbePass {
                         script_path: &glyph_path,
-                        force_style_option: GLYPH_ONLY_FORCE_STYLE_OPTION,
                         // Already collected from the full-ink run over the same
                         // script, and libass resolves the same faces for both:
                         // saying it twice would only pad the report.
@@ -1486,11 +1535,14 @@ impl ProbeOutcome {
 /// How one pass differs from the other. Everything else about them is identical,
 /// which is the point: two boxes of the same caption, not two measurements of
 /// two different layouts.
+///
+/// The filter graph is identical too, down to the option string. The two passes
+/// differ by their *script* and by nothing else, which is what lets the glyph
+/// box be compared with the full-ink box at all - a `subtitles` option that
+/// applied to one and not the other would be a second layout in disguise.
 struct ProbePass<'a> {
-    /// Script to render - the burn-in's own, or its decoration-free twin.
+    /// Script to render - the burn-in's own, or its decoration-hiding twin.
     script_path: &'a Path,
-    /// `subtitles` options spliced in after the shared ones.
-    force_style_option: &'a str,
     /// Whether to run verbosely enough to hear libass pick a fallback face.
     collect_font_notes: bool,
 }
@@ -1566,9 +1618,14 @@ async fn run_probe_pass(
 
 /// Everything about a probe's filtergraph that is not the cue list.
 ///
-/// Grouped rather than passed one by one because four of the five are strings
+/// Grouped rather than passed one by one because three of the four are strings
 /// spliced into the same `subtitles` option list, and a call site that mixed two
 /// of them up would build a graph that runs and measures the wrong thing.
+///
+/// There is deliberately no `force_style` here. Both passes want the styles the
+/// burn-in wrote, because a style-level override reaches every event in the
+/// script - the alpha-hidden neighbours included - and shrinking one of those is
+/// what moves the cue being measured. See [`GLYPH_ONLY_OVERRIDE_TAGS`].
 struct ProbeGraph<'a> {
     /// The script libass is handed.
     script_path: &'a Path,
@@ -1576,8 +1633,6 @@ struct ProbeGraph<'a> {
     fonts_dir_option: &'a str,
     /// `:wrap_unicode=1`, or empty for a binary whose filter has no such option.
     wrap_unicode_option: &'a str,
-    /// `:force_style='...'`, or empty for the full-ink pass.
-    force_style_option: &'a str,
     /// `-loglevel` value.
     log_level: &'a str,
 }
@@ -1600,7 +1655,6 @@ fn build_probe_args(
         script_path,
         fonts_dir_option,
         wrap_unicode_option,
-        force_style_option,
         log_level,
     } = graph;
 
@@ -1634,7 +1688,7 @@ fn build_probe_args(
     // produces no bytes.
     let filter = format!(
         "select='{select}',subtitles=filename='{escaped_script}':alpha=1{fonts_dir_option}\
-         {wrap_unicode_option}{force_style_option},alphaextract,bbox=min_val={BBOX_MIN_ALPHA},\
+         {wrap_unicode_option},alphaextract,bbox=min_val={BBOX_MIN_ALPHA},\
          metadata=mode=print:file=-"
     );
 
@@ -1733,7 +1787,6 @@ async fn run_probe(
             script_path: pass.script_path,
             fonts_dir_option: &fonts_dir_option,
             wrap_unicode_option,
-            force_style_option: pass.force_style_option,
             log_level,
         },
     );
@@ -1939,13 +1992,11 @@ mod tests {
         script_path: &'a Path,
         fonts_dir_option: &'a str,
         wrap_unicode_option: &'a str,
-        force_style_option: &'a str,
     ) -> ProbeGraph<'a> {
         ProbeGraph {
             script_path,
             fonts_dir_option,
             wrap_unicode_option,
-            force_style_option,
             log_level: PROBE_LOG_LEVEL,
         }
     }
@@ -2734,7 +2785,7 @@ mod tests {
             &request,
             &[(0, 30, 1.0), (0, 60, 2.0), (0, 90, 3.0)],
             30.0,
-            &probe_graph(Path::new("script.ass"), "", "", ""),
+            &probe_graph(Path::new("script.ass"), "", ""),
         );
         let input = args.iter().position(|arg| arg == "-i").expect("an input");
         let filter = args
@@ -2786,7 +2837,6 @@ mod tests {
                 Path::new("script.ass"),
                 ":fontsdir='/usr/share/fonts'",
                 super::super::export::SUBTITLES_WRAP_UNICODE_OPTION,
-                "",
             ),
         );
         let filter = args
@@ -2826,7 +2876,7 @@ mod tests {
             &request,
             &[(0, 25, 1.0)],
             25.0,
-            &probe_graph(Path::new("s.ass"), "", "", ""),
+            &probe_graph(Path::new("s.ass"), "", ""),
         );
         let input = args.iter().position(|arg| arg == "-i").expect("an input");
 
@@ -3001,13 +3051,16 @@ mod tests {
     }
 
     /// Feature: caption extent measurement
-    /// Scenario: the glyph-only probe also forces the style fields
+    /// Scenario: the glyph-only probe overrides no style field
     ///
-    /// Belt and braces for the `BorderStyle` column, which no inline tag can
-    /// reach, and quoted so the value's own commas do not end the `subtitles`
-    /// filter and start a new one.
+    /// The decoration is hidden inline, per event, by
+    /// [`GLYPH_ONLY_OVERRIDE_TAGS`]. A `force_style` option would reach the
+    /// alpha-hidden neighbours too, and a neighbour rendered smaller is a
+    /// measured cue libass packs lower - the geometry shift this pass exists to
+    /// avoid. Asserted on the graph so a "belt and braces" option cannot come
+    /// back without this failing.
     #[test]
-    fn the_glyph_probe_graph_forces_the_decoration_off_at_the_style_level() {
+    fn the_glyph_probe_graph_overrides_no_style_field() {
         let sequence = sequence_with_captions(&[("Hello", 0.0, 4.0)]);
         let request = CaptionExtentRequest {
             sequence: &sequence,
@@ -3024,12 +3077,7 @@ mod tests {
             &request,
             &[(0, 30, 1.0)],
             30.0,
-            &probe_graph(
-                Path::new("glyph.ass"),
-                "",
-                "",
-                GLYPH_ONLY_FORCE_STYLE_OPTION,
-            ),
+            &probe_graph(Path::new("glyph.ass"), "", ""),
         );
         let filter = args
             .iter()
@@ -3038,9 +3086,8 @@ mod tests {
 
         assert_eq!(
             args[filter + 1],
-            "select='eq(n\\,30)',subtitles=filename='glyph.ass':alpha=1:\
-             force_style='BorderStyle=1,Outline=0,Shadow=0',alphaextract,bbox=min_val=0,\
-             metadata=mode=print:file=-"
+            "select='eq(n\\,30)',subtitles=filename='glyph.ass':alpha=1,alphaextract,\
+             bbox=min_val=0,metadata=mode=print:file=-"
         );
     }
 
@@ -3379,19 +3426,11 @@ mod tests {
     /// The probe graph, run standalone against `script`, for one frame.
     ///
     /// Returns the box for that frame, or `None` when the frame carried no ink.
+    ///
+    /// One helper for both passes, because the passes differ only by the script
+    /// they are handed: a test that measured the glyph box through a different
+    /// graph would not be measuring what this module runs.
     fn probe_script(ffmpeg: &Path, script: &str, frame: u64, fps: f64) -> Option<MeasuredBox> {
-        probe_script_styled(ffmpeg, script, frame, fps, "")
-    }
-
-    /// The same, with the glyph-only pass's `force_style` under the caller's
-    /// control, so a test can measure both boxes of one fixture.
-    fn probe_script_styled(
-        ffmpeg: &Path,
-        script: &str,
-        frame: u64,
-        fps: f64,
-        force_style: &str,
-    ) -> Option<MeasuredBox> {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("extent.ass");
         std::fs::write(&path, script).expect("write script");
@@ -3420,7 +3459,7 @@ mod tests {
             &request,
             &[(0, frame, frame as f64 / fps)],
             fps,
-            &probe_graph(&path, &fonts, wrap, force_style),
+            &probe_graph(&path, &fonts, wrap),
         );
 
         let mut command = std::process::Command::new(ffmpeg);
@@ -3475,6 +3514,18 @@ mod tests {
              Text\n\
              {lines}"
         )
+    }
+
+    /// The same shape, with the style's `BorderStyle` column set to `3` - the
+    /// opaque background box - and a 10px box with a 3px drop shadow.
+    ///
+    /// The box is ink no `\bord` of the *events* put there, which is exactly why
+    /// it is the case the alpha method has to answer for: it is painted in the
+    /// outline colour and its shadow in the back colour, so `\3a`/`\4a` hide it
+    /// without changing the size of a single bitmap.
+    fn fixture_script_boxed(events: &[(&str, &str)], margin_v: u32) -> String {
+        fixture_script_with_events(events, margin_v)
+            .replace(",0,0,1,2.00,0.00,2,", ",0,0,3,10.00,3.00,2,")
     }
 
     /// Feature: caption extent measurement
@@ -3545,21 +3596,132 @@ mod tests {
     }
 
     /// Feature: caption extent measurement
-    /// Scenario: the glyph pass leaves a hidden neighbour's decoration alone
+    /// Scenario: a collided cue's glyph box is measured where the cue burns in
     ///
-    /// The glyph-only render takes the outline, shadow and background box off
-    /// every event it measures - and a hidden event is not one of those. It is
-    /// the *obstacle* libass shifted the measured cue away from, and libass
-    /// measured it with its decoration on: shrink it and the visible cue slides
-    /// down by however much the outline was worth.
+    /// The load-bearing property of [`GLYPH_ONLY_OVERRIDE_TAGS`], and the one
+    /// the geometry-zeroing tag set this module used to write got wrong.
     ///
-    /// Measured on this binary at 1920x1080, a `\bord6` cue stacked above a
-    /// hidden neighbour: the full ink is `891..953`, the glyph box with the
-    /// neighbour left alone is `903..953` - inside the ink on every side - and
-    /// the glyph box with the neighbour zeroed too is `909..959`, which escapes
-    /// the full-ink box by six pixels at the bottom. A title-safe verdict is
-    /// then being read off a rectangle that is not inside the rectangle it is
-    /// supposed to refine.
+    /// libass packs colliding events apart by the *bitmaps it rendered*. Take a
+    /// cue's outline or background box away by shrinking it - `\bord0\shad0`, or
+    /// a `force_style` - and libass lets that cue sit lower in the stack than
+    /// the render does, so the glyph pass reports a caption below where a viewer
+    /// sees it. Hiding the same decoration with `\3a&HFF&\4a&HFF&` changes no
+    /// bitmap's extent, so the packing, and the measured position, is the
+    /// burn-in's.
+    ///
+    /// The control is the same fixture with those alpha tags written straight
+    /// into the visible event and its geometry untouched - which is, by
+    /// construction, the cue's true glyph extent where it really renders. The
+    /// assertion is *equality* with that control, not containment inside the
+    /// full ink: containment is exactly what the old tag set went on satisfying
+    /// while reading six and ten pixels low.
+    ///
+    /// Measured on this binary at 1920x1080, second of a colliding pair with the
+    /// first alpha-hidden:
+    ///
+    /// | style | full ink | `\bord0...` | alpha (and control) |
+    /// |---|---|---|---|
+    /// | `\bord6` | `891..953` | `903..953` | `897..947` |
+    /// | `BorderStyle: 3` box | `869..950` | `899..949` | `889..939` |
+    ///
+    /// Note how nearly the boxed case broke the glyph-inside-ink invariant
+    /// outright: `949` against `950`.
+    #[test]
+    #[ignore = "requires FFmpeg with libass"]
+    fn a_collided_cues_glyph_box_is_measured_where_the_cue_burns_in() {
+        let Some(ffmpeg) = crate::core::test_ffmpeg::require_or_skip_ffmpeg() else {
+            return;
+        };
+
+        // The tag set this module wrote before the fix, kept here so the defect
+        // it caused is asserted rather than remembered.
+        const GEOMETRY_TAGS: &str = r"\bord0\shad0\xshad0\yshad0\blur0\be0";
+
+        let hide = crate::core::render::export::ASS_HIDE_INK_TAGS;
+        let hidden: std::collections::HashSet<usize> = [0usize].into_iter().collect();
+
+        for (label, tags, build) in [
+            (
+                "BorderStyle: 1 with a 6px outline",
+                r"\bord6",
+                fixture_script_with_events as fn(&[(&str, &str)], u32) -> String,
+            ),
+            ("BorderStyle: 3 opaque box", "", fixture_script_boxed),
+            (
+                "a blurred outline",
+                r"\bord4\blur3",
+                fixture_script_with_events,
+            ),
+        ] {
+            let first = format!("\\an2{hide}{tags}");
+            let second = format!("\\an2{tags}");
+            let isolated = build(
+                &[
+                    (&first, "First caption line"),
+                    (&second, "Second caption line"),
+                ],
+                60,
+            );
+            // Geometry untouched, the visible cue's outline and shadow simply
+            // not painted. Where the cue's letterforms really are.
+            let control_second = format!("{second}{GLYPH_ONLY_OVERRIDE_TAGS}");
+            let control_script = build(
+                &[
+                    (&first, "First caption line"),
+                    (&control_second, "Second caption line"),
+                ],
+                60,
+            );
+            // The same fixture with the decoration taken away by shrinking it.
+            let geometry_second = format!("{second}{GEOMETRY_TAGS}");
+            let geometry_script = build(
+                &[
+                    (&first, "First caption line"),
+                    (&geometry_second, "Second caption line"),
+                ],
+                60,
+            );
+
+            let full_ink = probe_script(&ffmpeg, &isolated, 30, 30.0)
+                .unwrap_or_else(|| panic!("{label}: the visible caption draws ink"));
+            let glyph = probe_script(&ffmpeg, &glyph_only_script(&isolated, &hidden), 30, 30.0)
+                .unwrap_or_else(|| panic!("{label}: the glyphs draw ink"));
+            let control = probe_script(&ffmpeg, &control_script, 30, 30.0)
+                .unwrap_or_else(|| panic!("{label}: the control's glyphs draw ink"));
+            let geometry = probe_script(&ffmpeg, &geometry_script, 30, 30.0)
+                .unwrap_or_else(|| panic!("{label}: the shrunken cue draws ink"));
+
+            assert_eq!(
+                glyph, control,
+                "{label}: the glyph pass has to measure the cue exactly where hiding its \
+                 decoration by alpha leaves it - equality, because the wrong method is also \
+                 inside the ink: {glyph:?} against {control:?}"
+            );
+            assert!(
+                glyph.x1 > full_ink.x1
+                    && glyph.x2 < full_ink.x2
+                    && glyph.y1 > full_ink.y1
+                    && glyph.y2 < full_ink.y2,
+                "{label}: and it still has to sit strictly inside the ink drawn around it: \
+                 {glyph:?} against {full_ink:?}"
+            );
+            assert!(
+                geometry.y1 > glyph.y1 && geometry.y2 > glyph.y2,
+                "{label}: the fixture only means anything if taking the decoration away by \
+                 geometry really does drop the cue down the collision stack: {geometry:?} \
+                 against {glyph:?}"
+            );
+        }
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: the glyph pass rewrites no event it is not measuring
+    ///
+    /// With [`GLYPH_ONLY_OVERRIDE_TAGS`] as it stands this changes no pixel - a
+    /// hidden event is already fully transparent, so hiding it again is
+    /// idempotent - and that is the assertion: the two scripts measure the same.
+    /// The `hidden_events` boundary exists for the tag set that is *not*
+    /// idempotent, and this pins that the current one is.
     #[test]
     #[ignore = "requires FFmpeg with libass"]
     fn the_glyph_pass_leaves_a_hidden_neighbours_decoration_alone() {
@@ -3568,46 +3730,30 @@ mod tests {
         };
 
         let hide = crate::core::render::export::ASS_HIDE_INK_TAGS;
-        let isolated = fixture_script_with_events(
+        let isolated = fixture_script_boxed(
             &[
-                (&format!("\\an2\\bord6{hide}"), "First caption line"),
+                (&format!("\\an2{hide}\\bord6"), "First caption line"),
                 ("\\an2\\bord6", "Second caption line"),
             ],
             60,
         );
         let hidden: std::collections::HashSet<usize> = [0usize].into_iter().collect();
 
-        let full_ink =
-            probe_script(&ffmpeg, &isolated, 30, 30.0).expect("the visible caption draws ink");
-        let glyph = probe_script_styled(
-            &ffmpeg,
-            &glyph_only_script(&isolated, &hidden),
-            30,
-            30.0,
-            GLYPH_ONLY_FORCE_STYLE_OPTION,
-        )
-        .expect("the glyphs draw ink");
-        let glyph_if_both_zeroed = probe_script_styled(
+        let skipped = probe_script(&ffmpeg, &glyph_only_script(&isolated, &hidden), 30, 30.0)
+            .expect("the glyphs draw ink");
+        let rewritten = probe_script(
             &ffmpeg,
             &glyph_only_script(&isolated, &std::collections::HashSet::new()),
             30,
             30.0,
-            GLYPH_ONLY_FORCE_STYLE_OPTION,
         )
         .expect("the glyphs draw ink");
 
-        assert!(
-            glyph.x1 >= full_ink.x1
-                && glyph.x2 <= full_ink.x2
-                && glyph.y1 >= full_ink.y1
-                && glyph.y2 <= full_ink.y2,
-            "the letterforms have to sit inside the ink drawn around them: {glyph:?} against \
-             {full_ink:?}"
-        );
-        assert!(
-            glyph_if_both_zeroed.y2 > full_ink.y2,
-            "the fixture only means anything if zeroing the hidden neighbour really does move the \
-             measured cue out of its own ink: {glyph_if_both_zeroed:?} against {full_ink:?}"
+        assert_eq!(
+            skipped, rewritten,
+            "hiding an already-hidden neighbour a second time has to be a no-op; if it is not, \
+             the tag set has started changing bitmap extents and the neighbours are no longer \
+             where libass packed the measured cue against them: {skipped:?} against {rewritten:?}"
         );
     }
 
@@ -3876,18 +4022,14 @@ mod tests {
     /// Scenario: the glyph-only render is strictly smaller than the full ink
     ///
     /// The claim the whole two-tier design rests on, and one no unit test can
-    /// make. Measured against this binary at 1920x1080, on a 60px caption with a
-    /// 6px outline and a 3px shadow:
+    /// make: a caption with no neighbour to collide with still measures a glyph
+    /// box strictly inside its own ink, because `\3a`/`\4a` stop the outline and
+    /// the shadow being painted.
     ///
-    /// - full ink            `693..1229 x 959..1022`
-    /// - `force_style` alone `693..1229 x 959..1022` — *unchanged*, because the
-    ///   event's own `\bord6.00` beats a forced style field
-    /// - glyph only          `704..1215 x 970..1009`
-    ///
-    /// The middle line is why this module rewrites the script rather than
-    /// passing an option, and it is asserted here so a future simplification
-    /// back to `force_style` alone fails loudly instead of silently measuring
-    /// the same box twice.
+    /// The `\blur2` in the fixture is deliberate. libass blurs the *border*
+    /// bitmap when a border is drawn and leaves the fill crisp, so hiding the
+    /// border by alpha measures the sharp letterforms - the same box zeroing the
+    /// geometry would have reported, and one no `\blur0` of ours had to produce.
     #[test]
     #[ignore = "requires FFmpeg with libass"]
     fn the_glyph_only_render_is_strictly_inside_the_full_ink_render() {
@@ -3900,18 +4042,8 @@ mod tests {
         let glyph = glyph_only_script(&full, &std::collections::HashSet::new());
 
         let full_box = probe_script(&ffmpeg, &full, 30, 30.0).expect("the caption draws ink");
-        let forced_only =
-            probe_script_styled(&ffmpeg, &full, 30, 30.0, GLYPH_ONLY_FORCE_STYLE_OPTION)
-                .expect("the caption still draws ink");
-        let glyph_box =
-            probe_script_styled(&ffmpeg, &glyph, 30, 30.0, GLYPH_ONLY_FORCE_STYLE_OPTION)
-                .expect("the glyphs draw ink");
+        let glyph_box = probe_script(&ffmpeg, &glyph, 30, 30.0).expect("the glyphs draw ink");
 
-        assert_eq!(
-            forced_only, full_box,
-            "an inline `\\bord` beats a forced style field, so `force_style` alone measures the \
-             full ink: {forced_only:?} against {full_box:?}"
-        );
         assert!(
             glyph_box.x1 > full_box.x1
                 && glyph_box.y1 > full_box.y1
@@ -3926,12 +4058,25 @@ mod tests {
     /// Scenario: a background-box caption collapses to its glyphs too
     ///
     /// `BorderStyle: 3` paints an opaque rectangle in the `OutlineColour`
-    /// column, which is ink the glyphs do not have and which no `\shad` or
-    /// `\blur` tag touches. Measured against this binary, a boxed caption inks
-    /// `685..1237 x 945..1037` and its glyph-only twin inks
+    /// column, and its drop shadow in the `BackColour` one - ink the glyphs do
+    /// not have. `\3a&HFF&\4a&HFF&` reaches both, which is why the alpha method
+    /// needs no separate answer for the box and no `force_style` for the
+    /// `BorderStyle` column. Measured against this binary, a boxed caption inks
+    /// `690..1232 x 949..1033` and its glyph-only twin inks
     /// `704..1215 x 970..1009` - the *identical* box the outlined caption's
-    /// glyphs measure, because libass paints no background box at a border size
-    /// of zero.
+    /// glyphs measure.
+    ///
+    /// The second half of this test is where the blur decision is pinned. A
+    /// boxed caption has no glyph-hugging border bitmap for `\blur` to land on,
+    /// so libass blurs the *fill*, and the alpha method reports the fill it
+    /// finds: the same words at `\blur2` measure `700..1219 x 965..1013`, a few
+    /// pixels wider on every side. That is deliberate, and the reason
+    /// [`GLYPH_ONLY_OVERRIDE_TAGS`] carries no `\blur0`. Zeroing the blur would
+    /// shrink the bitmap, and a shrunken bitmap is a cue libass packs somewhere
+    /// else - the exact defect the alpha method exists to remove. The soft edge
+    /// of a blurred letterform is part of that letterform, and measuring it
+    /// errs toward a larger box, which is the safe direction for a safe-area
+    /// verdict.
     #[test]
     #[ignore = "requires FFmpeg with libass"]
     fn a_background_box_caption_collapses_to_the_same_glyphs() {
@@ -3939,31 +4084,33 @@ mod tests {
             return;
         };
 
-        let outlined = fixture_script(r"\an2\bord6.00\xshad3\yshad3\blur2", "Hello measured world");
         // `BorderStyle: 3` with a 10px box, in the columns the export writes.
-        let boxed = fixture_script(
+        let boxed_style =
+            |script: String| script.replace(",0,0,1,2.00,0.00,2,", ",0,0,3,10.00,3.00,2,");
+        let glyphs_of = |script: &str| {
+            probe_script(
+                &ffmpeg,
+                &glyph_only_script(script, &std::collections::HashSet::new()),
+                30,
+                30.0,
+            )
+            .expect("the glyphs draw ink")
+        };
+
+        let outlined = fixture_script(r"\an2\bord6.00\xshad3\yshad3", "Hello measured world");
+        let boxed = boxed_style(fixture_script(
+            r"\an2\bord10.00\xshad3\yshad3",
+            "Hello measured world",
+        ));
+        let boxed_blurred = boxed_style(fixture_script(
             r"\an2\bord10.00\xshad3\yshad3\blur2",
             "Hello measured world",
-        )
-        .replace(",0,0,1,2.00,0.00,2,", ",0,0,3,10.00,3.00,2,");
+        ));
 
         let boxed_ink = probe_script(&ffmpeg, &boxed, 30, 30.0).expect("a boxed caption draws ink");
-        let boxed_glyphs = probe_script_styled(
-            &ffmpeg,
-            &glyph_only_script(&boxed, &std::collections::HashSet::new()),
-            30,
-            30.0,
-            GLYPH_ONLY_FORCE_STYLE_OPTION,
-        )
-        .expect("its glyphs draw ink");
-        let outlined_glyphs = probe_script_styled(
-            &ffmpeg,
-            &glyph_only_script(&outlined, &std::collections::HashSet::new()),
-            30,
-            30.0,
-            GLYPH_ONLY_FORCE_STYLE_OPTION,
-        )
-        .expect("the outlined caption's glyphs draw ink");
+        let boxed_glyphs = glyphs_of(&boxed);
+        let outlined_glyphs = glyphs_of(&outlined);
+        let blurred_glyphs = glyphs_of(&boxed_blurred);
 
         assert!(
             boxed_glyphs.x1 > boxed_ink.x1 && boxed_glyphs.y1 > boxed_ink.y1,
@@ -3972,7 +4119,16 @@ mod tests {
         assert_eq!(
             boxed_glyphs, outlined_glyphs,
             "the same words in the same face measure the same glyph box whichever decoration was \
-             taken off them"
+             hidden on them"
+        );
+        assert!(
+            blurred_glyphs.x1 < boxed_glyphs.x1
+                && blurred_glyphs.x2 > boxed_glyphs.x2
+                && blurred_glyphs.y1 < boxed_glyphs.y1
+                && blurred_glyphs.y2 > boxed_glyphs.y2,
+            "a boxed caption's `\\blur` lands on the fill, and this pass measures the soft \
+             letterform rather than shrinking the bitmap to sharpen it: {blurred_glyphs:?} \
+             against {boxed_glyphs:?}"
         );
     }
 

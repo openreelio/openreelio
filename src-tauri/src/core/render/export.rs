@@ -6676,7 +6676,20 @@ fn append_ass_text_style_and_event(
     // Appended after `tags`, and that ordering is the mechanism: within one
     // override block the last spelling of a tag wins, so an alpha the event's
     // own block set earlier cannot put the ink back.
-    let hide = if hidden || emoji.is_some_and(|context| context.markers.is_some()) {
+    let marker_pass = emoji.is_some_and(|context| context.markers.is_some());
+    // The two reasons are mutually exclusive by construction, and have to stay
+    // that way: the marker pass wants its cells *visible* and re-opens the fill
+    // alpha in its own block (`ass_emoji_marker_run`'s `\1a&H00&`), which sits
+    // after this one and would therefore paint a cell on an event the isolated
+    // build meant to hide. Nothing asks for both today - `caption_measure`
+    // passes `markers: None` - so this is a fence around a combination that has
+    // never been designed, not a repair of one that has.
+    debug_assert!(
+        !(hidden && marker_pass),
+        "an isolated build and the colour-emoji marker pass cannot share a script: the marker \
+         run re-opens the fill alpha, so a hidden event would paint its cells"
+    );
+    let hide = if hidden || marker_pass {
         ASS_HIDE_INK_TAGS
     } else {
         ""
