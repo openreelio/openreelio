@@ -646,8 +646,9 @@ impl FlushEdges {
     /// Whether the ink ran off the frame by an amount the picture cannot show.
     ///
     /// libass clips its own rendering at the frame, so a caption wider than the
-    /// picture measures as one *exactly* the width of the picture and the
-    /// overshoot is simply not in the image. That is worth reporting, and it is
+    /// picture measures as one the width of the picture - to within the few
+    /// pixels of [`FLUSH_EDGE_TOLERANCE_PX`] - and the overshoot is simply not
+    /// in the image. That is worth reporting, and it is
     /// the only thing here that is: "flush against an edge" on its own is
     /// ordinary output, and treating it as an overflow makes this measurement
     /// stricter than the estimate it replaced, on cues nobody cropped.
@@ -682,15 +683,72 @@ impl FlushEdges {
     }
 }
 
+/// How far short of a frame edge the ink may stop and still saturate it.
+///
+/// A caption libass cut off at the frame does *not* reliably ink the boundary
+/// column. The line is laid out in the script's `PlayRes` space and rasterised
+/// into the output frame, and where the boundary falls inside the run is a
+/// matter of arithmetic: land it in the side bearing of the glyph that straddles
+/// the edge and the outermost column stays transparent, even though the rest of
+/// the sentence was thrown away. Asking for pixel `0` and pixel `width - 1`
+/// exactly therefore reads half of all cropped captions as "fits".
+///
+/// Not a theory - measured on this binary, over a single centred line whose
+/// length was grown one character at a time well past the point where the ink
+/// stops widening (so every sample below really is cropped). The gap alternates
+/// with the parity of the character count, which is what makes it half:
+///
+/// | canvas | `PlayResX` | 48px | 72px | 96px |
+/// |---|---|---|---|---|
+/// | 1080x1920 | 608 | 8 | 4 | 12 |
+/// | 720x1280 | 608 | 5 | 3 | 8 |
+/// | 1088x1920 | 612 | 4 | 8 | 16 |
+/// | 1920x1080 | 1920 | 4 | 6 | 9 |
+/// | 1280x720 | 1920 | 2 | 4 | 6 |
+/// | 1080x1080 | 1080 | 4 | 7 | 6 |
+///
+/// (worst glyph of `l . i I 1 j t f r` at each size; `PlayResY` is always 1080,
+/// so a vertical canvas is a 608-wide script blown up to 1080 columns and pays
+/// the largest gaps - which is exactly where this check was reported passing a
+/// caption cropped on both sides.)
+///
+/// `16` is the largest of those. It bounds the measurements above and not the
+/// mechanism: the gap is a fraction of the em rather than a fixed count of
+/// pixels, so a caption set far larger than 96px can still stop further short
+/// than this. Closing that for good needs the boundary column's ink run rather
+/// than an ever-wider tolerance - see the TODO on
+/// [`FlushEdges::overflows_frame`].
+///
+/// What it costs is bounded and was measured too. A false positive needs a
+/// caption that lost nothing and yet inks within 16 pixels of *both* opposing
+/// edges - on a 1080-wide frame, one filling 97% of the picture, which is
+/// already far outside the 93% action-safe box `caption.safe_area` grades. The
+/// alternative is the defect this replaces, where a cropped caption's own box is
+/// indistinguishable from that one and the Error simply does not fire.
+const FLUSH_EDGE_TOLERANCE_PX: i64 = 16;
+
+/// The tolerance one axis can carry without its two thresholds meeting.
+///
+/// On a canvas narrower than twice the tolerance, "near the left edge" and "near
+/// the right edge" would overlap and a single inked pixel would read as flush
+/// against both at once - an overflow invented out of one dot. The canvas floor
+/// elsewhere is far above that, so this only ever binds on a degenerate frame.
+fn flush_tolerance(extent: u32) -> i64 {
+    let midpoint = (i64::from(extent) - 1) / 2 - 1;
+    midpoint.clamp(0, FLUSH_EDGE_TOLERANCE_PX)
+}
+
 /// Which frame edges the measured ink reaches.
 fn flush_edges(measured: MeasuredBox, width: u32, height: u32) -> FlushEdges {
-    let right_edge = i64::from(width) - 1;
-    let bottom_edge = i64::from(height) - 1;
+    let horizontal = flush_tolerance(width);
+    let vertical = flush_tolerance(height);
+    let right_edge = i64::from(width) - 1 - horizontal;
+    let bottom_edge = i64::from(height) - 1 - vertical;
 
     FlushEdges {
-        left: measured.x1 <= 0,
+        left: i64::from(measured.x1) <= horizontal,
         right: i64::from(measured.x2) >= right_edge,
-        top: measured.y1 <= 0,
+        top: i64::from(measured.y1) <= vertical,
         bottom: i64::from(measured.y2) >= bottom_edge,
     }
 }
@@ -2055,17 +2113,17 @@ mod tests {
     /// Scenario: a box filling an entire axis is an overflow of unknown size
     ///
     /// libass clips at the frame, so a caption wider than the picture measures
-    /// as one exactly the width of the picture. Reporting that as a clean "fits
-    /// inside the frame" is the failure this flag exists to prevent - and the
-    /// signature is both *opposing* edges at once, because that is what a line
-    /// longer than the axis produces and what a legitimate caption cannot.
+    /// as one the width of the picture. Reporting that as a clean "fits inside
+    /// the frame" is the failure this flag exists to prevent - and the signature
+    /// is both *opposing* edges at once, because that is what a line longer than
+    /// the axis produces and what a legitimate caption cannot.
     #[test]
     fn a_box_filling_a_whole_axis_is_flagged_as_clipped() {
         let inside = MeasuredBox {
-            x1: 1,
-            y1: 1,
-            x2: 1918,
-            y2: 1078,
+            x1: 60,
+            y1: 60,
+            x2: 1859,
+            y2: 1019,
         };
         assert!(!flush_edges(inside, 1920, 1080).overflows_frame());
 
@@ -2085,6 +2143,112 @@ mod tests {
             y2: 1079,
         };
         assert!(flush_edges(vertical, 1920, 1080).overflows_frame());
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a box that stops a pixel short of both edges is still clipped
+    ///
+    /// The regression this tolerance exists for, in arithmetic. Asking for pixel
+    /// `0` and pixel `width - 1` *exactly* let a caption cropped on both sides
+    /// through whenever the frame boundary happened to fall in the side bearing
+    /// of the glyph straddling it - which alternates with the character count,
+    /// so it was half of them. Measured on a 1080x1920 sequence the ink stopped
+    /// six columns short at each end (`6..1073`) while the estimate that
+    /// measurement replaced reported the same caption, which is the shape of
+    /// "worse than the model it replaced" this whole flag exists to avoid.
+    ///
+    /// The far side of the tolerance is asserted in the same breath: a box tens
+    /// of pixels clear of the edges is an ordinary caption and must stay one, or
+    /// the fix trades a false negative for a false positive.
+    #[test]
+    fn a_box_stopping_just_short_of_both_edges_is_still_clipped() {
+        // 1080x1920, `clean-minimal`, an unspaced run of ninety-six `l`s.
+        let measured_shorts = MeasuredBox {
+            x1: 6,
+            y1: 1668,
+            x2: 1073,
+            y2: 1712,
+        };
+        assert!(
+            flush_edges(measured_shorts, 1080, 1920).overflows_frame(),
+            "a caption cropped at both ends does not have to ink the boundary column"
+        );
+
+        // One pixel in from each edge, the smallest gap there is.
+        let one_pixel_short = MeasuredBox {
+            x1: 1,
+            y1: 900,
+            x2: 1078,
+            y2: 1000,
+        };
+        assert!(flush_edges(one_pixel_short, 1080, 1920).overflows_frame());
+
+        // The largest gap the tolerance covers, and the first one past it.
+        let at_the_limit = MeasuredBox {
+            x1: FLUSH_EDGE_TOLERANCE_PX as i32,
+            y1: 900,
+            x2: 1079 - FLUSH_EDGE_TOLERANCE_PX as i32,
+            y2: 1000,
+        };
+        assert!(flush_edges(at_the_limit, 1080, 1920).overflows_frame());
+        let past_the_limit = MeasuredBox {
+            x1: FLUSH_EDGE_TOLERANCE_PX as i32 + 1,
+            ..at_the_limit
+        };
+        assert!(
+            !flush_edges(past_the_limit, 1080, 1920).overflows_frame(),
+            "the tolerance is a few pixels, not a licence to call any wide caption cropped"
+        );
+
+        // An ordinary margined caption on the same canvas: measured `281..796`.
+        let margined = MeasuredBox {
+            x1: 281,
+            y1: 1175,
+            x2: 796,
+            y2: 1435,
+        };
+        assert!(
+            !flush_edges(margined, 1080, 1920).overflows_frame(),
+            "a caption with margins is nowhere near an edge"
+        );
+    }
+
+    /// Feature: caption extent measurement
+    /// Scenario: a frame too small to hold the tolerance cannot invent an
+    /// overflow
+    ///
+    /// The tolerance is a band at each end of an axis, and on a frame narrower
+    /// than two of them the bands would overlap: one inked pixel would read as
+    /// flush against the left *and* the right, and every caption on such a
+    /// canvas would be reported cropped. Nothing in the product makes a canvas
+    /// that small - the CLI floor is sixteen pixels - which is exactly why it
+    /// would never be noticed.
+    #[test]
+    fn a_canvas_smaller_than_the_tolerance_does_not_invent_an_overflow() {
+        let single_pixel = MeasuredBox {
+            x1: 4,
+            y1: 4,
+            x2: 4,
+            y2: 4,
+        };
+        assert!(
+            !flush_edges(single_pixel, 16, 16).overflows_frame(),
+            "one dot in the middle of a tiny frame fills no axis"
+        );
+        assert!(
+            flush_edges(
+                MeasuredBox {
+                    x1: 0,
+                    y1: 4,
+                    x2: 15,
+                    y2: 4,
+                },
+                16,
+                16
+            )
+            .overflows_frame(),
+            "and a run that really does span the axis is still reported"
+        );
     }
 
     /// Feature: caption extent measurement
@@ -4246,6 +4410,178 @@ mod tests {
             window_start_sec: 0.0,
             needs_glyph_box: true,
             probe_budget,
+        }
+    }
+
+    /// The same request over the sequence's own canvas rather than 1920x1080.
+    ///
+    /// The probe renders at exactly the canvas it is told about, and the whole
+    /// point of the vertical fixtures below is that the canvas decides how the
+    /// script is scaled - so measuring a 1080x1920 sequence at 1920x1080 would
+    /// measure a different caption.
+    fn request_for_canvas<'a>(
+        sequence: &'a Sequence,
+        effects: &'a HashMap<String, Effect>,
+        probe_budget: Duration,
+    ) -> CaptionExtentRequest<'a> {
+        CaptionExtentRequest {
+            canvas_width: sequence.format.canvas.width,
+            canvas_height: sequence.format.canvas.height,
+            ..request_for(sequence, effects, probe_budget)
+        }
+    }
+
+    /// A caption in the family the product actually ships and embeds.
+    ///
+    /// `caption_style` names `"Inter"`, which nothing here ships: libass
+    /// substitutes whatever the host ranks first and the metrics - and therefore
+    /// the pixel column a line is cut at - become a property of the machine. The
+    /// fixtures that assert on a *cropped* box have to be laid out by the face
+    /// the burn-in uses, so they name the bundled one and the script embeds it.
+    fn bundled_caption_style(font_size: f64) -> serde_json::Value {
+        serde_json::json!({
+            "fontFamily": crate::core::text::bundled_fonts::DEFAULT_TEXT_FONT_FAMILY,
+            "fontSize": font_size,
+            "color": "#FFFFFF",
+        })
+    }
+
+    /// One caption track, two cues: an over-long unspaced run, then a short one.
+    fn sequence_with_an_overflowing_caption(format: SequenceFormat) -> Sequence {
+        let mut sequence = Sequence::new("Overflow", format);
+        let mut track = Track::new_caption("Captions");
+
+        for (index, (label, start, end, margin_percent)) in [
+            // Ninety-six `l`s: unbreakable, far wider than any of these frames,
+            // and narrow enough that the frame boundary lands in a side bearing
+            // rather than on ink - which is the case that used to pass.
+            ("l".repeat(96), 0.0, 2.0, 10.0),
+            ("A short caption".to_string(), 2.0, 4.0, 10.0),
+            // `marginPercent: 0` draws against the last row of the picture. One
+            // edge, nothing cropped, and it must stay out of the Error.
+            ("Against the bottom".to_string(), 4.0, 6.0, 0.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, end - start)
+                .place_at(start);
+            clip.id = format!("clip-{index}");
+            clip.label = Some(label);
+            clip.caption_style = Some(bundled_caption_style(48.0));
+            clip.caption_position = Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": margin_percent,
+            }));
+            track.add_clip(clip);
+        }
+
+        sequence.add_track(track);
+        sequence
+    }
+
+    /// Feature: measured caption bounds
+    /// Scenario: a caption cropped on a vertical canvas is reported as clipped
+    ///
+    /// The regression test the direct-`MeasuredBox` unit tests could not be.
+    /// Those construct a rectangle and ask what the helper makes of it, so an
+    /// off-by-one between what libass *draws* and what the helper *expects* is
+    /// invisible to them - and that is precisely what shipped: `flush_edges`
+    /// wanted pixel `0` and pixel `width - 1` exactly, and on a 1080x1920
+    /// sequence the cropped run inked `6..1073`. `caption.out_of_bounds` is an
+    /// Error, so the worst caption in the project passed the one check that
+    /// exists to fail it, while the estimate the measurement replaced reported
+    /// it. The landscape canvases every other fixture here uses all happened to
+    /// ink the boundary column, which is why nothing caught it.
+    ///
+    /// Both canvases the product offers vertically are covered, because the
+    /// script is laid out at `PlayResY: 1080` and scaled to the frame: 1080x1920
+    /// and 720x1280 share a 608-wide script and two different scale factors, and
+    /// the gap is a property of the scale.
+    ///
+    /// The short caption on the same track, in the same run, is the control. If
+    /// the tolerance ever grows into something that calls an ordinary caption
+    /// cropped, this fails on that cue rather than silently over-reporting.
+    #[tokio::test]
+    #[ignore = "requires FFmpeg with libass"]
+    async fn a_caption_cropped_on_a_vertical_canvas_is_measured_as_clipped() {
+        let Some(engine) = real_engine() else {
+            return;
+        };
+
+        for format in [
+            SequenceFormat::shorts_1080(),
+            SequenceFormat::new(720, 1280, 30, 1, 48_000),
+        ] {
+            let canvas = format.canvas.clone();
+            let sequence = sequence_with_an_overflowing_caption(format);
+            let effects = HashMap::new();
+            let measurement = measure_caption_extents(
+                &engine,
+                &request_for_canvas(&sequence, &effects, Duration::from_secs(60)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{canvas:?}: the pass runs: {error}"));
+
+            assert!(
+                !measurement.coverage.probe_failed,
+                "{canvas:?}: a real binary completes the pass: {:?}",
+                measurement.coverage
+            );
+
+            let extent_of = |clip_id: &str| {
+                measurement
+                    .extents
+                    .iter()
+                    .find(|extent| extent.clip_id == clip_id)
+                    .unwrap_or_else(|| panic!("{canvas:?}: {clip_id} was measured"))
+                    .clone()
+            };
+
+            let cropped = extent_of("clip-0");
+            let inked = cropped
+                .full_ink
+                .unwrap_or_else(|| panic!("{canvas:?}: the long caption draws ink"));
+            assert!(
+                inked.width() > 95.0,
+                "{canvas:?}: the fixture only means anything if the run really did fill the \
+                 frame: {inked:?}"
+            );
+            assert!(
+                cropped.clipped,
+                "{canvas:?}: a caption libass cut off at both ends is clipped even when the \
+                 outermost columns carry no ink: {inked:?}"
+            );
+
+            let ordinary = extent_of("clip-1");
+            let inked = ordinary
+                .full_ink
+                .unwrap_or_else(|| panic!("{canvas:?}: the short caption draws ink"));
+            assert!(
+                !ordinary.clipped,
+                "{canvas:?}: and a caption that fits is left alone: {inked:?}"
+            );
+            assert!(
+                inked.left > 1.0 && inked.right < 99.0,
+                "{canvas:?}: which is a claim about this box, not just about the flag: {inked:?}"
+            );
+
+            let against_the_bottom = extent_of("clip-2");
+            let inked = against_the_bottom
+                .full_ink
+                .unwrap_or_else(|| panic!("{canvas:?}: the margin-0 caption draws ink"));
+            assert!(
+                inked.bottom > 99.0,
+                "{canvas:?}: the fixture only means anything if the cue really does reach the \
+                 last row: {inked:?}"
+            );
+            assert!(
+                !against_the_bottom.clipped,
+                "{canvas:?}: one saturated edge is an ordinary caption drawn against the frame, \
+                 not a cropped one - widening the tolerance must not change that: {inked:?}"
+            );
         }
     }
 
