@@ -355,20 +355,25 @@ function extractVerifiedArchive(target, archivePath, stagingRoot) {
 
   // GNU tar (Linux) cannot read zip and unzip is not installed everywhere, so
   // zip extraction tries unzip first and falls back to bsdtar (Windows, macOS).
+  //
+  // unzip exits 1 when it extracted everything but had to warn - the case that
+  // matters here is a zip whose entries use backslash separators, which unzip
+  // converts to directories as it goes - and 2 or higher when it did not. The
+  // extracted binary is still checked below, so a warning is not a failure.
   const attempts =
     target.archiveExtension === 'zip'
       ? [
-          ['unzip', ['-o', '-q', localName]],
-          ['tar', ['-xf', localName]],
+          ['unzip', ['-o', '-q', localName], new Set([0, 1])],
+          ['tar', ['-xf', localName], new Set([0])],
         ]
-      : [['tar', ['-xzf', localName]]];
+      : [['tar', ['-xzf', localName], new Set([0])]];
 
   const failures = [];
   let unpacked = false;
 
-  for (const [command, args] of attempts) {
+  for (const [command, args, completedStatuses] of attempts) {
     const result = spawnSync(command, args, { cwd: destination, encoding: 'utf-8' });
-    if (!result.error && result.status === 0) {
+    if (!result.error && completedStatuses.has(result.status)) {
       unpacked = true;
       break;
     }

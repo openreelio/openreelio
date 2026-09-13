@@ -476,8 +476,25 @@ jobs:
 
           rm -f "$ASSET_NAME" "${ASSET_NAME}.sha256"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            powershell -NoProfile -NonInteractive -Command \
-              "Compress-Archive -Path '${STAGE_DIR}/*' -DestinationPath '${ASSET_NAME}' -Force"
+            # Not Compress-Archive: it writes nested entries such as the emoji
+            # pack with backslash separators, which unzip only tolerates with a
+            # warning and other extractors read as literal file names. The zip
+            # specification requires forward slashes, and zipfile always emits
+            # them.
+            python - "$STAGE_DIR" "$ASSET_NAME" <<'PY'
+          import os
+          import sys
+          import zipfile
+
+          stage_dir, asset_name = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(asset_name, "w", zipfile.ZIP_DEFLATED) as archive:
+              for root, dirs, files in os.walk(stage_dir):
+                  dirs.sort()
+                  for name in sorted(files):
+                      path = os.path.join(root, name)
+                      entry = os.path.relpath(path, stage_dir).replace(os.sep, "/")
+                      archive.write(path, entry)
+          PY
           else
             # COPYFILE_DISABLE keeps macOS bsdtar from adding ._ metadata entries.
             COPYFILE_DISABLE=1 tar -czf "$ASSET_NAME" -C "$STAGE_DIR" "$CLI_NAME" LICENSE emoji

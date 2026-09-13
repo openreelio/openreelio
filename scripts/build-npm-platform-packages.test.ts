@@ -32,7 +32,7 @@ const RELEASED_BINARY = 'released-binary-bytes\n';
 const OTHER_BINARY = 'some-other-binary-bytes\n';
 
 /** Runs the generator, returning combined stdout; throws with stderr on failure. */
-function runGenerator(extraArgs: string[] = []): string {
+function runGenerator(extraArgs: string[] = [], platform = 'linux-x64'): string {
   return execFileSync(
     process.execPath,
     [
@@ -44,7 +44,7 @@ function runGenerator(extraArgs: string[] = []): string {
       '--out',
       OUT_DIR,
       '--only',
-      'linux-x64',
+      platform,
       ...extraArgs,
     ],
     { encoding: 'utf-8', stdio: 'pipe' }
@@ -64,6 +64,88 @@ function repackStagingDirectory(): void {
   writeChecksumSidecar(
     createHash('sha256').update(readFileSync(join(ARCHIVES_DIR, ARCHIVE_NAME))).digest('hex')
   );
+}
+
+/** CRC-32 (IEEE 802.3), the checksum every zip entry carries. */
+function crc32(data: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * Writes a stored (uncompressed) zip whose entry names are taken verbatim.
+ *
+ * Every zip tool normalises names on the way in, so the only way to reproduce
+ * an archive whose entries use backslash separators - what PowerShell's
+ * Compress-Archive writes for nested directories - is to lay the bytes out
+ * directly: local headers, the central directory, then the end record.
+ */
+function writeStoredZip(archivePath: string, entries: Array<[string, string]>): void {
+  const DOS_DATE_1980_01_01 = 0x21;
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+
+  for (const [name, content] of entries) {
+    const nameBytes = Buffer.from(name, 'utf-8');
+    const data = Buffer.from(content, 'utf-8');
+    const crc = crc32(data);
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4); // version needed to extract
+    local.writeUInt16LE(0, 6); // flags
+    local.writeUInt16LE(0, 8); // stored
+    local.writeUInt16LE(0, 10); // time
+    local.writeUInt16LE(DOS_DATE_1980_01_01, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    local.writeUInt16LE(0, 28); // extra length
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4); // version made by
+    central.writeUInt16LE(20, 6); // version needed to extract
+    central.writeUInt16LE(0, 8); // flags
+    central.writeUInt16LE(0, 10); // stored
+    central.writeUInt16LE(0, 12); // time
+    central.writeUInt16LE(DOS_DATE_1980_01_01, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt16LE(0, 30); // extra length
+    central.writeUInt16LE(0, 32); // comment length
+    central.writeUInt16LE(0, 34); // disk number
+    central.writeUInt16LE(0, 36); // internal attributes
+    central.writeUInt32LE(0, 38); // external attributes
+    central.writeUInt32LE(offset, 42);
+
+    locals.push(local, nameBytes, data);
+    centrals.push(central, nameBytes);
+    offset += local.length + nameBytes.length + data.length;
+  }
+
+  const centralSize = centrals.reduce((total, chunk) => total + chunk.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4); // this disk
+  end.writeUInt16LE(0, 6); // central directory disk
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20); // comment length
+
+  writeFileSync(archivePath, Buffer.concat([...locals, ...centrals, end]));
 }
 
 /**
@@ -174,6 +256,41 @@ describe('build-npm-platform-packages', () => {
       }
     }).toThrow();
     expect(stderr).toContain('regular file');
+  });
+
+  it('should package a Windows archive whose entries use backslash separators', () => {
+    const windowsTriple = 'x86_64-pc-windows-msvc';
+    const windowsArchive = `openreelio-cli-${VERSION}-${windowsTriple}.zip`;
+    const archivePath = join(ARCHIVES_DIR, windowsArchive);
+    const archivedManifest = '{"archived": true}\n';
+
+    // The v0.1.13 Windows archive: Compress-Archive wrote the nested emoji
+    // pack with backslashes, and unzip extracts it but exits 1 to warn.
+    writeStoredZip(archivePath, [
+      ['openreelio-cli.exe', RELEASED_BINARY],
+      ['LICENSE', 'MIT\n'],
+      ['emoji\\manifest.json', archivedManifest],
+      ['emoji\\png\\1f600.png', 'png-bytes\n'],
+    ]);
+    writeFileSync(
+      join(ARCHIVES_DIR, `${windowsArchive}.sha256`),
+      `${createHash('sha256').update(readFileSync(archivePath)).digest('hex')}  ${windowsArchive}\n`
+    );
+
+    runGenerator([], 'win32-x64');
+
+    const packageDir = join(OUT_DIR, 'cli-win32-x64');
+    expect(readFileSync(join(packageDir, 'bin', 'openreelio-cli.exe'), 'utf-8')).toBe(
+      RELEASED_BINARY
+    );
+    // The pack came out of the archive as real directories, not from the
+    // checkout fallback and not as files literally named "emoji\manifest.json".
+    expect(readFileSync(join(packageDir, 'emoji', 'manifest.json'), 'utf-8')).toBe(
+      archivedManifest
+    );
+    expect(readFileSync(join(packageDir, 'emoji', 'png', '1f600.png'), 'utf-8')).toBe(
+      'png-bytes\n'
+    );
   });
 
   it('should refuse to package a binary supplied outside the verified archive', () => {
