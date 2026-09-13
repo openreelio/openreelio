@@ -59,6 +59,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -108,8 +109,15 @@ function resolveEmojiPack(binaryPath, allowCheckoutFallback) {
     candidates.push(CHECKOUT_EMOJI_PACK);
   }
 
+  // A pack is its manifest plus the images the manifest points at. Checking
+  // only the manifest would pass an archive whose one-level-deep manifest
+  // survived extraction while the two-level-deep png/ entries did not.
   for (const candidate of candidates) {
-    if (existsSync(join(candidate, 'manifest.json'))) {
+    if (!existsSync(join(candidate, 'manifest.json'))) {
+      continue;
+    }
+    const pngDir = join(candidate, 'png');
+    if (existsSync(pngDir) && readdirSync(pngDir).length > 0) {
       return candidate;
     }
   }

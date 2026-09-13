@@ -174,7 +174,7 @@ jobs:
           ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.sources_ref != '' && inputs.sources_ref) || steps.release.outputs.tag }}
           persist-credentials: false
 
-      - name: Verify npm sources exist at this tag
+      - name: Verify npm sources match the tag
         env:
           VERSION: ${{ steps.release.outputs.version }}
           SOURCES_REF: ${{ (github.event_name == 'workflow_dispatch' && inputs.sources_ref != '' && inputs.sources_ref) || steps.release.outputs.tag }}

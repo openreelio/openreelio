@@ -226,7 +226,26 @@ describe('build-npm-platform-packages', () => {
   it('should refuse to package when the verified archive carries no colour emoji pack', () => {
     // The checkout has a real pack; on the release path it must not stand in
     // for one the archive never contained.
+    expect(existsSync(join(__dirname, '..', 'src-tauri', 'emoji', 'manifest.json'))).toBe(true);
     rmSync(join(STAGE_DIR, 'emoji'), { recursive: true, force: true });
+    repackStagingDirectory();
+
+    let stderr = '';
+    expect(() => {
+      try {
+        runGenerator();
+      } catch (error) {
+        stderr = String((error as { stderr?: string }).stderr ?? '');
+        throw error;
+      }
+    }).toThrow();
+    expect(stderr).toContain('no colour emoji pack');
+  });
+
+  it('should refuse to package an emoji pack whose images did not survive extraction', () => {
+    // The manifest alone is not a pack: an extractor that dropped the nested
+    // png/ entries would otherwise ship captions that render in monochrome.
+    rmSync(join(STAGE_DIR, 'emoji', 'png'), { recursive: true, force: true });
     repackStagingDirectory();
 
     let stderr = '';
