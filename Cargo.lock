@@ -4143,7 +4143,7 @@ dependencies = [
 
 [[package]]
 name = "openreelio"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "argon2",
  "async-trait",
@@ -4204,7 +4204,7 @@ dependencies = [
 
 [[package]]
 name = "openreelio-cli"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "openreelio-core"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "openreelio",
  "serde",
