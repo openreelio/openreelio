@@ -59,6 +59,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -92,16 +93,31 @@ const CHECKOUT_EMOJI_PACK = join(PROJECT_ROOT, 'src-tauri', EMOJI_PACK_DIR);
  * The release archives carry the pack beside the binary, and that copy is the
  * one to publish: it came out of the archive whose checksum was verified. A
  * local run against a bare `--binary` has no such copy, so the checkout's pack
- * stands in. Coming back empty is only survivable on that local path: see
- * `writePlatformPackage`, which refuses to write a pack-less package when the
- * binaries came from release archives.
+ * stands in - but only there. On the archive path the checkout is never
+ * consulted, so an archive that lost its pack (an extractor that skipped
+ * entries, a release step that forgot to stage it) comes back empty and
+ * `writePlatformPackage` refuses to write the package, instead of quietly
+ * shipping bytes the checksum never covered.
  *
  * @param {string} binaryPath Binary the package is being built around.
+ * @param {boolean} allowCheckoutFallback Whether the checkout's pack may stand in.
  * @returns {string|null} Directory holding `manifest.json` and `png/`, or null.
  */
-function resolveEmojiPack(binaryPath) {
-  for (const candidate of [join(dirname(binaryPath), EMOJI_PACK_DIR), CHECKOUT_EMOJI_PACK]) {
-    if (existsSync(join(candidate, 'manifest.json'))) {
+function resolveEmojiPack(binaryPath, allowCheckoutFallback) {
+  const candidates = [join(dirname(binaryPath), EMOJI_PACK_DIR)];
+  if (allowCheckoutFallback) {
+    candidates.push(CHECKOUT_EMOJI_PACK);
+  }
+
+  // A pack is its manifest plus the images the manifest points at. Checking
+  // only the manifest would pass an archive whose one-level-deep manifest
+  // survived extraction while the two-level-deep png/ entries did not.
+  for (const candidate of candidates) {
+    if (!existsSync(join(candidate, 'manifest.json'))) {
+      continue;
+    }
+    const pngDir = join(candidate, 'png');
+    if (existsSync(pngDir) && readdirSync(pngDir).length > 0) {
       return candidate;
     }
   }
@@ -355,20 +371,25 @@ function extractVerifiedArchive(target, archivePath, stagingRoot) {
 
   // GNU tar (Linux) cannot read zip and unzip is not installed everywhere, so
   // zip extraction tries unzip first and falls back to bsdtar (Windows, macOS).
+  //
+  // unzip exits 1 when it extracted everything but had to warn - the case that
+  // matters here is a zip whose entries use backslash separators, which unzip
+  // converts to directories as it goes - and 2 or higher when it did not. The
+  // extracted binary is still checked below, so a warning is not a failure.
   const attempts =
     target.archiveExtension === 'zip'
       ? [
-          ['unzip', ['-o', '-q', localName]],
-          ['tar', ['-xf', localName]],
+          ['unzip', ['-o', '-q', localName], new Set([0, 1])],
+          ['tar', ['-xf', localName], new Set([0])],
         ]
-      : [['tar', ['-xzf', localName]]];
+      : [['tar', ['-xzf', localName], new Set([0])]];
 
   const failures = [];
   let unpacked = false;
 
-  for (const [command, args] of attempts) {
+  for (const [command, args, completedStatuses] of attempts) {
     const result = spawnSync(command, args, { cwd: destination, encoding: 'utf-8' });
-    if (!result.error && result.status === 0) {
+    if (!result.error && completedStatuses.has(result.status)) {
       unpacked = true;
       break;
     }
@@ -514,7 +535,7 @@ function writePlatformPackage(target, binaryPath, version, outDir, requireEmojiP
 
   copyFileSync(join(PROJECT_ROOT, 'LICENSE'), join(packageDir, 'LICENSE'));
 
-  const emojiPack = resolveEmojiPack(binaryPath);
+  const emojiPack = resolveEmojiPack(binaryPath, !requireEmojiPack);
   if (emojiPack) {
     cpSync(emojiPack, join(packageDir, EMOJI_PACK_DIR), { recursive: true });
   } else if (requireEmojiPack) {
