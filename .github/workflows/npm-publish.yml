@@ -67,6 +67,14 @@ on:
         required: false
         type: boolean
         default: true
+      sources_ref:
+        description: >-
+          Git ref to take the npm packaging sources and scripts from instead of
+          the release tag. For re-publishing a tag after the publisher itself
+          was fixed; the shim version at that ref must still equal the tag.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -156,22 +164,27 @@ jobs:
           echo "Publishing version ${VERSION} from ${RELEASE_TAG} (dry_run=${DRY_RUN})."
           echo "npm dist-tag: ${DIST_TAG}"
 
-      - name: Checkout release tag
+      - name: Checkout npm packaging sources
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           # The npm packaging sources are taken from the tag being published, so
-          # the published shim always matches the released CLI.
-          ref: ${{ steps.release.outputs.tag }}
+          # the published shim always matches the released CLI. A manual run may
+          # name another ref when the publisher was fixed after the tag was
+          # cut; the shim-version check below still holds it to the tag.
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.sources_ref != '' && inputs.sources_ref) || steps.release.outputs.tag }}
           persist-credentials: false
 
       - name: Verify npm sources exist at this tag
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          SOURCES_REF: ${{ (github.event_name == 'workflow_dispatch' && inputs.sources_ref != '' && inputs.sources_ref) || steps.release.outputs.tag }}
         run: |
           set -euo pipefail
 
+          echo "npm packaging sources checked out from ${SOURCES_REF}."
+
           if [ ! -f npm/openreelio-cli/package.json ]; then
-            echo "npm/openreelio-cli/package.json is missing at ${RELEASE_TAG}." >&2
+            echo "npm/openreelio-cli/package.json is missing at ${SOURCES_REF}." >&2
             echo "Only tags that contain the npm distribution sources can be published." >&2
             exit 1
           fi

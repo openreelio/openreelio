@@ -11,7 +11,15 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,6 +38,8 @@ const STAGE_DIR = join(WORKSPACE, 'stage');
 
 const RELEASED_BINARY = 'released-binary-bytes\n';
 const OTHER_BINARY = 'some-other-binary-bytes\n';
+/** Distinct from the checkout's real manifest, so its origin is provable. */
+const ARCHIVED_EMOJI_MANIFEST = '{"archived": true}\n';
 
 /** Runs the generator, returning combined stdout; throws with stderr on failure. */
 function runGenerator(extraArgs: string[] = [], platform = 'linux-x64'): string {
@@ -58,7 +68,11 @@ function writeChecksumSidecar(digest: string): void {
 
 /** Repacks the staging directory and refreshes its checksum sidecar. */
 function repackStagingDirectory(): void {
-  execFileSync('tar', ['-czf', `../archives/${ARCHIVE_NAME}`, 'openreelio-cli', 'LICENSE'], {
+  const members = ['openreelio-cli', 'LICENSE'];
+  if (existsSync(join(STAGE_DIR, 'emoji'))) {
+    members.push('emoji');
+  }
+  execFileSync('tar', ['-czf', `../archives/${ARCHIVE_NAME}`, ...members], {
     cwd: STAGE_DIR,
   });
   writeChecksumSidecar(
@@ -178,9 +192,13 @@ describe('build-npm-platform-packages', () => {
     mkdirSync(STAGE_DIR, { recursive: true });
     mkdirSync(join(INPUT_DIR, TRIPLE), { recursive: true });
 
-    // The release archive: what the checksum will cover.
+    // The release archive: what the checksum will cover, colour emoji pack
+    // included - the release path refuses a package without one.
     writeFileSync(join(STAGE_DIR, 'openreelio-cli'), RELEASED_BINARY);
     writeFileSync(join(STAGE_DIR, 'LICENSE'), 'MIT\n');
+    mkdirSync(join(STAGE_DIR, 'emoji', 'png'), { recursive: true });
+    writeFileSync(join(STAGE_DIR, 'emoji', 'manifest.json'), ARCHIVED_EMOJI_MANIFEST);
+    writeFileSync(join(STAGE_DIR, 'emoji', 'png', '1f600.png'), 'png-bytes\n');
     // Relative paths under an explicit cwd: some tar builds read an absolute
     // Windows path as a remote host spec.
     repackStagingDirectory();
@@ -199,6 +217,28 @@ describe('build-npm-platform-packages', () => {
     const packaged = readFileSync(join(OUT_DIR, 'cli-linux-x64', 'bin', 'openreelio-cli'), 'utf-8');
     expect(packaged).toBe(RELEASED_BINARY);
     expect(packaged).not.toBe(OTHER_BINARY);
+    // The emoji pack came out of the archive too, not from the checkout.
+    expect(readFileSync(join(OUT_DIR, 'cli-linux-x64', 'emoji', 'manifest.json'), 'utf-8')).toBe(
+      ARCHIVED_EMOJI_MANIFEST
+    );
+  });
+
+  it('should refuse to package when the verified archive carries no colour emoji pack', () => {
+    // The checkout has a real pack; on the release path it must not stand in
+    // for one the archive never contained.
+    rmSync(join(STAGE_DIR, 'emoji'), { recursive: true, force: true });
+    repackStagingDirectory();
+
+    let stderr = '';
+    expect(() => {
+      try {
+        runGenerator();
+      } catch (error) {
+        stderr = String((error as { stderr?: string }).stderr ?? '');
+        throw error;
+      }
+    }).toThrow();
+    expect(stderr).toContain('no colour emoji pack');
   });
 
   it('should refuse to package when the archive does not match its checksum', () => {
@@ -262,14 +302,13 @@ describe('build-npm-platform-packages', () => {
     const windowsTriple = 'x86_64-pc-windows-msvc';
     const windowsArchive = `openreelio-cli-${VERSION}-${windowsTriple}.zip`;
     const archivePath = join(ARCHIVES_DIR, windowsArchive);
-    const archivedManifest = '{"archived": true}\n';
 
     // The v0.1.13 Windows archive: Compress-Archive wrote the nested emoji
     // pack with backslashes, and unzip extracts it but exits 1 to warn.
     writeStoredZip(archivePath, [
       ['openreelio-cli.exe', RELEASED_BINARY],
       ['LICENSE', 'MIT\n'],
-      ['emoji\\manifest.json', archivedManifest],
+      ['emoji\\manifest.json', ARCHIVED_EMOJI_MANIFEST],
       ['emoji\\png\\1f600.png', 'png-bytes\n'],
     ]);
     writeFileSync(
@@ -286,7 +325,7 @@ describe('build-npm-platform-packages', () => {
     // The pack came out of the archive as real directories, not from the
     // checkout fallback and not as files literally named "emoji\manifest.json".
     expect(readFileSync(join(packageDir, 'emoji', 'manifest.json'), 'utf-8')).toBe(
-      archivedManifest
+      ARCHIVED_EMOJI_MANIFEST
     );
     expect(readFileSync(join(packageDir, 'emoji', 'png', '1f600.png'), 'utf-8')).toBe(
       'png-bytes\n'

@@ -92,15 +92,23 @@ const CHECKOUT_EMOJI_PACK = join(PROJECT_ROOT, 'src-tauri', EMOJI_PACK_DIR);
  * The release archives carry the pack beside the binary, and that copy is the
  * one to publish: it came out of the archive whose checksum was verified. A
  * local run against a bare `--binary` has no such copy, so the checkout's pack
- * stands in. Coming back empty is only survivable on that local path: see
- * `writePlatformPackage`, which refuses to write a pack-less package when the
- * binaries came from release archives.
+ * stands in - but only there. On the archive path the checkout is never
+ * consulted, so an archive that lost its pack (an extractor that skipped
+ * entries, a release step that forgot to stage it) comes back empty and
+ * `writePlatformPackage` refuses to write the package, instead of quietly
+ * shipping bytes the checksum never covered.
  *
  * @param {string} binaryPath Binary the package is being built around.
+ * @param {boolean} allowCheckoutFallback Whether the checkout's pack may stand in.
  * @returns {string|null} Directory holding `manifest.json` and `png/`, or null.
  */
-function resolveEmojiPack(binaryPath) {
-  for (const candidate of [join(dirname(binaryPath), EMOJI_PACK_DIR), CHECKOUT_EMOJI_PACK]) {
+function resolveEmojiPack(binaryPath, allowCheckoutFallback) {
+  const candidates = [join(dirname(binaryPath), EMOJI_PACK_DIR)];
+  if (allowCheckoutFallback) {
+    candidates.push(CHECKOUT_EMOJI_PACK);
+  }
+
+  for (const candidate of candidates) {
     if (existsSync(join(candidate, 'manifest.json'))) {
       return candidate;
     }
@@ -519,7 +527,7 @@ function writePlatformPackage(target, binaryPath, version, outDir, requireEmojiP
 
   copyFileSync(join(PROJECT_ROOT, 'LICENSE'), join(packageDir, 'LICENSE'));
 
-  const emojiPack = resolveEmojiPack(binaryPath);
+  const emojiPack = resolveEmojiPack(binaryPath, !requireEmojiPack);
   if (emojiPack) {
     cpSync(emojiPack, join(packageDir, EMOJI_PACK_DIR), { recursive: true });
   } else if (requireEmojiPack) {
